@@ -1,0 +1,7 @@
+# Environment skips of the `ip-location` extended suite: tests that fail on a private single-node
+# Elasticsearch 9.5.5 in Docker for a reason outside the server under test (scripts/search-yaml-suites.sh
+# es-extended-baseline). Format: `<glob over test ids>  # reason`; roll skips them too.
+
+ip-location:ingest_geoip/30_geoip_stats/Test geoip stats  # needs the suite's GeoIP database download fixture
+ip-location:ingest_geoip/40_geoip_databases/Test adding, getting, and removing geoip databases  # needs the suite's GeoIP database download fixture
+ip-location:ingest_geoip/60_ip_location_databases/Test adding, getting, and removing ip location databases  # needs the suite's GeoIP database download fixture

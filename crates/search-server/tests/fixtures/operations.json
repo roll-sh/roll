@@ -1,0 +1,662 @@
+{
+ "_about": "Captured from Elasticsearch 9.5.5 (docker, single node) while a slow script search ran: the task listing, task get, cancel responses, the cancelled search's error, and the rejections of a full search / write pool (thread_pool.search.size=2, queue_size=2; thread_pool.write.size=1, queue_size=1). Node ids, times and Java hashes differ per run; tests/operations.rs masks them.",
+ "tasks_detailed_while_searching": {
+  "WVzIze1MQxq6OakrtfZpmQ:500": {
+   "node": "WVzIze1MQxq6OakrtfZpmQ",
+   "id": 500,
+   "type": "transport",
+   "action": "indices:data/read/search",
+   "description": "indices[slow], search_type[QUERY_THEN_FETCH], source[{\"query\":{\"script_score\":{\"query\":{\"match_all\":{\"boost\":1.0}},\"script\":{\"source\":\"long s=0; for (int i=0;i<900000;i++){s+=i;} return s % 7;\",\"lang\":\"painless\"}}}}]",
+   "start_time_in_millis": 1793130250907,
+   "running_time_in_nanos": 1038549712,
+   "cancellable": true,
+   "cancelled": false,
+   "headers": {
+    "X-Opaque-Id": "opq1"
+   }
+  },
+  "WVzIze1MQxq6OakrtfZpmQ:501": {
+   "node": "WVzIze1MQxq6OakrtfZpmQ",
+   "id": 501,
+   "type": "transport",
+   "action": "indices:data/read/search[phase/query]",
+   "description": "shardId[[slow][0]]",
+   "start_time_in_millis": 1793130250908,
+   "running_time_in_nanos": 1037511276,
+   "cancellable": true,
+   "cancelled": false,
+   "parent_task_id": "WVzIze1MQxq6OakrtfZpmQ:500",
+   "headers": {
+    "X-Opaque-Id": "opq1"
+   }
+  }
+ },
+ "task_get_running": {
+  "completed": false,
+  "task": {
+   "node": "WVzIze1MQxq6OakrtfZpmQ",
+   "id": 536,
+   "type": "transport",
+   "action": "indices:data/read/search",
+   "description": "indices[slow], search_type[QUERY_THEN_FETCH], source[{\"query\":{\"script_score\":{\"query\":{\"match_all\":{\"boost\":1.0}},\"script\":{\"source\":\"long s=0; for (int i=0;i<900000;i++){s+=i;} return s % 7;\",\"lang\":\"painless\"}}}}]",
+   "start_time_in_millis": 1793130296762,
+   "running_time_in_nanos": 1032943890,
+   "cancellable": true,
+   "cancelled": false,
+   "headers": {}
+  }
+ },
+ "cancel_by_id": {
+  "nodes": {
+   "WVzIze1MQxq6OakrtfZpmQ": {
+    "tasks": {
+     "WVzIze1MQxq6OakrtfZpmQ:536": {
+      "node": "WVzIze1MQxq6OakrtfZpmQ",
+      "id": 536,
+      "type": "transport",
+      "action": "indices:data/read/search",
+      "start_time_in_millis": 1793130296762,
+      "running_time_in_nanos": 1065648221,
+      "cancellable": true,
+      "cancelled": true,
+      "headers": {}
+     }
+    }
+   }
+  }
+ },
+ "cancelled_search": {
+  "error": {
+   "root_cause": [
+    {
+     "type": "task_cancelled_exception",
+     "reason": "task cancelled [by user request]"
+    }
+   ],
+   "type": "search_phase_execution_exception",
+   "reason": "all shards failed",
+   "phase": "query",
+   "grouped": true,
+   "failed_shards": [
+    {
+     "shard": 0,
+     "index": "slow",
+     "node": "WVzIze1MQxq6OakrtfZpmQ",
+     "reason": {
+      "type": "task_cancelled_exception",
+      "reason": "task cancelled [by user request]"
+     }
+    }
+   ]
+  },
+  "status": 400
+ },
+ "cancel_not_cancellable": {
+  "node_failures": [
+   {
+    "type": "failed_node_exception",
+    "reason": "Failed node [WVzIze1MQxq6OakrtfZpmQ]",
+    "node_id": "WVzIze1MQxq6OakrtfZpmQ",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "task [WVzIze1MQxq6OakrtfZpmQ:2546] doesn't support cancellation"
+    }
+   }
+  ],
+  "nodes": {}
+ },
+ "search_rejected": {
+  "error": {
+   "root_cause": [
+    {
+     "type": "es_rejected_execution_exception",
+     "reason": "rejected execution of TimedRunnable{original=ActionRunnable#wrap[org.elasticsearch.search.SearchService$$Lambda/0x000000003884e400@68d2442d], creationTimeNanos=12044600156213, startTimeNanos=0, finishTimeNanos=-1, failedOrRejected=false} on TaskExecutionTimeTrackingEsThreadPoolExecutor[name = 7aa6530e306d/search, queue capacity = 2, task execution EWMA = 698.2ms, total task execution time = 11.5s, org.elasticsearch.common.util.concurrent.TaskExecutionTimeTrackingEsThreadPoolExecutor@16819885[Running, pool size = 2, active threads = 2, queued tasks = 2, completed tasks = 12]]"
+    }
+   ],
+   "type": "search_phase_execution_exception",
+   "reason": "all shards failed",
+   "phase": "query",
+   "grouped": true,
+   "failed_shards": [
+    {
+     "shard": 0,
+     "index": "slow",
+     "node": "WVzIze1MQxq6OakrtfZpmQ",
+     "reason": {
+      "type": "es_rejected_execution_exception",
+      "reason": "rejected execution of TimedRunnable{original=ActionRunnable#wrap[org.elasticsearch.search.SearchService$$Lambda/0x000000003884e400@68d2442d], creationTimeNanos=12044600156213, startTimeNanos=0, finishTimeNanos=-1, failedOrRejected=false} on TaskExecutionTimeTrackingEsThreadPoolExecutor[name = 7aa6530e306d/search, queue capacity = 2, task execution EWMA = 698.2ms, total task execution time = 11.5s, org.elasticsearch.common.util.concurrent.TaskExecutionTimeTrackingEsThreadPoolExecutor@16819885[Running, pool size = 2, active threads = 2, queued tasks = 2, completed tasks = 12]]"
+     }
+    }
+   ],
+   "caused_by": {
+    "type": "es_rejected_execution_exception",
+    "reason": "rejected execution of TimedRunnable{original=ActionRunnable#wrap[org.elasticsearch.search.SearchService$$Lambda/0x000000003884e400@68d2442d], creationTimeNanos=12044600156213, startTimeNanos=0, finishTimeNanos=-1, failedOrRejected=false} on TaskExecutionTimeTrackingEsThreadPoolExecutor[name = 7aa6530e306d/search, queue capacity = 2, task execution EWMA = 698.2ms, total task execution time = 11.5s, org.elasticsearch.common.util.concurrent.TaskExecutionTimeTrackingEsThreadPoolExecutor@16819885[Running, pool size = 2, active threads = 2, queued tasks = 2, completed tasks = 12]]",
+    "caused_by": {
+     "type": "es_rejected_execution_exception",
+     "reason": "rejected execution of TimedRunnable{original=ActionRunnable#wrap[org.elasticsearch.search.SearchService$$Lambda/0x000000003884e400@68d2442d], creationTimeNanos=12044600156213, startTimeNanos=0, finishTimeNanos=-1, failedOrRejected=false} on TaskExecutionTimeTrackingEsThreadPoolExecutor[name = 7aa6530e306d/search, queue capacity = 2, task execution EWMA = 698.2ms, total task execution time = 11.5s, org.elasticsearch.common.util.concurrent.TaskExecutionTimeTrackingEsThreadPoolExecutor@16819885[Running, pool size = 2, active threads = 2, queued tasks = 2, completed tasks = 12]]"
+    }
+   }
+  },
+  "status": 429
+ },
+ "bulk_rejected": {
+  "errors": true,
+  "took": 0,
+  "ingest_took": 1000,
+  "items": [
+   {
+    "index": {
+     "_index": "w1",
+     "_id": "GxjmfqEBEJXonx2a5pcT",
+     "status": 429,
+     "error": {
+      "type": "es_rejected_execution_exception",
+      "reason": "rejected execution of TimedRunnable{original=org.elasticsearch.action.support.replication.TransportReplicationAction$AsyncPrimaryAction/org.elasticsearch.action.ActionListenerImplementations$RunBeforeActionListener/ChannelActionListener{TaskTransportChannel{task=676}{DirectResponseChannel{req=205}{indices:data/write/bulk[s][p]}}}/org.elasticsearch.action.support.replication.TransportReplicationAction$$Lambda/0x0000000038766400@5510427b, creationTimeNanos=12149968659140, startTimeNanos=0, finishTimeNanos=-1, failedOrRejected=false} on TaskExecutionTimeTrackingEsThreadPoolExecutor[name = 7aa6530e306d/write, queue capacity = 1, task execution EWMA = 7.8ms, total task execution time = 584.4ms, org.elasticsearch.common.util.concurrent.TaskExecutionTimeTrackingEsThreadPoolExecutor@1d74720f[Running, pool size = 1, active threads = 1, queued tasks = 1, completed tasks = 33]]"
+     }
+    }
+   }
+  ]
+ },
+ "http": {
+  "too_large_expect": "b'HTTP/1.1 413 Request Entity Too Large | content-length: 0 | connection: close |  | <EOF>'",
+  "expect_bad": "b'HTTP/1.1 417 Expectation Failed | content-length: 0 | connection: close |  | <EOF>'",
+  "bad_method": "b'HTTP/1.1 405 Method Not Allowed | Allow: GET,DELETE,HEAD | content-length: 82 |  | {\"error\":\"Unexpected http method: FOO, allowed: [GET, DELETE, HEAD]\",\"status\":405}<EOF>'",
+  "abs_uri": "b'HTTP/1.1 400 Bad Request | content-length: 85 |  | {\"error\":\"no handler found for uri [http://x/?filter_path=tagline] and method [GET]\"}<EOF>'"
+ },
+ "snapshot_in_progress": {
+  "_about": "A 2-shard snapshot of 4000 small docs into an fs repository throttled to max_snapshot_bytes_per_sec 2kb, one second in: GET _snapshot/r/s1, GET _snapshot/r/s1/_status, then _status of s1 when done and of s2 (same index, unchanged) taken after it.",
+  "get": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "repository": "r",
+     "version_id": 9111000,
+     "version": "9.5.2-9.5.5",
+     "indices": [
+      "snapidx"
+     ],
+     "data_streams": [],
+     "include_global_state": true,
+     "state": "IN_PROGRESS",
+     "start_time": "2026-10-27T23:20:54.639Z",
+     "start_time_in_millis": 1793143254639,
+     "end_time": "1970-01-01T00:00:00.000Z",
+     "end_time_in_millis": 0,
+     "duration_in_millis": 0,
+     "failures": [],
+     "shards": {
+      "total": 2,
+      "failed": 0,
+      "successful": 0
+     },
+     "feature_states": []
+    }
+   ],
+   "total": 1,
+   "remaining": 0
+  },
+  "current": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "repository": "r",
+     "version_id": 9111000,
+     "version": "9.5.2-9.5.5",
+     "indices": [
+      "snapidx"
+     ],
+     "data_streams": [],
+     "include_global_state": true,
+     "state": "IN_PROGRESS",
+     "start_time": "2026-10-27T23:20:54.639Z",
+     "start_time_in_millis": 1793143254639,
+     "end_time": "1970-01-01T00:00:00.000Z",
+     "end_time_in_millis": 0,
+     "duration_in_millis": 0,
+     "failures": [],
+     "shards": {
+      "total": 2,
+      "failed": 0,
+      "successful": 0
+     },
+     "feature_states": []
+    }
+   ],
+   "total": 1,
+   "remaining": 0
+  },
+  "status_all": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "repository": "r",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "state": "STARTED",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 2,
+      "finalizing": 0,
+      "done": 0,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "processed": {
+       "file_count": 7,
+       "size_in_bytes": 2724
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "start_time_in_millis": 1793143254639,
+      "time_in_millis": 1003
+     },
+     "indices": {
+      "snapidx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 2,
+        "finalizing": 0,
+        "done": 0,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "processed": {
+         "file_count": 7,
+         "size_in_bytes": 2724
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "start_time_in_millis": 1793143254639,
+        "time_in_millis": 0
+       },
+       "shards": {
+        "0": {
+         "stage": "STARTED",
+         "stats": {
+          "incremental": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "processed": {
+           "file_count": 4,
+           "size_in_bytes": 1571
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 0
+         },
+         "node": "3nzIQ4AqR_yA3CBgcFSEyg"
+        },
+        "1": {
+         "stage": "STARTED",
+         "stats": {
+          "incremental": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "processed": {
+           "file_count": 3,
+           "size_in_bytes": 1153
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 0
+         },
+         "node": "3nzIQ4AqR_yA3CBgcFSEyg"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "status": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "repository": "r",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "state": "STARTED",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 2,
+      "finalizing": 0,
+      "done": 0,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "processed": {
+       "file_count": 7,
+       "size_in_bytes": 2724
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "start_time_in_millis": 1793143254639,
+      "time_in_millis": 1206
+     },
+     "indices": {
+      "snapidx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 2,
+        "finalizing": 0,
+        "done": 0,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "processed": {
+         "file_count": 7,
+         "size_in_bytes": 2724
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "start_time_in_millis": 1793143254639,
+        "time_in_millis": 0
+       },
+       "shards": {
+        "0": {
+         "stage": "STARTED",
+         "stats": {
+          "incremental": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "processed": {
+           "file_count": 4,
+           "size_in_bytes": 1571
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 0
+         },
+         "node": "3nzIQ4AqR_yA3CBgcFSEyg"
+        },
+        "1": {
+         "stage": "STARTED",
+         "stats": {
+          "incremental": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "processed": {
+           "file_count": 3,
+           "size_in_bytes": 1153
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 0
+         },
+         "node": "3nzIQ4AqR_yA3CBgcFSEyg"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "status_done": {
+   "snapshots": [
+    {
+     "snapshot": "s1",
+     "repository": "r",
+     "uuid": "tYyCbjoGQo-oKqqrCEchHw",
+     "state": "SUCCESS",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 0,
+      "finalizing": 0,
+      "done": 2,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "start_time_in_millis": 1793143254639,
+      "time_in_millis": 70862
+     },
+     "indices": {
+      "snapidx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 0,
+        "finalizing": 0,
+        "done": 2,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "start_time_in_millis": 1793143254639,
+        "time_in_millis": 70862
+       },
+       "shards": {
+        "0": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 70862
+         }
+        },
+        "1": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "start_time_in_millis": 1793143254639,
+          "time_in_millis": 55841
+         }
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "status_second_snapshot": {
+   "snapshots": [
+    {
+     "snapshot": "s2",
+     "repository": "r",
+     "uuid": "qdzlilQ-TvmBnIIPdO4Lzg",
+     "state": "SUCCESS",
+     "include_global_state": true,
+     "shards_stats": {
+      "initializing": 0,
+      "started": 0,
+      "finalizing": 0,
+      "done": 2,
+      "failed": 0,
+      "total": 2
+     },
+     "stats": {
+      "incremental": {
+       "file_count": 0,
+       "size_in_bytes": 0
+      },
+      "total": {
+       "file_count": 11,
+       "size_in_bytes": 147045
+      },
+      "start_time_in_millis": 1793143351526,
+      "time_in_millis": 203
+     },
+     "indices": {
+      "snapidx": {
+       "shards_stats": {
+        "initializing": 0,
+        "started": 0,
+        "finalizing": 0,
+        "done": 2,
+        "failed": 0,
+        "total": 2
+       },
+       "stats": {
+        "incremental": {
+         "file_count": 0,
+         "size_in_bytes": 0
+        },
+        "total": {
+         "file_count": 11,
+         "size_in_bytes": 147045
+        },
+        "start_time_in_millis": 1793143351526,
+        "time_in_millis": 203
+       },
+       "shards": {
+        "0": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 0,
+           "size_in_bytes": 0
+          },
+          "total": {
+           "file_count": 7,
+           "size_in_bytes": 76316
+          },
+          "start_time_in_millis": 1793143351526,
+          "time_in_millis": 203
+         }
+        },
+        "1": {
+         "stage": "DONE",
+         "stats": {
+          "incremental": {
+           "file_count": 0,
+           "size_in_bytes": 0
+          },
+          "total": {
+           "file_count": 4,
+           "size_in_bytes": 70729
+          },
+          "start_time_in_millis": 1793143351526,
+          "time_in_millis": 203
+         }
+        }
+       }
+      }
+     }
+    }
+   ]
+  }
+ },
+ "http_heads": {
+  "_about": "Raw responses of Elasticsearch 9.5.5 to malformed first request heads (a fresh connection each): status line, headers and body; '<EOF>' when it closed, '<open>' when it kept the connection.",
+  "garbage": {
+   "request": "GARBAGE\r\n\r\n",
+   "response": "HTTP/1.0 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 203\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"illegal_argument_exception\",\"reason\":\"text is empty (possibly HTTP/0.9)\"}],\"type\":\"illegal_argument_exception\",\"reason\":\"text is empty (possibly HTTP/0.9)\"},\"status\":400}<EOF>"
+  },
+  "http25": {
+   "request": "GET / HTTP/2.5\r\nHost: x\r\n\r\n",
+   "response": "HTTP/2.5 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 221\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"illegal_argument_exception\",\"reason\":\"Unexpected http protocol version: HTTP/2.5\"}],\"type\":\"illegal_argument_exception\",\"reason\":\"Unexpected http protocol version: HTTP/2.5\"},\"status\":400}<EOF>"
+  },
+  "bad_version": {
+   "request": "GET / HTTP/x\r\nHost: x\r\n\r\n",
+   "response": "HTTP/1.0 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 197\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"illegal_argument_exception\",\"reason\":\"invalid version format: HTTP/X\"}],\"type\":\"illegal_argument_exception\",\"reason\":\"invalid version format: HTTP/X\"},\"status\":400}<EOF>"
+  },
+  "extra_part": {
+   "request": "GET / HTTP/1.1 extra\r\nHost: x\r\n\r\n",
+   "response": "HTTP/1.0 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 213\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"illegal_argument_exception\",\"reason\":\"invalid version format: HTTP/1.1 EXTRA\"}],\"type\":\"illegal_argument_exception\",\"reason\":\"invalid version format: HTTP/1.1 EXTRA\"},\"status\":400}<EOF>"
+  },
+  "space_before_colon": {
+   "request": "GET / HTTP/1.1\r\nHost: x\r\nFoo : bar\r\n\r\n",
+   "response": "HTTP/1.1 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 365\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"illegal_argument_exception\",\"reason\":\"a header name can only contain \\\"token\\\" characters, but found invalid character 0x20 at index 3 of header 'Foo '.\"}],\"type\":\"illegal_argument_exception\",\"reason\":\"a header name can only contain \\\"token\\\" characters, but found invalid character 0x20 at index 3 of header 'Foo '.\"},\"status\":400}<open>"
+  },
+  "no_colon": {
+   "request": "GET / HTTP/1.1\r\nHost: x\r\nBad Header\r\n\r\n",
+   "response": "HTTP/1.1 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 165\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"illegal_argument_exception\",\"reason\":\"No colon found\"}],\"type\":\"illegal_argument_exception\",\"reason\":\"No colon found\"},\"status\":400}<open>"
+  },
+  "two_content_lengths": {
+   "request": "POST /_count HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}",
+   "response": "HTTP/1.1 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 225\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"illegal_argument_exception\",\"reason\":\"Multiple Content-Length values found: [2, 3]\"}],\"type\":\"illegal_argument_exception\",\"reason\":\"Multiple Content-Length values found: [2, 3]\"},\"status\":400}<open>"
+  },
+  "content_length_and_chunked": {
+   "request": "POST /_count HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+   "response": "HTTP/1.1 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 343\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"content_length_not_allowed_exception\",\"reason\":\"Content-Length are not allowed in HTTP/1.1 messages that contains a Transfer-Encoding header.\"}],\"type\":\"content_length_not_allowed_exception\",\"reason\":\"Content-Length are not allowed in HTTP/1.1 messages that contains a Transfer-Encoding header.\"},\"status\":400}<open>"
+  },
+  "chunked_http10": {
+   "request": "POST /_count HTTP/1.0\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+   "response": "HTTP/1.0 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 293\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"transfer_encoding_not_allowed_exception\",\"reason\":\"The Transfer-Encoding header is only allowed in HTTP/1.1 or newer\"}],\"type\":\"transfer_encoding_not_allowed_exception\",\"reason\":\"The Transfer-Encoding header is only allowed in HTTP/1.1 or newer\"},\"status\":400}<EOF>"
+  },
+  "bare_lf": {
+   "request": "GET / HTTP/1.1\nHost: x\n\n",
+   "response": "HTTP/1.0 400 Bad Request\r\nX-elastic-product: Elasticsearch\r\ncontent-type: application/json\r\ncontent-length: 343\r\n\r\n{\"error\":{\"root_cause\":[{\"type\":\"invalid_line_separator_exception\",\"reason\":\"Line Feed must be preceded by Carriage Return when terminating HTTP start- and header field-lines\"}],\"type\":\"invalid_line_separator_exception\",\"reason\":\"Line Feed must be preceded by Carriage Return when terminating HTTP start- and header field-lines\"},\"status\":400}<EOF>"
+  },
+  "content_length_list": {
+   "request": "POST /_count HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2, 2\r\n\r\n{}",
+   "response": "<EOF>"
+  }
+ }
+}

@@ -5,6 +5,13 @@ use super::*;
 impl Engine {
     pub(super) async fn converge_one(&self, r: Row) {
         let id = r.id.clone();
+        // While it converges its `next_at` is a lease, not 0: a request meanwhile (a variable
+        // removed, a push, a keep) sets it to 0, which is a change, so it bumps the generation and
+        // this converge doesn't settle over it. A crash mid-converge is retried when it ends.
+        let lease = self.store.now_ms().unwrap_or_default() + CONVERGE_LEASE_MS;
+        if self.store.update(&id, |row| row.next_at = lease).is_err() {
+            return;
+        }
         let deleting = r.desired == Desired::Deleted;
         let result = if deleting { self.teardown(&r).await } else { self.converge(&r).await };
         match result {
@@ -299,7 +306,8 @@ impl Engine {
         // 4. Services: the change's repo at its head, every other repo at its default head.
         // From roll apps' catalog when the project has services there, else the repos'
         // `roll.toml`.
-        let repos: Vec<String> = project.resources.iter().filter(|x| x.kind == roll_workspace::Kind::Repo).map(|x| x.r#ref.clone()).collect();
+        // Only repos the project stands for (`Workspace::trusts`): they run with its secrets.
+        let repos: Vec<String> = project.resources.iter().filter(|x| x.kind == roll_workspace::Kind::Repo && self.workspace.trusts(&project, x.kind, &x.r#ref)).map(|x| x.r#ref.clone()).collect();
         // (spec, repo, revision, whether roll apps runs it)
         let mut wanted: Vec<(ServiceSpec, String, String, bool)> = Vec::new();
         let head_of = |repo: String| async move {
@@ -356,7 +364,9 @@ impl Engine {
                     self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
                 }
             }
-            if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved {
+            // A deploy the backend is still on is asked about again (until it's live or fails).
+            let in_flight = self.deploying_since.lock().contains_key(&(r.id.clone(), spec.name.clone()));
+            if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved || in_flight {
                 let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
                 let t = Target {
                     project: r.project_id.clone(),
@@ -402,6 +412,9 @@ impl Engine {
                             anyhow::bail!("deploying {}: {msg}", spec.name);
                         }
                         self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
+                        // The backend has what this deploy sent (its variables): a change made
+                        // meanwhile, even one back to how it was before, is sent again.
+                        self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
                         still_deploying = true;
                     }
                     Err(e) => {

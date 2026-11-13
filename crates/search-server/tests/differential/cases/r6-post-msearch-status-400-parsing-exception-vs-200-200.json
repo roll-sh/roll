@@ -1,0 +1,225 @@
+{
+ "found": {
+  "case": 35,
+  "case_seed": 120000395,
+  "seed": 120
+ },
+ "signature": "POST _msearch status 400:parsing_exception vs 200:200",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "flt0": {
+       "type": "float"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "mot0": {
+       "type": "match_only_text"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "fields": {
+          "raw": {
+           "ignore_above": 32,
+           "type": "keyword"
+          }
+         },
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "short0": {
+       "type": "short"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      },
+      "vec0": {
+       "dims": 3,
+       "index_options": {
+        "type": "flat"
+       },
+       "similarity": "l2_norm",
+       "type": "dense_vector"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m4-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m4-a"
+  },
+  {
+   "es": {
+    "body": {
+     "error": {
+      "col": 125,
+      "line": 1,
+      "reason": "No text specified for multi_match query",
+      "root_cause": [
+       {
+        "col": 125,
+        "line": 1,
+        "reason": "No text specified for multi_match query",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "parsing_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "lines": [
+    {
+     "index": "diff-m4-a"
+    },
+    {},
+    {
+     "index": "diff-m4-a"
+    },
+    {
+     "aggs": {
+      "terms_11": {
+       "aggs": {
+        "filters_13": {
+         "filters": {
+          "filters": {
+           "a": {
+            "multi_match": {
+             "tie_breaker": 0.5,
+             "type": "cross_fields"
+            }
+           }
+          }
+         }
+        }
+       },
+       "terms": {
+        "field": "long0",
+        "size": 3
+       }
+      }
+     }
+    },
+    {
+     "index": "diff-m4-a"
+    },
+    {
+     "aggs": {
+      "date_range_16": {
+       "date_range": {
+        "field": "date0",
+        "ranges": [
+         {
+          "to": "2024-04-01"
+         },
+         {
+          "from": "2024-04-01",
+          "to": "2024-09-01"
+         },
+         {
+          "from": "2024-09-01"
+         }
+        ]
+       }
+      },
+      "max_18": {
+       "max": {
+        "field": "short0"
+       }
+      },
+      "top_metrics_17": {
+       "top_metrics": {
+        "metrics": [
+         {
+          "field": "short0"
+         }
+        ],
+        "size": 2,
+        "sort": {
+         "long0": "asc"
+        }
+       }
+      }
+     },
+     "highlight": {
+      "fields": {
+       "text0": {}
+      }
+     },
+     "query": {
+      "match": {
+       "text0": "apple over"
+      }
+     },
+     "size": 0
+    }
+   ],
+   "method": "POST",
+   "path": "/_msearch"
+  }
+ ]
+}

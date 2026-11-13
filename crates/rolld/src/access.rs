@@ -10,6 +10,11 @@ use roll_access::{Access, Resolvers, WorkspaceResolver};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// roll secrets, once it's open (it opens after roll-access): an ephemeral environment is a
+/// preview to rules (`environments: ["preview"]`), whatever its slug (`pv-12`).
+#[derive(Clone, Default)]
+pub struct SecretsEnvs(pub Arc<std::sync::OnceLock<Arc<roll_secrets::Secrets>>>);
+
 /// The products whose ids the evaluator can't read off a path.
 pub struct Products<'a> {
     pub postgres: Option<Arc<pg_control::Control>>,
@@ -17,11 +22,18 @@ pub struct Products<'a> {
     pub nosql: Option<Arc<nosql_control::Control>>,
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub code: Option<&'a Arc<code_control::Code>>,
+    pub secrets: SecretsEnvs,
     pub apps: Option<Arc<apps_control::Apps>>,
+    pub search: Option<Arc<search_control::Control>>,
 }
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
     let mut r = Resolvers { workspace: Some(Arc::new(WorkspaceResolver(workspace))), ..Default::default() };
+    let slot = p.secrets.0;
+    r.environment_fn("secrets", move |project, env| {
+        let e = slot.get()?.environment(project, env, &roll_secrets::Caller::operator()).ok()?;
+        (e.kind == roll_secrets::EnvironmentKind::Ephemeral).then(|| "preview".to_string())
+    });
     if let Some(pg) = p.postgres {
         // A project by its id; an endpoint is in its project.
         r.by_fn("endpoint", move |id: &str| pg.endpoint_or_404(id).ok().map(|e| e.project_id));
@@ -38,6 +50,10 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
     }
     if let Some(broker) = p.streams {
         r.by_fn("stream", move |id: &str| broker.find_stream(id).map(|s| s.id.clone()));
+    }
+    if let Some(search) = p.search {
+        // A cluster by its id, also when a path names it.
+        r.by_fn("cluster", move |id: &str| search.store.id_of(id).ok().flatten());
     }
     if let Some(code) = p.code {
         let c = code.clone();

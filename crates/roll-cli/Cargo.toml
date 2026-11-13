@@ -15,6 +15,10 @@ path = "src/main.rs"
 roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"]
 
 [dependencies]
+aes-gcm.workspace = true
+curve25519-dalek.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
 agent-host.workspace = true
 apps-build.workspace = true
 agent-proto.workspace = true
@@ -77,6 +81,12 @@ regex.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
+# `tests/secrets.rs`: roll secrets in process.
+roll-secrets.workspace = true
+# `tests/search.rs` runs the `roll` binary against an in-process search control plane.
+search-control.workspace = true
+search-server.workspace = true
+search-store.workspace = true
 
 [[test]]
 name = "cqlsh_roll"

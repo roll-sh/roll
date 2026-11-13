@@ -1,0 +1,187 @@
+{
+ "found": {
+  "case": 104,
+  "case_seed": 112000440,
+  "seed": 112
+ },
+ "signature": "POST _count status 400:search_phase_execution_exception vs 200:200",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "bool0": {
+       "type": "boolean"
+      },
+      "byte0": {
+       "type": "byte"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "flt0": {
+       "type": "float"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "irange0": {
+       "type": "integer_range"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "mot0": {
+       "type": "match_only_text"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "fields": {
+          "raw": {
+           "ignore_above": 32,
+           "type": "keyword"
+          }
+         },
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m0-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m0-a"
+  },
+  {
+   "body": {
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "nested": {
+         "inner_hits": {},
+         "path": "n",
+         "query": {
+          "term": {
+           "n.kw0": "alpha"
+          }
+         }
+        }
+       }
+      ],
+      "should": [
+       {
+        "nested": {
+         "inner_hits": {
+          "size": 2
+         },
+         "path": "n",
+         "query": {
+          "intervals": {
+           "n.text0": {
+            "match": {
+             "max_gaps": 2,
+             "ordered": false,
+             "query": "banana score"
+            }
+           }
+          }
+         }
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "caused_by": {
+        "reason": "[inner_hits] already contains an entry for key [n]",
+        "type": "illegal_argument_exception"
+       },
+       "reason": "[inner_hits] already contains an entry for key [n]",
+       "type": "illegal_argument_exception"
+      },
+      "failed_shards": [
+       {
+        "index": "diff-m0-a",
+        "node": "GTFtKRkMSi-lm0r0R4ztbA",
+        "reason": {
+         "reason": "[inner_hits] already contains an entry for key [n]",
+         "type": "illegal_argument_exception"
+        },
+        "shard": 0
+       }
+      ],
+      "grouped": true,
+      "phase": "query",
+      "reason": "all shards failed",
+      "root_cause": [
+       {
+        "reason": "[inner_hits] already contains an entry for key [n]",
+        "type": "illegal_argument_exception"
+       }
+      ],
+      "type": "search_phase_execution_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m0-a/_count"
+  }
+ ]
+}

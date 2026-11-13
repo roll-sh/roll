@@ -1,0 +1,65 @@
+{
+  "knn.stats": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/vector-search/api/knn/",
+      "description": "Statistics of the k-NN plugin."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_knn/stats",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_plugins/_knn/stats/{stat}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "stat": {
+              "type": "list",
+              "description": "stat"
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_knn/{node_id}/stats",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "node_id": {
+              "type": "list",
+              "description": "node_id"
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_knn/{node_id}/stats/{stat}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "node_id": {
+              "type": "list",
+              "description": "node_id"
+            },
+            "stat": {
+              "type": "list",
+              "description": "stat"
+            }
+          }
+        }
+      ]
+    },
+    "params": {
+      "timeout": {
+        "type": "time",
+        "description": "Operation timeout."
+      }
+    }
+  }
+}

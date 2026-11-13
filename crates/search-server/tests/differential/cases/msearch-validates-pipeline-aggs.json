@@ -1,0 +1,1068 @@
+{
+  "diff": {
+    "es": {
+      "body": {
+        "error": {
+          "reason": "Validation Failed: 1: parent histogram of derivative aggregation [derivative_16] must have min_doc_count of 0;",
+          "root_cause": [
+            {
+              "reason": "Validation Failed: 1: parent histogram of derivative aggregation [derivative_16] must have min_doc_count of 0;",
+              "type": "action_request_validation_exception"
+            }
+          ],
+          "type": "action_request_validation_exception"
+        },
+        "status": 400
+      },
+      "error": "action_request_validation_exception",
+      "status": 400
+    },
+    "path": "status 400",
+    "roll": {
+      "body": {
+        "responses": [
+          {
+            "_shards": {
+              "failed": 0,
+              "skipped": 0,
+              "successful": 12,
+              "total": 12
+            },
+            "hits": {
+              "hits": [
+                {
+                  "_id": "10",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2025-01-16T13:00:00Z",
+                    "geo0": {
+                      "lat": -58.82,
+                      "lon": 118.37
+                    },
+                    "ip0": "10.0.3.227",
+                    "kw1": "beta",
+                    "short0": -169,
+                    "text0": "banana and roll blue",
+                    "text1": "cats red score brown"
+                  }
+                },
+                {
+                  "_id": "11",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": 1715022000000,
+                    "geo0": {
+                      "lat": 58.18,
+                      "lon": 26.24
+                    },
+                    "ip0": "10.2.0.11",
+                    "kw0": "x-2",
+                    "kw1": "user@example.com",
+                    "mot0": "search runs Quick ran Quick",
+                    "short0": 22,
+                    "text0": "elastic and engine fast stream",
+                    "text1": "cherry"
+                  }
+                },
+                {
+                  "_id": "12",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-10-31T15:00:00Z",
+                    "dbl0": 8.84,
+                    "geo0": "28.26,-0.57",
+                    "ip0": "10.0.0.139",
+                    "kw1": "delta",
+                    "mot0": "the blue",
+                    "short0": 300,
+                    "text0": "slow",
+                    "text1": "blue green engine banana data red of red apple"
+                  }
+                },
+                {
+                  "_id": "13",
+                  "_ignored": [
+                    "text0.raw"
+                  ],
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-06-05",
+                    "dbl0": null,
+                    "geo0": "19.41,39.43",
+                    "ip0": "10.2.2.36",
+                    "kw1": "gamma",
+                    "mot0": "quick",
+                    "short0": -60,
+                    "text0": "jumps red engine cherry quick green banana roll",
+                    "text1": "quick"
+                  }
+                },
+                {
+                  "_id": "14",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": [
+                      "2024-04-15T16:00:00Z",
+                      "2024-11-19T04:00:00Z"
+                    ],
+                    "dbl0": 137.49,
+                    "ip0": "10.2.2.208",
+                    "kw1": "x-1",
+                    "short0": -198,
+                    "text0": "ran index cherry",
+                    "text1": "fast brown of stream jumps dog"
+                  }
+                },
+                {
+                  "_id": "15",
+                  "_ignored": [
+                    "text0.raw"
+                  ],
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-09-12",
+                    "dbl0": 175.53,
+                    "geo0": {
+                      "lat": 18.41,
+                      "lon": 127.41
+                    },
+                    "ip0": "10.1.0.194",
+                    "kw1": "pi",
+                    "mot0": "query of the of",
+                    "short0": 234,
+                    "text0": "green roll apple stream query dog brown quick"
+                  }
+                },
+                {
+                  "_id": "16",
+                  "_ignored": [
+                    "text0.raw"
+                  ],
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-01-10",
+                    "geo0": "21.17,75.55",
+                    "ip0": "10.1.3.187",
+                    "kw0": "Alpha",
+                    "kw1": "",
+                    "mot0": "search blue",
+                    "short0": null,
+                    "text0": "score runs quick engine jumps jumps Quick banana"
+                  }
+                },
+                {
+                  "_id": "17",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-09-09",
+                    "dbl0": 14.28,
+                    "geo0": "24.37,-96.8",
+                    "ip0": "10.2.1.67",
+                    "kw0": [
+                      "x-1",
+                      "x-1",
+                      "alpha"
+                    ],
+                    "kw1": "x-1",
+                    "mot0": "the dog search fast of dog",
+                    "short0": 108,
+                    "text0": "and dog the engine",
+                    "text1": "cats score Dogs engine"
+                  }
+                },
+                {
+                  "_id": "18",
+                  "_ignored": [
+                    "text0.raw"
+                  ],
+                  "_index": "diff-m4-a",
+                  "_routing": "r1",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-04-20",
+                    "dbl0": 41.99,
+                    "geo0": {
+                      "lat": 7.97,
+                      "lon": -84.67
+                    },
+                    "ip0": "10.2.0.104",
+                    "kw0": [
+                      "",
+                      "gamma"
+                    ],
+                    "mot0": "blue red query data",
+                    "short0": 248,
+                    "text0": [
+                      "stream cat score cherry dog jumps engine brown Quick",
+                      "green over fox green score brown query",
+                      "fast search the lazy elastic"
+                    ],
+                    "text1": "search engine red apple Dogs green slow the blue"
+                  }
+                },
+                {
+                  "_id": "19",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": null,
+                    "dbl0": 36.28,
+                    "geo0": null,
+                    "ip0": "10.0.2.13",
+                    "kw0": "delta",
+                    "kw1": "gamma",
+                    "mot0": "runs ran red banana fox engine running roll",
+                    "short0": -89,
+                    "text1": "fox"
+                  }
+                }
+              ],
+              "max_score": 1.0,
+              "total": {
+                "relation": "eq",
+                "value": 21
+              }
+            },
+            "status": 200,
+            "timed_out": false,
+            "took": 2
+          },
+          {
+            "_shards": {
+              "failed": 0,
+              "skipped": 0,
+              "successful": 12,
+              "total": 12
+            },
+            "hits": {
+              "hits": [
+                {
+                  "_id": "10",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2025-01-16T13:00:00Z",
+                    "geo0": {
+                      "lat": -58.82,
+                      "lon": 118.37
+                    },
+                    "ip0": "10.0.3.227",
+                    "kw1": "beta",
+                    "short0": -169,
+                    "text0": "banana and roll blue",
+                    "text1": "cats red score brown"
+                  }
+                },
+                {
+                  "_id": "11",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": 1715022000000,
+                    "geo0": {
+                      "lat": 58.18,
+                      "lon": 26.24
+                    },
+                    "ip0": "10.2.0.11",
+                    "kw0": "x-2",
+                    "kw1": "user@example.com",
+                    "mot0": "search runs Quick ran Quick",
+                    "short0": 22,
+                    "text0": "elastic and engine fast stream",
+                    "text1": "cherry"
+                  }
+                },
+                {
+                  "_id": "12",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-10-31T15:00:00Z",
+                    "dbl0": 8.84,
+                    "geo0": "28.26,-0.57",
+                    "ip0": "10.0.0.139",
+                    "kw1": "delta",
+                    "mot0": "the blue",
+                    "short0": 300,
+                    "text0": "slow",
+                    "text1": "blue green engine banana data red of red apple"
+                  }
+                },
+                {
+                  "_id": "13",
+                  "_ignored": [
+                    "text0.raw"
+                  ],
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-06-05",
+                    "dbl0": null,
+                    "geo0": "19.41,39.43",
+                    "ip0": "10.2.2.36",
+                    "kw1": "gamma",
+                    "mot0": "quick",
+                    "short0": -60,
+                    "text0": "jumps red engine cherry quick green banana roll",
+                    "text1": "quick"
+                  }
+                },
+                {
+                  "_id": "14",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": [
+                      "2024-04-15T16:00:00Z",
+                      "2024-11-19T04:00:00Z"
+                    ],
+                    "dbl0": 137.49,
+                    "ip0": "10.2.2.208",
+                    "kw1": "x-1",
+                    "short0": -198,
+                    "text0": "ran index cherry",
+                    "text1": "fast brown of stream jumps dog"
+                  }
+                },
+                {
+                  "_id": "15",
+                  "_ignored": [
+                    "text0.raw"
+                  ],
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-09-12",
+                    "dbl0": 175.53,
+                    "geo0": {
+                      "lat": 18.41,
+                      "lon": 127.41
+                    },
+                    "ip0": "10.1.0.194",
+                    "kw1": "pi",
+                    "mot0": "query of the of",
+                    "short0": 234,
+                    "text0": "green roll apple stream query dog brown quick"
+                  }
+                },
+                {
+                  "_id": "16",
+                  "_ignored": [
+                    "text0.raw"
+                  ],
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-01-10",
+                    "geo0": "21.17,75.55",
+                    "ip0": "10.1.3.187",
+                    "kw0": "Alpha",
+                    "kw1": "",
+                    "mot0": "search blue",
+                    "short0": null,
+                    "text0": "score runs quick engine jumps jumps Quick banana"
+                  }
+                },
+                {
+                  "_id": "17",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-09-09",
+                    "dbl0": 14.28,
+                    "geo0": "24.37,-96.8",
+                    "ip0": "10.2.1.67",
+                    "kw0": [
+                      "x-1",
+                      "x-1",
+                      "alpha"
+                    ],
+                    "kw1": "x-1",
+                    "mot0": "the dog search fast of dog",
+                    "short0": 108,
+                    "text0": "and dog the engine",
+                    "text1": "cats score Dogs engine"
+                  }
+                },
+                {
+                  "_id": "18",
+                  "_ignored": [
+                    "text0.raw"
+                  ],
+                  "_index": "diff-m4-a",
+                  "_routing": "r1",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": "2024-04-20",
+                    "dbl0": 41.99,
+                    "geo0": {
+                      "lat": 7.97,
+                      "lon": -84.67
+                    },
+                    "ip0": "10.2.0.104",
+                    "kw0": [
+                      "",
+                      "gamma"
+                    ],
+                    "mot0": "blue red query data",
+                    "short0": 248,
+                    "text0": [
+                      "stream cat score cherry dog jumps engine brown Quick",
+                      "green over fox green score brown query",
+                      "fast search the lazy elastic"
+                    ],
+                    "text1": "search engine red apple Dogs green slow the blue"
+                  }
+                },
+                {
+                  "_id": "19",
+                  "_index": "diff-m4-a",
+                  "_score": 1.0,
+                  "_source": {
+                    "date0": null,
+                    "dbl0": 36.28,
+                    "geo0": null,
+                    "ip0": "10.0.2.13",
+                    "kw0": "delta",
+                    "kw1": "gamma",
+                    "mot0": "runs ran red banana fox engine running roll",
+                    "short0": -89,
+                    "text1": "fox"
+                  }
+                }
+              ],
+              "max_score": 1.0,
+              "total": {
+                "relation": "eq",
+                "value": 21
+              }
+            },
+            "status": 200,
+            "timed_out": false,
+            "took": 2
+          },
+          {
+            "error": {
+              "reason": "Validation Failed: 1: parent histogram of derivative aggregation [derivative_16] must have min_doc_count of 0;",
+              "root_cause": [
+                {
+                  "reason": "Validation Failed: 1: parent histogram of derivative aggregation [derivative_16] must have min_doc_count of 0;",
+                  "type": "action_request_validation_exception"
+                }
+              ],
+              "type": "action_request_validation_exception"
+            },
+            "status": 400
+          }
+        ],
+        "took": 10
+      },
+      "error": null,
+      "status": 200
+    }
+  },
+  "found": {
+    "case": 38,
+    "case_seed": 4000050,
+    "seed": 4
+  },
+  "roll": {
+    "body": {
+      "responses": [
+        {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 12,
+            "total": 12
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "10",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2025-01-16T13:00:00Z",
+                  "geo0": {
+                    "lat": -58.82,
+                    "lon": 118.37
+                  },
+                  "ip0": "10.0.3.227",
+                  "kw1": "beta",
+                  "short0": -169,
+                  "text0": "banana and roll blue",
+                  "text1": "cats red score brown"
+                }
+              },
+              {
+                "_id": "11",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": 1715022000000,
+                  "geo0": {
+                    "lat": 58.18,
+                    "lon": 26.24
+                  },
+                  "ip0": "10.2.0.11",
+                  "kw0": "x-2",
+                  "kw1": "user@example.com",
+                  "mot0": "search runs Quick ran Quick",
+                  "short0": 22,
+                  "text0": "elastic and engine fast stream",
+                  "text1": "cherry"
+                }
+              },
+              {
+                "_id": "12",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-10-31T15:00:00Z",
+                  "dbl0": 8.84,
+                  "geo0": "28.26,-0.57",
+                  "ip0": "10.0.0.139",
+                  "kw1": "delta",
+                  "mot0": "the blue",
+                  "short0": 300,
+                  "text0": "slow",
+                  "text1": "blue green engine banana data red of red apple"
+                }
+              },
+              {
+                "_id": "13",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-06-05",
+                  "dbl0": null,
+                  "geo0": "19.41,39.43",
+                  "ip0": "10.2.2.36",
+                  "kw1": "gamma",
+                  "mot0": "quick",
+                  "short0": -60,
+                  "text0": "jumps red engine cherry quick green banana roll",
+                  "text1": "quick"
+                }
+              },
+              {
+                "_id": "14",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": [
+                    "2024-04-15T16:00:00Z",
+                    "2024-11-19T04:00:00Z"
+                  ],
+                  "dbl0": 137.49,
+                  "ip0": "10.2.2.208",
+                  "kw1": "x-1",
+                  "short0": -198,
+                  "text0": "ran index cherry",
+                  "text1": "fast brown of stream jumps dog"
+                }
+              },
+              {
+                "_id": "15",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-09-12",
+                  "dbl0": 175.53,
+                  "geo0": {
+                    "lat": 18.41,
+                    "lon": 127.41
+                  },
+                  "ip0": "10.1.0.194",
+                  "kw1": "pi",
+                  "mot0": "query of the of",
+                  "short0": 234,
+                  "text0": "green roll apple stream query dog brown quick"
+                }
+              },
+              {
+                "_id": "16",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-01-10",
+                  "geo0": "21.17,75.55",
+                  "ip0": "10.1.3.187",
+                  "kw0": "Alpha",
+                  "kw1": "",
+                  "mot0": "search blue",
+                  "short0": null,
+                  "text0": "score runs quick engine jumps jumps Quick banana"
+                }
+              },
+              {
+                "_id": "17",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-09-09",
+                  "dbl0": 14.28,
+                  "geo0": "24.37,-96.8",
+                  "ip0": "10.2.1.67",
+                  "kw0": [
+                    "x-1",
+                    "x-1",
+                    "alpha"
+                  ],
+                  "kw1": "x-1",
+                  "mot0": "the dog search fast of dog",
+                  "short0": 108,
+                  "text0": "and dog the engine",
+                  "text1": "cats score Dogs engine"
+                }
+              },
+              {
+                "_id": "18",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m4-a",
+                "_routing": "r1",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-04-20",
+                  "dbl0": 41.99,
+                  "geo0": {
+                    "lat": 7.97,
+                    "lon": -84.67
+                  },
+                  "ip0": "10.2.0.104",
+                  "kw0": [
+                    "",
+                    "gamma"
+                  ],
+                  "mot0": "blue red query data",
+                  "short0": 248,
+                  "text0": [
+                    "stream cat score cherry dog jumps engine brown Quick",
+                    "green over fox green score brown query",
+                    "fast search the lazy elastic"
+                  ],
+                  "text1": "search engine red apple Dogs green slow the blue"
+                }
+              },
+              {
+                "_id": "19",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": null,
+                  "dbl0": 36.28,
+                  "geo0": null,
+                  "ip0": "10.0.2.13",
+                  "kw0": "delta",
+                  "kw1": "gamma",
+                  "mot0": "runs ran red banana fox engine running roll",
+                  "short0": -89,
+                  "text1": "fox"
+                }
+              }
+            ],
+            "max_score": 1.0,
+            "total": {
+              "relation": "eq",
+              "value": 21
+            }
+          },
+          "status": 200,
+          "timed_out": false,
+          "took": 2
+        },
+        {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 12,
+            "total": 12
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "10",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2025-01-16T13:00:00Z",
+                  "geo0": {
+                    "lat": -58.82,
+                    "lon": 118.37
+                  },
+                  "ip0": "10.0.3.227",
+                  "kw1": "beta",
+                  "short0": -169,
+                  "text0": "banana and roll blue",
+                  "text1": "cats red score brown"
+                }
+              },
+              {
+                "_id": "11",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": 1715022000000,
+                  "geo0": {
+                    "lat": 58.18,
+                    "lon": 26.24
+                  },
+                  "ip0": "10.2.0.11",
+                  "kw0": "x-2",
+                  "kw1": "user@example.com",
+                  "mot0": "search runs Quick ran Quick",
+                  "short0": 22,
+                  "text0": "elastic and engine fast stream",
+                  "text1": "cherry"
+                }
+              },
+              {
+                "_id": "12",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-10-31T15:00:00Z",
+                  "dbl0": 8.84,
+                  "geo0": "28.26,-0.57",
+                  "ip0": "10.0.0.139",
+                  "kw1": "delta",
+                  "mot0": "the blue",
+                  "short0": 300,
+                  "text0": "slow",
+                  "text1": "blue green engine banana data red of red apple"
+                }
+              },
+              {
+                "_id": "13",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-06-05",
+                  "dbl0": null,
+                  "geo0": "19.41,39.43",
+                  "ip0": "10.2.2.36",
+                  "kw1": "gamma",
+                  "mot0": "quick",
+                  "short0": -60,
+                  "text0": "jumps red engine cherry quick green banana roll",
+                  "text1": "quick"
+                }
+              },
+              {
+                "_id": "14",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": [
+                    "2024-04-15T16:00:00Z",
+                    "2024-11-19T04:00:00Z"
+                  ],
+                  "dbl0": 137.49,
+                  "ip0": "10.2.2.208",
+                  "kw1": "x-1",
+                  "short0": -198,
+                  "text0": "ran index cherry",
+                  "text1": "fast brown of stream jumps dog"
+                }
+              },
+              {
+                "_id": "15",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-09-12",
+                  "dbl0": 175.53,
+                  "geo0": {
+                    "lat": 18.41,
+                    "lon": 127.41
+                  },
+                  "ip0": "10.1.0.194",
+                  "kw1": "pi",
+                  "mot0": "query of the of",
+                  "short0": 234,
+                  "text0": "green roll apple stream query dog brown quick"
+                }
+              },
+              {
+                "_id": "16",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-01-10",
+                  "geo0": "21.17,75.55",
+                  "ip0": "10.1.3.187",
+                  "kw0": "Alpha",
+                  "kw1": "",
+                  "mot0": "search blue",
+                  "short0": null,
+                  "text0": "score runs quick engine jumps jumps Quick banana"
+                }
+              },
+              {
+                "_id": "17",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-09-09",
+                  "dbl0": 14.28,
+                  "geo0": "24.37,-96.8",
+                  "ip0": "10.2.1.67",
+                  "kw0": [
+                    "x-1",
+                    "x-1",
+                    "alpha"
+                  ],
+                  "kw1": "x-1",
+                  "mot0": "the dog search fast of dog",
+                  "short0": 108,
+                  "text0": "and dog the engine",
+                  "text1": "cats score Dogs engine"
+                }
+              },
+              {
+                "_id": "18",
+                "_ignored": [
+                  "text0.raw"
+                ],
+                "_index": "diff-m4-a",
+                "_routing": "r1",
+                "_score": 1.0,
+                "_source": {
+                  "date0": "2024-04-20",
+                  "dbl0": 41.99,
+                  "geo0": {
+                    "lat": 7.97,
+                    "lon": -84.67
+                  },
+                  "ip0": "10.2.0.104",
+                  "kw0": [
+                    "",
+                    "gamma"
+                  ],
+                  "mot0": "blue red query data",
+                  "short0": 248,
+                  "text0": [
+                    "stream cat score cherry dog jumps engine brown Quick",
+                    "green over fox green score brown query",
+                    "fast search the lazy elastic"
+                  ],
+                  "text1": "search engine red apple Dogs green slow the blue"
+                }
+              },
+              {
+                "_id": "19",
+                "_index": "diff-m4-a",
+                "_score": 1.0,
+                "_source": {
+                  "date0": null,
+                  "dbl0": 36.28,
+                  "geo0": null,
+                  "ip0": "10.0.2.13",
+                  "kw0": "delta",
+                  "kw1": "gamma",
+                  "mot0": "runs ran red banana fox engine running roll",
+                  "short0": -89,
+                  "text1": "fox"
+                }
+              }
+            ],
+            "max_score": 1.0,
+            "total": {
+              "relation": "eq",
+              "value": 21
+            }
+          },
+          "status": 200,
+          "timed_out": false,
+          "took": 2
+        },
+        {
+          "error": {
+            "reason": "Validation Failed: 1: parent histogram of derivative aggregation [derivative_16] must have min_doc_count of 0;",
+            "root_cause": [
+              {
+                "reason": "Validation Failed: 1: parent histogram of derivative aggregation [derivative_16] must have min_doc_count of 0;",
+                "type": "action_request_validation_exception"
+              }
+            ],
+            "type": "action_request_validation_exception"
+          },
+          "status": 400
+        }
+      ],
+      "took": 10
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _msearch status 400:action_request_validation_exception vs 200:200",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "comp0": {
+              "type": "completion"
+            },
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "dbl0": {
+              "type": "double"
+            },
+            "geo0": {
+              "type": "geo_point"
+            },
+            "half0": {
+              "type": "half_float"
+            },
+            "int0": {
+              "type": "integer"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "kw1": {
+              "type": "keyword"
+            },
+            "long0": {
+              "type": "long"
+            },
+            "mot0": {
+              "type": "match_only_text"
+            },
+            "scaled0": {
+              "scaling_factor": 100,
+              "type": "scaled_float"
+            },
+            "short0": {
+              "type": "short"
+            },
+            "text0": {
+              "analyzer": "simple",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "term_vector": "with_positions_offsets",
+              "type": "text"
+            },
+            "wild0": {
+              "type": "wildcard"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 5,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m1-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m1-a"
+    },
+    {
+      "es": {
+        "body": {
+          "error": {
+            "reason": "Validation Failed: 1: parent histogram of derivative aggregation [derivative_16] must have min_doc_count of 0;",
+            "root_cause": [
+              {
+                "reason": "Validation Failed: 1: parent histogram of derivative aggregation [derivative_16] must have min_doc_count of 0;",
+                "type": "action_request_validation_exception"
+              }
+            ],
+            "type": "action_request_validation_exception"
+          },
+          "status": 400
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 400
+      },
+      "lines": [
+        {},
+        {},
+        {},
+        {},
+        {},
+        {
+          "aggs": {
+            "date_histogram_13": {
+              "aggs": {
+                "histogram_14": {
+                  "aggs": {
+                    "derivative_16": {
+                      "derivative": {
+                        "buckets_path": "_count"
+                      }
+                    }
+                  },
+                  "histogram": {
+                    "field": "scaled0",
+                    "min_doc_count": 1
+                  }
+                }
+              },
+              "date_histogram": {
+                "calendar_interval": "quarter",
+                "field": "date0"
+              }
+            }
+          }
+        }
+      ],
+      "method": "POST",
+      "path": "/_msearch"
+    }
+  ]
+}

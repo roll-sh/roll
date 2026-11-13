@@ -1,0 +1,370 @@
+return [1, 2, 3].count(x -> x > 1)
+----
+return ['a': 1].count((k, v) -> v > 0)
+----
+TreeMap m = new TreeMap(); m.put('a', 1); return m.lowerKey('b')
+----
+BitSet b = new BitSet(); b.set(1); return b.get(1)
+----
+return LocalDateTime.of(2020, 1, 1, 0, 0).withNano(5)
+----
+return Year.of(2020).isBefore(Year.of(2021))
+----
+return LocalDate.of(2020, 1, 1).toLocalTime()
+----
+return [1].spliterator()
+----
+return Pattern.compile('x')
+----
+return Collections.list(Collections.enumeration([1, 2]))
+----
+return new SimpleDateFormat('yyyy-MM-dd').format(new Date(0))
+----
+return TimeZone.getTimeZone('UTC').getID()
+----
+return ZoneId.of('Europe/Paris').getRules().getOffset(Instant.EPOCH)
+----
+return new DateTimeFormatterBuilder().appendPattern('yyyy').toFormatter().format(LocalDate.of(2020, 1, 1))
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(0); return c.get(Calendar.YEAR)
+----
+return Character.UnicodeBlock.of('a' as char)
+----
+return Character.UnicodeBlock.of(65)
+----
+return Character.UnicodeScript.of(65)
+----
+return Locale.getAvailableLocales().length > 0
+----
+return new Locale.Builder().setLanguage('fr').build()
+----
+return Collator.getInstance(Locale.ROOT).compare('a', 'B')
+----
+return JapaneseDate.of(2020, 1, 1)
+----
+return MessageFormat.format('{0} x {1}', 1, 'a')
+----
+return HijrahDate.now() != null
+----
+return IsoChronology.INSTANCE.isLeapYear(2020)
+----
+return DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).withLocale(Locale.US).format(LocalDate.of(2020, 1, 2))
+----
+return DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL).withLocale(Locale.FRANCE).format(LocalDate.of(2020, 1, 2))
+----
+return DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM).withLocale(Locale.US).format(LocalDateTime.of(2020, 1, 2, 3, 4, 5))
+----
+return DateTimeFormatter.ofPattern('EEEE d MMMM yyyy', Locale.GERMAN).format(LocalDate.of(2020, 3, 2))
+----
+return DateTimeFormatter.ofPattern('EEE, MMM d', new Locale('es')).format(LocalDate.of(2020, 3, 2))
+----
+return DateTimeFormatter.ofPattern('MMMM', Locale.JAPANESE).format(LocalDate.of(2020, 3, 2))
+----
+return DateTimeFormatter.ofPattern('d MMMM yyyy', Locale.FRENCH).parse('2 mars 2020')
+----
+return LocalDate.of(2020, 3, 2).getDayOfWeek().getDisplayName(TextStyle.FULL, Locale.ITALIAN)
+----
+return LocalDate.of(2020, 3, 2).getMonth().getDisplayName(TextStyle.SHORT, Locale.forLanguageTag('pt-BR'))
+----
+return SignStyle.NORMAL
+----
+return TextStyle.FULL.asStandalone()
+----
+return ZoneId.of('Europe/Paris').getRules().isDaylightSavings(Instant.EPOCH)
+----
+return ZoneId.of('Europe/Paris').getRules().nextTransition(Instant.EPOCH)
+----
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.FRENCH); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.FRENCH).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.FRENCH).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.FRENCH).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.GERMAN); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.GERMAN).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.GERMAN).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.GERMAN).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.ITALIAN); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.ITALIAN).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.ITALIAN).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.ITALIAN).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.JAPANESE); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.JAPANESE).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.JAPANESE).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.JAPANESE).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.KOREAN); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.KOREAN).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.KOREAN).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.KOREAN).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.CHINESE); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.CHINESE).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.CHINESE).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.CHINESE).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.SIMPLIFIED_CHINESE); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.SIMPLIFIED_CHINESE).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.SIMPLIFIED_CHINESE).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.SIMPLIFIED_CHINESE).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.TRADITIONAL_CHINESE); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.TRADITIONAL_CHINESE).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.TRADITIONAL_CHINESE).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.TRADITIONAL_CHINESE).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.UK); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.UK).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.UK).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.UK).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.US); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.US).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.US).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.US).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.CANADA_FRENCH); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.CANADA_FRENCH).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.CANADA_FRENCH).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.CANADA_FRENCH).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.ROOT); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.ROOT).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.ROOT).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.ROOT).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('ru')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('ru')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('ru')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('ru')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('ar')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('ar')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('ar')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('ar')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('he')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('he')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('he')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('he')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('th', 'TH')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('th', 'TH')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('th', 'TH')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('th', 'TH')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('hi', 'IN')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('hi', 'IN')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('hi', 'IN')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('hi', 'IN')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('pl')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('pl')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('pl')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('pl')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('cs')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('cs')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('cs')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('cs')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('fi')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('fi')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('fi')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('fi')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('es', 'MX')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('es', 'MX')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('es', 'MX')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('es', 'MX')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('pt', 'BR')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('pt', 'BR')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('pt', 'BR')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('pt', 'BR')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('nl')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('nl')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('nl')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('nl')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('sv')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('sv')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('sv')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('sv')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('tr')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('tr')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('tr')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('tr')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('el')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('el')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('el')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('el')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('uk')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('uk')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('uk')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('uk')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('vi')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('vi')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('vi')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('vi')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('id')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('id')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('id')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('id')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.forLanguageTag('sr-Latn')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.forLanguageTag('sr-Latn')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.forLanguageTag('sr-Latn')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.forLanguageTag('sr-Latn')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', Locale.forLanguageTag('zh-Hant-TW')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(Locale.forLanguageTag('zh-Hant-TW')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(Locale.forLanguageTag('zh-Hant-TW')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(Locale.forLanguageTag('zh-Hant-TW')).format(z)); } return out
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('Europe/Paris')); DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE EEE EEEEE cccc ccc | MMMM MMM MMMMM LLLL LLL | QQQQ QQQ q | a | G GGGG GGGGG | w W e c Y', new Locale('ca')); return f.format(z)
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 2, 7, 15, 4, 5, 0, ZoneId.of('UTC')); List out = []; for (FormatStyle s : [FormatStyle.SHORT, FormatStyle.MEDIUM, FormatStyle.LONG, FormatStyle.FULL]) { out.add(DateTimeFormatter.ofLocalizedDate(s).withLocale(new Locale('ca')).format(z)); out.add(DateTimeFormatter.ofLocalizedTime(s).withLocale(new Locale('ca')).format(z)); out.add(DateTimeFormatter.ofLocalizedDateTime(s).withLocale(new Locale('ca')).format(z)); } return out
+----
+return DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT)
+----
+return DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT, FormatStyle.LONG)
+----
+return DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM).format(LocalTime.of(3, 4))
+----
+return DateTimeFormatter.ofLocalizedTime(FormatStyle.FULL).format(LocalTime.of(3, 4))
+----
+return DateTimeFormatter.ofLocalizedDateTime(FormatStyle.LONG).format(LocalDateTime.of(2020, 1, 2, 3, 4))
+----
+return DateTimeFormatter.ofLocalizedDate(null)
+----
+return DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).parse('Jan 2, 2020')
+----
+return LocalDate.parse('2 janv. 2020', DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(Locale.FRENCH))
+----
+return LocalDate.parse('Montag, 6. Januar 2020', DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL).withLocale(Locale.GERMAN))
+----
+return LocalDate.parse('6 MARS 2020', DateTimeFormatter.ofPattern('d MMMM yyyy', Locale.FRENCH))
+----
+return LocalDate.parse('6 MARS 2020', DateTimeFormatter.ofPattern('d MMMM yyyy', Locale.FRENCH).withResolverStyle(ResolverStyle.STRICT))
+----
+return new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern('d MMMM yyyy').toFormatter(Locale.FRENCH).parse('6 MARS 2020')
+----
+return LocalDate.parse('2020-W01-1', DateTimeFormatter.ofPattern("YYYY-'W'ww-e", Locale.FRANCE))
+----
+return LocalDate.parse('2020-W01-1', DateTimeFormatter.ofPattern("YYYY-'W'ww-e", Locale.US))
+----
+return DateTimeFormatter.ofPattern("YYYY-'W'ww-e", Locale.FRANCE).format(LocalDate.of(2021, 1, 3))
+----
+return DateTimeFormatter.ofPattern("YYYY-'W'ww-e", Locale.UK).format(LocalDate.of(2021, 1, 3))
+----
+return DateTimeFormatter.ofPattern("YYYY-'W'ww-e", new Locale('ar', 'SA')).format(LocalDate.of(2021, 1, 3))
+----
+return [WeekFields.of(Locale.FRANCE), WeekFields.of(Locale.US), WeekFields.of(new Locale('ar', 'EG')), WeekFields.of(Locale.ROOT), WeekFields.of(new Locale('pt', 'PT'))]
+----
+return LocalDate.of(2021, 1, 3).get(WeekFields.of(Locale.FRANCE).weekOfWeekBasedYear()) + ':' + LocalDate.of(2021, 1, 3).get(WeekFields.of(Locale.US).weekOfYear())
+----
+List out = []; for (DayOfWeek d : DayOfWeek.values()) { out.add(d.getDisplayName(TextStyle.SHORT, Locale.KOREAN)); out.add(d.getDisplayName(TextStyle.NARROW_STANDALONE, new Locale('ru'))); } return out
+----
+List out = []; for (Month m : Month.values()) { out.add(m.getDisplayName(TextStyle.FULL_STANDALONE, new Locale('ru'))); out.add(m.getDisplayName(TextStyle.FULL, new Locale('ru'))); } return out
+----
+return [ChronoField.MONTH_OF_YEAR.getDisplayName(Locale.FRENCH), ChronoField.DAY_OF_WEEK.getDisplayName(Locale.GERMAN), ChronoField.YEAR.getDisplayName(Locale.ROOT)]
+----
+return DateTimeFormatter.ofPattern('MMMM', Locale.FRENCH).getLocale()
+----
+return DateTimeFormatter.ofPattern('d MMM uuuu', new Locale('es')).parse('3 feb 2021')
+----
+return DateTimeFormatter.ofPattern('d MMM uuuu', new Locale('es')).parse('3 feb. 2021')
+----
+return DateTimeFormatter.ofPattern('EEE d MMM uuuu', Locale.US).parse('Fri 3 Feb 2021')
+----
+return DateTimeFormatter.ofPattern('h:mm a', Locale.US).parse('3:04 pm')
+----
+return DateTimeFormatter.ofPattern('h:mm a', Locale.US).parse('3:04 PM')
+----
+return DateTimeFormatter.ofPattern('h:mm a', new Locale('ko')).format(LocalTime.of(15, 4))
+----
+return DateTimeFormatter.ofPattern('G y', Locale.JAPAN).format(LocalDate.of(2020, 1, 1))
+----
+List out = []; for (String id : ['Europe/Paris', 'America/New_York', 'Asia/Kolkata', 'Australia/Lord_Howe', 'Etc/GMT+5', 'UTC', 'Asia/Tokyo', 'Europe/Dublin', 'America/Sao_Paulo', 'Africa/Casablanca', 'Pacific/Apia']) { ZoneRules r = ZoneId.of(id).getRules(); Instant i = Instant.parse('2021-07-01T00:00:00Z'); out.add(id + ' ' + r + ' ' + r.getOffset(i) + ' ' + r.getStandardOffset(i) + ' ' + r.isDaylightSavings(i) + ' ' + r.getDaylightSavings(i) + ' ' + r.isFixedOffset() + ' ' + r.nextTransition(i) + ' ' + r.previousTransition(i)); } return out
+----
+List out = []; for (String id : ['Europe/Paris', 'America/New_York', 'Australia/Sydney', 'Asia/Kolkata']) { ZoneRules r = ZoneId.of(id).getRules(); Instant i = Instant.parse('1900-01-01T00:00:00Z'); for (int k = 0; k < 4; k++) { ZoneOffsetTransition t = r.nextTransition(i); if (t == null) break; out.add(t + ' ' + t.getInstant() + ' ' + t.getDuration() + ' ' + t.getDateTimeAfter()); i = t.getInstant(); } } return out
+----
+ZoneRules r = ZoneId.of('Europe/Paris').getRules(); ZoneOffsetTransition t = r.nextTransition(Instant.parse('2021-01-01T00:00:00Z')); return [r.previousTransition(t.getInstant()), r.previousTransition(t.getInstant().plusNanos(1)), r.nextTransition(t.getInstant().minusSeconds(1)), t.isValidOffset(ZoneOffset.ofHours(1)), t.isGap(), t.isOverlap(), t.toEpochSecond(), t.compareTo(r.nextTransition(t.getInstant()))]
+----
+ZoneRules r = ZoneId.of('Europe/Paris').getRules(); return [r.getTransition(LocalDateTime.of(2021, 3, 28, 2, 30)), r.getTransition(LocalDateTime.of(2021, 3, 28, 3, 0)), r.getTransition(LocalDateTime.of(2021, 3, 28, 2, 0)), r.getValidOffsets(LocalDateTime.of(2021, 3, 28, 2, 30)), r.isValidOffset(LocalDateTime.of(2021, 10, 31, 2, 30), ZoneOffset.ofHours(2)), r.isValidOffset(LocalDateTime.of(2021, 6, 1, 0, 0), ZoneOffset.ofHours(1))]
+----
+return ZoneOffsetTransition.of(LocalDateTime.of(2021, 3, 28, 2, 0), ZoneOffset.ofHours(1), ZoneOffset.ofHours(2))
+----
+return ZoneOffsetTransition.of(LocalDateTime.of(2021, 3, 28, 2, 0), ZoneOffset.ofHours(1), ZoneOffset.ofHours(1))
+----
+return ZoneRules.of(ZoneOffset.ofHours(3)).getOffset(Instant.EPOCH) + ' ' + ZoneRules.of(ZoneOffset.ofHours(3))
+----
+ZoneRules r = ZoneId.of('America/New_York').getRules(); return [r.nextTransition(Instant.parse('2099-12-01T00:00:00Z')), r.previousTransition(Instant.parse('1800-01-01T00:00:00Z')), r.previousTransition(Instant.parse('1890-01-01T00:00:00Z')), r.equals(ZoneId.of('America/New_York').getRules()), r.equals(ZoneId.of('US/Eastern').getRules())]
+----
+return [DateTimeFormatter.ofPattern('B BBBB BBBBB', Locale.US).format(LocalTime.of(0, 0)), DateTimeFormatter.ofPattern('B', Locale.GERMANY).format(LocalTime.of(14, 30)), DateTimeFormatter.ofPattern('h B', new Locale('zh', 'TW')).format(LocalTime.of(20, 0)), DateTimeFormatter.ofPattern('B')]
+----
+return DateTimeFormatter.ofPattern('BB')
+----
+return LocalTime.parse('3 in the afternoon', DateTimeFormatter.ofPattern('h B', Locale.US))
+----
+return DateTimeFormatter.ofPattern('B').format(LocalDate.of(2020, 1, 1))
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendPattern('yyyy').optionalStart().appendLiteral('-').appendValue(ChronoField.MONTH_OF_YEAR, 2).optionalEnd().parseDefaulting(ChronoField.MONTH_OF_YEAR, 1).parseDefaulting(ChronoField.DAY_OF_MONTH, 1).toFormatter(); return [f, f.format(LocalDate.of(2020, 3, 1)), LocalDate.parse('2021', f), LocalDate.parse('2021-05', f)]
+----
+return new DateTimeFormatterBuilder().appendValue(ChronoField.YEAR, 4, 10, SignStyle.EXCEEDS_PAD).appendLiteral('/').appendValue(ChronoField.DAY_OF_YEAR, 3).toFormatter().format(LocalDate.of(2020, 2, 3))
+----
+return new DateTimeFormatterBuilder().appendValue(ChronoField.YEAR, 0)
+----
+return new DateTimeFormatterBuilder().appendValue(ChronoField.YEAR, 5, 2, SignStyle.NORMAL)
+----
+return new DateTimeFormatterBuilder().appendValue(ChronoField.YEAR, 2, 20, SignStyle.NORMAL)
+----
+return new DateTimeFormatterBuilder().optionalEnd()
+----
+return new DateTimeFormatterBuilder().padNext(0)
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().padNext(5, '*' as char).appendValue(ChronoField.DAY_OF_MONTH).toFormatter(); return f
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().padNext(5, (char) 42).appendValue(ChronoField.DAY_OF_MONTH).padNext(3).appendLiteral('x').toFormatter(); return [f, f.format(LocalDate.of(2020, 1, 7))]
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendText(ChronoField.MONTH_OF_YEAR, TextStyle.SHORT).appendLiteral(' ').appendText(ChronoField.DAY_OF_WEEK).toFormatter(Locale.FRENCH); return [f, f.format(LocalDate.of(2020, 1, 7)), f.getLocale()]
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendInstant(3).toFormatter(); return [f, f.format(Instant.ofEpochSecond(1, 5000000)), f.format(Instant.ofEpochSecond(1)), new DateTimeFormatterBuilder().appendInstant(-1).toFormatter().format(Instant.ofEpochSecond(1, 5000000)), new DateTimeFormatterBuilder().appendInstant(0).toFormatter().format(Instant.ofEpochSecond(1, 5000000))]
+----
+return new DateTimeFormatterBuilder().appendInstant(10)
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendOffset('+HH:mm', 'Z').toFormatter(); return [f, f.format(ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.ofHoursMinutes(5, 30))), f.format(ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.ofHours(5))), f.format(ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC))]
+----
+return new DateTimeFormatterBuilder().appendOffset('+HHH', 'Z')
+----
+List out = []; for (String p : ['+HH', '+HHmm', '+HH:mm', '+HHMM', '+HH:MM', '+HHMMss', '+HH:MM:ss', '+HHMMSS', '+HH:MM:SS', '+HHmmss', '+HH:mm:ss', '+H', '+Hmm', '+H:mm', '+HMM', '+H:MM', '+HMMss', '+H:MM:ss', '+HMMSS', '+H:MM:SS', '+Hmmss', '+H:mm:ss']) { DateTimeFormatter f = new DateTimeFormatterBuilder().appendOffset(p, 'none').toFormatter(); for (int o : [0, 3600, 5400, 3661, -45, 36000]) out.add(p + '=' + f.format(OffsetDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneOffset.ofTotalSeconds(o)))) } return out
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendFraction(ChronoField.NANO_OF_SECOND, 0, 6, true).toFormatter(); return [f, f.format(LocalTime.of(1, 2, 3, 120000000)), f.format(LocalTime.of(1, 2, 3))]
+----
+return new DateTimeFormatterBuilder().appendFraction(ChronoField.NANO_OF_SECOND, 5, 3, true)
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendLocalized(FormatStyle.MEDIUM, null).toFormatter(Locale.GERMAN); return [f, f.format(LocalDate.of(2020, 1, 7))]
+----
+return new DateTimeFormatterBuilder().appendLocalized(null, null)
+----
+return DateTimeFormatterBuilder.getLocalizedDateTimePattern(FormatStyle.SHORT, FormatStyle.SHORT, IsoChronology.INSTANCE, Locale.UK)
+----
+return DateTimeFormatterBuilder.getLocalizedDateTimePattern(null, null, IsoChronology.INSTANCE, Locale.UK)
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern('MMM yyyy').toFormatter(Locale.US); return [f, YearMonth.parse('JAN 2020', f)]
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendZoneId().toFormatter(); return [f, f.format(ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('Europe/Paris')))]
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendZoneText(TextStyle.FULL).toFormatter(); return [f, f.format(ZonedDateTime.of(2020, 7, 1, 0, 0, 0, 0, ZoneId.of('Europe/Paris')))]
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendValueReduced(ChronoField.YEAR, 2, 2, 2000).toFormatter(); return [f, f.format(LocalDate.of(2020, 1, 1)), f.parse('20')]
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().append(DateTimeFormatter.ISO_LOCAL_DATE).appendLiteral('T').appendOptional(DateTimeFormatter.ISO_LOCAL_TIME).toFormatter(); return [f, LocalDateTime.parse('2020-01-02T03:04', f)]
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().parseLenient().appendPattern('yyyy').parseStrict().toFormatter(); return f
+----
+DateTimeFormatter f = new DateTimeFormatterBuilder().appendChronologyId().toFormatter(); return [f, f.format(LocalDate.of(2020, 1, 1))]
+----
+return new DateTimeFormatterBuilder().toFormatter().format(LocalDate.of(2020, 1, 1))
+----
+return new DateTimeFormatterBuilder().appendPattern('yyyy[').appendLiteral('x').toFormatter()
+----
+return new DateTimeFormatterBuilder().appendPattern(']')
+----
+return new DateTimeFormatterBuilder()
+----
+return TimeZone.getTimeZone('UTC').getID()
+----
+TimeZone tz = TimeZone.getTimeZone('Europe/Paris'); return [tz.getID(), tz.getRawOffset(), tz.getOffset(0L), tz.useDaylightTime(), tz.getDisplayName(), tz.getDisplayName(true, TimeZone.SHORT), tz.getDSTSavings(), tz.toZoneId(), tz.inDaylightTime(Date.from(Instant.parse('2021-07-01T00:00:00Z'))), tz.observesDaylightTime(), tz.hasSameRules(TimeZone.getTimeZone('Europe/Berlin'))]
+----
+return [TimeZone.getTimeZone('Nowhere/Place').getID(), TimeZone.getTimeZone('GMT+5').getID(), TimeZone.getTimeZone('EST').getID(), TimeZone.getDefault().getID(), TimeZone.getTimeZone(ZoneId.of('Asia/Tokyo')).getID(), TimeZone.getAvailableIDs().length > 500]
+----
+return TimeZone.getTimeZone('UTC')
+----
+return new SimpleTimeZone(3600000, 'X').getID()
+----
+Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(0); return [c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_WEEK), c.getTimeInMillis()]
+----
+return new SimpleDateFormat('yyyy-MM-dd HH:mm:ss.SSS Z').format(new Date(0))
+----
+SimpleDateFormat f = new SimpleDateFormat('yyyy-MM-dd'); f.setTimeZone(TimeZone.getTimeZone('UTC')); return f.parse('2020-01-02').getTime()
+----
+return [new Date(0), new Date(0).getTime(), new Date(1600000000000L).toInstant()]

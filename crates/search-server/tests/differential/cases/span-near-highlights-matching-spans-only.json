@@ -1,0 +1,214 @@
+{
+  "diff": {
+    "es": 1,
+    "path": ".hits.hits[0].highlight.text0.length",
+    "roll": 2
+  },
+  "found": {
+    "case": 27,
+    "case_seed": 10000057,
+    "seed": 10
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+      },
+      "hits": {
+        "hits": [
+          {
+            "_id": "10",
+            "_index": "diff-m6-a",
+            "_score": 0.37229443,
+            "_source": {
+              "text0": [
+                "red quick apple fox banana query cats",
+                "of quick search brown runs brown cherry stream engine"
+              ]
+            },
+            "highlight": {
+              "text0": [
+                "red <em>quick</em> apple <em>fox</em> banana query cats",
+                "of <em>quick</em> search brown runs brown cherry stream engine"
+              ]
+            }
+          }
+        ],
+        "max_score": 0.37229443,
+        "total": {
+          "relation": "eq",
+          "value": 1
+        }
+      },
+      "timed_out": false,
+      "took": 1
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .hits.hits[].highlight.text.length",
+  "steps": [
+    {
+      "body": {
+        "settings": {
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m6-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m6-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "10",
+                "_index": "diff-m6-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 2
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 200
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "10",
+            "_index": "diff-m6-a"
+          }
+        },
+        {
+          "text0": [
+            "red quick apple fox banana query cats",
+            "of quick search brown runs brown cherry stream engine"
+          ]
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 2
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m6-a/_refresh"
+    },
+    {
+      "body": {
+        "highlight": {
+          "fields": {
+            "text0": {}
+          }
+        },
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text0": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text0": "fox"
+                }
+              }
+            ],
+            "slop": 2
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_id": "10",
+                "_index": "diff-m6-a",
+                "_score": 0.37229443,
+                "_source": {
+                  "text0": [
+                    "red quick apple fox banana query cats",
+                    "of quick search brown runs brown cherry stream engine"
+                  ]
+                },
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ],
+            "max_score": 0.37229443,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "timed_out": false,
+          "took": 1
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m6-a/_search?search_type=dfs_query_then_fetch"
+    }
+  ]
+}

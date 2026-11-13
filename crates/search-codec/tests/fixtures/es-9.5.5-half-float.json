@@ -1,0 +1,12 @@
+{
+  "description": "half_float values indexed in Elasticsearch 9.5.5 and the values docvalue_fields returns for them (65520 is rejected as out of range)",
+  "cases": [
+    {"value": 0.1, "docvalue": 0.0999755859375},
+    {"value": 1.0005, "docvalue": 1.0009765625},
+    {"value": 65519, "docvalue": 65504.0},
+    {"value": 3.14159, "docvalue": 3.140625},
+    {"value": -2.5e-05, "docvalue": -2.4974346160888672e-05},
+    {"value": 1e-08, "docvalue": 0.0},
+    {"value": 0.333333, "docvalue": 0.333251953125}
+  ]
+}

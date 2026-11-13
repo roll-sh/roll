@@ -1,0 +1,9552 @@
+{
+"docs": [
+{
+"t": "quick brown fox",
+"t2": "the fox",
+"pr": 10,
+"len": 3,
+"topics": {
+"pol": 20,
+"spo": 1.5
+},
+"sv": {
+"a": 0.5,
+"b": 1.2
+}
+},
+{
+"t": "lazy dog",
+"t2": "quick quick quick dog and fox",
+"pr": 3.3,
+"len": 40,
+"topics": {
+"spo": 30
+},
+"sv": {
+"a": 2.0
+}
+},
+{
+"t2": "fox",
+"pr": 0.001,
+"topics": {
+"pol": 0.7
+},
+"sv": {
+"b": 0.1,
+"c": 3
+}
+},
+{
+"t": "fox fox the end of a long story about a fox",
+"len": 0.25,
+"sv": {
+"a": 7.5,
+"c": 0.01
+}
+},
+{
+"t": "the quick dog",
+"t2": "brown dog story",
+"pr": 120000,
+"topics": {
+"pol": 2,
+"eco": 9
+}
+},
+{
+"t": "a story",
+"pr": 1.0,
+"len": 1.0
+}
+],
+"cases": [
+{
+"es": {
+"rank_feature": {
+"field": "pr"
+}
+},
+"lucene": "FeatureQuery(field=_feature, feature=pr, function=SaturationFunction(pivot=null))",
+"total": 5,
+"hits": [
+{
+"id": "4",
+"score": 0.999955,
+"explanation": {
+"value": 0.999955,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 5.390625,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 119808.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.6497462,
+"explanation": {
+"value": 0.6497462,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 5.390625,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 10.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.3794964,
+"explanation": {
+"value": 0.3794964,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 5.390625,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 3.296875,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.15647924,
+"explanation": {
+"value": 0.15647924,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 5.390625,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.00018537045,
+"explanation": {
+"value": 0.00018537045,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 5.390625,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.0009994507,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "pr",
+"saturation": {
+"pivot": 4
+}
+}
+},
+"lucene": "FeatureQuery(field=_feature, feature=pr, function=SaturationFunction(pivot=4.0))",
+"total": 5,
+"hits": [
+{
+"id": "4",
+"score": 0.9999666,
+"explanation": {
+"value": 0.9999666,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 119808.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.71428573,
+"explanation": {
+"value": 0.71428573,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 10.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.45182014,
+"explanation": {
+"value": 0.45182014,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 3.296875,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.19999999,
+"explanation": {
+"value": 0.19999999,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.00024980307,
+"explanation": {
+"value": 0.00024980307,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.0009994507,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "pr",
+"saturation": {
+"pivot": 4
+},
+"boost": 3
+}
+},
+"lucene": "(FeatureQuery(field=_feature, feature=pr, function=SaturationFunction(pivot=4.0)))^3.0",
+"total": 5,
+"hits": [
+{
+"id": "4",
+"score": 2.9998999,
+"explanation": {
+"value": 2.9998999,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 3.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 119808.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 2.142857,
+"explanation": {
+"value": 2.142857,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 3.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 10.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 1.3554604,
+"explanation": {
+"value": 1.3554604,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 3.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 3.296875,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.59999996,
+"explanation": {
+"value": 0.59999996,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 3.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.0007494092,
+"explanation": {
+"value": 0.0007494092,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 3.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.0009994507,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "pr",
+"log": {
+"scaling_factor": 4
+}
+}
+},
+"lucene": "FeatureQuery(field=_feature, feature=pr, function=LogFunction(scalingFactor=4.0))",
+"total": 5,
+"hits": [
+{
+"id": "4",
+"score": 11.693679,
+"explanation": {
+"value": 11.693679,
+"description": "Log function on the _feature field for the pr feature, computed as w * log(a + S) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "a, scaling factor",
+"details": []
+},
+{
+"value": 119808.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 2.6390574,
+"explanation": {
+"value": 2.6390574,
+"description": "Log function on the _feature field for the pr feature, computed as w * log(a + S) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "a, scaling factor",
+"details": []
+},
+{
+"value": 10.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 1.9874462,
+"explanation": {
+"value": 1.9874462,
+"description": "Log function on the _feature field for the pr feature, computed as w * log(a + S) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "a, scaling factor",
+"details": []
+},
+{
+"value": 3.296875,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 1.609438,
+"explanation": {
+"value": 1.609438,
+"description": "Log function on the _feature field for the pr feature, computed as w * log(a + S) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "a, scaling factor",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 1.3865442,
+"explanation": {
+"value": 1.3865442,
+"description": "Log function on the _feature field for the pr feature, computed as w * log(a + S) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "a, scaling factor",
+"details": []
+},
+{
+"value": 0.0009994507,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "pr",
+"sigmoid": {
+"pivot": 7,
+"exponent": 0.6
+}
+}
+},
+"lucene": "FeatureQuery(field=_feature, feature=pr, function=SigmoidFunction(pivot=7.0, a=0.6))",
+"total": 5,
+"hits": [
+{
+"id": "4",
+"score": 0.9971245,
+"explanation": {
+"value": 0.9971245,
+"description": "Sigmoid function on the _feature field for the pr feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 119808.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.553298,
+"explanation": {
+"value": 0.553298,
+"description": "Sigmoid function on the _feature field for the pr feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 10.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.38894212,
+"explanation": {
+"value": 0.38894212,
+"description": "Sigmoid function on the _feature field for the pr feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 3.296875,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.23729882,
+"explanation": {
+"value": 0.23729882,
+"description": "Sigmoid function on the _feature field for the pr feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.0049052634,
+"explanation": {
+"value": 0.0049052634,
+"description": "Sigmoid function on the _feature field for the pr feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 0.0009994507,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "pr",
+"linear": {}
+}
+},
+"lucene": "FeatureQuery(field=_feature, feature=pr, function=LinearFunction)",
+"total": 5,
+"hits": [
+{
+"id": "4",
+"score": 119808.0,
+"explanation": {
+"value": 119808.0,
+"description": "Linear function on the _feature field for the pr feature, computed as w * S from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 119808.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 10.0,
+"explanation": {
+"value": 10.0,
+"description": "Linear function on the _feature field for the pr feature, computed as w * S from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 10.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 3.296875,
+"explanation": {
+"value": 3.296875,
+"description": "Linear function on the _feature field for the pr feature, computed as w * S from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 3.296875,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 1.0,
+"explanation": {
+"value": 1.0,
+"description": "Linear function on the _feature field for the pr feature, computed as w * S from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.0009994507,
+"explanation": {
+"value": 0.0009994507,
+"description": "Linear function on the _feature field for the pr feature, computed as w * S from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.0009994507,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "len"
+}
+},
+"lucene": "FeatureQuery(field=_feature, feature=len, function=SaturationFunction(pivot=null))",
+"total": 4,
+"hits": [
+{
+"id": "3",
+"score": 0.9024014,
+"explanation": {
+"value": 0.9024014,
+"description": "Saturation function on the _feature field for the len feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.4326172,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 4.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.6980232,
+"explanation": {
+"value": 0.6980232,
+"description": "Saturation function on the _feature field for the len feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.4326172,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.43494898,
+"explanation": {
+"value": 0.43494898,
+"description": "Saturation function on the _feature field for the len feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.4326172,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.3330078,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.054555178,
+"explanation": {
+"value": 0.054555178,
+"description": "Saturation function on the _feature field for the len feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.4326172,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.024963379,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "len",
+"sigmoid": {
+"pivot": 7,
+"exponent": 0.6
+},
+"boost": 2
+}
+},
+"lucene": "(FeatureQuery(field=_feature, feature=len, function=SigmoidFunction(pivot=7.0, a=0.6)))^2.0",
+"total": 4,
+"hits": [
+{
+"id": "3",
+"score": 0.83367497,
+"explanation": {
+"value": 0.83367497,
+"description": "Sigmoid function on the _feature field for the len feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 2.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 4.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.47459763,
+"explanation": {
+"value": 0.47459763,
+"description": "Sigmoid function on the _feature field for the len feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 2.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.27712053,
+"explanation": {
+"value": 0.27712053,
+"description": "Sigmoid function on the _feature field for the len feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 2.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 0.3330078,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.06574121,
+"explanation": {
+"value": 0.06574121,
+"description": "Sigmoid function on the _feature field for the len feature, computed as w * S^a / (S^a + k^a) from:",
+"details": [
+{
+"value": 2.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.6,
+"description": "a, exponent, higher values make the function grow slower before k and faster after k",
+"details": []
+},
+{
+"value": 0.024963379,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "len",
+"linear": {},
+"boost": 0.5
+}
+},
+"lucene": "(FeatureQuery(field=_feature, feature=len, function=LinearFunction))^0.5",
+"total": 4,
+"hits": [
+{
+"id": "3",
+"score": 2.0,
+"explanation": {
+"value": 2.0,
+"description": "Linear function on the _feature field for the len feature, computed as w * S from:",
+"details": [
+{
+"value": 0.5,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.5,
+"explanation": {
+"value": 0.5,
+"description": "Linear function on the _feature field for the len feature, computed as w * S from:",
+"details": [
+{
+"value": 0.5,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 1.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.1665039,
+"explanation": {
+"value": 0.1665039,
+"description": "Linear function on the _feature field for the len feature, computed as w * S from:",
+"details": [
+{
+"value": 0.5,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.3330078,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.012481689,
+"explanation": {
+"value": 0.012481689,
+"description": "Linear function on the _feature field for the len feature, computed as w * S from:",
+"details": [
+{
+"value": 0.5,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.024963379,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "topics.pol"
+}
+},
+"lucene": "FeatureQuery(field=topics, feature=pol, function=SaturationFunction(pivot=null))",
+"total": 3,
+"hits": [
+{
+"id": "0",
+"score": 0.86603516,
+"explanation": {
+"value": 0.86603516,
+"description": "Saturation function on the topics field for the pol feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 3.09375,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 20.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "4",
+"score": 0.39263803,
+"explanation": {
+"value": 0.39263803,
+"description": "Saturation function on the topics field for the pol feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 3.09375,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 2.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.18434602,
+"explanation": {
+"value": 0.18434602,
+"description": "Saturation function on the topics field for the pol feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 3.09375,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 0.69921875,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "topics.pol",
+"log": {
+"scaling_factor": 4
+}
+}
+},
+"lucene": "FeatureQuery(field=topics, feature=pol, function=LogFunction(scalingFactor=4.0))",
+"total": 3,
+"hits": [
+{
+"id": "0",
+"score": 3.1780539,
+"explanation": {
+"value": 3.1780539,
+"description": "Log function on the topics field for the pol feature, computed as w * log(a + S) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "a, scaling factor",
+"details": []
+},
+{
+"value": 20.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "4",
+"score": 1.7917595,
+"explanation": {
+"value": 1.7917595,
+"description": "Log function on the topics field for the pol feature, computed as w * log(a + S) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "a, scaling factor",
+"details": []
+},
+{
+"value": 2.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 1.5473963,
+"explanation": {
+"value": 1.5473963,
+"description": "Log function on the topics field for the pol feature, computed as w * log(a + S) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 4.0,
+"description": "a, scaling factor",
+"details": []
+},
+{
+"value": 0.69921875,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "topics.eco",
+"saturation": {
+"pivot": 9
+}
+}
+},
+"lucene": "FeatureQuery(field=topics, feature=eco, function=SaturationFunction(pivot=9.0))",
+"total": 1,
+"hits": [
+{
+"id": "4",
+"score": 0.5,
+"explanation": {
+"value": 0.5,
+"description": "Saturation function on the topics field for the eco feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 9.0,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 9.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"rank_feature": {
+"field": "topics.none"
+}
+},
+"lucene": "FeatureQuery(field=topics, feature=none, function=SaturationFunction(pivot=null))",
+"total": 0,
+"hits": []
+},
+{
+"es": {
+"sparse_vector": {
+"field": "sv",
+"query_vector": {
+"a": 1.5,
+"c": 0.2
+}
+}
+},
+"lucene": "((FeatureQuery(field=sv, feature=a, function=LinearFunction))^1.5 (FeatureQuery(field=sv, feature=c, function=LinearFunction))^0.2)~1",
+"total": 4,
+"hits": [
+{
+"id": "3",
+"score": 11.251996,
+"explanation": {
+"value": 11.251996,
+"description": "sum of:",
+"details": [
+{
+"value": 11.25,
+"description": "Linear function on the sv field for the a feature, computed as w * S from:",
+"details": [
+{
+"value": 1.5,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.5,
+"description": "S, feature value",
+"details": []
+}
+]
+},
+{
+"value": 0.0019958497,
+"description": "Linear function on the sv field for the c feature, computed as w * S from:",
+"details": [
+{
+"value": 0.2,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.009979248,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+},
+{
+"id": "1",
+"score": 3.0,
+"explanation": {
+"value": 3.0,
+"description": "sum of:",
+"details": [
+{
+"value": 3.0,
+"description": "Linear function on the sv field for the a feature, computed as w * S from:",
+"details": [
+{
+"value": 1.5,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 2.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.75,
+"explanation": {
+"value": 0.75,
+"description": "sum of:",
+"details": [
+{
+"value": 0.75,
+"description": "Linear function on the sv field for the a feature, computed as w * S from:",
+"details": [
+{
+"value": 1.5,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.5,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.6,
+"explanation": {
+"value": 0.6,
+"description": "sum of:",
+"details": [
+{
+"value": 0.6,
+"description": "Linear function on the sv field for the c feature, computed as w * S from:",
+"details": [
+{
+"value": 0.2,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 3.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"sparse_vector": {
+"field": "sv",
+"query_vector": {
+"b": 3,
+"a": 0.25,
+"zz": 1
+}
+}
+},
+"lucene": "((FeatureQuery(field=sv, feature=a, function=LinearFunction))^0.25 (FeatureQuery(field=sv, feature=b, function=LinearFunction))^3.0)~1",
+"total": 4,
+"hits": [
+{
+"id": "0",
+"score": 3.7226562,
+"explanation": {
+"value": 3.7226562,
+"description": "sum of:",
+"details": [
+{
+"value": 0.125,
+"description": "Linear function on the sv field for the a feature, computed as w * S from:",
+"details": [
+{
+"value": 0.25,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.5,
+"description": "S, feature value",
+"details": []
+}
+]
+},
+{
+"value": 3.5976562,
+"description": "Linear function on the sv field for the b feature, computed as w * S from:",
+"details": [
+{
+"value": 3.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 1.1992188,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+},
+{
+"id": "3",
+"score": 1.875,
+"explanation": {
+"value": 1.875,
+"description": "sum of:",
+"details": [
+{
+"value": 1.875,
+"description": "Linear function on the sv field for the a feature, computed as w * S from:",
+"details": [
+{
+"value": 0.25,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 7.5,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.5,
+"explanation": {
+"value": 0.5,
+"description": "sum of:",
+"details": [
+{
+"value": 0.5,
+"description": "Linear function on the sv field for the a feature, computed as w * S from:",
+"details": [
+{
+"value": 0.25,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 2.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.29956055,
+"explanation": {
+"value": 0.29956055,
+"description": "sum of:",
+"details": [
+{
+"value": 0.29956055,
+"description": "Linear function on the sv field for the b feature, computed as w * S from:",
+"details": [
+{
+"value": 3.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 0.099853516,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"bool": {
+"must": [
+{
+"match": {
+"t": "fox"
+}
+}
+],
+"should": [
+{
+"rank_feature": {
+"field": "pr"
+}
+}
+]
+}
+},
+"lucene": "+t:fox FeatureQuery(field=_feature, feature=pr, function=SaturationFunction(pivot=null))",
+"total": 2,
+"hits": [
+{
+"id": "0",
+"score": 1.6410857,
+"explanation": {
+"value": 1.6410857,
+"description": "sum of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "weight(t:fox in 0) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5147059,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 3.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 0.6497462,
+"description": "Saturation function on the _feature field for the pr feature, computed as w * S / (S + k) from:",
+"details": [
+{
+"value": 1.0,
+"description": "w, weight of this function",
+"details": []
+},
+{
+"value": 5.390625,
+"description": "k, pivot feature value that would give a score contribution equal to w/2",
+"details": []
+},
+{
+"value": 10.0,
+"description": "S, feature value",
+"details": []
+}
+]
+}
+]
+}
+},
+{
+"id": "3",
+"score": 1.0213802,
+"explanation": {
+"value": 1.0213802,
+"description": "sum of:",
+"details": [
+{
+"value": 1.0213802,
+"description": "weight(t:fox in 3) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 1.0213802,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.530303,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"combined_fields": {
+"query": "quick fox",
+"fields": [
+"t",
+"t2^2"
+]
+}
+},
+"lucene": "CombinedFieldQuery((t t2^2.0)(quick)) CombinedFieldQuery((t t2^2.0)(fox))",
+"total": 5,
+"hits": [
+{
+"id": "1",
+"score": 2.1417723,
+"explanation": {
+"value": 2.1417723,
+"description": "sum of:",
+"details": [
+{
+"value": 1.5008035,
+"description": "weight(CombinedFieldQuery((t t2^2.0)(quick)) in 1), result of:",
+"details": [
+{
+"value": 1.5008035,
+"description": "score(freq=6.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.77922076,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 6.0,
+"description": "termFreq=6.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 14.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 9.0,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 0.6409688,
+"description": "weight(CombinedFieldQuery((t t2^2.0)(fox)) in 1), result of:",
+"details": [
+{
+"value": 0.6409688,
+"description": "score(freq=2.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5405405,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 2.0,
+"description": "termFreq=2.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 14.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 9.0,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "0",
+"score": 1.8523598,
+"explanation": {
+"value": 1.8523598,
+"description": "sum of:",
+"details": [
+{
+"value": 0.9630156,
+"description": "weight(CombinedFieldQuery((t t2^2.0)(quick)) in 0), result of:",
+"details": [
+{
+"value": 0.9630156,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 7.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 9.0,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 0.8893442,
+"description": "weight(CombinedFieldQuery((t t2^2.0)(fox)) in 0), result of:",
+"details": [
+{
+"value": 0.8893442,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.75,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "termFreq=3.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 7.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 9.0,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.94863385,
+"explanation": {
+"value": 0.94863385,
+"description": "sum of:",
+"details": [
+{
+"value": 0.94863385,
+"description": "weight(CombinedFieldQuery((t t2^2.0)(fox)) in 2), result of:",
+"details": [
+{
+"value": 0.94863385,
+"description": "score(freq=2.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.79999995,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 2.0,
+"description": "termFreq=2.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 2.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 9.0,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "4",
+"score": 0.87546873,
+"explanation": {
+"value": 0.87546873,
+"description": "sum of:",
+"details": [
+{
+"value": 0.87546873,
+"description": "weight(CombinedFieldQuery((t t2^2.0)(quick)) in 4), result of:",
+"details": [
+{
+"value": 0.87546873,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.45454544,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 9.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 9.0,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "3",
+"score": 0.80849475,
+"explanation": {
+"value": 0.80849475,
+"description": "sum of:",
+"details": [
+{
+"value": 0.80849475,
+"description": "weight(CombinedFieldQuery((t t2^2.0)(fox)) in 3), result of:",
+"details": [
+{
+"value": 0.80849475,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.6818182,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "termFreq=3.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 9.0,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"combined_fields": {
+"query": "quick fox",
+"fields": [
+"t",
+"t2"
+]
+}
+},
+"lucene": "CombinedFieldQuery((t t2)(quick)) CombinedFieldQuery((t t2)(fox))",
+"total": 5,
+"hits": [
+{
+"id": "1",
+"score": 1.8118808,
+"explanation": {
+"value": 1.8118808,
+"description": "sum of:",
+"details": [
+{
+"value": 1.315922,
+"description": "weight(CombinedFieldQuery((t t2)(quick)) in 1), result of:",
+"details": [
+{
+"value": 1.315922,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.6832298,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "termFreq=3.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 8.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 0.49595875,
+"description": "weight(CombinedFieldQuery((t t2)(fox)) in 1), result of:",
+"details": [
+{
+"value": 0.49595875,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.41825092,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 8.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "0",
+"score": 1.767199,
+"explanation": {
+"value": 1.767199,
+"description": "sum of:",
+"details": [
+{
+"value": 0.9718506,
+"description": "weight(CombinedFieldQuery((t t2)(quick)) in 0), result of:",
+"details": [
+{
+"value": 0.9718506,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5045872,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 5.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 0.7953485,
+"description": "weight(CombinedFieldQuery((t t2)(fox)) in 0), result of:",
+"details": [
+{
+"value": 0.7953485,
+"description": "score(freq=2.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.67073166,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 2.0,
+"description": "termFreq=2.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 5.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "4",
+"score": 0.90928507,
+"explanation": {
+"value": 0.90928507,
+"description": "sum of:",
+"details": [
+{
+"value": 0.90928507,
+"description": "weight(CombinedFieldQuery((t t2)(quick)) in 4), result of:",
+"details": [
+{
+"value": 0.90928507,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.472103,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 6.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.8255516,
+"explanation": {
+"value": 0.8255516,
+"description": "sum of:",
+"details": [
+{
+"value": 0.8255516,
+"description": "weight(CombinedFieldQuery((t t2)(fox)) in 2), result of:",
+"details": [
+{
+"value": 0.8255516,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.6962025,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 1.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "3",
+"score": 0.7411202,
+"explanation": {
+"value": 0.7411202,
+"description": "sum of:",
+"details": [
+{
+"value": 0.7411202,
+"description": "weight(CombinedFieldQuery((t t2)(fox)) in 3), result of:",
+"details": [
+{
+"value": 0.7411202,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.625,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "termFreq=3.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"combined_fields": {
+"query": "dog story",
+"fields": [
+"t^1.5",
+"t2^3"
+],
+"operator": "and"
+}
+},
+"lucene": "+CombinedFieldQuery((t^1.5 t2^3.0)(dog)) +CombinedFieldQuery((t^1.5 t2^3.0)(story))",
+"total": 1,
+"hits": [
+{
+"id": "4",
+"score": 2.8725383,
+"explanation": {
+"value": 2.8725383,
+"description": "sum of:",
+"details": [
+{
+"value": 1.5098763,
+"description": "weight(CombinedFieldQuery((t^1.5 t2^3.0)(dog)) in 4), result of:",
+"details": [
+{
+"value": 1.5098763,
+"description": "score(freq=4.5), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.7839314,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 4.5,
+"description": "termFreq=4.5",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 14.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 13.4,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 1.3626621,
+"description": "weight(CombinedFieldQuery((t^1.5 t2^3.0)(story)) in 4), result of:",
+"details": [
+{
+"value": 1.3626621,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.70749736,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "termFreq=3.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 14.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 13.4,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"combined_fields": {
+"query": "fox",
+"fields": [
+"t2",
+"t"
+]
+}
+},
+"lucene": "CombinedFieldQuery((t t2)(fox))",
+"total": 4,
+"hits": [
+{
+"id": "2",
+"score": 0.8255516,
+"explanation": {
+"value": 0.8255516,
+"description": "weight(CombinedFieldQuery((t t2)(fox)) in 2), result of:",
+"details": [
+{
+"value": 0.8255516,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.6962025,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 1.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.7953485,
+"explanation": {
+"value": 0.7953485,
+"description": "weight(CombinedFieldQuery((t t2)(fox)) in 0), result of:",
+"details": [
+{
+"value": 0.7953485,
+"description": "score(freq=2.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.67073166,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 2.0,
+"description": "termFreq=2.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 5.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "3",
+"score": 0.7411202,
+"explanation": {
+"value": 0.7411202,
+"description": "weight(CombinedFieldQuery((t t2)(fox)) in 3), result of:",
+"details": [
+{
+"value": 0.7411202,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.625,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "termFreq=3.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.49595875,
+"explanation": {
+"value": 0.49595875,
+"description": "weight(CombinedFieldQuery((t t2)(fox)) in 1), result of:",
+"details": [
+{
+"value": 0.49595875,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.5389965,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 3,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.41825092,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 8.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"combined_fields": {
+"query": "brown",
+"fields": [
+"t^2.5"
+]
+}
+},
+"lucene": "CombinedFieldQuery((t^2.5)(brown))",
+"total": 1,
+"hits": [
+{
+"id": "0",
+"score": 2.183261,
+"explanation": {
+"value": 2.183261,
+"description": "weight(CombinedFieldQuery((t^2.5)(brown)) in 0), result of:",
+"details": [
+{
+"value": 2.183261,
+"description": "score(freq=2.5), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 1.3862944,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 1,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.71585906,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 2.5,
+"description": "termFreq=2.5",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 8.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 10.4,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"combined_fields": {
+"query": "nothing",
+"fields": [
+"t",
+"t2"
+]
+}
+},
+"lucene": "CombinedFieldQuery((t t2)(nothing))",
+"total": 0,
+"hits": []
+},
+{
+"es": {
+"combined_fields": {
+"query": "the dog",
+"fields": [
+"t",
+"t2"
+],
+"boost": 2
+}
+},
+"lucene": "(CombinedFieldQuery((t t2)(the)) CombinedFieldQuery((t t2)(dog)))^2.0",
+"total": 4,
+"hits": [
+{
+"id": "4",
+"score": 4.289281,
+"explanation": {
+"value": 4.289281,
+"description": "sum of:",
+"details": [
+{
+"value": 1.8185701,
+"description": "weight(CombinedFieldQuery((t t2)(the)) in 4), result of:",
+"details": [
+{
+"value": 1.8185701,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 4.4,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.472103,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 6.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 2.4707108,
+"description": "weight(CombinedFieldQuery((t t2)(dog)) in 4), result of:",
+"details": [
+{
+"value": 2.4707108,
+"description": "score(freq=2.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 4.4,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.6413994,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 2.0,
+"description": "termFreq=2.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 6.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "1",
+"score": 2.2719939,
+"explanation": {
+"value": 2.2719939,
+"description": "sum of:",
+"details": [
+{
+"value": 2.2719939,
+"description": "weight(CombinedFieldQuery((t t2)(dog)) in 1), result of:",
+"details": [
+{
+"value": 2.2719939,
+"description": "score(freq=2.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 4.4,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5898123,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 2.0,
+"description": "termFreq=2.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 8.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "0",
+"score": 1.9437011,
+"explanation": {
+"value": 1.9437011,
+"description": "sum of:",
+"details": [
+{
+"value": 1.9437011,
+"description": "weight(CombinedFieldQuery((t t2)(the)) in 0), result of:",
+"details": [
+{
+"value": 1.9437011,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 4.4,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5045872,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 5.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "3",
+"score": 1.3757367,
+"explanation": {
+"value": 1.3757367,
+"description": "sum of:",
+"details": [
+{
+"value": 1.3757367,
+"description": "weight(CombinedFieldQuery((t t2)(the)) in 3), result of:",
+"details": [
+{
+"value": 1.3757367,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 4.4,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.35714287,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "termFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 6.6,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"match_phrase_prefix": {
+"t": "quick b"
+}
+},
+"lucene": "t:\"quick b*\"",
+"total": 1,
+"hits": [
+{
+"id": "0",
+"score": 2.561114,
+"explanation": {
+"value": 2.561114,
+"description": "weight(t:\"quick brown\" in 0) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 2.561114,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 2.261763,
+"description": "idf, sum of:",
+"details": [
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 1.3862944,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 1,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+}
+]
+},
+{
+"value": 0.5147059,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "phraseFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 3.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"match_phrase_prefix": {
+"t2": "quick quick d"
+}
+},
+"lucene": "t2:\"quick quick d*\"",
+"total": 1,
+"hits": [
+{
+"id": "1",
+"score": 2.2007756,
+"explanation": {
+"value": 2.2007756,
+"description": "weight(t2:\"quick quick dog\" in 1) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 2.2007756,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 3.1010928,
+"description": "idf, sum of:",
+"details": [
+{
+"value": 1.2039728,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 1,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 4,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 1.2039728,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 1,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 4,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.6931472,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 4,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+}
+]
+},
+{
+"value": 0.32258064,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "phraseFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 6.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 3.0,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"match_phrase_prefix": {
+"t": {
+"query": "fox the e",
+"slop": 1
+}
+}
+},
+"lucene": "t:\"fox the e*\"~1",
+"total": 1,
+"hits": [
+{
+"id": "3",
+"score": 1.8872409,
+"explanation": {
+"value": 1.8872409,
+"description": "weight(t:\"fox the end\"~1 in 3) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 1.8872409,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 3.1372318,
+"description": "idf, sum of:",
+"details": [
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 1.3862944,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 1,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+}
+]
+},
+{
+"value": 0.2734375,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "phraseFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"match_phrase_prefix": {
+"t": {
+"query": "a s",
+"max_expansions": 1
+}
+}
+},
+"lucene": "t:\"a s*\"",
+"total": 1,
+"hits": [
+{
+"id": "5",
+"score": 2.228466,
+"explanation": {
+"value": 2.228466,
+"description": "weight(t:\"a story\" in 5) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 2.228466,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 1.7509375,
+"description": "idf, sum of:",
+"details": [
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+}
+]
+},
+{
+"value": 0.57851243,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "phraseFreq=1.0",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 2.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"match_phrase_prefix": {
+"t": "the zz"
+}
+},
+"lucene": "t:\"the zz*\"",
+"total": 0,
+"hits": []
+},
+{
+"es": {
+"pinned": {
+"ids": [
+"3",
+"5"
+],
+"organic": {
+"match": {
+"t": "fox"
+}
+}
+}
+},
+"lucene": "(((ConstantScore(_id:([fe 3f])))^1.7014124E38 | (ConstantScore(_id:([fe 5f])))^1.7014122E38) | CappedScore(t:fox))",
+"total": 3,
+"hits": [
+{
+"id": "3",
+"score": 1.7014124e+38,
+"explanation": {
+"value": 1.7014124e+38,
+"description": "max of:",
+"details": [
+{
+"value": 1.7014124e+38,
+"description": "max of:",
+"details": [
+{
+"value": 1.7014124e+38,
+"description": "ConstantScore(_id:([fe 3f]))^1.7014124E38",
+"details": []
+}
+]
+},
+{
+"value": 1.0213802,
+"description": "weight(t:fox in 3) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 1.0213802,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.530303,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "5",
+"score": 1.7014122e+38,
+"explanation": {
+"value": 1.7014122e+38,
+"description": "max of:",
+"details": [
+{
+"value": 1.7014122e+38,
+"description": "max of:",
+"details": [
+{
+"value": 1.7014122e+38,
+"description": "ConstantScore(_id:([fe 5f]))^1.7014122E38",
+"details": []
+}
+]
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.99133956,
+"explanation": {
+"value": 0.99133956,
+"description": "max of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "weight(t:fox in 0) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5147059,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 3.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"pinned": {
+"ids": [],
+"organic": {
+"match": {
+"t": "quick"
+}
+}
+}
+},
+"lucene": "CappedScore(t:quick)",
+"total": 2,
+"hits": [
+{
+"id": "0",
+"score": 0.99133956,
+"explanation": {
+"value": 0.99133956,
+"description": "weight(t:quick in 0) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5147059,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 3.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "4",
+"score": 0.99133956,
+"explanation": {
+"value": 0.99133956,
+"description": "weight(t:quick in 4) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5147059,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 3.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"boosting": {
+"positive": {
+"match": {
+"t": "fox"
+}
+},
+"negative": {
+"match": {
+"t2": "fox"
+}
+},
+"negative_boost": 0.2
+}
+},
+"lucene": "FunctionScoreQuery(t:fox, scored by boost(queryboost(score(t2:fox))^0.2))",
+"total": 2,
+"hits": [
+{
+"id": "3",
+"score": 1.0213802,
+"explanation": {
+"value": 1.0213802,
+"description": "weight(FunctionScoreQuery(t:fox, scored by boost(queryboost(score(t2:fox))^0.2))), result of:",
+"details": [
+{
+"value": 1.0213802,
+"description": "weight(t:fox in 3) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 1.0213802,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.530303,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.19826792,
+"explanation": {
+"value": 0.1982679158191072,
+"description": "weight(FunctionScoreQuery(t:fox, scored by boost(queryboost(score(t2:fox))^0.2))), result of:",
+"details": [
+{
+"value": 0.1982679158191072,
+"description": "product of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "weight(t:fox in 0) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5147059,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 3.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 0.2,
+"description": "Matched boosting query score(t2:fox)",
+"details": []
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"boosting": {
+"positive": {
+"match": {
+"t": "fox"
+}
+},
+"negative": {
+"match": {
+"t2": "fox"
+}
+},
+"negative_boost": 0.5,
+"boost": 3
+}
+},
+"lucene": "(FunctionScoreQuery(t:fox, scored by boost(queryboost(score(t2:fox))^0.5)))^3.0",
+"total": 2,
+"hits": [
+{
+"id": "3",
+"score": 3.0641406,
+"explanation": {
+"value": 3.0641406,
+"description": "weight(FunctionScoreQuery(t:fox, scored by boost(queryboost(score(t2:fox))^0.5))), product of:",
+"details": [
+{
+"value": 3.0,
+"description": "boost",
+"details": []
+},
+{
+"value": 1.0213802,
+"description": "weight(t:fox in 3) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 1.0213802,
+"description": "score(freq=3.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.530303,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "0",
+"score": 1.4870093,
+"explanation": {
+"value": 1.4870093,
+"description": "weight(FunctionScoreQuery(t:fox, scored by boost(queryboost(score(t2:fox))^0.5))), product of:",
+"details": [
+{
+"value": 3.0,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.49566978216171265,
+"description": "product of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "weight(t:fox in 0) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5147059,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 3.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+},
+{
+"value": 0.5,
+"description": "Matched boosting query score(t2:fox)",
+"details": []
+}
+]
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"boosting": {
+"positive": {
+"match": {
+"t": "the"
+}
+},
+"negative": {
+"match": {
+"t": "zzz"
+}
+},
+"negative_boost": 0.1
+}
+},
+"lucene": "FunctionScoreQuery(t:the, scored by boost(queryboost(score(t:zzz))^0.1))",
+"total": 2,
+"hits": [
+{
+"id": "4",
+"score": 0.99133956,
+"explanation": {
+"value": 0.99133956,
+"description": "weight(FunctionScoreQuery(t:the, scored by boost(queryboost(score(t:zzz))^0.1))), result of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "weight(t:the in 4) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 0.99133956,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.5147059,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 3.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+},
+{
+"id": "3",
+"score": 0.5266491,
+"explanation": {
+"value": 0.5266491,
+"description": "weight(FunctionScoreQuery(t:the, scored by boost(queryboost(score(t:zzz))^0.1))), result of:",
+"details": [
+{
+"value": 0.5266491,
+"description": "weight(t:the in 3) [PerFieldSimilarity], result of:",
+"details": [
+{
+"value": 0.5266491,
+"description": "score(freq=1.0), computed as boost * idf * tf from:",
+"details": [
+{
+"value": 2.2,
+"description": "boost",
+"details": []
+},
+{
+"value": 0.87546873,
+"description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+"details": [
+{
+"value": 2,
+"description": "n, number of documents containing term",
+"details": []
+},
+{
+"value": 5,
+"description": "N, total number of documents with field",
+"details": []
+}
+]
+},
+{
+"value": 0.2734375,
+"description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "freq, occurrences of term within document",
+"details": []
+},
+{
+"value": 1.2,
+"description": "k1, term saturation parameter",
+"details": []
+},
+{
+"value": 0.75,
+"description": "b, length normalization parameter",
+"details": []
+},
+{
+"value": 11.0,
+"description": "dl, length of field",
+"details": []
+},
+{
+"value": 4.2,
+"description": "avgdl, average length of field",
+"details": []
+}
+]
+}
+]
+}
+]
+}
+]
+}
+}
+]
+}
+],
+"distance": {
+"docs": [
+{
+"d": 1577836800000,
+"g": [
+1.0,
+2.0
+]
+},
+{
+"d": [
+1577923200000,
+1578009600000
+],
+"g": [
+[
+1.4,
+2.6
+],
+[
+-3.0,
+-4.0
+]
+]
+},
+{
+"d": 1609459200000
+},
+{
+"g": [
+179.9,
+10.0
+]
+},
+{
+"d": [
+1500000000000,
+1650000000000,
+1700000000000
+],
+"g": [
+[
+-179.95,
+10.01
+],
+[
+100.0,
+-45.0
+]
+]
+},
+{
+"d": 1578268799999,
+"g": [
+1.5,
+2.5
+]
+},
+{}
+],
+"cases": [
+{
+"es": {
+"distance_feature": {
+"field": "d",
+"origin": 1578268799999,
+"pivot": "2d"
+}
+},
+"params": {
+"long": [
+1578268799999,
+172800000
+]
+},
+"lucene": "LongDistanceFeatureQuery(field=,origin=1578268799999,pivotDistance=172800000)",
+"total": 5,
+"hits": [
+{
+"id": "5",
+"score": 1.0,
+"explanation": {
+"value": 1.0,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 172800000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1578268799999,
+"description": "origin",
+"details": []
+},
+{
+"value": 1578268799999,
+"description": "current value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.4,
+"explanation": {
+"value": 0.4,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 172800000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1578268799999,
+"description": "origin",
+"details": []
+},
+{
+"value": 1578009600000,
+"description": "current value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.2857143,
+"explanation": {
+"value": 0.2857143,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 172800000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1578268799999,
+"description": "origin",
+"details": []
+},
+{
+"value": 1577836800000,
+"description": "current value",
+"details": []
+}
+]
+}
+},
+{
+"id": "2",
+"score": 0.005509642,
+"explanation": {
+"value": 0.005509642,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 172800000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1578268799999,
+"description": "origin",
+"details": []
+},
+{
+"value": 1609459200000,
+"description": "current value",
+"details": []
+}
+]
+}
+},
+{
+"id": "4",
+"score": 0.0024032043,
+"explanation": {
+"value": 0.0024032043,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 172800000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1578268799999,
+"description": "origin",
+"details": []
+},
+{
+"value": 1650000000000,
+"description": "current value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"distance_feature": {
+"field": "d",
+"origin": 1600000000000,
+"pivot": "30d",
+"boost": 2.5
+}
+},
+"params": {
+"long": [
+1600000000000,
+2592000000
+]
+},
+"lucene": "(LongDistanceFeatureQuery(field=,origin=1600000000000,pivotDistance=2592000000))^2.5",
+"total": 5,
+"hits": [
+{
+"id": "2",
+"score": 0.5377058,
+"explanation": {
+"value": 0.5377058,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 2.5,
+"description": "weight",
+"details": []
+},
+{
+"value": 2592000000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1600000000000,
+"description": "origin",
+"details": []
+},
+{
+"value": 1609459200000,
+"description": "current value",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.26641232,
+"explanation": {
+"value": 0.26641232,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 2.5,
+"description": "weight",
+"details": []
+},
+{
+"value": 2592000000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1600000000000,
+"description": "origin",
+"details": []
+},
+{
+"value": 1578268799999,
+"description": "current value",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.26360324,
+"explanation": {
+"value": 0.26360324,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 2.5,
+"description": "weight",
+"details": []
+},
+{
+"value": 2592000000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1600000000000,
+"description": "origin",
+"details": []
+},
+{
+"value": 1578009600000,
+"description": "current value",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.2617632,
+"explanation": {
+"value": 0.2617632,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 2.5,
+"description": "weight",
+"details": []
+},
+{
+"value": 2592000000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1600000000000,
+"description": "origin",
+"details": []
+},
+{
+"value": 1577836800000,
+"description": "current value",
+"details": []
+}
+]
+}
+},
+{
+"id": "4",
+"score": 0.12321266,
+"explanation": {
+"value": 0.12321266,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(value - origin)) from:",
+"details": [
+{
+"value": 2.5,
+"description": "weight",
+"details": []
+},
+{
+"value": 2592000000,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 1600000000000,
+"description": "origin",
+"details": []
+},
+{
+"value": 1650000000000,
+"description": "current value",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"distance_feature": {
+"field": "g",
+"origin": [
+1.5,
+2.5
+],
+"pivot": "10km"
+}
+},
+"params": {
+"geo": [
+2.5,
+1.5,
+10000.0
+]
+},
+"lucene": "LatLonPointDistanceFeatureQuery(field=,originLat=2.5,originLon=1.5,pivotDistance=10000.0)",
+"total": 5,
+"hits": [
+{
+"id": "5",
+"score": 1.0,
+"explanation": {
+"value": 1.0,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 10000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 2.5,
+"description": "originLat",
+"details": []
+},
+{
+"value": 1.5,
+"description": "originLon",
+"details": []
+},
+{
+"value": 2.4999999767169356,
+"description": "current lat",
+"details": []
+},
+{
+"value": 1.4999999944120646,
+"description": "current lon",
+"details": []
+},
+{
+"value": 0.0,
+"description": "distance",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.38883913,
+"explanation": {
+"value": 0.38883913,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 10000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 2.5,
+"description": "originLat",
+"details": []
+},
+{
+"value": 1.5,
+"description": "originLon",
+"details": []
+},
+{
+"value": 2.5999999791383743,
+"description": "current lat",
+"details": []
+},
+{
+"value": 1.39999995008111,
+"description": "current lon",
+"details": []
+},
+{
+"value": 15717.576371613266,
+"description": "distance",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.11287144,
+"explanation": {
+"value": 0.11287144,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 10000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 2.5,
+"description": "originLat",
+"details": []
+},
+{
+"value": 1.5,
+"description": "originLon",
+"details": []
+},
+{
+"value": 1.9999999646097422,
+"description": "current lat",
+"details": []
+},
+{
+"value": 0.9999999403953552,
+"description": "current lon",
+"details": []
+},
+{
+"value": 78596.37364878906,
+"description": "distance",
+"details": []
+}
+]
+}
+},
+{
+"id": "4",
+"score": 0.0009189524,
+"explanation": {
+"value": 0.0009189524,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 10000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 2.5,
+"description": "originLat",
+"details": []
+},
+{
+"value": 1.5,
+"description": "originLon",
+"details": []
+},
+{
+"value": -45.0,
+"description": "current lat",
+"details": []
+},
+{
+"value": 99.99999999068677,
+"description": "current lon",
+"details": []
+},
+{
+"value": 10871956.559164189,
+"description": "distance",
+"details": []
+}
+]
+}
+},
+{
+"id": "3",
+"score": 0.0005369436,
+"explanation": {
+"value": 0.0005369436,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 1.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 10000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 2.5,
+"description": "originLat",
+"details": []
+},
+{
+"value": 1.5,
+"description": "originLon",
+"details": []
+},
+{
+"value": 9.999999990686774,
+"description": "current lat",
+"details": []
+},
+{
+"value": 179.89999995566905,
+"description": "current lon",
+"details": []
+},
+{
+"value": 18613929.276934262,
+"description": "distance",
+"details": []
+}
+]
+}
+}
+]
+},
+{
+"es": {
+"distance_feature": {
+"field": "g",
+"origin": [
+-179.99,
+10.0
+],
+"pivot": "1000km",
+"boost": 3
+}
+},
+"params": {
+"geo": [
+10.0,
+-179.99,
+1000000.0
+]
+},
+"lucene": "(LatLonPointDistanceFeatureQuery(field=,originLat=10.0,originLon=-179.99,pivotDistance=1000000.0))^3.0",
+"total": 5,
+"hits": [
+{
+"id": "4",
+"score": 2.9865036,
+"explanation": {
+"value": 2.9865036,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 1000000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 10.0,
+"description": "originLat",
+"details": []
+},
+{
+"value": -179.99,
+"description": "originLon",
+"details": []
+},
+{
+"value": 10.009999978356063,
+"description": "current lat",
+"details": []
+},
+{
+"value": -179.95000001974404,
+"description": "current lon",
+"details": []
+},
+{
+"value": 4519.0976742683315,
+"description": "distance",
+"details": []
+}
+]
+}
+},
+{
+"id": "3",
+"score": 2.9642932,
+"explanation": {
+"value": 2.9642932,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 1000000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 10.0,
+"description": "originLat",
+"details": []
+},
+{
+"value": -179.99,
+"description": "originLon",
+"details": []
+},
+{
+"value": 9.999999990686774,
+"description": "current lat",
+"details": []
+},
+{
+"value": 179.89999995566905,
+"description": "current lon",
+"details": []
+},
+{
+"value": 12045.640226757449,
+"description": "distance",
+"details": []
+}
+]
+}
+},
+{
+"id": "1",
+"score": 0.1530173,
+"explanation": {
+"value": 0.1530173,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 1000000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 10.0,
+"description": "originLat",
+"details": []
+},
+{
+"value": -179.99,
+"description": "originLon",
+"details": []
+},
+{
+"value": 2.5999999791383743,
+"description": "current lat",
+"details": []
+},
+{
+"value": 1.39999995008111,
+"description": "current lon",
+"details": []
+},
+{
+"value": 18605626.492404353,
+"description": "distance",
+"details": []
+}
+]
+}
+},
+{
+"id": "5",
+"score": 0.15294091,
+"explanation": {
+"value": 0.15294091,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 1000000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 10.0,
+"description": "originLat",
+"details": []
+},
+{
+"value": -179.99,
+"description": "originLon",
+"details": []
+},
+{
+"value": 2.4999999767169356,
+"description": "current lat",
+"details": []
+},
+{
+"value": 1.4999999944120646,
+"description": "current lon",
+"details": []
+},
+{
+"value": 18615417.32308162,
+"description": "distance",
+"details": []
+}
+]
+}
+},
+{
+"id": "0",
+"score": 0.15246785,
+"explanation": {
+"value": 0.15246785,
+"description": "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+"details": [
+{
+"value": 3.0,
+"description": "weight",
+"details": []
+},
+{
+"value": 1000000.0,
+"description": "pivotDistance",
+"details": []
+},
+{
+"value": 10.0,
+"description": "originLat",
+"details": []
+},
+{
+"value": -179.99,
+"description": "originLon",
+"details": []
+},
+{
+"value": 1.9999999646097422,
+"description": "current lat",
+"details": []
+},
+{
+"value": 0.9999999403953552,
+"description": "current lon",
+"details": []
+},
+{
+"value": 18676278.91031971,
+"description": "distance",
+"details": []
+}
+]
+}
+}
+]
+}
+]
+},
+"join": {
+"docs": [
+[
+"q1",
+null,
+{
+"t": "what fox",
+"join": "question"
+}
+],
+[
+"q2",
+null,
+{
+"t": "why dog",
+"join": "question"
+}
+],
+[
+"a1",
+"q1",
+{
+"t": "fox fox answer",
+"join": {
+"name": "answer",
+"parent": "q1"
+}
+}
+],
+[
+"a2",
+"q1",
+{
+"t": "a fox",
+"join": {
+"name": "answer",
+"parent": "q1"
+}
+}
+],
+[
+"a3",
+"q2",
+{
+"t": "fox dog",
+"join": {
+"name": "answer",
+"parent": "q2"
+}
+}
+],
+[
+"q3",
+null,
+{
+"t": "who fox fox",
+"join": "question"
+}
+],
+[
+"a4",
+"q3",
+{
+"t": "dog only",
+"join": {
+"name": "answer",
+"parent": "q3"
+}
+}
+],
+[
+"a5",
+"q2",
+{
+"t": "the quick fox jumps over a lazy fox",
+"join": {
+"name": "answer",
+"parent": "q2"
+}
+}
+],
+[
+"q4",
+null,
+{
+"t": "no answers fox",
+"join": "question"
+}
+]
+],
+"cases": [
+{
+"es": {
+"has_child": {
+"type": "answer",
+"query": {
+"match": {
+"t": "fox"
+}
+}
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question}",
+"total": 2,
+"hits": [
+{
+"id": "q1",
+"score": 1.0,
+"explanation": {
+"value": 1.0,
+"description": "A match, join value q1",
+"details": []
+}
+},
+{
+"id": "q2",
+"score": 1.0,
+"explanation": {
+"value": 1.0,
+"description": "A match, join value q2",
+"details": []
+}
+}
+]
+},
+{
+"es": {
+"has_child": {
+"type": "answer",
+"query": {
+"match": {
+"t": "fox"
+}
+},
+"score_mode": "sum"
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question,min=1,max=2147483647,fromQuery=+t:fox #join:answer}",
+"total": 2,
+"hits": [
+{
+"id": "q1",
+"score": 0.72866845,
+"explanation": {
+"value": 0.72866845,
+"description": "A match, join value q1",
+"details": []
+}
+},
+{
+"id": "q2",
+"score": 0.602425,
+"explanation": {
+"value": 0.602425,
+"description": "A match, join value q2",
+"details": []
+}
+}
+]
+},
+{
+"es": {
+"has_child": {
+"type": "answer",
+"query": {
+"match": {
+"t": "fox"
+}
+},
+"score_mode": "max"
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question,min=1,max=2147483647,fromQuery=+t:fox #join:answer}",
+"total": 2,
+"hits": [
+{
+"id": "q1",
+"score": 0.39556286,
+"explanation": {
+"value": 0.39556286,
+"description": "A match, join value q1",
+"details": []
+}
+},
+{
+"id": "q2",
+"score": 0.3331056,
+"explanation": {
+"value": 0.3331056,
+"description": "A match, join value q2",
+"details": []
+}
+}
+]
+},
+{
+"es": {
+"has_child": {
+"type": "answer",
+"query": {
+"match": {
+"t": "fox"
+}
+},
+"score_mode": "min"
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question,min=1,max=2147483647,fromQuery=+t:fox #join:answer}",
+"total": 2,
+"hits": [
+{
+"id": "q1",
+"score": 0.3331056,
+"explanation": {
+"value": 0.3331056,
+"description": "A match, join value q1",
+"details": []
+}
+},
+{
+"id": "q2",
+"score": 0.26931942,
+"explanation": {
+"value": 0.26931942,
+"description": "A match, join value q2",
+"details": []
+}
+}
+]
+},
+{
+"es": {
+"has_child": {
+"type": "answer",
+"query": {
+"match": {
+"t": "fox"
+}
+},
+"score_mode": "avg",
+"boost": 3
+}
+},
+"lucene": "(LateParsingQuery {joinField=join#question})^3.0",
+"rewritten": "(GlobalOrdinalsQuery{joinField=join#question,min=1,max=2147483647,fromQuery=+t:fox #join:answer})^3.0",
+"total": 2,
+"hits": [
+{
+"id": "q1",
+"score": 1.0930027,
+"explanation": {
+"value": 1.0930027,
+"description": "A match, join value q1^3.0",
+"details": []
+}
+},
+{
+"id": "q2",
+"score": 0.90363747,
+"explanation": {
+"value": 0.90363747,
+"description": "A match, join value q2^3.0",
+"details": []
+}
+}
+]
+},
+{
+"es": {
+"has_child": {
+"type": "answer",
+"query": {
+"match": {
+"t": "fox"
+}
+},
+"score_mode": "max",
+"min_children": 2
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question,min=2,max=2147483647,fromQuery=+t:fox #join:answer}",
+"total": 2,
+"hits": [
+{
+"id": "q1",
+"score": 0.39556286,
+"explanation": {
+"value": 0.39556286,
+"description": "A match, join value q1",
+"details": []
+}
+},
+{
+"id": "q2",
+"score": 0.3331056,
+"explanation": {
+"value": 0.3331056,
+"description": "A match, join value q2",
+"details": []
+}
+}
+]
+},
+{
+"es": {
+"has_child": {
+"type": "answer",
+"query": {
+"match": {
+"t": "fox"
+}
+},
+"max_children": 1
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question,min=1,max=1,fromQuery=+t:fox #join:answer}",
+"total": 0,
+"hits": []
+},
+{
+"es": {
+"has_child": {
+"type": "answer",
+"query": {
+"match": {
+"t": "zebra"
+}
+},
+"score_mode": "max"
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question,min=1,max=2147483647,fromQuery=+t:zebra #join:answer}",
+"total": 0,
+"hits": []
+},
+{
+"es": {
+"has_parent": {
+"parent_type": "question",
+"query": {
+"match": {
+"t": "fox"
+}
+}
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question}",
+"total": 3,
+"hits": [
+{
+"id": "a1",
+"score": 1.0,
+"explanation": {
+"value": 1.0,
+"description": "A match, join value q1",
+"details": []
+}
+},
+{
+"id": "a2",
+"score": 1.0,
+"explanation": {
+"value": 1.0,
+"description": "A match, join value q1",
+"details": []
+}
+},
+{
+"id": "a4",
+"score": 1.0,
+"explanation": {
+"value": 1.0,
+"description": "A match, join value q3",
+"details": []
+}
+}
+]
+},
+{
+"es": {
+"has_parent": {
+"parent_type": "question",
+"query": {
+"match": {
+"t": "fox"
+}
+},
+"score": true
+}
+},
+"lucene": "LateParsingQuery {joinField=join#question}",
+"rewritten": "GlobalOrdinalsQuery{joinField=join#question,min=1,max=2147483647,fromQuery=+t:fox #join:question}",
+"total": 3,
+"hits": [
+{
+"id": "a4",
+"score": 0.39556286,
+"explanation": {
+"value": 0.39556286,
+"description": "A match, join value q3",
+"details": []
+}
+},
+{
+"id": "a1",
+"score": 0.3331056,
+"explanation": {
+"value": 0.3331056,
+"description": "A match, join value q1",
+"details": []
+}
+},
+{
+"id": "a2",
+"score": 0.3331056,
+"explanation": {
+"value": 0.3331056,
+"description": "A match, join value q1",
+"details": []
+}
+}
+]
+},
+{
+"es": {
+"has_parent": {
+"parent_type": "question",
+"query": {
+"match": {
+"t": "fox"
+}
+},
+"score": true,
+"boost": 2
+}
+},
+"lucene": "(LateParsingQuery {joinField=join#question})^2.0",
+"rewritten": "(GlobalOrdinalsQuery{joinField=join#question,min=1,max=2147483647,fromQuery=+t:fox #join:question})^2.0",
+"total": 3,
+"hits": [
+{
+"id": "a4",
+"score": 0.7911257,
+"explanation": {
+"value": 0.7911257,
+"description": "A match, join value q3^2.0",
+"details": []
+}
+},
+{
+"id": "a1",
+"score": 0.6662112,
+"explanation": {
+"value": 0.6662112,
+"description": "A match, join value q1^2.0",
+"details": []
+}
+},
+{
+"id": "a2",
+"score": 0.6662112,
+"explanation": {
+"value": 0.6662112,
+"description": "A match, join value q1^2.0",
+"details": []
+}
+}
+]
+}
+]
+},
+"geosort": {
+"docs": [
+{
+"g": [
+1.0,
+2.0
+],
+"n": 3
+},
+{
+"g": [
+[
+1.4,
+2.6
+],
+[
+-3.0,
+-4.0
+]
+],
+"n": 10
+},
+{
+"n": 7
+},
+{
+"g": [
+179.9,
+10.0
+],
+"n": -2
+},
+{
+"g": [
+[
+-179.95,
+10.01
+],
+[
+100.0,
+-45.0
+],
+[
+0.0,
+0.0
+]
+],
+"n": 5
+},
+{
+"g": [
+1.5,
+2.5
+],
+"n": 1
+},
+{
+"g": [
+[
+50.0,
+50.0
+],
+[
+-50.0,
+-50.0
+]
+]
+}
+],
+"cases": [
+{
+"sort": [
+{
+"_geo_distance": {
+"g": [
+1.5,
+2.5
+]
+}
+}
+],
+"hits": [
+{
+"id": "5",
+"sort": [
+0.0
+]
+},
+{
+"id": "1",
+"sort": [
+15717.576371613266
+]
+},
+{
+"id": "0",
+"sort": [
+78596.37364878906
+]
+},
+{
+"id": "4",
+"sort": [
+324159.3449383784
+]
+},
+{
+"id": "6",
+"sort": [
+6969899.424439188
+]
+},
+{
+"id": "3",
+"sort": [
+18613929.276934262
+]
+},
+{
+"id": "2",
+"sort": [
+"Infinity"
+]
+}
+],
+"after": [
+78596.37364878906
+],
+"after_hits": [
+"4",
+"6",
+"3",
+"2"
+]
+},
+{
+"sort": [
+{
+"_geo_distance": {
+"g": [
+1.5,
+2.5
+],
+"order": "desc"
+}
+}
+],
+"hits": [
+{
+"id": "2",
+"sort": [
+"Infinity"
+]
+},
+{
+"id": "4",
+"sort": [
+18614828.08603616
+]
+},
+{
+"id": "3",
+"sort": [
+18613929.276934262
+]
+},
+{
+"id": "6",
+"sort": [
+7617902.172678594
+]
+},
+{
+"id": "1",
+"sort": [
+878897.0299037673
+]
+},
+{
+"id": "0",
+"sort": [
+78596.37364878906
+]
+},
+{
+"id": "5",
+"sort": [
+0.0
+]
+}
+],
+"after": [
+18613929.276934262
+],
+"after_hits": [
+"6",
+"1",
+"0",
+"5"
+]
+},
+{
+"sort": [
+{
+"_geo_distance": {
+"g": [
+1.5,
+2.5
+],
+"unit": "km",
+"distance_type": "plane"
+}
+}
+],
+"hits": [
+{
+"id": "5",
+"sort": [
+2.662342515756347e-06
+]
+},
+{
+"id": "1",
+"sort": [
+15.717577376131965
+]
+},
+{
+"id": "0",
+"sort": [
+78.5964990194092
+]
+},
+{
+"id": "4",
+"sort": [
+324.1661607933506
+]
+},
+{
+"id": "6",
+"sort": [
+7161.821678387452
+]
+},
+{
+"id": "3",
+"sort": [
+19736.923590474682
+]
+},
+{
+"id": "2",
+"sort": [
+"Infinity"
+]
+}
+],
+"after": [
+78.5964990194092
+],
+"after_hits": [
+"4",
+"6",
+"3",
+"2"
+]
+},
+{
+"sort": [
+{
+"_geo_distance": {
+"g": [
+[
+1.5,
+2.5
+],
+[
+-179.99,
+10.0
+]
+],
+"mode": "max",
+"unit": "mi"
+}
+}
+],
+"hits": [
+{
+"id": "6",
+"sort": [
+8475.862749194186
+]
+},
+{
+"id": "3",
+"sort": [
+11566.159427030057
+]
+},
+{
+"id": "5",
+"sort": [
+11567.084056038746
+]
+},
+{
+"id": "0",
+"sort": [
+11604.901693062333
+]
+},
+{
+"id": "4",
+"sort": [
+11745.8809331779
+]
+},
+{
+"id": "1",
+"sort": [
+11973.750463883393
+]
+},
+{
+"id": "2",
+"sort": [
+"Infinity"
+]
+}
+],
+"after": [
+11567.084056038746
+],
+"after_hits": [
+"0",
+"4",
+"1",
+"2"
+]
+},
+{
+"sort": [
+{
+"_geo_distance": {
+"g": [
+0,
+0
+],
+"mode": "avg"
+}
+}
+],
+"hits": [
+{
+"id": "0",
+"sort": [
+248629.6506696575
+]
+},
+{
+"id": "5",
+"sort": [
+324159.34239917336
+]
+},
+{
+"id": "1",
+"sort": [
+442071.25418334006
+]
+},
+{
+"id": "6",
+"sort": [
+7293897.149429746
+]
+},
+{
+"id": "4",
+"sort": [
+9897952.132040823
+]
+},
+{
+"id": "3",
+"sort": [
+18903108.525333792
+]
+},
+{
+"id": "2",
+"sort": [
+"Infinity"
+]
+}
+],
+"after": [
+442071.25418334006
+],
+"after_hits": [
+"6",
+"4",
+"3",
+"2"
+]
+},
+{
+"sort": [
+{
+"_geo_distance": {
+"g": [
+0,
+0
+],
+"mode": "median",
+"order": "desc"
+}
+}
+],
+"hits": [
+{
+"id": "2",
+"sort": [
+"Infinity"
+]
+},
+{
+"id": "3",
+"sort": [
+18903108.525333792
+]
+},
+{
+"id": "4",
+"sort": [
+10791818.533511648
+]
+},
+{
+"id": "6",
+"sort": [
+7293897.149429746
+]
+},
+{
+"id": "1",
+"sort": [
+442071.25418334006
+]
+},
+{
+"id": "5",
+"sort": [
+324159.34239917336
+]
+},
+{
+"id": "0",
+"sort": [
+248629.6506696575
+]
+}
+],
+"after": [
+10791818.533511648
+],
+"after_hits": [
+"6",
+"1",
+"5",
+"0"
+]
+},
+{
+"sort": [
+{
+"_geo_distance": {
+"g": [
+0,
+0
+],
+"mode": "min",
+"unit": "km",
+"distance_type": "plane"
+}
+},
+{
+"n": "asc"
+}
+],
+"hits": [
+{
+"id": "4",
+"sort": [
+0.0,
+5
+]
+},
+{
+"id": "0",
+"sort": [
+248.63217722030686,
+3
+]
+},
+{
+"id": "5",
+"sort": [
+324.1661582540239,
+1
+]
+},
+{
+"id": "1",
+"sort": [
+328.33613609740905,
+10
+]
+},
+{
+"id": "6",
+"sort": [
+7503.3896910240455,
+9223372036854775807
+]
+},
+{
+"id": "3",
+"sort": [
+19958.872232134163,
+-2
+]
+},
+{
+"id": "2",
+"sort": [
+"Infinity",
+7
+]
+}
+],
+"after": [
+324.1661582540239,
+1
+],
+"after_hits": [
+"1",
+"6",
+"3",
+"2"
+]
+},
+{
+"sort": [
+{
+"_script": {
+"type": "number",
+"script": {
+"source": "doc['n'].size() == 0 ? -1 : doc['n'].value * 2.5"
+},
+"order": "desc"
+}
+}
+],
+"hits": [
+{
+"id": "1",
+"sort": [
+25.0
+]
+},
+{
+"id": "2",
+"sort": [
+17.5
+]
+},
+{
+"id": "4",
+"sort": [
+12.5
+]
+},
+{
+"id": "0",
+"sort": [
+7.5
+]
+},
+{
+"id": "5",
+"sort": [
+2.5
+]
+},
+{
+"id": "6",
+"sort": [
+-1.0
+]
+},
+{
+"id": "3",
+"sort": [
+-5.0
+]
+}
+],
+"after": [
+12.5
+],
+"after_hits": [
+"0",
+"5",
+"6",
+"3"
+]
+}
+]
+},
+"spell": {
+"docs": [
+"brown laser",
+"fox box quirk",
+"crown quick",
+"grown search searches lazily quirk bumps",
+"crown crown doge dogs",
+"brown dogs hazy browns",
+"running searching elastics quack box frown",
+"fox searching",
+"lumps fox browns",
+"dog cat running searches quick quirk",
+"fox crown running elastic",
+"box grown lazily brown pat",
+"elastic grown can quack brown plastic",
+"grown elastics cot quick quack",
+"lazy frown",
+"dog quick quick maze",
+"running plastic",
+"cat fox quick",
+"elastic quack sat hazy quick dog",
+"grown maze",
+"bumps brown pat",
+"plastic plastic searches",
+"hazy laser dog brown starch searches",
+"quack brown",
+"brown search",
+"searcher maze cam elastic",
+"doge quick lumps search crown",
+"crown crown",
+"doge eat lazy",
+"starch brown doge",
+"quack frown",
+"elastic searcher eat",
+"doge crown",
+"lazier stunning car crown",
+"quick coat dogs quick",
+"cab cart",
+"grown browns quirk",
+"frown elastic max",
+"dog running",
+"cast maze jumps maze grown starch",
+"quick doge crown brown",
+"brown elastic dog",
+"quickly cox quack quickly brown",
+"quick foxes box search",
+"maze car quick lazy",
+"quick bat jumps dog",
+"pat quack quirk fox browns",
+"box grown brown hat browns hazy",
+"bat rat",
+"frown plastic searches quack elastic search",
+"dog doge frown",
+"starch foxes laser",
+"plastic fox",
+"lumps mat",
+"quack grown box quirk foxes lumps",
+"quickly laser lazier maze",
+"quick chat",
+"searcher dog running",
+"quick running",
+"plastic lazily crown running cunning",
+"act plastic quick",
+"lazy hat lax starch",
+"searcher cut bumps brown running",
+"foxes doge",
+"quick search brown",
+"vat elastics elastic hazy jumps",
+"lazy dogs",
+"crown elastic laser laser scat running",
+"cap sat eat elastic eat",
+"fox car fox brown",
+"fox jumps dog brown",
+"stunning lumps brown",
+"bumps cot quick search bat",
+"brown search browns elastics lazy searches",
+"fox elastic crown running searching",
+"maze chat crown",
+"quick lazy laser quack elastics lazy",
+"bumps fox maze hazy grown",
+"laser quack",
+"doge brown",
+"grown laser searcher",
+"elastic foxes laser brown box",
+"lazier plastic",
+"frown brown hazy",
+"browns pat brown cunning crown lazy",
+"running foxes dogs lazy chat",
+"fat lazy hazy grown elastic",
+"ax bumps frown dogs searcher",
+"bumps quickly lazily grown",
+"frown elastic search",
+"eat quack laser stunning foxes",
+"search cart searcher running stunning lazy",
+"laser crown frown elastic",
+"search lazies lazier",
+"box elastic",
+"quick maze quirk",
+"lazies jumps",
+"quick lazier cab cunning search",
+"search quirk",
+"brown sax quirk plastic quickly",
+"frown sat",
+"fax brown searches quickly pat lazier",
+"brown crown maze browns dogs brown",
+"crown cut quirk",
+"box brown maze",
+"searcher fox brown brown quack plastic",
+"act searches laser stunning",
+"quick can dog browns sarching",
+"quick quack lazier quirk",
+"browns hazy vat dogs",
+"running dogs stunning bumps running browns",
+"stunning lazier rat brown",
+"dog jumps doge quick cot",
+"quick searching can crown fox",
+"brown car quick search brown quack",
+"browns frown hazy hazy quick search",
+"elastic box doge caw quirk",
+"bumps lazy brown lazies",
+"foxes cab bumps coat starch doge",
+"bat search browns",
+"elastics hazy quirk running laser",
+"oat quirk",
+"quirk brown quicker runner dog",
+"jumps coat brown frown laser lazy",
+"laser lumps",
+"quick quick lumps searcher",
+"brown lazier browns",
+"doge search box",
+"quick quick frown",
+"jumps laser lazies running",
+"starch doge pat lazy elastics",
+"lazier stunning quack fox quick can",
+"lumps doge quick jumps",
+"brown brown",
+"searching quirk jumps dogs grown searching",
+"lazy grown lazies frown brown elastics",
+"pat searching doge",
+"lazy laser",
+"lazies rat crown search",
+"scat quicker",
+"laser runner frown",
+"quick elastic quick",
+"fox starch running",
+"lazies lazy hazy rat quirk lazy",
+"search crown lazy quick fox",
+"laser crown quirk",
+"hazy box",
+"crown searcher bumps",
+"quick brown fox",
+"quick quirk browns lazies",
+"quirk quick elastic brown",
+"hazy searching",
+"lazy cap quirk quickly quick frown",
+"cunning hazy brown dog box",
+"grown zax",
+"runner quickly lazies cap fat quick",
+"searcher starch bumps mat searching dog",
+"running elastic bumps grown quirk",
+"crown mat",
+"frown scat running"
+],
+"cases": [
+{
+"case": {
+"text": "quikc",
+"term": {}
+},
+"entries": [
+{
+"text": "quikc",
+"options": [
+[
+"quick",
+0.8,
+37
+],
+[
+"quirk",
+0.6,
+22
+],
+[
+"quack",
+0.6,
+17
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "brwn",
+"term": {}
+},
+"entries": [
+{
+"text": "brwn",
+"options": [
+[
+"brown",
+0.75,
+39
+],
+[
+"browns",
+0.5,
+15
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "elastik serch",
+"term": {}
+},
+"entries": [
+{
+"text": "elastik",
+"options": [
+[
+"elastic",
+0.85714287,
+21
+],
+[
+"elastics",
+0.71428573,
+8
+]
+]
+},
+{
+"text": "serch",
+"options": [
+[
+"search",
+0.8,
+19
+],
+[
+"starch",
+0.6,
+9
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "lazzy",
+"term": {
+"suggest_mode": "always"
+}
+},
+"entries": [
+{
+"text": "lazzy",
+"options": [
+[
+"lazy",
+0.75,
+19
+],
+[
+"lazily",
+0.6,
+4
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "search",
+"term": {
+"suggest_mode": "popular"
+}
+},
+"entries": [
+{
+"text": "search",
+"options": []
+}
+]
+},
+{
+"case": {
+"text": "lazy",
+"term": {
+"suggest_mode": "always",
+"sort": "frequency"
+}
+},
+"entries": [
+{
+"text": "lazy",
+"options": []
+}
+]
+},
+{
+"case": {
+"text": "runing",
+"term": {
+"string_distance": "damerau_levenshtein"
+}
+},
+"entries": [
+{
+"text": "runing",
+"options": [
+[
+"running",
+0.8333333,
+19
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "runing",
+"term": {
+"string_distance": "levenshtein"
+}
+},
+"entries": [
+{
+"text": "runing",
+"options": [
+[
+"running",
+0.85714287,
+19
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "runing",
+"term": {
+"string_distance": "jaro_winkler"
+}
+},
+"entries": [
+{
+"text": "runing",
+"options": [
+[
+"running",
+0.92777777,
+19
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "runing",
+"term": {
+"string_distance": "ngram"
+}
+},
+"entries": [
+{
+"text": "runing",
+"options": [
+[
+"running",
+0.85714287,
+19
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "searchng",
+"term": {
+"max_edits": 1
+}
+},
+"entries": [
+{
+"text": "searchng",
+"options": [
+[
+"searching",
+0.875,
+8
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "qick",
+"term": {
+"prefix_length": 0
+}
+},
+"entries": [
+{
+"text": "qick",
+"options": [
+[
+"quick",
+0.75,
+37
+],
+[
+"quirk",
+0.5,
+22
+],
+[
+"quack",
+0.5,
+17
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "qick",
+"term": {
+"prefix_length": 2
+}
+},
+"entries": [
+{
+"text": "qick",
+"options": []
+}
+]
+},
+{
+"case": {
+"text": "fox",
+"term": {
+"min_word_length": 3,
+"suggest_mode": "always"
+}
+},
+"entries": [
+{
+"text": "fox",
+"options": []
+}
+]
+},
+{
+"case": {
+"text": "lumpz",
+"term": {
+"min_doc_freq": 3
+}
+},
+"entries": [
+{
+"text": "lumpz",
+"options": [
+[
+"lumps",
+0.8,
+8
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "lumpz",
+"term": {
+"min_doc_freq": 0.02
+}
+},
+"entries": [
+{
+"text": "lumpz",
+"options": [
+[
+"lumps",
+0.8,
+8
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "quick",
+"term": {
+"suggest_mode": "always",
+"max_term_freq": 0.5
+}
+},
+"entries": [
+{
+"text": "quick",
+"options": [
+[
+"quirk",
+0.8,
+22
+],
+[
+"quack",
+0.8,
+17
+],
+[
+"quickly",
+0.6,
+7
+],
+[
+"quicker",
+0.6,
+2
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "quick",
+"term": {
+"suggest_mode": "always",
+"max_term_freq": 5
+}
+},
+"entries": [
+{
+"text": "quick",
+"options": []
+}
+]
+},
+{
+"case": {
+"text": "sunnning",
+"term": {
+"size": 2
+}
+},
+"entries": [
+{
+"text": "sunnning",
+"options": [
+[
+"stunning",
+0.75,
+8
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "starhc",
+"term": {
+"accuracy": 0.8
+}
+},
+"entries": [
+{
+"text": "starhc",
+"options": [
+[
+"starch",
+0.8333333,
+9
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "lazies",
+"term": {
+"suggest_mode": "always",
+"max_inspections": 1,
+"size": 3
+}
+},
+"entries": [
+{
+"text": "lazies",
+"options": []
+}
+]
+},
+{
+"case": {
+"text": "cunnning",
+"term": {
+"size": 10
+}
+},
+"entries": [
+{
+"text": "cunnning",
+"options": [
+[
+"cunning",
+0.85714287,
+4
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "cax",
+"term": {
+"min_word_length": 3,
+"max_inspections": 1,
+"size": 3
+}
+},
+"entries": [
+{
+"text": "cax",
+"options": [
+[
+"can",
+0.6666666,
+4
+],
+[
+"car",
+0.6666666,
+4
+],
+[
+"cab",
+0.6666666,
+3
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "cax",
+"term": {
+"min_word_length": 3,
+"max_inspections": 1,
+"size": 3,
+"max_term_freq": 0.5
+}
+},
+"entries": [
+{
+"text": "cax",
+"options": [
+[
+"can",
+0.6666666,
+4
+],
+[
+"car",
+0.6666666,
+4
+],
+[
+"cab",
+0.6666666,
+3
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "caxt",
+"term": {
+"max_inspections": 1,
+"size": 2,
+"max_term_freq": 0.5
+}
+},
+"entries": [
+{
+"text": "caxt",
+"options": [
+[
+"cart",
+0.75,
+2
+],
+[
+"cast",
+0.75,
+1
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "caxt",
+"term": {
+"max_inspections": 2,
+"size": 4,
+"max_term_freq": 0.5,
+"string_distance": "jaro_winkler"
+}
+},
+"entries": [
+{
+"text": "caxt",
+"options": [
+[
+"cat",
+0.93333334,
+2
+],
+[
+"cart",
+0.8666667,
+2
+],
+[
+"cast",
+0.8666667,
+1
+],
+[
+"chat",
+0.84999996,
+3
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "xat",
+"term": {
+"min_word_length": 2,
+"prefix_length": 0,
+"max_inspections": 1,
+"size": 1
+}
+},
+"entries": [
+{
+"text": "xat",
+"options": [
+[
+"bat",
+0.6666666,
+4
+]
+]
+}
+]
+},
+{
+"case": {
+"text": "xat",
+"term": {
+"min_word_length": 2,
+"prefix_length": 0,
+"size": 20,
+"accuracy": 0.3
+}
+},
+"entries": [
+{
+"text": "xat",
+"options": [
+[
+"pat",
+0.6666666,
+7
+],
+[
+"bat",
+0.6666666,
+4
+],
+[
+"eat",
+0.6666666,
+4
+],
+[
+"rat",
+0.6666666,
+4
+],
+[
+"mat",
+0.6666666,
+3
+],
+[
+"sat",
+0.6666666,
+3
+],
+[
+"cat",
+0.6666666,
+2
+],
+[
+"fat",
+0.6666666,
+2
+],
+[
+"hat",
+0.6666666,
+2
+],
+[
+"vat",
+0.6666666,
+2
+],
+[
+"oat",
+0.6666666,
+1
+]
+]
+}
+]
+}
+]
+},
+"phrase": {
+"analysis": {
+"analyzer": {
+"body": {
+"tokenizer": "standard",
+"filter": [
+"lowercase"
+]
+},
+"bigram": {
+"tokenizer": "standard",
+"filter": [
+"lowercase",
+"bigram"
+]
+},
+"ngram": {
+"tokenizer": "standard",
+"filter": [
+"lowercase",
+"ngram"
+]
+},
+"trigram": {
+"tokenizer": "standard",
+"filter": [
+"lowercase",
+"trigram"
+]
+},
+"reverse": {
+"tokenizer": "standard",
+"filter": [
+"lowercase",
+"reverse"
+]
+}
+},
+"filter": {
+"bigram": {
+"type": "shingle",
+"output_unigrams": false,
+"min_shingle_size": 2,
+"max_shingle_size": 2
+},
+"ngram": {
+"type": "shingle",
+"output_unigrams": true,
+"min_shingle_size": 2,
+"max_shingle_size": 2
+},
+"trigram": {
+"type": "shingle",
+"output_unigrams": true,
+"min_shingle_size": 2,
+"max_shingle_size": 3
+}
+}
+},
+"docs": [
+"Xorr the God-Jewel",
+"Xorn",
+"Arthur, King of the Britons",
+"Sir Lancelot the Brave",
+"Patsy, Arthur's Servant",
+"Sir Robin the Not-Quite-So-Brave-as-Sir-Lancelot",
+"Sir Bedevere the Wise",
+"Sir Galahad the Pure",
+"Miss Islington, the Witch",
+"Zoot",
+"Leader of Robin's Minstrels",
+"Old Crone",
+"Frank, the Historian",
+"Frank's Wife",
+"Dr. Piglet",
+"Dr. Winston",
+"Sir Robin (Stand-in)",
+"Knight Who Says Ni",
+"Police sergeant who stops the film",
+"the god jewel of king arthur",
+"king arthur and the knights",
+"sir lancelot and sir robin",
+"the brave sir robin ran away"
+],
+"cases": [
+{
+"case": {
+"text": "xor the got-jewel",
+"phrase": {
+"field": "body.ngram",
+"force_unigrams": true,
+"max_errors": 0.5,
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"xorr the god jewel",
+null,
+0.03657371
+],
+[
+"xorn the god jewel",
+null,
+0.006558515
+],
+[
+"xor the god jewel",
+null,
+0.0056607085
+],
+[
+"xorr the got jewel",
+null,
+0.0005186113
+],
+[
+"xorn the got jewel",
+null,
+9.299903e-05
+]
+]
+},
+{
+"case": {
+"text": "xor the got-jewel",
+"phrase": {
+"field": "body",
+"analyzer": "body",
+"force_unigrams": true,
+"max_errors": 0.5,
+"direct_generator": [
+{
+"field": "body",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"xorn the god jewel",
+null,
+0.00126461
+],
+[
+"xorr the god jewel",
+null,
+0.00126461
+],
+[
+"xor the god jewel",
+null,
+0.0010914954
+],
+[
+"xorn the got jewel",
+null,
+0.0009152641
+],
+[
+"xorr the got jewel",
+null,
+0.0009152641
+]
+]
+},
+{
+"case": {
+"text": "Artur, Ging of the Britons",
+"phrase": {
+"field": "body.ngram",
+"force_unigrams": true,
+"max_errors": 0.5,
+"direct_generator": [
+{
+"field": "body.reverse",
+"min_word_length": 1,
+"suggest_mode": "always",
+"pre_filter": "reverse",
+"post_filter": "reverse"
+}
+]
+}
+},
+"options": [
+[
+"arthur king of the britons",
+null,
+0.011626877
+],
+[
+"artur king of the britons",
+null,
+0.0011028874
+],
+[
+"arthur ging of the britons",
+null,
+0.00019101641
+]
+]
+},
+{
+"case": {
+"text": "Artur, Ging of the Britons",
+"phrase": {
+"field": "body.ngram",
+"max_errors": 0.5,
+"confidence": 0,
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "always"
+},
+{
+"field": "body.reverse",
+"min_word_length": 1,
+"suggest_mode": "always",
+"pre_filter": "reverse",
+"post_filter": "reverse"
+}
+],
+"highlight": {
+"pre_tag": "<em>",
+"post_tag": "</em>"
+}
+}
+},
+"options": [
+[
+"arthur king of the britons",
+"<em>arthur king</em> of the britons",
+0.011626877
+],
+[
+"artur king of the britons",
+"artur <em>king</em> of the britons",
+0.0011028874
+],
+[
+"arthur ging of the britons",
+"<em>arthur</em> ging of the britons",
+0.00019101641
+],
+[
+"artur ging of the britons",
+"artur ging of the britons",
+0.000104616294
+]
+]
+},
+{
+"case": {
+"text": "sir robbin the brav",
+"phrase": {
+"field": "body.ngram",
+"max_errors": 2,
+"size": 3,
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"sir robin the brave",
+null,
+0.03227817
+],
+[
+"sir robin the brav",
+null,
+0.0045845676
+],
+[
+"sir robbin the brave",
+null,
+0.0009533175
+]
+]
+},
+{
+"case": {
+"text": "sir robbin the brav",
+"phrase": {
+"field": "body.ngram",
+"max_errors": 2,
+"size": 3,
+"smoothing": {
+"laplace": {
+"alpha": 0.7
+}
+},
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"sir robin the brave",
+null,
+0.0021408037
+],
+[
+"sir robin the brav",
+null,
+0.0013199289
+],
+[
+"sir robbin the brave",
+null,
+0.00070109544
+]
+]
+},
+{
+"case": {
+"text": "sir robbin the brav",
+"phrase": {
+"field": "body.ngram",
+"max_errors": 2,
+"size": 3,
+"smoothing": {
+"linear": {
+"trigram_lambda": 0.5,
+"bigram_lambda": 0.3,
+"unigram_lambda": 0.2
+}
+},
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"sir robin the brave",
+null,
+0.0067522214
+],
+[
+"sir robin the brav",
+null,
+0.00118759
+],
+[
+"sir robbin the brave",
+null,
+0.00031203276
+]
+]
+},
+{
+"case": {
+"text": "sir robbin the brav",
+"phrase": {
+"field": "body.ngram",
+"max_errors": 2,
+"size": 3,
+"smoothing": {
+"stupid_backoff": {
+"discount": 0.4
+}
+},
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"sir robin the brave",
+null,
+0.03227817
+],
+[
+"sir robin the brav",
+null,
+0.004584567
+],
+[
+"sir robbin the brave",
+null,
+0.0009533175
+]
+]
+},
+{
+"case": {
+"text": "the brave sir robbin ran awy",
+"phrase": {
+"field": "body.trigram",
+"max_errors": 2,
+"size": 4,
+"real_word_error_likelihood": 0.8,
+"direct_generator": [
+{
+"field": "body.trigram",
+"min_word_length": 1,
+"suggest_mode": "always",
+"max_edits": 1
+}
+]
+}
+},
+"options": [
+[
+"the brave sir robin ran away",
+null,
+0.030525219
+],
+[
+"the brave sir robin ran awy",
+null,
+0.001711725
+],
+[
+"the brave sir robbin ran away",
+null,
+0.00013577414
+]
+]
+},
+{
+"case": {
+"text": "the brave sir robbin ran awy",
+"phrase": {
+"field": "body.trigram",
+"max_errors": 2,
+"size": 4,
+"gram_size": 2,
+"smoothing": {
+"linear": {
+"trigram_lambda": 0.2,
+"bigram_lambda": 0.3,
+"unigram_lambda": 0.5
+}
+},
+"direct_generator": [
+{
+"field": "body.trigram",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"the brave sir robin ran away",
+null,
+0.001100382
+],
+[
+"the brave sir robin ran awy",
+null,
+0.00014649128
+],
+[
+"the brave sir robbin ran away",
+null,
+3.991055e-05
+]
+]
+},
+{
+"case": {
+"text": "the brave sir robbin ran awy",
+"phrase": {
+"field": "body.trigram",
+"max_errors": 2,
+"size": 4,
+"smoothing": {
+"laplace": {
+"alpha": 0.2
+}
+},
+"direct_generator": [
+{
+"field": "body.trigram",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"the brave sir robin ran away",
+null,
+0.00016072915
+],
+[
+"the brave sir robin ran awy",
+null,
+8.7254666e-05
+]
+]
+},
+{
+"case": {
+"text": "king artur",
+"phrase": {
+"field": "body.ngram",
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "missing"
+},
+{
+"field": "body",
+"min_word_length": 1,
+"suggest_mode": "popular"
+}
+]
+}
+},
+"options": [
+[
+"king arthur",
+null,
+0.11910062
+]
+]
+},
+{
+"case": {
+"text": "king artur",
+"phrase": {
+"field": "body.ngram",
+"confidence": 2.0,
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "always"
+}
+]
+}
+},
+"options": [
+[
+"king arthur",
+null,
+0.11910062
+]
+]
+},
+{
+"case": {
+"text": "galahad the pur",
+"phrase": {
+"field": "body.ngram",
+"direct_generator": [
+{
+"field": "body.ngram",
+"min_word_length": 1,
+"suggest_mode": "always",
+"string_distance": "jaro_winkler",
+"size": 2
+}
+]
+}
+},
+"options": [
+[
+"galahad the pure",
+null,
+0.037501447
+]
+]
+}
+]
+},
+"slices": {
+"docs": [
+{
+"id": "0",
+"n": [
+-50,
+0
+]
+},
+{
+"id": "1",
+"n": [
+-83
+]
+},
+{
+"id": "2",
+"n": [
+-66
+]
+},
+{
+"id": "3",
+"n": null
+},
+{
+"id": "4",
+"n": [
+-32
+]
+},
+{
+"id": "5",
+"n": [
+15,
+5
+]
+},
+{
+"id": "6",
+"n": [
+2
+]
+},
+{
+"id": "7",
+"n": [
+19
+]
+},
+{
+"id": "8",
+"n": [
+36
+]
+},
+{
+"id": "9",
+"n": [
+53
+]
+},
+{
+"id": "10",
+"n": null
+},
+{
+"id": "11",
+"n": [
+87
+]
+},
+{
+"id": "12",
+"n": [
+104
+]
+},
+{
+"id": "13",
+"n": [
+121
+]
+},
+{
+"id": "14",
+"n": [
+138
+]
+},
+{
+"id": "15",
+"n": [
+145,
+15
+]
+},
+{
+"id": "16",
+"n": [
+172
+]
+},
+{
+"id": "17",
+"n": null
+},
+{
+"id": "18",
+"n": [
+206
+]
+},
+{
+"id": "19",
+"n": [
+223
+]
+},
+{
+"id": "20",
+"n": [
+210,
+20
+]
+},
+{
+"id": "21",
+"n": [
+257
+]
+},
+{
+"id": "22",
+"n": [
+274
+]
+},
+{
+"id": "23",
+"n": [
+291
+]
+},
+{
+"id": "24",
+"n": null
+},
+{
+"id": "25",
+"n": [
+275,
+25
+]
+},
+{
+"id": "26",
+"n": [
+342
+]
+},
+{
+"id": "27",
+"n": [
+359
+]
+},
+{
+"id": "28",
+"n": [
+376
+]
+},
+{
+"id": "29",
+"n": [
+393
+]
+},
+{
+"id": "30",
+"n": [
+340,
+30
+]
+},
+{
+"id": "31",
+"n": null
+},
+{
+"id": "32",
+"n": [
+444
+]
+},
+{
+"id": "33",
+"n": [
+461
+]
+},
+{
+"id": "34",
+"n": [
+478
+]
+},
+{
+"id": "35",
+"n": [
+405,
+35
+]
+},
+{
+"id": "36",
+"n": [
+512
+]
+},
+{
+"id": "37",
+"n": [
+529
+]
+},
+{
+"id": "38",
+"n": null
+},
+{
+"id": "39",
+"n": [
+563
+]
+},
+{
+"id": "abc",
+"n": [
+470,
+40
+]
+},
+{
+"id": "x-y",
+"n": [
+597
+]
+},
+{
+"id": "QmFzZTY0",
+"n": [
+614
+]
+},
+{
+"id": "long id with spaces",
+"n": [
+631
+]
+}
+],
+"cases": [
+{
+"kind": "scroll",
+"id": 0,
+"max": 2,
+"ids": [
+"10",
+"11",
+"12",
+"13",
+"14",
+"16",
+"17",
+"18",
+"20",
+"25",
+"28",
+"3",
+"34",
+"35",
+"36",
+"4",
+"5",
+"6",
+"7",
+"8",
+"9",
+"QmFzZTY0",
+"abc",
+"x-y"
+]
+},
+{
+"kind": "scroll",
+"id": 1,
+"max": 2,
+"ids": [
+"0",
+"1",
+"15",
+"19",
+"2",
+"21",
+"22",
+"23",
+"24",
+"26",
+"27",
+"29",
+"30",
+"31",
+"32",
+"33",
+"37",
+"38",
+"39",
+"long id with spaces"
+]
+},
+{
+"kind": "scroll",
+"id": 0,
+"max": 3,
+"ids": [
+"0",
+"12",
+"2",
+"20",
+"26",
+"28",
+"29",
+"3",
+"32",
+"37",
+"38",
+"4",
+"6",
+"7"
+]
+},
+{
+"kind": "scroll",
+"id": 1,
+"max": 3,
+"ids": [
+"1",
+"10",
+"11",
+"13",
+"15",
+"17",
+"18",
+"30",
+"31",
+"33",
+"34",
+"36",
+"5",
+"8",
+"abc"
+]
+},
+{
+"kind": "scroll",
+"id": 2,
+"max": 3,
+"ids": [
+"14",
+"16",
+"19",
+"21",
+"22",
+"23",
+"24",
+"25",
+"27",
+"35",
+"39",
+"9",
+"QmFzZTY0",
+"long id with spaces",
+"x-y"
+]
+},
+{
+"kind": "scroll",
+"id": 0,
+"max": 5,
+"ids": [
+"10",
+"16",
+"18",
+"19",
+"2",
+"24",
+"27",
+"29",
+"36",
+"37",
+"4",
+"QmFzZTY0"
+]
+},
+{
+"kind": "scroll",
+"id": 1,
+"max": 5,
+"ids": [
+"15",
+"17",
+"20",
+"25",
+"31",
+"34",
+"35",
+"38",
+"6",
+"9",
+"long id with spaces",
+"x-y"
+]
+},
+{
+"kind": "scroll",
+"id": 2,
+"max": 5,
+"ids": [
+"0",
+"1",
+"21"
+]
+},
+{
+"kind": "scroll",
+"id": 3,
+"max": 5,
+"ids": [
+"12",
+"22",
+"23",
+"26",
+"3",
+"30",
+"32",
+"abc"
+]
+},
+{
+"kind": "scroll",
+"id": 4,
+"max": 5,
+"ids": [
+"11",
+"13",
+"14",
+"28",
+"33",
+"39",
+"5",
+"7",
+"8"
+]
+},
+{
+"kind": "field",
+"id": 0,
+"max": 2,
+"ids": [
+"0",
+"1",
+"10",
+"14",
+"15",
+"17",
+"18",
+"20",
+"23",
+"24",
+"27",
+"28",
+"3",
+"31",
+"32",
+"33",
+"34",
+"38",
+"39",
+"4",
+"5",
+"9",
+"QmFzZTY0",
+"long id with spaces",
+"x-y"
+]
+},
+{
+"kind": "field",
+"id": 1,
+"max": 2,
+"ids": [
+"0",
+"11",
+"12",
+"13",
+"15",
+"16",
+"19",
+"2",
+"20",
+"21",
+"22",
+"25",
+"26",
+"29",
+"30",
+"35",
+"36",
+"37",
+"5",
+"6",
+"7",
+"8",
+"abc"
+]
+},
+{
+"kind": "field",
+"id": 0,
+"max": 3,
+"ids": [
+"0",
+"10",
+"15",
+"16",
+"17",
+"19",
+"22",
+"24",
+"25",
+"3",
+"30",
+"31",
+"34",
+"38",
+"39",
+"5",
+"6",
+"8",
+"long id with spaces"
+]
+},
+{
+"kind": "field",
+"id": 1,
+"max": 3,
+"ids": [
+"1",
+"12",
+"14",
+"15",
+"18",
+"20",
+"21",
+"26",
+"27",
+"28",
+"29",
+"33",
+"35",
+"36",
+"37",
+"7",
+"QmFzZTY0",
+"x-y"
+]
+},
+{
+"kind": "field",
+"id": 2,
+"max": 3,
+"ids": [
+"11",
+"13",
+"2",
+"23",
+"32",
+"4",
+"5",
+"9",
+"abc"
+]
+},
+{
+"kind": "field",
+"id": 0,
+"max": 5,
+"ids": [
+"0",
+"10",
+"15",
+"17",
+"18",
+"24",
+"25",
+"3",
+"31",
+"32",
+"38",
+"9",
+"QmFzZTY0"
+]
+},
+{
+"kind": "field",
+"id": 1,
+"max": 5,
+"ids": [
+"14",
+"16",
+"21",
+"23",
+"30",
+"35",
+"36",
+"4",
+"6",
+"abc",
+"x-y"
+]
+},
+{
+"kind": "field",
+"id": 2,
+"max": 5,
+"ids": [
+"0",
+"13",
+"2",
+"25",
+"30",
+"33",
+"34",
+"39",
+"5",
+"8"
+]
+},
+{
+"kind": "field",
+"id": 3,
+"max": 5,
+"ids": [
+"11",
+"15",
+"19",
+"20",
+"22",
+"27",
+"28",
+"29",
+"37",
+"5",
+"7",
+"abc"
+]
+},
+{
+"kind": "field",
+"id": 4,
+"max": 5,
+"ids": [
+"1",
+"12",
+"20",
+"26",
+"long id with spaces"
+]
+},
+{
+"kind": "pit",
+"id": 0,
+"max": 2,
+"ids": [
+"0",
+"1",
+"10",
+"11",
+"12",
+"13",
+"14",
+"15",
+"16",
+"17",
+"18",
+"19",
+"2",
+"20",
+"21",
+"3",
+"4",
+"5",
+"6",
+"7",
+"8",
+"9"
+]
+},
+{
+"kind": "pit",
+"id": 1,
+"max": 2,
+"ids": [
+"22",
+"23",
+"24",
+"25",
+"26",
+"27",
+"28",
+"29",
+"30",
+"31",
+"32",
+"33",
+"34",
+"35",
+"36",
+"37",
+"38",
+"39",
+"QmFzZTY0",
+"abc",
+"long id with spaces",
+"x-y"
+]
+},
+{
+"kind": "pit",
+"id": 0,
+"max": 3,
+"ids": [
+"0",
+"1",
+"10",
+"11",
+"12",
+"13",
+"14",
+"2",
+"3",
+"4",
+"5",
+"6",
+"7",
+"8",
+"9"
+]
+},
+{
+"kind": "pit",
+"id": 1,
+"max": 3,
+"ids": [
+"15",
+"16",
+"17",
+"18",
+"19",
+"20",
+"21",
+"22",
+"23",
+"24",
+"25",
+"26",
+"27",
+"28",
+"29"
+]
+},
+{
+"kind": "pit",
+"id": 2,
+"max": 3,
+"ids": [
+"30",
+"31",
+"32",
+"33",
+"34",
+"35",
+"36",
+"37",
+"38",
+"39",
+"QmFzZTY0",
+"abc",
+"long id with spaces",
+"x-y"
+]
+},
+{
+"kind": "pit",
+"id": 0,
+"max": 5,
+"ids": [
+"0",
+"1",
+"2",
+"3",
+"4",
+"5",
+"6",
+"7",
+"8"
+]
+},
+{
+"kind": "pit",
+"id": 1,
+"max": 5,
+"ids": [
+"10",
+"11",
+"12",
+"13",
+"14",
+"15",
+"16",
+"17",
+"9"
+]
+},
+{
+"kind": "pit",
+"id": 2,
+"max": 5,
+"ids": [
+"18",
+"19",
+"20",
+"21",
+"22",
+"23",
+"24",
+"25",
+"26"
+]
+},
+{
+"kind": "pit",
+"id": 3,
+"max": 5,
+"ids": [
+"27",
+"28",
+"29",
+"30",
+"31",
+"32",
+"33",
+"34",
+"35"
+]
+},
+{
+"kind": "pit",
+"id": 4,
+"max": 5,
+"ids": [
+"36",
+"37",
+"38",
+"39",
+"QmFzZTY0",
+"abc",
+"long id with spaces",
+"x-y"
+]
+}
+]
+}
+}

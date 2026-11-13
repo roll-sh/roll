@@ -18,6 +18,7 @@
 //! | storage | aws-sdk-s3, path and virtual-host style | `PutObject`, multipart uploads | `GetObject` of acknowledged keys |
 //! | tasks | HTTPS on `tasks.` | publishes with a `dedup_id` | pull and ack |
 //! | queues | lapin over AMQPS, the URL the API gave for a vhost (SNI `<vhost>.mq.…`) | publishes with confirms to a quorum queue | a consumer with manual acks |
+//! | search | the Elasticsearch REST API on `<cluster>.search.…`, basic auth | `PUT` of documents by id | realtime `GET` of acknowledged documents |
 //!
 //! Under that load: (a) SIGKILL the node holding the most leases, then start it again; (b) a rolling
 //! restart, each node in turn stopped with SIGTERM (it must drain and exit 0), started again and
@@ -148,6 +149,7 @@ enum Product {
     Storage,
     Tasks,
     Queues,
+    Search,
 }
 
 impl Product {
@@ -160,6 +162,7 @@ impl Product {
             Product::Storage => "storage",
             Product::Tasks => "tasks",
             Product::Queues => "queues",
+            Product::Search => "search",
         }
     }
 
@@ -182,6 +185,9 @@ impl Product {
     /// - tasks (deploy/aws/README.md, "On the roll cloud fleet"): reconnects, `503` with
     ///   `Retry-After`, and `502` for a write whose connection broke at a dead leader (retried
     ///   with its `dedup_id`);
+    /// - search (docs/search/architecture.md, "On the fleet"): reconnects, `503` with
+    ///   `Retry-After` (no owner yet), and `502` for a write forwarded to an owner that died
+    ///   (retried: a document `PUT` by id is idempotent);
     /// - queues (docs/queues/architecture.md, "Many nodes"): a connection closed (its node
     ///   stopped or died) and the reconnect; a publish in flight while its queue moves waits for
     ///   the new owner and is confirmed there, so a nack or a confirm timeout is never allowed.
@@ -189,7 +195,7 @@ impl Product {
         let k = kind.split_whitespace().next().unwrap_or_default();
         match self {
             Product::Storage => matches!(k, "connect" | "closed" | "503" | "500"),
-            Product::Code | Product::Tasks => matches!(k, "connect" | "closed" | "503" | "502"),
+            Product::Code | Product::Tasks | Product::Search => matches!(k, "connect" | "closed" | "503" | "502"),
             Product::Redis => matches!(k, "connect" | "closed" | "LOADING"),
             Product::Nosql => matches!(k, "connect" | "closed"),
             Product::Kafka => matches!(k, "reconnect" | "NotLeaderForPartition" | "NotCoordinator" | "NotEnoughReplicas" | "LeaderNotAvailable"),
@@ -284,6 +290,10 @@ impl World {
 
     fn tasks(&self, path: &str) -> String {
         format!("https://tasks.{REGION}.{DOMAIN}:{}{path}", self.ports.https)
+    }
+
+    fn search(&self, path: &str) -> String {
+        format!("https://{SEARCH_CLUSTER}.search.{REGION}.{DOMAIN}:{}{path}", self.ports.https)
     }
 
     fn tls(&self) -> Arc<rustls::ClientConfig> {
@@ -1694,6 +1704,129 @@ async fn tasks_verify(w: &World, t: &TasksState) {
     w.stat(Product::Tasks, |st| st.verified = verified);
 }
 
+// ── search ──
+
+const SEARCH_CLUSTER: &str = "fleet";
+const SEARCH_INDEX: &str = "events";
+const SEARCH_WRITERS: u64 = 2;
+
+/// A search cluster (its password from the control plane) and an index in it, reached by the
+/// edge's hostname for the cluster.
+struct SearchState {
+    password: String,
+    /// Acknowledged documents (ids; writer `k` writes `k << 40 | n`).
+    acks: Mutex<Vec<u64>>,
+}
+
+/// One search request under the retry policy: 2xx is done, 5xx and transport errors retry.
+async fn search_call(w: &World, s: &SearchState, method: reqwest::Method, path: &str, body: &Value, p: Option<Product>) -> Result<Value, String> {
+    let url = w.search(path);
+    let attempt = |_| async {
+        let mut rb = w.http.request(method.clone(), &url).basic_auth(SEARCH_CLUSTER, Some(&s.password));
+        // A GET with a body is refused, as Elasticsearch refuses it.
+        if !body.is_null() {
+            rb = rb.json(body);
+        }
+        match send(rb).await {
+            Ok(a) if (200..300).contains(&a.status) => Step::Done(a.body),
+            Ok(a) if a.status >= 500 => Step::Retry(a.status.to_string(), a.retry_after),
+            Ok(a) => Step::Fail(format!("{} {}", a.status, a.text)),
+            Err(k) => Step::Retry(k, None),
+        }
+    };
+    match p {
+        Some(p) => retry(w, p, attempt).await,
+        // Setup and checks: retried, never counted against the product.
+        None => {
+            let started = Instant::now();
+            let mut last = String::new();
+            for n in 0..MAX_ATTEMPTS * 2 {
+                match attempt(n).await {
+                    Step::Done(v) => return Ok(v),
+                    Step::Fail(e) => return Err(e),
+                    Step::Retry(k, _) if started.elapsed() >= OP_DEADLINE * 2 => return Err(k),
+                    Step::Retry(k, ra) => {
+                        last = k;
+                        tokio::time::sleep(backoff(n, ra)).await;
+                    }
+                }
+            }
+            Err(format!("no success within the retry policy (last: {last})"))
+        }
+    }
+}
+
+async fn search_writer(w: Arc<World>, s: Arc<SearchState>, k: u64) {
+    let mut n = 0u64;
+    while w.running() {
+        let id = k << 40 | n;
+        w.write(Product::Search);
+        // A retry of a write that did apply overwrites the same document (`200`).
+        match search_call(&w, &s, reqwest::Method::PUT, &format!("/{SEARCH_INDEX}/_doc/{id}"), &json!({ "n": id, "writer": k }), Some(Product::Search)).await {
+            Ok(_) => {
+                w.ack(Product::Search);
+                s.acks.lock().push(id);
+            }
+            Err(e) => w.problem(Product::Search, format!("index {id}: {e}")),
+        }
+        n += 1;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Realtime `GET`s of acknowledged documents: each one must be found.
+async fn search_reader(w: Arc<World>, s: Arc<SearchState>) {
+    let mut rng = Lcg::new();
+    while w.running() {
+        let id = {
+            let acks = s.acks.lock();
+            (!acks.is_empty()).then(|| acks[rng.below(acks.len())])
+        };
+        if let Some(id) = id {
+            match search_call(&w, &s, reqwest::Method::GET, &format!("/{SEARCH_INDEX}/_doc/{id}"), &Value::Null, Some(Product::Search)).await {
+                Ok(d) if d["found"] == true && d["_source"]["n"] == id => {}
+                Ok(d) => w.problem(Product::Search, format!("acknowledged document {id} read back as {d}")),
+                // A 404 for an acknowledged id fails the attempt: it is lost.
+                Err(e) => w.problem(Product::Search, format!("GET {id}: {e}")),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Every acknowledged document is there (`_mget`, realtime), and a search after a refresh counts
+/// at least as many.
+async fn search_verify(w: &World, s: &SearchState) {
+    let acks = s.acks.lock().clone();
+    let mut verified = 0u64;
+    let mut missing = Vec::new();
+    for chunk in acks.chunks(500) {
+        let ids: Vec<String> = chunk.iter().map(u64::to_string).collect();
+        match search_call(w, s, reqwest::Method::POST, &format!("/{SEARCH_INDEX}/_mget"), &json!({ "ids": ids }), None).await {
+            Ok(r) => {
+                for d in r["docs"].as_array().cloned().unwrap_or_default() {
+                    if d["found"] == true {
+                        verified += 1;
+                    } else {
+                        missing.push(d["_id"].as_str().unwrap_or_default().to_string());
+                    }
+                }
+            }
+            Err(e) => w.problem(Product::Search, format!("_mget: {e}")),
+        }
+    }
+    if !missing.is_empty() {
+        w.problem(Product::Search, format!("{} acknowledged documents missing, e.g. {:?}", missing.len(), &missing[..missing.len().min(5)]));
+    }
+    let _ = search_call(w, s, reqwest::Method::POST, &format!("/{SEARCH_INDEX}/_refresh"), &json!({}), None).await;
+    match search_call(w, s, reqwest::Method::GET, &format!("/{SEARCH_INDEX}/_count"), &Value::Null, None).await {
+        Ok(c) if c["count"].as_u64().is_some_and(|n| n >= acks.len() as u64) => w.note(Product::Search, format!("{} documents searchable after a refresh, {} acknowledged", c["count"], acks.len())),
+        Ok(c) => w.problem(Product::Search, format!("a search counts {} documents, {} were acknowledged", c["count"], acks.len())),
+        Err(e) => w.problem(Product::Search, format!("_count: {e}")),
+    }
+    w.stat(Product::Search, |st| st.verified = verified);
+}
+
 // ── queues ──
 
 /// A vhost with its own user, a quorum queue in it, and the vhost's AMQPS URL as the API gave it
@@ -2028,7 +2161,7 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .tls_certs_only([reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap()]);
-    for h in [format!("api.{DOMAIN}"), format!("tasks.{REGION}.{DOMAIN}")] {
+    for h in [format!("api.{DOMAIN}"), format!("tasks.{REGION}.{DOMAIN}"), format!("{SEARCH_CLUSTER}.search.{REGION}.{DOMAIN}")] {
         hb = hb.resolve(&h, lb);
     }
     let scratch = tempfile::tempdir().unwrap();
@@ -2060,7 +2193,7 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
     let info = ok(&w, "GET", &w.api("/v1/info"), None).await;
     let products: HashSet<String> = info["products"].as_array().unwrap().iter().filter_map(|p| p.as_str().map(str::to_string)).collect();
     eprintln!("fleet up: {info}");
-    for p in ["code", "redis", "nosql", "streams", "storage", "tasks", "queues"] {
+    for p in ["code", "redis", "nosql", "streams", "storage", "tasks", "queues", "search"] {
         assert!(products.contains(p), "{p} is off on the fleet (ROLL_PRODUCTS): {info}");
     }
 
@@ -2125,6 +2258,11 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
     assert!(url.starts_with("amqps://") && url.contains(&format!("@{MQ_VHOST}.mq.{REGION}.{DOMAIN}:{}/", ports.amqps)), "the vhost's AMQPS URL names its public hostname: {vh}");
     ok(&w, "POST", &w.api(&format!("/v1/queues/vhosts/{MQ_VHOST}/queues")), Some(json!({ "name": MQ_QUEUE, "type": "quorum" }))).await;
     let queues = Arc::new(QueuesState { url, acks: Mutex::default(), sent: Mutex::default(), delivered: Mutex::default(), consumer_stop: AtomicBool::new(false) });
+    // search: a cluster (its URL names the edge's hostname for it) and an index.
+    let sc = ok(&w, "POST", &w.api("/v1/search/clusters"), Some(json!({ "name": SEARCH_CLUSTER }))).await;
+    assert!(sc["url"].as_str().is_some_and(|u| u.contains(&format!("{SEARCH_CLUSTER}.search.{REGION}.{DOMAIN}"))), "the cluster's URL names its public hostname: {sc}");
+    let search = Arc::new(SearchState { password: sc["password"].as_str().unwrap().into(), acks: Mutex::default() });
+    search_call(&w, &search, reqwest::Method::PUT, &format!("/{SEARCH_INDEX}"), &json!({ "settings": { "number_of_shards": 2 } }), None).await.expect("create the search index");
     eprintln!("setup done in {:.1}s", w.at(Instant::now()));
 
     // ── traffic ──
@@ -2146,6 +2284,10 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
         tasks.push(tokio::spawn(queues_publisher(w.clone(), queues.clone(), k)));
     }
     let mq_consumer = tokio::spawn(queues_consumer(w.clone(), queues.clone()));
+    for k in 0..SEARCH_WRITERS {
+        tasks.push(tokio::spawn(search_writer(w.clone(), search.clone(), k)));
+    }
+    tasks.push(tokio::spawn(search_reader(w.clone(), search.clone())));
     let kafka_threads = {
         let (w1, k1, s1) = (w.clone(), kafka.clone(), kafka_setup.clone());
         let (w2, k2, s2) = (w.clone(), kafka.clone(), kafka_setup.clone());
@@ -2260,6 +2402,7 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
     storage_verify(&w, &storage).await;
     tasks_verify(&w, &tasks_state).await;
     queues_verify(&w, &queues);
+    search_verify(&w, &search).await;
 
     // ── the scoreboard ──
     eprintln!("\n=== roll cloud fleet e2e: {:.0}s of traffic ===", (traffic_to - traffic_from).as_secs_f64());

@@ -1,0 +1,24 @@
+{
+  "query.settings": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/sql/ppl/index/",
+      "description": "Updates the SQL/PPL plugin's cluster settings."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_query/settings",
+          "methods": [
+            "PUT"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The settings: {\"transient\": {...}, \"persistent\": {...}}",
+      "required": true
+    }
+  }
+}

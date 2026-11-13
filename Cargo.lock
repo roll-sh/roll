@@ -817,6 +817,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-kms"
+version = "1.123.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bbe8833a7ad3b970f2a6a856939c9cb171942dcdfd2ab65f2db3a8baaf73cc1"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.152.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1666,6 +1691,7 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.7",
  "inout 0.1.4",
+ "zeroize",
 ]
 
 [[package]]
@@ -1862,8 +1888,11 @@ name = "code-github"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "blake2",
  "bytes",
  "chrono",
+ "crypto_box",
  "hex",
  "hmac 0.12.1",
  "jsonwebtoken",
@@ -2259,6 +2288,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "crypto_box"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16182b4f39a82ec8a6851155cc4c0cda3065bb1db33651726a29e1951de0f009"
+dependencies = [
+ "aead",
+ "blake2",
+ "crypto_secretbox",
+ "curve25519-dalek",
+ "salsa20",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "crypto_secretbox"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9d6cf87adf719ddf43a805e92c6870a531aedda35ff640442cbaf8674e141e1"
+dependencies = [
+ "aead",
+ "cipher 0.4.4",
+ "generic-array",
+ "poly1305",
+ "salsa20",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -3236,6 +3295,8 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -4353,6 +4414,15 @@ checksum = "f48c6352cc1185740af256ccc396af598d2366bfd90a34f5afe48744bf06a5b5"
 dependencies = [
  "fearless_simd",
  "fearless_simd_macros",
+]
+
+[[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -5532,11 +5602,14 @@ name = "pg-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
+ "chrono",
  "futures",
  "object_store",
  "pg-proxy",
  "postgres-protocol",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -5730,6 +5803,17 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "poly1305"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "opaque-debug",
+ "universal-hash",
 ]
 
 [[package]]
@@ -6554,6 +6638,7 @@ dependencies = [
 name = "roll-cli"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "agent-host",
  "agent-proto",
  "anyhow",
@@ -6569,8 +6654,10 @@ dependencies = [
  "code-control",
  "code-preview",
  "code-sql",
+ "curve25519-dalek",
  "futures",
  "getrandom 0.4.3",
+ "hkdf",
  "ignore",
  "libc",
  "model-gateway",
@@ -6587,14 +6674,19 @@ dependencies = [
  "roll-auth",
  "roll-fetch",
  "roll-previews",
+ "roll-secrets",
  "roll-workspace",
  "rustls-pemfile",
  "rustyline",
  "s3-control",
  "s3-server",
  "s3-store",
+ "search-control",
+ "search-server",
+ "search-store",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.6",
@@ -6741,6 +6833,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-secrets"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "curve25519-dalek",
+ "getrandom 0.4.3",
+ "hkdf",
+ "hmac 0.12.1",
+ "http-body-util",
+ "ipnet",
+ "rcgen",
+ "regex",
+ "ring",
+ "roll-auth",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "x509-parser",
+ "zeroize",
+]
+
+[[package]]
 name = "roll-workspace"
 version = "0.1.0"
 dependencies = [
@@ -6765,15 +6889,19 @@ dependencies = [
  "anyhow",
  "apps-control",
  "async-trait",
+ "aws-config",
  "aws-sdk-dynamodb",
+ "aws-sdk-kms",
  "aws-sdk-s3",
  "aws-smithy-http-client",
  "aws-smithy-runtime-api",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
  "code-control",
+ "code-github",
  "code-preview",
  "code-review",
  "code-sql",
@@ -6781,7 +6909,9 @@ dependencies = [
  "futures",
  "futures-util",
  "getrandom 0.4.3",
+ "hmac 0.12.1",
  "http-body 1.1.0",
+ "http-body-util",
  "kafka-protocol",
  "lapin",
  "libc",
@@ -6806,15 +6936,18 @@ dependencies = [
  "nosql-storage",
  "object_store",
  "parking_lot",
+ "pbkdf2",
  "pg-control",
  "pg-proxy",
  "pg-storage",
  "rabbitmq-stream-client",
+ "rand 0.8.8",
  "rcgen",
  "rdkafka",
  "redis-control",
  "redis-server",
  "reqwest",
+ "ring",
  "roll-access",
  "roll-accounts",
  "roll-auth",
@@ -6823,12 +6956,20 @@ dependencies = [
  "roll-mcp",
  "roll-net",
  "roll-previews",
+ "roll-secrets",
  "roll-workspace",
+ "rsa",
+ "rusqlite",
  "s3-api",
  "s3-control",
+ "s3-proto",
  "s3-server",
  "s3-store",
+ "search-control",
+ "search-server",
+ "search-store",
  "serde_json",
+ "sha2 0.10.9",
  "stream-broker",
  "tasks",
  "tempfile",
@@ -6837,7 +6978,9 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
+ "zeroize",
 ]
 
 [[package]]
@@ -7441,6 +7584,228 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "search-aggs"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "foldhash 0.2.0",
+ "hashbrown 0.16.1",
+ "rand 0.8.8",
+ "search-codec",
+ "search-index",
+ "serde_json",
+ "smallvec",
+]
+
+[[package]]
+name = "search-analysis"
+version = "0.1.0"
+dependencies = [
+ "foldhash 0.2.0",
+ "regex",
+ "regex-syntax",
+ "serde_json",
+ "smallvec",
+ "unicode-normalization",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "search-codec"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32c",
+ "memmap2",
+ "rand 0.8.8",
+ "regex-syntax",
+ "serde_json",
+ "thiserror",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "search-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "futures",
+ "futures-util",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "parking_lot",
+ "reqwest",
+ "roll-cluster",
+ "rusqlite",
+ "search-es",
+ "search-index",
+ "search-server",
+ "search-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower-http 0.7.1",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "search-es"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "flate2",
+ "foldhash 0.2.0",
+ "indexmap",
+ "itoa",
+ "libc",
+ "memchr",
+ "parking_lot",
+ "pbkdf2",
+ "rand 0.8.8",
+ "regex",
+ "regex-syntax",
+ "reqwest",
+ "ryu",
+ "search-aggs",
+ "search-analysis",
+ "search-codec",
+ "search-index",
+ "search-painless",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
+name = "search-index"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "foldhash 0.2.0",
+ "hashbrown 0.16.1",
+ "libm",
+ "parking_lot",
+ "rand 0.8.8",
+ "search-analysis",
+ "search-codec",
+ "serde_json",
+ "smallvec",
+ "thiserror",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "search-painless"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "indexmap",
+ "libm",
+ "regex-syntax",
+ "ryu",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "search-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "flate2",
+ "futures",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "libc",
+ "libmimalloc-sys",
+ "mimalloc",
+ "parking_lot",
+ "rcgen",
+ "reqwest",
+ "search-codec",
+ "search-es",
+ "search-index",
+ "search-store",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.6",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "search-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crc32c",
+ "futures",
+ "getrandom 0.4.3",
+ "hashbrown 0.16.1",
+ "memmap2",
+ "parking_lot",
+ "pg-storage",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "search-yaml"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "indexmap",
+ "libc",
+ "rcgen",
+ "regex",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.6",
 ]
 
 [[package]]

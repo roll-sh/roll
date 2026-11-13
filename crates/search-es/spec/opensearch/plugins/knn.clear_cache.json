@@ -1,0 +1,26 @@
+{
+  "knn.clear_cache": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/vector-search/api/knn/",
+      "description": "Evicts the native k-NN graphs of indices from memory."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_knn/clear_cache/{index}",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        }
+      ]
+    },
+    "params": {}
+  }
+}

@@ -1,0 +1,3850 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 2)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "java.nio.HeapByteBuffer[pos=1 lim=3 cap=3]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 1); return [b.limit(), b.get(0), b.get(1)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2, 1, 2]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 1); return b.get(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+       "return b.get(2)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 1); return b.get(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 68,
+       "start": 60,
+       "end": 75
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+     "return b.get(2)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 1); return b.get(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 68,
+     "start": 60,
+     "end": 75
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.get(3)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+       "return b.get(3)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.get(3)",
+      "lang": "painless",
+      "position": {
+       "offset": 62,
+       "start": 54,
+       "end": 69
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+     "return b.get(3)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.get(3)",
+    "lang": "painless",
+    "position": {
+     "offset": 62,
+     "start": 54,
+     "end": 69
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.get(-1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+       "return b.get(-1)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.get(-1)",
+      "lang": "painless",
+      "position": {
+       "offset": 62,
+       "start": 54,
+       "end": 70
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+     "return b.get(-1)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.get(-1)",
+    "lang": "painless",
+    "position": {
+     "offset": 62,
+     "start": 54,
+     "end": 70
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.getInt(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getInt(HeapByteBuffer.java:496)",
+       "return b.getInt(0)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.getInt(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 62,
+       "start": 54,
+       "end": 72
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getInt(HeapByteBuffer.java:496)",
+     "return b.getInt(0)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.getInt(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 62,
+     "start": 54,
+     "end": 72
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}); return b.getShort(4)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getShort(HeapByteBuffer.java:444)",
+       "return b.getShort(4)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}); return b.getShort(4)",
+      "lang": "painless",
+      "position": {
+       "offset": 68,
+       "start": 60,
+       "end": 80
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getShort(HeapByteBuffer.java:444)",
+     "return b.getShort(4)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}); return b.getShort(4)",
+    "lang": "painless",
+    "position": {
+     "offset": 68,
+     "start": 60,
+     "end": 80
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}); return b.getChar(4)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getChar(HeapByteBuffer.java:392)",
+       "return b.getChar(4)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}); return b.getChar(4)",
+      "lang": "painless",
+      "position": {
+       "offset": 68,
+       "start": 60,
+       "end": 79
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getChar(HeapByteBuffer.java:392)",
+     "return b.getChar(4)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}); return b.getChar(4)",
+    "lang": "painless",
+    "position": {
+     "offset": 68,
+     "start": 60,
+     "end": 79
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getLong(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getLong(HeapByteBuffer.java:548)",
+       "return b.getLong(2)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getLong(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 80,
+       "start": 72,
+       "end": 91
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getLong(HeapByteBuffer.java:548)",
+     "return b.getLong(2)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getLong(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 80,
+     "start": 72,
+     "end": 91
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getDouble(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getDouble(HeapByteBuffer.java:657)",
+       "return b.getDouble(2)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getDouble(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 80,
+       "start": 72,
+       "end": 93
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getDouble(HeapByteBuffer.java:657)",
+     "return b.getDouble(2)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getDouble(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 80,
+     "start": 72,
+     "end": 93
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getFloat(6)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getFloat(HeapByteBuffer.java:601)",
+       "return b.getFloat(6)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getFloat(6)",
+      "lang": "painless",
+      "position": {
+       "offset": 80,
+       "start": 72,
+       "end": 92
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getFloat(HeapByteBuffer.java:601)",
+     "return b.getFloat(6)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9}); return b.getFloat(6)",
+    "lang": "painless",
+    "position": {
+     "offset": 80,
+     "start": 72,
+     "end": 92
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); return b.asCharBuffer()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "ABC"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); def c = b.asCharBuffer(); return [c.get(0), c.get(2), c.limit(), c.toString(), c.length()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[A, C, 3, ABC, 3]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); return b.asCharBuffer().get(3)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsCharBufferB.get(ByteBufferAsCharBufferB.java:151)",
+       "return b.asCharBuffer().get(3)",
+       "                       ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); return b.asCharBuffer().get(3)",
+      "lang": "painless",
+      "position": {
+       "offset": 92,
+       "start": 69,
+       "end": 99
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsCharBufferB.get(ByteBufferAsCharBufferB.java:151)",
+     "return b.asCharBuffer().get(3)",
+     "                       ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); return b.asCharBuffer().get(3)",
+    "lang": "painless",
+    "position": {
+     "offset": 92,
+     "start": 69,
+     "end": 99
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}, 1, 5); return [b.asCharBuffer(), b.asCharBuffer().get(0), b.asShortBuffer(), b.asShortBuffer().get(1)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[䄀䈀, 䄀, java.nio.ByteBufferAsShortBufferB[pos=0 lim=2 cap=2], 16896]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1}); return [b.asShortBuffer(), b.asIntBuffer(), b.asLongBuffer(), b.asFloatBuffer(), b.asDoubleBuffer()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[java.nio.ByteBufferAsShortBufferB[pos=0 lim=3 cap=3], java.nio.ByteBufferAsIntBufferB[pos=0 lim=1 cap=1], java.nio.ByteBufferAsLongBufferB[pos=0 lim=0 cap=0], java.nio.ByteBufferAsFloatBufferB[pos=0 lim=1 cap=1], java.nio.ByteBufferAsDoubleBufferB[pos=0 lim=0 cap=0]]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}).order(ByteOrder.LITTLE_ENDIAN); return [b.asShortBuffer(), b.asIntBuffer(), b.asLongBuffer(), b.asFloatBuffer(), b.asDoubleBuffer(), b.asIntBuffer().get(1), b.asLongBuffer().get(0), b.asShortBuffer().get(3), b.asFloatBuffer().get(0), b.asDoubleBuffer().get(0)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[java.nio.ByteBufferAsShortBufferL[pos=0 lim=4 cap=4], java.nio.ByteBufferAsIntBufferL[pos=0 lim=2 cap=2], java.nio.ByteBufferAsLongBufferL[pos=0 lim=1 cap=1], java.nio.ByteBufferAsFloatBufferL[pos=0 lim=2 cap=2], java.nio.ByteBufferAsDoubleBufferL[pos=0 lim=1 cap=1], 151077632, 648873489704435968, 2305, 32.063477, 2.676689306683991E-265]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); IntBuffer i = b.asIntBuffer(); return i.get(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsIntBufferB.get(ByteBufferAsIntBufferB.java:151)",
+       "return i.get(2)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); IntBuffer i = b.asIntBuffer(); return i.get(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 111,
+       "start": 103,
+       "end": 118
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsIntBufferB.get(ByteBufferAsIntBufferB.java:151)",
+     "return i.get(2)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); IntBuffer i = b.asIntBuffer(); return i.get(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 111,
+     "start": 103,
+     "end": 118
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asLongBuffer().get(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsLongBufferB.get(ByteBufferAsLongBufferB.java:151)",
+       "return b.asLongBuffer().get(1)",
+       "                       ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asLongBuffer().get(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 95,
+       "start": 72,
+       "end": 102
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsLongBufferB.get(ByteBufferAsLongBufferB.java:151)",
+     "return b.asLongBuffer().get(1)",
+     "                       ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asLongBuffer().get(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 95,
+     "start": 72,
+     "end": 102
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asDoubleBuffer().get(-1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsDoubleBufferB.get(ByteBufferAsDoubleBufferB.java:151)",
+       "return b.asDoubleBuffer().get(-1)",
+       "                         ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asDoubleBuffer().get(-1)",
+      "lang": "painless",
+      "position": {
+       "offset": 97,
+       "start": 72,
+       "end": 105
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsDoubleBufferB.get(ByteBufferAsDoubleBufferB.java:151)",
+     "return b.asDoubleBuffer().get(-1)",
+     "                         ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asDoubleBuffer().get(-1)",
+    "lang": "painless",
+    "position": {
+     "offset": 97,
+     "start": 72,
+     "end": 105
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asFloatBuffer().get(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsFloatBufferB.get(ByteBufferAsFloatBufferB.java:151)",
+       "return b.asFloatBuffer().get(2)",
+       "                        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asFloatBuffer().get(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 96,
+       "start": 72,
+       "end": 103
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsFloatBufferB.get(ByteBufferAsFloatBufferB.java:151)",
+     "return b.asFloatBuffer().get(2)",
+     "                        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asFloatBuffer().get(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 96,
+     "start": 72,
+     "end": 103
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asShortBuffer().get(4)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsShortBufferB.get(ByteBufferAsShortBufferB.java:151)",
+       "return b.asShortBuffer().get(4)",
+       "                        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asShortBuffer().get(4)",
+      "lang": "painless",
+      "position": {
+       "offset": 96,
+       "start": 72,
+       "end": 103
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsShortBufferB.get(ByteBufferAsShortBufferB.java:151)",
+     "return b.asShortBuffer().get(4)",
+     "                        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66, 0, 67, 1, 9}); return b.asShortBuffer().get(4)",
+    "lang": "painless",
+    "position": {
+     "offset": 96,
+     "start": 72,
+     "end": 103
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65}); def c = b.asCharBuffer(); return [c.limit(), c == c, c.equals(b.asCharBuffer()), c.hashCode() == b.asCharBuffer().hashCode(), b.equals(ByteBuffer.wrap(new byte[] {0, 65})), b.hashCode()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, true, true, true, true, 2976]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}, 1, 2); return [b.equals(ByteBuffer.wrap(new byte[] {2, 3})), b.hashCode(), ByteBuffer.wrap(new byte[] {2, 3}).hashCode()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, 1056, 1056]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[] {1, 2, 3}, 2, 2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.ByteBuffer.wrap(ByteBuffer.java:445)",
+       "ByteBuffer.wrap(new byte[] {1, 2, 3}, 2, 2)",
+       "                ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[] {1, 2, 3}, 2, 2)",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.ByteBuffer.wrap(ByteBuffer.java:445)",
+     "ByteBuffer.wrap(new byte[] {1, 2, 3}, 2, 2)",
+     "                ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[] {1, 2, 3}, 2, 2)",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[] {1, 2, 3}, -1, 2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.ByteBuffer.wrap(ByteBuffer.java:445)",
+       "ByteBuffer.wrap(new byte[] {1, 2, 3}, -1, 2)",
+       "                ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[] {1, 2, 3}, -1, 2)",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.ByteBuffer.wrap(ByteBuffer.java:445)",
+     "ByteBuffer.wrap(new byte[] {1, 2, 3}, -1, 2)",
+     "                ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[] {1, 2, 3}, -1, 2)",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.ByteBuffer.wrap(ByteBuffer.java:472)",
+       "ByteBuffer.wrap(null)",
+       "          ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 21
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.ByteBuffer.wrap(ByteBuffer.java:472)",
+     "ByteBuffer.wrap(null)",
+     "          ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 21
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot read the array length because \"array\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1, 2, 3}); return b.order(null).order()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "LITTLE_ENDIAN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[0]); return [b, b.asCharBuffer(), b.asIntBuffer().limit()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[java.nio.HeapByteBuffer[pos=0 lim=0 cap=0], , 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return [b.getInt(0), b.getInt(3), b.getInt(5), b.asIntBuffer(), b.asIntBuffer().get(0), b.getLong(1)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[16909060, 67438087, 101124105, java.nio.ByteBufferAsIntBufferB[pos=0 lim=1 cap=1], 67438087, 144964032628459529]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return b.getInt(6)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getInt(HeapByteBuffer.java:496)",
+       "return b.getInt(6)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return b.getInt(6)",
+      "lang": "painless",
+      "position": {
+       "offset": 78,
+       "start": 70,
+       "end": 88
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getInt(HeapByteBuffer.java:496)",
+     "return b.getInt(6)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return b.getInt(6)",
+    "lang": "painless",
+    "position": {
+     "offset": 78,
+     "start": 70,
+     "end": 88
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return b.get(9)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+       "return b.get(9)",
+       "        ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return b.get(9)",
+      "lang": "painless",
+      "position": {
+       "offset": 78,
+       "start": 70,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+     "return b.get(9)",
+     "        ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[] {1,2,3,4,5,6,7,8,9}, 3, 6); return b.get(9)",
+    "lang": "painless",
+    "position": {
+     "offset": 78,
+     "start": 70,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); return [b.limit, b.order(), ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN.toString()]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return [b.limit, b.order(), ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN.toString()]",
+       "         ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); return [b.limit, b.order(), ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN.toString()]",
+      "lang": "painless",
+      "position": {
+       "offset": 56,
+       "start": 47,
+       "end": 132
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return [b.limit, b.order(), ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN.toString()]",
+     "         ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); return [b.limit, b.order(), ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN.toString()]",
+    "lang": "painless",
+    "position": {
+     "offset": 56,
+     "start": 47,
+     "end": 132
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "dynamic getter [java.nio.HeapByteBuffer, limit] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); def c = b.asCharBuffer(); return [c instanceof CharSequence, c.charAt(0), c.length(), c.subSequence(0, 1), c.chars().count(), c.isEmpty()]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return [c instanceof CharSequence, c.charAt(0), c.length(), c.subSequence(0, 1), c.chars().count(), c.isEmpty()]",
+       "                                                                                                     ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); def c = b.asCharBuffer(); return [c instanceof CharSequence, c.charAt(0), c.length(), c.subSequence(0, 1), c.chars().count(), c.isEmpty()]",
+      "lang": "painless",
+      "position": {
+       "offset": 174,
+       "start": 73,
+       "end": 185
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return [c instanceof CharSequence, c.charAt(0), c.length(), c.subSequence(0, 1), c.chars().count(), c.isEmpty()]",
+     "                                                                                                     ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); def c = b.asCharBuffer(); return [c instanceof CharSequence, c.charAt(0), c.length(), c.subSequence(0, 1), c.chars().count(), c.isEmpty()]",
+    "lang": "painless",
+    "position": {
+     "offset": 174,
+     "start": 73,
+     "end": 185
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "dynamic method [java.nio.ByteBufferAsCharBufferB, isEmpty/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66}); CharBuffer c = b.asCharBuffer(); return c + 'x'",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "ABx"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[] {0, 65, 0, 66}); return b.asCharBuffer().toString().length()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "2"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); def c = b.asCharBuffer(); return [c instanceof CharSequence, c.charAt(0), c.length(), c.subSequence(0, 1), c.chars().count()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, A, 2, A, 2]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); CharSequence c = b.asCharBuffer(); return [c.charAt(1), c.length(), c.subSequence(1, 2), c.toString(), c.codePoints().count(), c.isEmpty()]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... c.codePoints().count(), c.isEmpty()]",
+       "                             ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); CharSequence c = b.asCharBuffer(); return [c.charAt(1), c.length(), c.subSequence(1, 2), c.toString(), c.codePoints().count(), c.isEmpty()]",
+      "lang": "painless",
+      "position": {
+       "offset": 177,
+       "start": 152,
+       "end": 188
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... c.codePoints().count(), c.isEmpty()]",
+     "                             ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); CharSequence c = b.asCharBuffer(); return [c.charAt(1), c.length(), c.subSequence(1, 2), c.toString(), c.codePoints().count(), c.isEmpty()]",
+    "lang": "painless",
+    "position": {
+     "offset": 177,
+     "start": 152,
+     "end": 188
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.CharSequence, isEmpty/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); CharSequence c = b.asCharBuffer(); return c.charAt(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.CharBuffer.charAt(CharBuffer.java:2024)",
+       "return c.charAt(2)",
+       "        ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); CharSequence c = b.asCharBuffer(); return c.charAt(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 92,
+       "start": 84,
+       "end": 102
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.CharBuffer.charAt(CharBuffer.java:2024)",
+     "return c.charAt(2)",
+     "        ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); CharSequence c = b.asCharBuffer(); return c.charAt(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 92,
+     "start": 84,
+     "end": 102
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); def c = b.asCharBuffer(); return [c.limit(), c.equals('AB'), c.compareTo(b.asCharBuffer()), c.hashCode()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[2, false, 0, 3072]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); def c = b.asIntBuffer(); return [c.limit(), c.hashCode(), c.equals(b.asIntBuffer()), c.get(0)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 4259937, true, 4259906]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return [b.asCharBuffer() instanceof Buffer, b instanceof Buffer, b.asIntBuffer() instanceof Comparable, b instanceof Comparable]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[true, true, true, true]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return 'x' =~ /x/ && b.asCharBuffer() ==~ /AB/",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return 'x' =~ /x/ && b.asCharBuffer() ==~ /AB/",
+       "                      ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return 'x' =~ /x/ && b.asCharBuffer() ==~ /AB/",
+      "lang": "painless",
+      "position": {
+       "offset": 71,
+       "start": 49,
+       "end": 95
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return 'x' =~ /x/ && b.asCharBuffer() ==~ /AB/",
+     "                      ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return 'x' =~ /x/ && b.asCharBuffer() ==~ /AB/",
+    "lang": "painless",
+    "position": {
+     "offset": 71,
+     "start": 49,
+     "end": 95
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "cannot implicitly cast def [java.nio.ByteBufferAsCharBufferB] to java.lang.String"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return /A/.matcher(b.asCharBuffer()).find()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {1,2,3,4}); return b.order(ByteOrder.LITTLE_ENDIAN).getInt(0) + ' ' + b.getShort(2) + ' ' + b.getChar(0) + ' ' + b.order()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "67305985 1027 ȁ LITTLE_ENDIAN"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.asCharBuffer().get(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsCharBufferB.get(ByteBufferAsCharBufferB.java:151)",
+       "return b.asCharBuffer().get(2)",
+       "                       ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.asCharBuffer().get(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 72,
+       "start": 49,
+       "end": 79
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsCharBufferB.get(ByteBufferAsCharBufferB.java:151)",
+     "return b.asCharBuffer().get(2)",
+     "                       ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.asCharBuffer().get(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 72,
+     "start": 49,
+     "end": 79
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.get(4)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+       "return b.get(4)",
+       "        ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.get(4)",
+      "lang": "painless",
+      "position": {
+       "offset": 57,
+       "start": 49,
+       "end": 64
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.HeapByteBuffer.get(HeapByteBuffer.java:180)",
+     "return b.get(4)",
+     "        ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.get(4)",
+    "lang": "painless",
+    "position": {
+     "offset": 57,
+     "start": 49,
+     "end": 64
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.getInt(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getInt(HeapByteBuffer.java:496)",
+       "return b.getInt(1)",
+       "        ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.getInt(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 57,
+       "start": 49,
+       "end": 67
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getInt(HeapByteBuffer.java:496)",
+     "return b.getInt(1)",
+     "        ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[] {0,65,0,66}); return b.getInt(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 57,
+     "start": 49,
+     "end": 67
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).getChar(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getChar(HeapByteBuffer.java:392)",
+       "ByteBuffer.wrap(new byte[0]).getChar(0)",
+       "                            ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).getChar(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 39
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getChar(HeapByteBuffer.java:392)",
+     "ByteBuffer.wrap(new byte[0]).getChar(0)",
+     "                            ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).getChar(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 39
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).getShort(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getShort(HeapByteBuffer.java:444)",
+       "ByteBuffer.wrap(new byte[0]).getShort(0)",
+       "                            ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).getShort(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 40
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getShort(HeapByteBuffer.java:444)",
+     "ByteBuffer.wrap(new byte[0]).getShort(0)",
+     "                            ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).getShort(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 40
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).getLong(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getLong(HeapByteBuffer.java:548)",
+       "ByteBuffer.wrap(new byte[0]).getLong(0)",
+       "                            ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).getLong(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 39
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getLong(HeapByteBuffer.java:548)",
+     "ByteBuffer.wrap(new byte[0]).getLong(0)",
+     "                            ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).getLong(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 39
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).getFloat(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getFloat(HeapByteBuffer.java:601)",
+       "ByteBuffer.wrap(new byte[0]).getFloat(0)",
+       "                            ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).getFloat(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 40
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getFloat(HeapByteBuffer.java:601)",
+     "ByteBuffer.wrap(new byte[0]).getFloat(0)",
+     "                            ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).getFloat(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 40
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).getDouble(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.HeapByteBuffer.getDouble(HeapByteBuffer.java:657)",
+       "ByteBuffer.wrap(new byte[0]).getDouble(0)",
+       "                            ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).getDouble(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 28,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.HeapByteBuffer.getDouble(HeapByteBuffer.java:657)",
+     "ByteBuffer.wrap(new byte[0]).getDouble(0)",
+     "                            ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).getDouble(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 28,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).asCharBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsCharBufferB.get(ByteBufferAsCharBufferB.java:151)",
+       "ByteBuffer.wrap(new byte[0]).asCharBuffer().get(0)",
+       "                                           ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).asCharBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 43,
+       "start": 0,
+       "end": 50
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsCharBufferB.get(ByteBufferAsCharBufferB.java:151)",
+     "ByteBuffer.wrap(new byte[0]).asCharBuffer().get(0)",
+     "                                           ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).asCharBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 43,
+     "start": 0,
+     "end": 50
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).asShortBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsShortBufferB.get(ByteBufferAsShortBufferB.java:151)",
+       "ByteBuffer.wrap(new byte[0]).asShortBuffer().get(0)",
+       "                                            ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).asShortBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 44,
+       "start": 0,
+       "end": 51
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsShortBufferB.get(ByteBufferAsShortBufferB.java:151)",
+     "ByteBuffer.wrap(new byte[0]).asShortBuffer().get(0)",
+     "                                            ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).asShortBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 44,
+     "start": 0,
+     "end": 51
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).asIntBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsIntBufferB.get(ByteBufferAsIntBufferB.java:151)",
+       "ByteBuffer.wrap(new byte[0]).asIntBuffer().get(0)",
+       "                                          ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).asIntBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 42,
+       "start": 0,
+       "end": 49
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsIntBufferB.get(ByteBufferAsIntBufferB.java:151)",
+     "ByteBuffer.wrap(new byte[0]).asIntBuffer().get(0)",
+     "                                          ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).asIntBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 42,
+     "start": 0,
+     "end": 49
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).asLongBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsLongBufferB.get(ByteBufferAsLongBufferB.java:151)",
+       "ByteBuffer.wrap(new byte[0]).asLongBuffer().get(0)",
+       "                                           ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).asLongBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 43,
+       "start": 0,
+       "end": 50
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsLongBufferB.get(ByteBufferAsLongBufferB.java:151)",
+     "ByteBuffer.wrap(new byte[0]).asLongBuffer().get(0)",
+     "                                           ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).asLongBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 43,
+     "start": 0,
+     "end": 50
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).asFloatBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsFloatBufferB.get(ByteBufferAsFloatBufferB.java:151)",
+       "ByteBuffer.wrap(new byte[0]).asFloatBuffer().get(0)",
+       "                                            ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).asFloatBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 44,
+       "start": 0,
+       "end": 51
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsFloatBufferB.get(ByteBufferAsFloatBufferB.java:151)",
+     "ByteBuffer.wrap(new byte[0]).asFloatBuffer().get(0)",
+     "                                            ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).asFloatBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 44,
+     "start": 0,
+     "end": 51
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).asDoubleBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsDoubleBufferB.get(ByteBufferAsDoubleBufferB.java:151)",
+       "ByteBuffer.wrap(new byte[0]).asDoubleBuffer().get(0)",
+       "                                             ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).asDoubleBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 45,
+       "start": 0,
+       "end": 52
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsDoubleBufferB.get(ByteBufferAsDoubleBufferB.java:151)",
+     "ByteBuffer.wrap(new byte[0]).asDoubleBuffer().get(0)",
+     "                                             ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).asDoubleBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 45,
+     "start": 0,
+     "end": 52
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsCharBufferL.get(ByteBufferAsCharBufferL.java:151)",
+       "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().get(0)",
+       "                                                                          ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 74,
+       "start": 0,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsCharBufferL.get(ByteBufferAsCharBufferL.java:151)",
+     "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().get(0)",
+     "                                                                          ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 74,
+     "start": 0,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsShortBufferL.get(ByteBufferAsShortBufferL.java:151)",
+       "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(0)",
+       "                                                                           ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 75,
+       "start": 0,
+       "end": 82
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsShortBufferL.get(ByteBufferAsShortBufferL.java:151)",
+     "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(0)",
+     "                                                                           ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 75,
+     "start": 0,
+     "end": 82
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsIntBufferL.get(ByteBufferAsIntBufferL.java:151)",
+       "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(0)",
+       "                                                                         ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 73,
+       "start": 0,
+       "end": 80
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsIntBufferL.get(ByteBufferAsIntBufferL.java:151)",
+     "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(0)",
+     "                                                                         ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 73,
+     "start": 0,
+     "end": 80
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asLongBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsLongBufferL.get(ByteBufferAsLongBufferL.java:151)",
+       "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asLongBuffer().get(0)",
+       "                                                                          ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asLongBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 74,
+       "start": 0,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsLongBufferL.get(ByteBufferAsLongBufferL.java:151)",
+     "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asLongBuffer().get(0)",
+     "                                                                          ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asLongBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 74,
+     "start": 0,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsFloatBufferL.get(ByteBufferAsFloatBufferL.java:151)",
+       "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(0)",
+       "                                                                           ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 75,
+       "start": 0,
+       "end": 82
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsFloatBufferL.get(ByteBufferAsFloatBufferL.java:151)",
+     "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(0)",
+     "                                                                           ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 75,
+     "start": 0,
+     "end": 82
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer().get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+       "java.base/java.nio.ByteBufferAsDoubleBufferL.get(ByteBufferAsDoubleBufferL.java:151)",
+       "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer().get(0)",
+       "                                                                            ^---- HERE"
+      ],
+      "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer().get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 76,
+       "start": 0,
+       "end": 83
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:767)",
+     "java.base/java.nio.ByteBufferAsDoubleBufferL.get(ByteBufferAsDoubleBufferL.java:151)",
+     "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer().get(0)",
+     "                                                                            ^---- HERE"
+    ],
+    "script": "ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer().get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 76,
+     "start": 0,
+     "end": 83
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "CharSequence c = ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer(); return c.charAt(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+       "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+       "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+       "java.base/java.nio.CharBuffer.charAt(CharBuffer.java:2024)",
+       "return c.charAt(0)",
+       "        ^---- HERE"
+      ],
+      "script": "CharSequence c = ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer(); return c.charAt(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 101,
+       "start": 93,
+       "end": 111
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:756)",
+     "java.base/java.nio.Buffer$1.apply(Buffer.java:753)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:213)",
+     "java.base/jdk.internal.util.Preconditions$4.apply(Preconditions.java:210)",
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:98)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.nio.Buffer.checkIndex(Buffer.java:778)",
+     "java.base/java.nio.CharBuffer.charAt(CharBuffer.java:2024)",
+     "return c.charAt(0)",
+     "        ^---- HERE"
+    ],
+    "script": "CharSequence c = ByteBuffer.wrap(new byte[0]).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer(); return c.charAt(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 101,
+     "start": 93,
+     "end": 111
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(1, 4)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+       "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+       "java.base/java.util.Objects.checkFromToIndex(Objects.java:391)",
+       "java.base/java.nio.ByteBufferAsCharBufferB.subSequence(ByteBufferAsCharBufferB.java:242)",
+       "java.base/java.nio.ByteBufferAsCharBufferB.subSequence(ByteBufferAsCharBufferB.java:39)",
+       "return c.subSequence(1, 4)",
+       "        ^---- HERE"
+      ],
+      "script": "CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(1, 4)",
+      "lang": "painless",
+      "position": {
+       "offset": 85,
+       "start": 77,
+       "end": 103
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+     "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+     "java.base/java.util.Objects.checkFromToIndex(Objects.java:391)",
+     "java.base/java.nio.ByteBufferAsCharBufferB.subSequence(ByteBufferAsCharBufferB.java:242)",
+     "java.base/java.nio.ByteBufferAsCharBufferB.subSequence(ByteBufferAsCharBufferB.java:39)",
+     "return c.subSequence(1, 4)",
+     "        ^---- HERE"
+    ],
+    "script": "CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(1, 4)",
+    "lang": "painless",
+    "position": {
+     "offset": 85,
+     "start": 77,
+     "end": 103
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": "Range [1, 4) out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return [c.subSequence(1, 3), c.subSequence(1, 3).length(), c.subSequence(1,3).charAt(1)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[BC, 2, C]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(2, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+       "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+       "java.base/java.util.Objects.checkFromToIndex(Objects.java:391)",
+       "java.base/java.nio.ByteBufferAsCharBufferB.subSequence(ByteBufferAsCharBufferB.java:242)",
+       "java.base/java.nio.ByteBufferAsCharBufferB.subSequence(ByteBufferAsCharBufferB.java:39)",
+       "return c.subSequence(2, 1)",
+       "        ^---- HERE"
+      ],
+      "script": "CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(2, 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 85,
+       "start": 77,
+       "end": 103
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckFromToIndex(Preconditions.java:112)",
+     "java.base/jdk.internal.util.Preconditions.checkFromToIndex(Preconditions.java:349)",
+     "java.base/java.util.Objects.checkFromToIndex(Objects.java:391)",
+     "java.base/java.nio.ByteBufferAsCharBufferB.subSequence(ByteBufferAsCharBufferB.java:242)",
+     "java.base/java.nio.ByteBufferAsCharBufferB.subSequence(ByteBufferAsCharBufferB.java:39)",
+     "return c.subSequence(2, 1)",
+     "        ^---- HERE"
+    ],
+    "script": "CharSequence c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(2, 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 85,
+     "start": 77,
+     "end": 103
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": "Range [2, 1) out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.subSequence(1, 3).get(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "B"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return [c.subSequence(1, 3).limit(), c.subSequence(1, 3).get(0), c.subSequence(1,3).hashCode()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[3, A, 3104]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asIntBuffer(); return c.compareTo(ByteBuffer.wrap(new byte[]{0,65,0,67}).asIntBuffer())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "-1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.compareTo(ByteBuffer.wrap(new byte[]{0,65,0,66}).asCharBuffer())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def c = ByteBuffer.wrap(new byte[]{1,2,3}); return [c.compareTo(ByteBuffer.wrap(new byte[]{1,2})), c.compareTo(ByteBuffer.wrap(new byte[]{1,-2})), c.equals(c), c.equals(null), c.equals('x')]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 4, true, false, false]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.compareTo('x')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.CharBuffer.compareTo(CharBuffer.java:292)",
+       "return c.compareTo('x')",
+       "        ^---- HERE"
+      ],
+      "script": "def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.compareTo('x')",
+      "lang": "painless",
+      "position": {
+       "offset": 76,
+       "start": 68,
+       "end": 91
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.CharBuffer.compareTo(CharBuffer.java:292)",
+     "return c.compareTo('x')",
+     "        ^---- HERE"
+    ],
+    "script": "def c = ByteBuffer.wrap(new byte[]{0,65,0,66,0,67}).asCharBuffer(); return c.compareTo('x')",
+    "lang": "painless",
+    "position": {
+     "offset": 76,
+     "start": 68,
+     "end": 91
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "class java.lang.String cannot be cast to class java.nio.CharBuffer (java.lang.String and java.nio.CharBuffer are in module java.base of loader 'bootstrap')"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer c = ByteBuffer.wrap(new byte[]{0,0,0,0,0,0,0,0, 127,-8,0,0,0,0,0,0}); def d = c.asDoubleBuffer(); return [d.get(1), d.equals(ByteBuffer.wrap(new byte[]{0,0,0,0,0,0,0,0, 127,-8,0,0,0,0,0,1}).asDoubleBuffer()), d.hashCode()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[NaN, true, 961]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer c = ByteBuffer.wrap(new byte[]{-128,0,0,0,0,0,0,0}); def d = c.asDoubleBuffer(); return [d.get(0), d.equals(ByteBuffer.wrap(new byte[8]).asDoubleBuffer()), d.compareTo(ByteBuffer.wrap(new byte[8]).asDoubleBuffer())]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[-0.0, true, 0]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{1,2,3,4,5}, 1, 3); return [b.asShortBuffer(), b.asShortBuffer().get(0), b.hashCode(), b.toString()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[java.nio.ByteBufferAsShortBufferB[pos=0 lim=1 cap=1], 515, 33730, java.nio.HeapByteBuffer[pos=1 lim=4 cap=5]]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return b.asCharBuffer().chars().sum()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "131"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return String.valueOf(b.asCharBuffer()) + b.asCharBuffer().toString()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "ABAB"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); StringBuilder sb = new StringBuilder(); sb.append(b.asCharBuffer()); sb.append(b); return sb.toString()",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "ABjava.nio.HeapByteBuffer[pos=0 lim=4 cap=4]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return 'AB'.contentEquals(b.asCharBuffer())",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "true"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return [b.asCharBuffer().getClass(), b.getClass(), b.asLongBuffer().getClass().getName()]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "return [b.asCharBuffer().getClass(), b.getClass(), b.asLongBuffer().getClass().getName()]",
+       "                        ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return [b.asCharBuffer().getClass(), b.getClass(), b.asLongBuffer().getClass().getName()]",
+      "lang": "painless",
+      "position": {
+       "offset": 72,
+       "start": 48,
+       "end": 137
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "return [b.asCharBuffer().getClass(), b.getClass(), b.asLongBuffer().getClass().getName()]",
+     "                        ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[]{0,65,0,66}); return [b.asCharBuffer().getClass(), b.getClass(), b.asLongBuffer().getClass().getName()]",
+    "lang": "painless",
+    "position": {
+     "offset": 72,
+     "start": 48,
+     "end": 137
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "dynamic method [java.nio.ByteBufferAsCharBufferB, getClass/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{1}); return b.compareTo(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.ByteBuffer.compareTo(ByteBuffer.java:1847)",
+       "java.base/java.nio.ByteBuffer.compareTo(ByteBuffer.java:292)",
+       "return b.compareTo(null)",
+       "        ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[]{1}); return b.compareTo(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 40,
+       "end": 64
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.ByteBuffer.compareTo(ByteBuffer.java:1847)",
+     "java.base/java.nio.ByteBuffer.compareTo(ByteBuffer.java:292)",
+     "return b.compareTo(null)",
+     "        ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[]{1}); return b.compareTo(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 40,
+     "end": 64
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot invoke \"java.nio.ByteBuffer.position()\" because \"that\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{1}).asIntBuffer(); return b.compareTo(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.IntBuffer.compareTo(IntBuffer.java:1847)",
+       "java.base/java.nio.IntBuffer.compareTo(IntBuffer.java:292)",
+       "return b.compareTo(null)",
+       "        ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[]{1}).asIntBuffer(); return b.compareTo(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 62,
+       "start": 54,
+       "end": 78
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.IntBuffer.compareTo(IntBuffer.java:1847)",
+     "java.base/java.nio.IntBuffer.compareTo(IntBuffer.java:292)",
+     "return b.compareTo(null)",
+     "        ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[]{1}).asIntBuffer(); return b.compareTo(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 62,
+     "start": 54,
+     "end": 78
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot invoke \"java.nio.IntBuffer.position()\" because \"that\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{1}); return b.compareTo('x')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.ByteBuffer.compareTo(ByteBuffer.java:292)",
+       "return b.compareTo('x')",
+       "        ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[]{1}); return b.compareTo('x')",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 40,
+       "end": 63
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.ByteBuffer.compareTo(ByteBuffer.java:292)",
+     "return b.compareTo('x')",
+     "        ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[]{1}); return b.compareTo('x')",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 40,
+     "end": 63
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "class java.lang.String cannot be cast to class java.nio.ByteBuffer (java.lang.String and java.nio.ByteBuffer are in module java.base of loader 'bootstrap')"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{1,2,3,4}).asIntBuffer(); return b.compareTo(ByteBuffer.wrap(new byte[]{1}))",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.IntBuffer.compareTo(IntBuffer.java:292)",
+       "return b.compareTo(ByteBuffer.wrap(new byte[]{1}))",
+       "                                   ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[]{1,2,3,4}).asIntBuffer(); return b.compareTo(ByteBuffer.wrap(new byte[]{1}))",
+      "lang": "painless",
+      "position": {
+       "offset": 95,
+       "start": 60,
+       "end": 110
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.IntBuffer.compareTo(IntBuffer.java:292)",
+     "return b.compareTo(ByteBuffer.wrap(new byte[]{1}))",
+     "                                   ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[]{1,2,3,4}).asIntBuffer(); return b.compareTo(ByteBuffer.wrap(new byte[]{1}))",
+    "lang": "painless",
+    "position": {
+     "offset": 95,
+     "start": 60,
+     "end": 110
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "class java.nio.HeapByteBuffer cannot be cast to class java.nio.IntBuffer (java.nio.HeapByteBuffer and java.nio.IntBuffer are in module java.base of loader 'bootstrap')"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def b = ByteBuffer.wrap(new byte[]{1,2,3,4}).asCharBuffer(); return b.compareTo(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.CharBuffer.compareTo(CharBuffer.java:1847)",
+       "java.base/java.nio.CharBuffer.compareTo(CharBuffer.java:292)",
+       "return b.compareTo(null)",
+       "        ^---- HERE"
+      ],
+      "script": "def b = ByteBuffer.wrap(new byte[]{1,2,3,4}).asCharBuffer(); return b.compareTo(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 69,
+       "start": 61,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.CharBuffer.compareTo(CharBuffer.java:1847)",
+     "java.base/java.nio.CharBuffer.compareTo(CharBuffer.java:292)",
+     "return b.compareTo(null)",
+     "        ^---- HERE"
+    ],
+    "script": "def b = ByteBuffer.wrap(new byte[]{1,2,3,4}).asCharBuffer(); return b.compareTo(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 69,
+     "start": 61,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": "Cannot invoke \"java.nio.CharBuffer.position()\" because \"that\" is null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ByteBuffer b = ByteBuffer.wrap(new byte[]{1,2,3,4}); return b.compareTo(b.asShortBuffer())",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.nio.ByteBuffer.compareTo(ByteBuffer.java:292)",
+       "return b.compareTo(b.asShortBuffer())",
+       "                    ^---- HERE"
+      ],
+      "script": "ByteBuffer b = ByteBuffer.wrap(new byte[]{1,2,3,4}); return b.compareTo(b.asShortBuffer())",
+      "lang": "painless",
+      "position": {
+       "offset": 73,
+       "start": 53,
+       "end": 90
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.nio.ByteBuffer.compareTo(ByteBuffer.java:292)",
+     "return b.compareTo(b.asShortBuffer())",
+     "                    ^---- HERE"
+    ],
+    "script": "ByteBuffer b = ByteBuffer.wrap(new byte[]{1,2,3,4}); return b.compareTo(b.asShortBuffer())",
+    "lang": "painless",
+    "position": {
+     "offset": 73,
+     "start": 53,
+     "end": 90
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "class java.nio.ByteBufferAsShortBufferB cannot be cast to class java.nio.ByteBuffer (java.nio.ByteBufferAsShortBufferB and java.nio.ByteBuffer are in module java.base of loader 'bootstrap')"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [ByteBuffer.wrap(new byte[]{3}), ByteBuffer.wrap(new byte[]{1}), ByteBuffer.wrap(new byte[]{2})]; Collections.sort(l); return l",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[java.nio.HeapByteBuffer[pos=0 lim=1 cap=1], java.nio.HeapByteBuffer[pos=0 lim=1 cap=1], java.nio.HeapByteBuffer[pos=0 lim=1 cap=1]]"
+  }
+ }
+]

@@ -329,6 +329,37 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   `Operator`). A product that serves users reads `SignedIn`; everything else stays operator-only
   (403 for users). Never log or echo a code, token or seed. Tests: `roll-accounts/tests/flows.rs`
   (fake providers, file outbox) and `rolld/tests/auth.rs`.
+- **Secrets (roll secrets: a project's secrets and environment variables):**
+  - The design and the HTTP contract are `docs/secrets.md`; `apps/dashboard/src/lib/secrets-api.ts`
+    is its client (change both together). `crates/roll-secrets` is the store, crypto and router
+    (`/v1/secrets`); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
+    `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`.
+  - Values are encrypted with the project's data key, sealed by `ROLL_SECRET_KEY`, and bound to
+    their row (project, secret, version) as associated data. A value never goes in a log, a
+    `Debug`, an error, an audit row, a change's or request's diff, or a command line: `Value`
+    redacts itself, and containers get env values by name (`code-preview/src/docker.rs`).
+  - Only the `reveal` routes return values. Every read of values and every write is audited.
+    Anything that touches a second environment (a reference, an import, a base, a promote's
+    source) checks the caller through `Caller::allows`; checks, sandboxes and previews resolve
+    untrusted (`Secrets::untrusted`, `"untrusted": true`): never a protected environment.
+  - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
+    canvas proves nothing about who owns what's on it: anything acting on a resource through a
+    project asks `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll
+    previews), never membership alone. What a person made (tokens and their tokens, identities,
+    syncs) acts only while they can sign in and still reach the project (`maker_reaches`).
+  - Workload identities (`identities.rs`) log CI in with its own OIDC token: an issuer is a URL a
+    tenant chose, fetched only through rolld's guarded client (`Deliver::get`), and a shared issuer
+    (GitHub, GitLab) needs a subject that names one repo.
+  - roll-secrets knows no product: a resource is linkable through a `LinkProvider` that rolld
+    registers, calling the product's own routes in process. A product's credential is never its
+    shared password when it can issue keys of its own. Issuing and revoking happen outside the
+    database transaction; a write closure only touches the database.
+  - Read-then-writes are one `code_sql` write (SQLite or the system database's `secrets` schema,
+    shared by every node); background work claims each item in a write before acting on it.
+  - Tests: flows in `crates/roll-secrets/tests/api.rs` (also on Postgres with
+    `ROLL_CODE_TEST_DATABASE`), two nodes in `tests/nodes.rs`, the CLI in
+    `crates/roll-cli/tests/secrets.rs`, dashboard logic in `apps/dashboard/src/lib/secrets-*.test.ts`.
+    No test calls a real product or platform: use fake providers.
 - **Agents (roll code agents: the agent harness on a canvas):**
   - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
     for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and
@@ -448,6 +479,28 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Put new tests in the matching file: differential scripts in `crates/nosql-server/tests/compat/*.cql`, drivers in `tests/drivers.rs`, persistence in `tests/storage.rs`, `branches.rs` and `restore.rs`, several nodes sharing databases in `crates/nosql-control/tests/cluster.rs`.
   - On a fleet a database is loaded only on the holder of its lease `nosql:db:<id>`, and every manifest write is a compare-and-swap (`nosql_storage::manifest::swap_manifest`): never `put` a manifest. The design is "On a fleet" in `docs/nosql/architecture.md`.
   - SSTable backup imports: format parsers are unit-tested in `crates/nosql-sstable-import`, imports end to end in `crates/nosql-control/tests/import_sstables.rs`. Its fixtures are made by `tests/fixtures/generate.sh` on the references (`imp_` keyspaces; `cleanup.sh` drops them and their snapshots).
+- **Search (Elasticsearch / OpenSearch compatible):**
+  - The design is in `docs/search/` (start with `README.md` and `architecture.md`; cross-crate
+    interfaces in `contracts.md`). The target is 1:1 client-visible behaviour with Elasticsearch
+    9.5.5, plus an OpenSearch 3.9 dialect: gate on `Dialect`, never on a guess.
+  - `search-analysis`, `search-codec`, `search-index`, `search-aggs` and `search-painless` are the
+    engine (no I/O); `search-store` is object storage (WAL, segments, manifests, branches, GC);
+    `search-es` is the REST API; `search-server` the multi-tenant node; `search-control`
+    `/v1/search`, metering and the fleet; `search-yaml` the YAML REST runner.
+  - On a fleet a cluster is loaded only on the holder of its lease `search:cluster:<name>`
+    (`search_control::cluster`), and every request for it runs there (`Cluster::dispatch`). Writes
+    are fenced by the ownership markers in object storage (`Store::claim_next`), never by the
+    lease's epoch, and acknowledged once their WAL batch is in object storage. A call about one
+    cluster under `/v1/search/clusters/{id}/` runs on its owner; put new ones there.
+  - Elasticsearch's YAML suites and module sources are downloaded at test time into `target/`
+    (they aren't Apache-licensed): never commit them. Only test ids go in
+    `crates/search-yaml/baseline/`, and a pass count only goes up (`docs/search/compatibility.md`
+    holds the minimums).
+  - After touching anything search-related, run `pnpm test:search` (it skips itself when nothing
+    relevant changed; `--unit` skips Docker). Put new tests in the matching place: engine
+    behaviour as unit tests in its crate, REST behaviour as fixtures checked against Elasticsearch
+    (`search-es/tests/`), the node in `search-server/tests/`, `/v1/search` and the fleet in
+    `search-control/tests/{control,cluster}.rs`, the CLI in `roll-cli/tests/search.rs`.
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.
   - Test Postgres with `docker run --rm postgres:18-alpine psql "postgres://...@host.docker.internal:55432/main?options=endpoint%3D<ep>"`, because there is no local psql.

@@ -56,6 +56,9 @@ pub struct CheckSpec {
     pub memory_mb: u32,
     pub cpus: f64,
     pub env: BTreeMap<String, String>,
+    /// A roll secrets environment (`development`, `staging:/api`) of the repo's workspace project
+    /// whose values the check gets (docs/secrets.md); never a protected one.
+    pub secrets: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +105,7 @@ struct RawCheck {
     cpus: Option<f64>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    secrets: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +166,7 @@ impl RollToml {
                     memory_mb: memory(&at, c.memory)?,
                     cpus: cpus(&at, c.cpus)?,
                     env: env(&at, c.env)?,
+                    secrets: secrets(&at, c.secrets)?,
                 },
             );
         }
@@ -262,6 +267,18 @@ fn cpus(at: &str, cpus: Option<f64>) -> Result<f64, String> {
         return Err(format!("{FILE} {at}: cpus must be 0.1-16"));
     }
     Ok(cpus)
+}
+
+/// `env` or `env:/folder`: an environment's slug and a folder path.
+fn secrets(at: &str, s: Option<String>) -> Result<Option<String>, String> {
+    let Some(s) = s else { return Ok(None) };
+    let (env, path) = s.split_once(':').unwrap_or((&s, "/"));
+    let slug = (1..=32).contains(&env.len()) && env.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let folder = path.starts_with('/') && path.len() <= 600 && path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/_-".contains(&b));
+    if !slug || !folder {
+        return Err(format!("{FILE} {at}: secrets is an environment (development) or an environment and folder (staging:/api)"));
+    }
+    Ok(Some(s))
 }
 
 fn env(at: &str, env: BTreeMap<String, String>) -> Result<BTreeMap<String, String>, String> {

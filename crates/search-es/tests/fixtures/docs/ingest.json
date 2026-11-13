@@ -1,0 +1,714 @@
+{
+  "description" : "Ingest pipelines: simulate, processors, on_failure and default pipelines",
+  "steps" : [
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-p1",
+      "body" : {
+        "description" : "test",
+        "processors" : [
+          {
+            "set" : {
+              "field" : "stage",
+              "value" : "{{_source.kind}}-one"
+            }
+          },
+          {
+            "rename" : {
+              "field" : "old",
+              "target_field" : "new",
+              "ignore_missing" : true
+            }
+          },
+          {
+            "lowercase" : {
+              "field" : "name"
+            }
+          },
+          {
+            "split" : {
+              "field" : "csv",
+              "separator" : ","
+            }
+          },
+          {
+            "convert" : {
+              "field" : "num",
+              "type" : "integer"
+            }
+          },
+          {
+            "grok" : {
+              "field" : "msg",
+              "patterns" : [
+                "%{IP:client} %{WORD:method} %{NUMBER:bytes:int}"
+              ],
+              "ignore_missing" : true
+            }
+          },
+          {
+            "date" : {
+              "field" : "ts",
+              "formats" : [
+                "dd/MM/yyyy"
+              ],
+              "target_field" : "when"
+            }
+          },
+          {
+            "remove" : {
+              "field" : "ts"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "GET /_ingest/pipeline/es-docs-p1",
+      "status" : 200,
+      "response" : {
+        "es-docs-p1" : {
+          "description" : "test",
+          "processors" : [
+            {
+              "set" : {
+                "field" : "stage",
+                "value" : "{{_source.kind}}-one"
+              }
+            },
+            {
+              "rename" : {
+                "field" : "old",
+                "target_field" : "new",
+                "ignore_missing" : true
+              }
+            },
+            {
+              "lowercase" : {
+                "field" : "name"
+              }
+            },
+            {
+              "split" : {
+                "field" : "csv",
+                "separator" : ","
+              }
+            },
+            {
+              "convert" : {
+                "field" : "num",
+                "type" : "integer"
+              }
+            },
+            {
+              "grok" : {
+                "field" : "msg",
+                "patterns" : [
+                  "%{IP:client} %{WORD:method} %{NUMBER:bytes:int}"
+                ],
+                "ignore_missing" : true
+              }
+            },
+            {
+              "date" : {
+                "field" : "ts",
+                "formats" : [
+                  "dd/MM/yyyy"
+                ],
+                "target_field" : "when"
+              }
+            },
+            {
+              "remove" : {
+                "field" : "ts"
+              }
+            }
+          ],
+          "created_date_millis" : 1792659529002,
+          "modified_date_millis" : 1792659529002
+        }
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/es-docs-p1/_simulate",
+      "body" : {
+        "docs" : [
+          {
+            "_source" : {
+              "kind" : "x",
+              "old" : 1,
+              "name" : "ABC",
+              "csv" : "a,b",
+              "num" : "42",
+              "msg" : "1.2.3.4 GET 512",
+              "ts" : "02/03/2024"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "msg" : "1.2.3.4 GET 512",
+                "new" : 1,
+                "stage" : "x-one",
+                "method" : "GET",
+                "kind" : "x",
+                "bytes" : 512,
+                "csv" : [
+                  "a",
+                  "b"
+                ],
+                "num" : 42,
+                "name" : "abc",
+                "client" : "1.2.3.4",
+                "when" : "2024-03-02T00:00:00.000Z"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T08:58:49.094185396Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/es-docs-p1/_simulate?verbose=true",
+      "body" : {
+        "docs" : [
+          {
+            "_index" : "i",
+            "_id" : "1",
+            "_source" : {
+              "kind" : "y",
+              "name" : "X",
+              "csv" : "c",
+              "num" : "7",
+              "ts" : "01/01/2020"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "processor_results" : [
+              {
+                "processor_type" : "set",
+                "status" : "success",
+                "doc" : {
+                  "_index" : "i",
+                  "_version" : "-3",
+                  "_id" : "1",
+                  "_source" : {
+                    "stage" : "y-one",
+                    "kind" : "y",
+                    "csv" : "c",
+                    "num" : "7",
+                    "name" : "X",
+                    "ts" : "01/01/2020"
+                  },
+                  "_ingest" : {
+                    "pipeline" : "es-docs-p1",
+                    "timestamp" : "2026-10-22T08:58:49.11096936Z"
+                  }
+                }
+              },
+              {
+                "processor_type" : "rename",
+                "status" : "success",
+                "doc" : {
+                  "_index" : "i",
+                  "_version" : "-3",
+                  "_id" : "1",
+                  "_source" : {
+                    "stage" : "y-one",
+                    "kind" : "y",
+                    "csv" : "c",
+                    "num" : "7",
+                    "name" : "X",
+                    "ts" : "01/01/2020"
+                  },
+                  "_ingest" : {
+                    "pipeline" : "es-docs-p1",
+                    "timestamp" : "2026-10-22T08:58:49.11096936Z"
+                  }
+                }
+              },
+              {
+                "processor_type" : "lowercase",
+                "status" : "success",
+                "doc" : {
+                  "_index" : "i",
+                  "_version" : "-3",
+                  "_id" : "1",
+                  "_source" : {
+                    "stage" : "y-one",
+                    "kind" : "y",
+                    "csv" : "c",
+                    "num" : "7",
+                    "name" : "x",
+                    "ts" : "01/01/2020"
+                  },
+                  "_ingest" : {
+                    "pipeline" : "es-docs-p1",
+                    "timestamp" : "2026-10-22T08:58:49.11096936Z"
+                  }
+                }
+              },
+              {
+                "processor_type" : "split",
+                "status" : "success",
+                "doc" : {
+                  "_index" : "i",
+                  "_version" : "-3",
+                  "_id" : "1",
+                  "_source" : {
+                    "stage" : "y-one",
+                    "kind" : "y",
+                    "csv" : [
+                      "c"
+                    ],
+                    "num" : "7",
+                    "name" : "x",
+                    "ts" : "01/01/2020"
+                  },
+                  "_ingest" : {
+                    "pipeline" : "es-docs-p1",
+                    "timestamp" : "2026-10-22T08:58:49.11096936Z"
+                  }
+                }
+              },
+              {
+                "processor_type" : "convert",
+                "status" : "success",
+                "doc" : {
+                  "_index" : "i",
+                  "_version" : "-3",
+                  "_id" : "1",
+                  "_source" : {
+                    "stage" : "y-one",
+                    "kind" : "y",
+                    "csv" : [
+                      "c"
+                    ],
+                    "num" : 7,
+                    "name" : "x",
+                    "ts" : "01/01/2020"
+                  },
+                  "_ingest" : {
+                    "pipeline" : "es-docs-p1",
+                    "timestamp" : "2026-10-22T08:58:49.11096936Z"
+                  }
+                }
+              },
+              {
+                "processor_type" : "grok",
+                "status" : "success",
+                "doc" : {
+                  "_index" : "i",
+                  "_version" : "-3",
+                  "_id" : "1",
+                  "_source" : {
+                    "stage" : "y-one",
+                    "kind" : "y",
+                    "csv" : [
+                      "c"
+                    ],
+                    "num" : 7,
+                    "name" : "x",
+                    "ts" : "01/01/2020"
+                  },
+                  "_ingest" : {
+                    "pipeline" : "es-docs-p1",
+                    "timestamp" : "2026-10-22T08:58:49.11096936Z"
+                  }
+                }
+              },
+              {
+                "processor_type" : "date",
+                "status" : "success",
+                "doc" : {
+                  "_index" : "i",
+                  "_version" : "-3",
+                  "_id" : "1",
+                  "_source" : {
+                    "stage" : "y-one",
+                    "kind" : "y",
+                    "csv" : [
+                      "c"
+                    ],
+                    "num" : 7,
+                    "name" : "x",
+                    "when" : "2020-01-01T00:00:00.000Z",
+                    "ts" : "01/01/2020"
+                  },
+                  "_ingest" : {
+                    "pipeline" : "es-docs-p1",
+                    "timestamp" : "2026-10-22T08:58:49.11096936Z"
+                  }
+                }
+              },
+              {
+                "processor_type" : "remove",
+                "status" : "success",
+                "doc" : {
+                  "_index" : "i",
+                  "_version" : "-3",
+                  "_id" : "1",
+                  "_source" : {
+                    "stage" : "y-one",
+                    "kind" : "y",
+                    "csv" : [
+                      "c"
+                    ],
+                    "num" : 7,
+                    "name" : "x",
+                    "when" : "2020-01-01T00:00:00.000Z"
+                  },
+                  "_ingest" : {
+                    "pipeline" : "es-docs-p1",
+                    "timestamp" : "2026-10-22T08:58:49.11096936Z"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "convert" : {
+                "field" : "num",
+                "type" : "integer"
+              }
+            }
+          ],
+          "on_failure" : [
+            {
+              "set" : {
+                "field" : "error",
+                "value" : "{{_ingest.on_failure_message}}"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "num" : "abc"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "error" : "For input string: \\\"abc\\\"",
+                "num" : "abc"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T08:58:49.118637231Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "fail" : {
+                "message" : "nope {{_source.x}}"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : 1
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "fail_processor_exception",
+                  "reason" : "nope 1"
+                }
+              ],
+              "type" : "fail_processor_exception",
+              "reason" : "nope 1"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "drop" : {
+                "if" : "ctx.x == 1"
+              }
+            },
+            {
+              "append" : {
+                "field" : "tags",
+                "value" : [
+                  "a",
+                  "{{x}}"
+                ]
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "x" : 1
+            }
+          },
+          {
+            "_source" : {
+              "x" : 2
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          null,
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "x" : 2,
+                "tags" : [
+                  "a",
+                  "2"
+                ]
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T08:58:49.129805564Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/_simulate",
+      "body" : {
+        "pipeline" : {
+          "processors" : [
+            {
+              "script" : {
+                "source" : "ctx.total = ctx.a + ctx.b"
+              }
+            },
+            {
+              "kv" : {
+                "field" : "q",
+                "field_split" : "&",
+                "value_split" : "="
+              }
+            },
+            {
+              "dissect" : {
+                "field" : "line",
+                "pattern" : "%{a} - %{b}"
+              }
+            }
+          ]
+        },
+        "docs" : [
+          {
+            "_source" : {
+              "a" : 1,
+              "b" : 2,
+              "q" : "k=v&x=y",
+              "line" : "left - right"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "doc" : {
+              "_index" : "_index",
+              "_version" : "-3",
+              "_id" : "_id",
+              "_source" : {
+                "a" : "left",
+                "q" : "k=v&x=y",
+                "b" : "right",
+                "total" : 3,
+                "line" : "left - right",
+                "x" : "y",
+                "k" : "v"
+              },
+              "_ingest" : {
+                "timestamp" : "2026-10-22T08:58:49.144887697Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /es-docs-i",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "default_pipeline" : "es-docs-p1"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-i"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-i/_doc/1?refresh=true",
+      "body" : {
+        "kind" : "z",
+        "name" : "NaMe",
+        "csv" : "1,2",
+        "num" : "3",
+        "ts" : "05/06/2021"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-i",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-i/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-i",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "stage" : "z-one",
+          "kind" : "z",
+          "csv" : [
+            "1",
+            "2"
+          ],
+          "num" : 3,
+          "name" : "name",
+          "when" : "2021-06-05T00:00:00.000Z"
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-i/_doc/2?pipeline=_none",
+      "body" : {
+        "kind" : "raw"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-i",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-i/_doc/3?pipeline=es-docs-pmissing",
+      "body" : {
+        "kind" : "raw"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "pipeline with id [es-docs-pmissing] does not exist"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "pipeline with id [es-docs-pmissing] does not exist"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-i",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-p1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

@@ -1,0 +1,218 @@
+{
+ "found": {
+  "case": 47,
+  "case_seed": 114000389,
+  "seed": 114
+ },
+ "signature": "POST _search .hits.hits[].inner_hits",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "kw0": {
+       "type": "keyword"
+      },
+      "mot0": {
+       "type": "match_only_text"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "sayt0": {
+       "type": "search_as_you_type"
+      },
+      "short0": {
+       "type": "short"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "term_vector": "with_positions_offsets",
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "type": "text"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m12-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m12-a"
+  },
+  {
+   "body": {
+    "comp0": "and",
+    "date0": "2024-11-26T08:00:00Z",
+    "dbl0": 52.42,
+    "dnanos0": 1730651460000,
+    "flat0": {
+     "a": "x-1",
+     "b": {
+      "c": "alpha"
+     }
+    },
+    "flt0": 183.38,
+    "int0": 79,
+    "irange0": {
+     "gte": 73,
+     "lte": 85
+    },
+    "kw0": "omega",
+    "mot0": null,
+    "o": {
+     "int0": 191,
+     "kw0": ""
+    },
+    "sayt0": "search blue elastic",
+    "short0": 296,
+    "text0": "red search blue cat data",
+    "text1": "elastic and brown index"
+   },
+   "es": {
+    "body": {
+     "_id": "20",
+     "_index": "diff-m12-a",
+     "_primary_term": 1,
+     "_seq_no": 0,
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "_version": 1,
+     "forced_refresh": true,
+     "result": "created"
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 201
+   },
+   "method": "PUT",
+   "path": "/diff-m12-a/_doc/20?refresh=true"
+  },
+  {
+   "body": {
+    "rescore": {
+     "query": {
+      "rescore_query": {
+       "nested": {
+        "inner_hits": {},
+        "path": "n",
+        "query": {
+         "terms": {
+          "n.long0": [
+           50
+          ]
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "20",
+        "_index": "diff-m12-a",
+        "_score": 1.0,
+        "_source": {
+         "comp0": "and",
+         "date0": "2024-11-26T08:00:00Z",
+         "dbl0": 52.42,
+         "dnanos0": 1730651460000,
+         "flat0": {
+          "a": "x-1",
+          "b": {
+           "c": "alpha"
+          }
+         },
+         "flt0": 183.38,
+         "int0": 79,
+         "irange0": {
+          "gte": 73,
+          "lte": 85
+         },
+         "kw0": "omega",
+         "mot0": null,
+         "o": {
+          "int0": 191,
+          "kw0": ""
+         },
+         "sayt0": "search blue elastic",
+         "short0": 296,
+         "text0": "red search blue cat data",
+         "text1": "elastic and brown index"
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m12-a/_search"
+  }
+ ]
+}

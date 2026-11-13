@@ -546,6 +546,66 @@ async fn blockers_keep_changes_out_of_the_queue() {
     assert_eq!(s, StatusCode::CONFLICT);
 }
 
+/// roll secrets for acme/api: STRIPE_KEY in production holds `sk_live_51Hx9Q2`.
+struct FakeSecrets;
+
+#[async_trait]
+impl code_control::SecretEnv for FakeSecrets {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        let hit = candidates.iter().position(|c| c == "sk_live_51Hx9Q2").filter(|_| repo == "acme/api");
+        Ok(hit.map(|i| (i, "STRIPE_KEY".into(), "production".into(), "/".into())).into_iter().collect())
+    }
+    /// Only STRIPE_KEY is set (in production).
+    async fn missing(&self, _: &str, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        Ok(keys.into_iter().filter(|k| k != "STRIPE_KEY").map(|k| (k, vec!["production".to_string()])).collect())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_that_adds_a_secrets_value_is_blocked_until_it_is_removed() {
+    let a = queue_app("", Arc::new(QueueRunner::default())).await;
+    a.code.set_secret_env(Arc::new(FakeSecrets));
+    let c = change(&a, "config", json!({ "config.js": { "content": "export const port = 8080;\nconst stripe = \"sk_live_51Hx9Q2\";\n" } })).await;
+    let leak = |v: &Value| v["blockers"].as_array().unwrap().iter().find(|b| b["kind"] == "secret_leak").cloned();
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(leak(&c).unwrap()["message"], "adds the value of STRIPE_KEY (production): rotate it and remove it from the change");
+    assert_eq!((leak(&c).unwrap()["key"].clone(), leak(&c).unwrap()["environments"].clone()), (json!("STRIPE_KEY"), json!(["production"])), "where to fix it");
+    let (s, v) = a.req("POST", &format!("/v1/code/changes/{}/enqueue", id(&c)), None, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(leak(&v).is_some() && !v.to_string().contains("sk_live_51Hx9Q2"), "{v}");
+    let c = a.ok("POST", &format!("/v1/code/changes/{}/revise", id(&c)), Some(json!({ "message": "config", "files": { "config.js": { "content": "const stripe = process.env.STRIPE_KEY;\nconst dsn = process.env.SENTRY_DSN;\n" } } }))).await;
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(leak(&c), None);
+    // A variable it starts reading that an environment lacks: a notice, never a blocker. Not on a
+    // public repo, where anyone could guess names in a diff to learn what roll secrets holds.
+    assert_eq!(c["notices"], Value::Null);
+    a.ok("PATCH", P, Some(json!({ "visibility": "private" }))).await;
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(c["notices"], json!([{ "kind": "secret_missing", "message": "reads SENTRY_DSN, which isn't set in every roll secrets environment", "key": "SENTRY_DSN" }]));
+    assert!(!c["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "secret_missing"));
+
+    // A value that landed before (here, before roll secrets was on): a scan says where, not what.
+    let b = app(None);
+    b.repo("acme", "api").await;
+    b.ok("POST", &format!("{P}/land"), Some(json!({ "message": "old", "files": { "src/pay.js": { "content": "// payments\nconst key = 'sk_live_51Hx9Q2';\n" }, "README.md": { "content": "# api\n" } } }))).await;
+    b.code.set_secret_env(Arc::new(FakeSecrets));
+    let scan = b.ok("GET", &format!("{P}/leaks"), None).await;
+    assert_eq!((scan["files"].as_u64(), &scan["found"]), (Some(2), &json!([{ "key": "STRIPE_KEY", "environment": "production", "folder": "/", "path": "src/pay.js", "line": 2 }])));
+    assert!(!scan.to_string().contains("sk_live"));
+    // Removed since: gone from the head, still in history, so it's still out.
+    let fixed = b.ok("POST", &format!("{P}/land"), Some(json!({ "message": "use the env", "files": { "src/pay.js": { "content": "const key = process.env.STRIPE_KEY;\n" } } }))).await;
+    assert!(fixed["changeset"].is_string(), "{fixed}");
+    let scan = b.ok("GET", &format!("{P}/leaks?history=10"), None).await;
+    assert_eq!((scan["found"].as_array().unwrap().len(), scan["commits"].as_u64()), (0, Some(2)));
+    assert_eq!((scan["history"][0]["key"].as_str(), scan["history"][0]["path"].as_str(), scan["history"].as_array().unwrap().len()), (Some("STRIPE_KEY"), Some("src/pay.js"), 1));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revert_restores_the_parent_and_keeps_later_work() {
     let a = app(None);

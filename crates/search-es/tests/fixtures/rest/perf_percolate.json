@@ -1,0 +1,2961 @@
+{
+  "description": "Percolation with many identical stored queries (each distinct query is verified once for all its documents): scores, slots, named queries per slot, highlighting, constant score, totals and deletes among the duplicates, over two segments.",
+  "steps": [
+    {
+      "req": "PUT /esm-perc",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "query": {
+              "type": "percolator"
+            },
+            "body": {
+              "type": "text"
+            },
+            "tag": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-perc"
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-perc/_bulk?refresh=true&filter_path=errors",
+      "raw": "{\"index\": {\"_id\": \"0\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"1\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"2\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"3\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"4\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"5\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"6\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"7\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"8\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"9\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"10\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"11\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"12\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"13\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"14\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"15\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"16\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"17\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"18\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"19\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"20\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"21\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"22\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"23\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"24\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"25\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"26\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"27\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"28\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"29\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"30\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"31\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"32\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"33\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"34\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"35\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"36\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"37\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"38\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"39\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"40\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n{\"index\": {\"_id\": \"41\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n{\"index\": {\"_id\": \"42\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n{\"index\": {\"_id\": \"43\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n{\"index\": {\"_id\": \"44\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n{\"index\": {\"_id\": \"45\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n{\"index\": {\"_id\": \"46\"}}\n{\"query\": {\"match_phrase\": {\"body\": \"brown fox\"}}}\n{\"index\": {\"_id\": \"47\"}}\n{\"query\": {\"match_phrase\": {\"body\": \"brown fox\"}}}\n{\"index\": {\"_id\": \"48\"}}\n{\"query\": {\"match_phrase\": {\"body\": \"brown fox\"}}}\n{\"index\": {\"_id\": \"49\"}}\n{\"query\": {\"match_phrase\": {\"body\": \"brown fox\"}}}\n{\"index\": {\"_id\": \"50\"}}\n{\"query\": {\"match_all\": {}}}\n",
+      "headers": {
+        "Content-Type": "application/x-ndjson"
+      },
+      "status": 200,
+      "response": {
+        "errors": false
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-perc/_bulk?refresh=true&filter_path=errors",
+      "raw": "{\"index\": {\"_id\": \"60\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"61\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"62\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"63\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"64\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"65\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"66\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"67\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"68\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"69\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"70\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"71\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"72\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"73\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"74\"}}\n{\"query\": {\"match\": {\"body\": {\"query\": \"ignore me\"}}}}\n{\"index\": {\"_id\": \"75\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n{\"index\": {\"_id\": \"76\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n{\"index\": {\"_id\": \"77\"}}\n{\"query\": {\"bool\": {\"should\": [{\"match\": {\"body\": {\"query\": \"quick\", \"_name\": \"q\"}}}, {\"term\": {\"tag\": {\"value\": \"red\", \"_name\": \"t\"}}}]}}}\n",
+      "headers": {
+        "Content-Type": "application/x-ndjson"
+      },
+      "status": 200,
+      "response": {
+        "errors": false
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-perc/_bulk?refresh=true&filter_path=errors",
+      "raw": "{\"delete\": {\"_id\": \"3\"}}\n{\"delete\": {\"_id\": \"7\"}}\n{\"delete\": {\"_id\": \"41\"}}\n{\"delete\": {\"_id\": \"62\"}}\n{\"delete\": {\"_id\": \"76\"}}\n",
+      "headers": {
+        "Content-Type": "application/x-ndjson"
+      },
+      "status": 200,
+      "response": {
+        "errors": false
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      }
+    },
+    {
+      "req": "POST /esm-perc/_search",
+      "body": {
+        "size": 100,
+        "query": {
+          "percolate": {
+            "field": "query",
+            "document": {
+              "body": "please ignore me"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 215,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 53,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-perc",
+              "_id": "50",
+              "_score": 1.0,
+              "_source": {
+                "query": {
+                  "match_all": {}
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "0",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "1",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "2",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "4",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "5",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "6",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "8",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "9",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "10",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "11",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "12",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "13",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "14",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "15",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "16",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "17",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "18",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "19",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "20",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "21",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "22",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "23",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "24",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "25",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "26",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "27",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "28",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "29",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "30",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "31",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "32",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "33",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "34",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "35",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "36",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "37",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "38",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "39",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "60",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "61",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "63",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "64",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "65",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "66",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "67",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "68",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "69",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "70",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "71",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "72",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "73",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "74",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "mask": [
+        "took"
+      ]
+    },
+    {
+      "req": "POST /esm-perc/_search",
+      "body": {
+        "size": 5,
+        "query": {
+          "constant_score": {
+            "filter": {
+              "percolate": {
+                "field": "query",
+                "document": {
+                  "body": "ignore me"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 15,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 53,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-perc",
+              "_id": "0",
+              "_score": 1.0,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "1",
+              "_score": 1.0,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "2",
+              "_score": 1.0,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "4",
+              "_score": 1.0,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "5",
+              "_score": 1.0,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "mask": [
+        "took"
+      ]
+    },
+    {
+      "req": "POST /esm-perc/_search",
+      "body": {
+        "size": 100,
+        "query": {
+          "percolate": {
+            "field": "query",
+            "documents": [
+              {
+                "body": "a quick brown fox"
+              },
+              {
+                "body": "ignore",
+                "tag": "red"
+              },
+              {
+                "body": "nothing"
+              }
+            ]
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 167,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 64,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-perc",
+              "_id": "50",
+              "_score": 1.0,
+              "_source": {
+                "query": {
+                  "match_all": {}
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0,
+                  1,
+                  2
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "46",
+              "_score": 0.63279307,
+              "_source": {
+                "query": {
+                  "match_phrase": {
+                    "body": "brown fox"
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "47",
+              "_score": 0.63279307,
+              "_source": {
+                "query": {
+                  "match_phrase": {
+                    "body": "brown fox"
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "48",
+              "_score": 0.63279307,
+              "_source": {
+                "query": {
+                  "match_phrase": {
+                    "body": "brown fox"
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "49",
+              "_score": 0.63279307,
+              "_source": {
+                "query": {
+                  "match_phrase": {
+                    "body": "brown fox"
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "0",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "1",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "2",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "4",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "5",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "6",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "8",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "9",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "10",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "11",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "12",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "13",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "14",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "15",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "16",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "17",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "18",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "19",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "20",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "21",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "22",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "23",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "24",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "25",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "26",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "27",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "28",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "29",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "30",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "31",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "32",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "33",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "34",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "35",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "36",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "37",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "38",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "39",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "60",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "61",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "63",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "64",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "65",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "66",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "67",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "68",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "69",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "70",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "71",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "72",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "73",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "74",
+              "_score": 0.5604739,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "40",
+              "_score": 0.31639653,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_1_matched_queries": [
+                  "t"
+                ],
+                "_percolator_document_slot_0_matched_queries": [
+                  "q"
+                ],
+                "_percolator_document_slot": [
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "42",
+              "_score": 0.31639653,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_1_matched_queries": [
+                  "t"
+                ],
+                "_percolator_document_slot_0_matched_queries": [
+                  "q"
+                ],
+                "_percolator_document_slot": [
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "43",
+              "_score": 0.31639653,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_1_matched_queries": [
+                  "t"
+                ],
+                "_percolator_document_slot_0_matched_queries": [
+                  "q"
+                ],
+                "_percolator_document_slot": [
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "44",
+              "_score": 0.31639653,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_1_matched_queries": [
+                  "t"
+                ],
+                "_percolator_document_slot_0_matched_queries": [
+                  "q"
+                ],
+                "_percolator_document_slot": [
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "45",
+              "_score": 0.31639653,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_1_matched_queries": [
+                  "t"
+                ],
+                "_percolator_document_slot_0_matched_queries": [
+                  "q"
+                ],
+                "_percolator_document_slot": [
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "75",
+              "_score": 0.31639653,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_1_matched_queries": [
+                  "t"
+                ],
+                "_percolator_document_slot_0_matched_queries": [
+                  "q"
+                ],
+                "_percolator_document_slot": [
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "77",
+              "_score": 0.31639653,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_1_matched_queries": [
+                  "t"
+                ],
+                "_percolator_document_slot_0_matched_queries": [
+                  "q"
+                ],
+                "_percolator_document_slot": [
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "mask": [
+        "took"
+      ]
+    },
+    {
+      "req": "POST /esm-perc/_search",
+      "body": {
+        "size": 3,
+        "query": {
+          "percolate": {
+            "field": "query",
+            "document": {
+              "body": "the quick brown fox",
+              "tag": "red"
+            },
+            "name": "p"
+          }
+        },
+        "highlight": {
+          "fields": {
+            "body": {}
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 55,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 12,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "esm-perc",
+              "_id": "50",
+              "_score": 1.0,
+              "_source": {
+                "query": {
+                  "match_all": {}
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "40",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_0_matched_queries": [
+                  "q",
+                  "t"
+                ],
+                "_percolator_document_slot": [
+                  0
+                ]
+              },
+              "highlight": {
+                "body": [
+                  "the <em>quick</em> brown fox"
+                ]
+              }
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "42",
+              "_score": 0.26152915,
+              "_source": {
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "match": {
+                          "body": {
+                            "query": "quick",
+                            "_name": "q"
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "tag": {
+                            "value": "red",
+                            "_name": "t"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot_0_matched_queries": [
+                  "q",
+                  "t"
+                ],
+                "_percolator_document_slot": [
+                  0
+                ]
+              },
+              "highlight": {
+                "body": [
+                  "the <em>quick</em> brown fox"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "mask": [
+        "took"
+      ]
+    },
+    {
+      "req": "POST /esm-perc/_search",
+      "body": {
+        "size": 0,
+        "track_total_hits": true,
+        "query": {
+          "percolate": {
+            "field": "query",
+            "document": {
+              "body": "me"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 8,
+        "timed_out": false,
+        "terminated_early": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 53,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "mask": [
+        "took"
+      ]
+    },
+    {
+      "req": "POST /esm-perc/_search",
+      "body": {
+        "size": 2,
+        "sort": [
+          "_doc"
+        ],
+        "query": {
+          "bool": {
+            "filter": [
+              {
+                "percolate": {
+                  "field": "query",
+                  "document": {
+                    "body": "ignore me"
+                  }
+                }
+              }
+            ],
+            "must_not": [
+              {
+                "ids": {
+                  "values": [
+                    "0",
+                    "1"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "took": 32,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 51,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-perc",
+              "_id": "2",
+              "_score": null,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              },
+              "sort": [
+                2
+              ]
+            },
+            {
+              "_index": "esm-perc",
+              "_id": "4",
+              "_score": null,
+              "_source": {
+                "query": {
+                  "match": {
+                    "body": {
+                      "query": "ignore me"
+                    }
+                  }
+                }
+              },
+              "fields": {
+                "_percolator_document_slot": [
+                  0
+                ]
+              },
+              "sort": [
+                4
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json"
+      },
+      "mask": [
+        "took"
+      ]
+    }
+  ]
+}

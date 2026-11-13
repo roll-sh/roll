@@ -1,0 +1,1176 @@
+{
+  "description" : "Round 4 (b): time series data streams route by @timestamp (timestamp errors: missing, wrong type, unparsable, outside every backing index; create-only), data stream stats and verbose maximum_timestamp, data stream alias filters in search, failure store redirection after reroute and for final pipelines changing the target",
+  "steps" : [
+    {
+      "req" : "PUT /_index_template/es-docs-r4tsds",
+      "body" : {
+        "index_patterns" : [
+          "es-docs-r4tsds*"
+        ],
+        "data_stream" : { },
+        "priority" : 500,
+        "template" : {
+          "settings" : {
+            "index" : {
+              "mode" : "time_series",
+              "routing_path" : [
+                "k"
+              ],
+              "number_of_shards" : 1
+            }
+          },
+          "mappings" : {
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              },
+              "k" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/es-docs-r4tsds",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4tsds/_doc",
+      "body" : {
+        "k" : "a"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "timestamp_error",
+              "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [START_OBJECT] but found [null]",
+              "failure_store" : "not_enabled"
+            }
+          ],
+          "type" : "timestamp_error",
+          "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [START_OBJECT] but found [null]",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "Failed to parse object: expecting token of type [START_OBJECT] but found [null]",
+            "line" : 1,
+            "col" : 9
+          },
+          "failure_store" : "not_enabled"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4tsds/_doc",
+      "body" : {
+        "@timestamp" : "wrong",
+        "k" : "a"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "timestamp_error",
+              "reason" : "Error extracting data stream timestamp field: failed to parse date field [wrong] with format [strict_date_optional_time_nanos||strict_date_optional_time||epoch_millis]",
+              "failure_store" : "not_enabled"
+            }
+          ],
+          "type" : "timestamp_error",
+          "reason" : "Error extracting data stream timestamp field: failed to parse date field [wrong] with format [strict_date_optional_time_nanos||strict_date_optional_time||epoch_millis]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "failed to parse date field [wrong] with format [strict_date_optional_time_nanos||strict_date_optional_time||epoch_millis]",
+            "caused_by" : {
+              "type" : "date_time_parse_exception",
+              "reason" : "Failed to parse with all enclosed parsers"
+            }
+          },
+          "failure_store" : "not_enabled"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4tsds/_doc",
+      "body" : {
+        "@timestamp" : {
+          "a" : 1
+        },
+        "k" : "a"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "timestamp_error",
+              "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [START_OBJECT]",
+              "failure_store" : "not_enabled"
+            }
+          ],
+          "type" : "timestamp_error",
+          "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [START_OBJECT]",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [START_OBJECT]",
+            "line" : 1,
+            "col" : 15
+          },
+          "failure_store" : "not_enabled"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4tsds/_doc",
+      "body" : {
+        "@timestamp" : [
+          "2020-01-01T00:00:00Z"
+        ],
+        "k" : "a"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "timestamp_error",
+              "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [START_ARRAY]",
+              "failure_store" : "not_enabled"
+            }
+          ],
+          "type" : "timestamp_error",
+          "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [START_ARRAY]",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [START_ARRAY]",
+            "line" : 1,
+            "col" : 15
+          },
+          "failure_store" : "not_enabled"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4tsds/_doc",
+      "body" : {
+        "@timestamp" : null,
+        "k" : "a"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "timestamp_error",
+              "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [VALUE_NULL]",
+              "failure_store" : "not_enabled"
+            }
+          ],
+          "type" : "timestamp_error",
+          "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [VALUE_NULL]",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [VALUE_NULL]",
+            "line" : 1,
+            "col" : 15
+          },
+          "failure_store" : "not_enabled"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4tsds/_doc",
+      "body" : {
+        "@timestamp" : true,
+        "k" : "a"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "timestamp_error",
+              "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [VALUE_BOOLEAN]",
+              "failure_store" : "not_enabled"
+            }
+          ],
+          "type" : "timestamp_error",
+          "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [VALUE_BOOLEAN]",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "Failed to parse object: expecting token of type [VALUE_STRING] or [VALUE_NUMBER] but found [VALUE_BOOLEAN]",
+            "line" : 1,
+            "col" : 15
+          },
+          "failure_store" : "not_enabled"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4tsds/_doc",
+      "body" : {
+        "@timestamp" : "2020-01-01T00:00:00Z",
+        "k" : "a"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation",
+        "reason"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "timestamp_error",
+              "reason" : "the document timestamp [2020-01-01T00:00:00.000Z] is outside of ranges of currently writable indices [[2026-10-22T12:45:52.000Z,2026-10-22T14:54:52.000Z]]",
+              "failure_store" : "not_enabled"
+            }
+          ],
+          "type" : "timestamp_error",
+          "reason" : "the document timestamp [2020-01-01T00:00:00.000Z] is outside of ranges of currently writable indices [[2026-10-22T12:45:52.000Z,2026-10-22T14:54:52.000Z]]",
+          "failure_store" : "not_enabled"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4tsds/_bulk",
+      "raw" : "{\"create\":{}}\n{\"k\":\"a\"}\n{\"create\":{}}\n{\"@timestamp\":\"2020-01-01T00:00:00Z\",\"k\":\"a\"}\n{\"index\":{}}\n{\"@timestamp\":\"2020-01-01T00:00:00Z\",\"k\":\"a\"}\n",
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation",
+        "reason"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 0,
+        "items" : [
+          {
+            "create" : {
+              "_index" : "es-docs-r4tsds",
+              "_id" : null,
+              "status" : 400,
+              "failure_store" : "not_enabled",
+              "error" : {
+                "type" : "timestamp_error",
+                "reason" : "Error extracting data stream timestamp field: Failed to parse object: expecting token of type [START_OBJECT] but found [null]",
+                "caused_by" : {
+                  "type" : "parsing_exception",
+                  "reason" : "Failed to parse object: expecting token of type [START_OBJECT] but found [null]",
+                  "line" : 1,
+                  "col" : 9
+                }
+              }
+            }
+          },
+          {
+            "create" : {
+              "_index" : "es-docs-r4tsds",
+              "_id" : null,
+              "status" : 400,
+              "failure_store" : "not_enabled",
+              "error" : {
+                "type" : "timestamp_error",
+                "reason" : "the document timestamp [2020-01-01T00:00:00.000Z] is outside of ranges of currently writable indices [[2026-10-22T12:45:52.000Z,2026-10-22T14:54:52.000Z]]"
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4tsds",
+              "_id" : null,
+              "status" : 400,
+              "error" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "only write ops with an op_type of create are allowed in data streams"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /_data_stream/es-docs-r4tsds?verbose=true",
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation",
+        "maximum_timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "es-docs-r4tsds",
+            "timestamp_field" : {
+              "name" : "@timestamp"
+            },
+            "indices" : [
+              {
+                "index_name" : ".ds-es-docs-r4tsds-2026.10.22-000001",
+                "index_uuid" : "RVfP94gnTJaneDNFa2hbGQ",
+                "managed_by" : "Unmanaged",
+                "prefer_ilm" : true,
+                "index_mode" : "time_series"
+              }
+            ],
+            "generation" : 1,
+            "status" : "YELLOW",
+            "template" : "es-docs-r4tsds",
+            "next_generation_managed_by" : "Unmanaged",
+            "prefer_ilm" : true,
+            "hidden" : false,
+            "system" : false,
+            "allow_custom_routing" : false,
+            "replicated" : false,
+            "rollover_on_write" : false,
+            "maximum_timestamp" : 0,
+            "index_mode" : "time_series",
+            "time_series" : {
+              "temporal_ranges" : [
+                {
+                  "start" : "2026-10-22T12:45:52.000Z",
+                  "end" : "2026-10-22T14:54:52.000Z"
+                }
+              ]
+            },
+            "settings" : { },
+            "mappings" : { },
+            "failure_store" : {
+              "enabled" : false,
+              "rollover_on_write" : true,
+              "indices" : [ ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /_data_stream/es-docs-r4tsds/_stats",
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation",
+        "maximum_timestamp",
+        "store_size_bytes",
+        "total_store_size_bytes"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "data_stream_count" : 1,
+        "backing_indices" : 1,
+        "total_store_size_bytes" : 227,
+        "data_streams" : [
+          {
+            "data_stream" : "es-docs-r4tsds",
+            "backing_indices" : 1,
+            "store_size_bytes" : 227,
+            "maximum_timestamp" : 0
+          }
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/es-docs-r4tsds",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/es-docs-r4tsds",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_index_template/es-docs-r4std",
+      "body" : {
+        "index_patterns" : [
+          "es-docs-r4std*"
+        ],
+        "data_stream" : { },
+        "priority" : 500,
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 1
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4std/_doc?refresh=true",
+      "body" : {
+        "@timestamp" : 1593639273740,
+        "zone" : "a"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : ".ds-es-docs-r4std-2026.10.22-000001",
+        "_id" : "I-cTZKEB9DjmY5InXkaO",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4std/_doc?refresh=true",
+      "body" : {
+        "@timestamp" : 1593639273741,
+        "zone" : "b"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : ".ds-es-docs-r4std-2026.10.22-000001",
+        "_id" : "JOcTZKEB9DjmY5InX0Yf",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /_data_stream/es-docs-r4std/_stats",
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation",
+        "store_size_bytes",
+        "total_store_size_bytes"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "data_stream_count" : 1,
+        "backing_indices" : 1,
+        "total_store_size_bytes" : 11553,
+        "data_streams" : [
+          {
+            "data_stream" : "es-docs-r4std",
+            "backing_indices" : 1,
+            "store_size_bytes" : 11553,
+            "maximum_timestamp" : 1593639273741
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "es-docs-r4std",
+              "alias" : "es-docs-r4std-za",
+              "filter" : {
+                "term" : {
+                  "zone" : "a"
+                }
+              }
+            }
+          },
+          {
+            "add" : {
+              "index" : "es-docs-r4std",
+              "alias" : "es-docs-r4std-all"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4std-za/_search",
+      "body" : {
+        "_source" : [
+          "zone"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : ".ds-es-docs-r4std-2026.10.22-000001",
+              "_id" : "I-cTZKEB9DjmY5InXkaO",
+              "_score" : 1.0,
+              "_source" : {
+                "zone" : "a"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4std-all/_search",
+      "body" : {
+        "size" : 0
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/es-docs-r4std",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/es-docs-r4std",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4fail",
+      "body" : {
+        "processors" : [
+          {
+            "fail" : {
+              "message" : "error_message",
+              "tag" : "foo-tag"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4toDst",
+      "body" : {
+        "processors" : [
+          {
+            "reroute" : {
+              "tag" : "reroute-tag",
+              "destination" : "es-docs-r4fsdst"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4chg",
+      "body" : {
+        "processors" : [
+          {
+            "set" : {
+              "field" : "_index",
+              "value" : "es-docs-r4fsother"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_index_template/es-docs-r4fsdst",
+      "body" : {
+        "index_patterns" : [
+          "es-docs-r4fsdst"
+        ],
+        "data_stream" : { },
+        "priority" : 500,
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 1,
+            "index" : {
+              "default_pipeline" : "es-docs-r4fail"
+            }
+          },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_index_template/es-docs-r4fssrc",
+      "body" : {
+        "index_patterns" : [
+          "es-docs-r4fssrc*"
+        ],
+        "data_stream" : { },
+        "priority" : 500,
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 1,
+            "index" : {
+              "default_pipeline" : "es-docs-r4toDst"
+            }
+          },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_index_template/es-docs-r4fsfin",
+      "body" : {
+        "index_patterns" : [
+          "es-docs-r4fsfin*"
+        ],
+        "data_stream" : { },
+        "priority" : 500,
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 1,
+            "index" : {
+              "final_pipeline" : "es-docs-r4chg"
+            }
+          },
+          "data_stream_options" : {
+            "failure_store" : {
+              "enabled" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/es-docs-r4fsdst",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fssrc/_doc?refresh=true",
+      "body" : {
+        "@timestamp" : "2020-12-12",
+        "foo" : "bar"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : ".fs-es-docs-r4fsdst-2026.10.22-000002",
+        "_id" : "JecTZKEB9DjmY5InZkYO",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "failure_store" : "used"
+      }
+    },
+    {
+      "req" : "POST /.fs-es-docs-r4fsdst-*/_search",
+      "body" : {
+        "_source" : [
+          "document.index",
+          "error.type",
+          "error.message",
+          "error.pipeline",
+          "error.pipeline_trace",
+          "error.processor_tag",
+          "error.processor_type"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : ".fs-es-docs-r4fsdst-2026.10.22-000002",
+              "_id" : "JecTZKEB9DjmY5InZkYO",
+              "_score" : 1.0,
+              "_source" : {
+                "document" : {
+                  "index" : "es-docs-r4fssrc"
+                },
+                "error" : {
+                  "type" : "fail_processor_exception",
+                  "message" : "error_message",
+                  "pipeline_trace" : [
+                    "es-docs-r4fail"
+                  ],
+                  "pipeline" : "es-docs-r4fail",
+                  "processor_tag" : "foo-tag",
+                  "processor_type" : "fail"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4fsfin/_doc?refresh=true",
+      "body" : {
+        "@timestamp" : "2020-12-12",
+        "foo" : "bar"
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : ".fs-es-docs-r4fsfin-2026.10.22-000001",
+        "_id" : "JucTZKEB9DjmY5Ine0bG",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "failure_store" : "used"
+      }
+    },
+    {
+      "req" : "POST /.fs-es-docs-r4fsfin-*/_search",
+      "body" : {
+        "_source" : [
+          "document.index",
+          "error.type",
+          "error.message",
+          "error.pipeline",
+          "error.pipeline_trace"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took",
+        "@timestamp",
+        "stack_trace",
+        "time_series",
+        "temporal_ranges",
+        "generation"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : ".fs-es-docs-r4fsfin-2026.10.22-000001",
+              "_id" : "JucTZKEB9DjmY5Ine0bG",
+              "_score" : 1.0,
+              "_source" : {
+                "document" : {
+                  "index" : "es-docs-r4fsfin"
+                },
+                "error" : {
+                  "type" : "illegal_state_exception",
+                  "message" : "final pipeline [es-docs-r4chg] can't change the target index (from [es-docs-r4fsfin] to [es-docs-r4fsother]) for document [null]",
+                  "pipeline_trace" : [
+                    "es-docs-r4chg"
+                  ],
+                  "pipeline" : "es-docs-r4chg"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/es-docs-r4fsdst,es-docs-r4fssrc,es-docs-r4fsfin",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [es-docs-r4fssrc]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "es-docs-r4fssrc",
+              "index_uuid" : "_na_",
+              "index" : "es-docs-r4fssrc"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [es-docs-r4fssrc]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "es-docs-r4fssrc",
+          "index_uuid" : "_na_",
+          "index" : "es-docs-r4fssrc"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/es-docs-r4fsdst,es-docs-r4fsfin",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/es-docs-r4fsdst",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/es-docs-r4fssrc",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/es-docs-r4fsfin",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4fail",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4toDst",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4chg",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

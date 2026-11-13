@@ -1,0 +1,1072 @@
+{
+  "description" : "Cluster health, state, settings validation, pending tasks, allocation explain.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-c1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 2
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-c1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-c2",
+      "body" : {
+        "settings" : {
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-c2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-c1",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "yellow",
+        "timed_out" : false,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 2,
+        "active_shards" : 2,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 2,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 50.0
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-c2",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "green",
+        "timed_out" : false,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 1,
+        "active_shards" : 1,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 0,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 100.0
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-c*?level=shards",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "yellow",
+        "timed_out" : false,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 3,
+        "active_shards" : 3,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 2,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 60.0,
+        "indices" : {
+          "esm-c1" : {
+            "status" : "yellow",
+            "number_of_shards" : 2,
+            "number_of_replicas" : 1,
+            "active_primary_shards" : 2,
+            "active_shards" : 2,
+            "relocating_shards" : 0,
+            "initializing_shards" : 0,
+            "unassigned_shards" : 2,
+            "unassigned_primary_shards" : 0,
+            "shards" : {
+              "0" : {
+                "status" : "yellow",
+                "primary_active" : true,
+                "active_shards" : 1,
+                "relocating_shards" : 0,
+                "initializing_shards" : 0,
+                "unassigned_shards" : 1,
+                "unassigned_primary_shards" : 0
+              },
+              "1" : {
+                "status" : "yellow",
+                "primary_active" : true,
+                "active_shards" : 1,
+                "relocating_shards" : 0,
+                "initializing_shards" : 0,
+                "unassigned_shards" : 1,
+                "unassigned_primary_shards" : 0
+              }
+            }
+          },
+          "esm-c2" : {
+            "status" : "green",
+            "number_of_shards" : 1,
+            "number_of_replicas" : 0,
+            "active_primary_shards" : 1,
+            "active_shards" : 1,
+            "relocating_shards" : 0,
+            "initializing_shards" : 0,
+            "unassigned_shards" : 0,
+            "unassigned_primary_shards" : 0,
+            "shards" : {
+              "0" : {
+                "status" : "green",
+                "primary_active" : true,
+                "active_shards" : 1,
+                "relocating_shards" : 0,
+                "initializing_shards" : 0,
+                "unassigned_shards" : 0,
+                "unassigned_primary_shards" : 0
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-c2?level=indices&wait_for_status=green",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "green",
+        "timed_out" : false,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 1,
+        "active_shards" : 1,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 0,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 100.0,
+        "indices" : {
+          "esm-c2" : {
+            "status" : "green",
+            "number_of_shards" : 1,
+            "number_of_replicas" : 0,
+            "active_primary_shards" : 1,
+            "active_shards" : 1,
+            "relocating_shards" : 0,
+            "initializing_shards" : 0,
+            "unassigned_shards" : 0,
+            "unassigned_primary_shards" : 0
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-c1?wait_for_status=green&timeout=10ms",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 408,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "yellow",
+        "timed_out" : true,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 2,
+        "active_shards" : 2,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 2,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 50.0
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-nope?timeout=10ms",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 408,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "red",
+        "timed_out" : true,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 0,
+        "active_shards" : 0,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 0,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 100.0
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-nope*",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "green",
+        "timed_out" : false,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 0,
+        "active_shards" : 0,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 0,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 100.0
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?wait_for_status=bogus",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.elasticsearch.cluster.health.ClusterHealthStatus.BOGUS"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.elasticsearch.cluster.health.ClusterHealthStatus.BOGUS"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health?level=bogus",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "level parameter must be one of [cluster] or [indices] or [shards] but was [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "level parameter must be one of [cluster] or [indices] or [shards] but was [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/health/esm-c2?wait_for_nodes=1&wait_for_active_shards=1&wait_for_no_relocating_shards=true&wait_for_events=languid",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "status" : "green",
+        "timed_out" : false,
+        "number_of_nodes" : 1,
+        "number_of_data_nodes" : 1,
+        "active_primary_shards" : 1,
+        "active_shards" : 1,
+        "relocating_shards" : 0,
+        "initializing_shards" : 0,
+        "unassigned_shards" : 0,
+        "unassigned_primary_shards" : 0,
+        "delayed_unassigned_shards" : 0,
+        "number_of_pending_tasks" : 0,
+        "number_of_in_flight_fetch" : 0,
+        "task_max_waiting_in_queue_millis" : 0,
+        "active_shards_percent_as_number" : 100.0
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/state/version,blocks/esm-c1",
+      "mask" : [
+        "cluster_name",
+        "version"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "cluster_uuid" : "JVRQcT0KR6GWyC2o7bSplQ",
+        "version" : 1587,
+        "state_uuid" : "YR_OBkSXS_euSA8lyaq9tQ",
+        "blocks" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/state/metadata/esm-c2?filter_path=metadata.indices",
+      "mask" : [
+        "version",
+        "in_sync_allocations",
+        "transport_version",
+        "mappings_updated_version"
+      ],
+      "status" : 200,
+      "response" : {
+        "metadata" : {
+          "indices" : {
+            "esm-c2" : {
+              "version" : 4,
+              "transport_version" : "9458013",
+              "mapping_version" : 1,
+              "settings_version" : 1,
+              "aliases_version" : 1,
+              "routing_num_shards" : 1024,
+              "state" : "open",
+              "settings" : {
+                "index" : {
+                  "routing" : {
+                    "allocation" : {
+                      "include" : {
+                        "_tier_preference" : "data_content"
+                      }
+                    }
+                  },
+                  "number_of_shards" : "1",
+                  "provided_name" : "esm-c2",
+                  "creation_date" : "1792523709846",
+                  "number_of_replicas" : "0",
+                  "uuid" : "mIGGpVeOQCq92D9PDgDCcA",
+                  "version" : {
+                    "created" : "9111000"
+                  }
+                }
+              },
+              "mappings" : { },
+              "aliases" : [ ],
+              "primary_terms" : {
+                "0" : 1
+              },
+              "in_sync_allocations" : {
+                "0" : [
+                  "dfsUaAMWQaqGSyAtAo8FSg"
+                ]
+              },
+              "rollover_info" : { },
+              "mappings_updated_version" : 9111000,
+              "system" : false,
+              "timestamp_range" : {
+                "unknown" : true
+              },
+              "event_ingested_range" : {
+                "unknown" : true
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/state/routing_table/esm-c1",
+      "mask" : [
+        "node",
+        "id",
+        "at"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "cluster_uuid" : "JVRQcT0KR6GWyC2o7bSplQ",
+        "routing_table" : {
+          "indices" : {
+            "esm-c1" : {
+              "shards" : {
+                "0" : [
+                  {
+                    "state" : "STARTED",
+                    "primary" : true,
+                    "node" : "2AU6uEV5S82s9FCi0WUJKg",
+                    "relocating_node" : null,
+                    "shard" : 0,
+                    "index" : "esm-c1",
+                    "allocation_id" : {
+                      "id" : "bM33Ue29Q3Sy16zsv7Iz0w"
+                    },
+                    "relocation_failure_info" : {
+                      "failed_attempts" : 0
+                    }
+                  },
+                  {
+                    "state" : "UNASSIGNED",
+                    "primary" : false,
+                    "node" : null,
+                    "relocating_node" : null,
+                    "shard" : 0,
+                    "index" : "esm-c1",
+                    "recovery_source" : {
+                      "type" : "PEER"
+                    },
+                    "unassigned_info" : {
+                      "reason" : "INDEX_CREATED",
+                      "at" : "2026-10-20T19:15:09.714Z",
+                      "delayed" : false,
+                      "allocation_status" : "no_attempt"
+                    },
+                    "relocation_failure_info" : {
+                      "failed_attempts" : 0
+                    }
+                  }
+                ],
+                "1" : [
+                  {
+                    "state" : "STARTED",
+                    "primary" : true,
+                    "node" : "2AU6uEV5S82s9FCi0WUJKg",
+                    "relocating_node" : null,
+                    "shard" : 1,
+                    "index" : "esm-c1",
+                    "allocation_id" : {
+                      "id" : "5ZBbzm2nSNSLlyYqiBn5xw"
+                    },
+                    "relocation_failure_info" : {
+                      "failed_attempts" : 0
+                    }
+                  },
+                  {
+                    "state" : "UNASSIGNED",
+                    "primary" : false,
+                    "node" : null,
+                    "relocating_node" : null,
+                    "shard" : 1,
+                    "index" : "esm-c1",
+                    "recovery_source" : {
+                      "type" : "PEER"
+                    },
+                    "unassigned_info" : {
+                      "reason" : "INDEX_CREATED",
+                      "at" : "2026-10-20T19:15:09.714Z",
+                      "delayed" : false,
+                      "allocation_status" : "no_attempt"
+                    },
+                    "relocation_failure_info" : {
+                      "failed_attempts" : 0
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/state/bogus",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "cluster_uuid" : "JVRQcT0KR6GWyC2o7bSplQ"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-c1/_block/write",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : [
+          {
+            "name" : "esm-c1",
+            "blocked" : true
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/state/blocks/esm-c1",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "cluster_uuid" : "JVRQcT0KR6GWyC2o7bSplQ",
+        "blocks" : {
+          "indices" : {
+            "esm-c1" : {
+              "8" : {
+                "description" : "index write (api)",
+                "retryable" : false,
+                "levels" : [
+                  "write"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-c1/_block/bogus",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No block found with name bogus"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No block found with name bogus"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-c1/_block/write",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "indices" : [
+          {
+            "name" : "esm-c1",
+            "unblocked" : true
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/state/blocks/esm-c1",
+      "mask" : [
+        "cluster_name"
+      ],
+      "status" : 200,
+      "response" : {
+        "cluster_name" : "docker-cluster",
+        "cluster_uuid" : "JVRQcT0KR6GWyC2o7bSplQ",
+        "blocks" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "persistent" : {
+          "esm.bogus" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "persistent setting [esm.bogus], not recognized"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "persistent setting [esm.bogus], not recognized"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "persistent" : {
+          "cluster.routing.allocation.enable" : "bogus"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.elasticsearch.cluster.routing.allocation.decider.EnableAllocationDecider.Allocation.BOGUS"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.elasticsearch.cluster.routing.allocation.decider.EnableAllocationDecider.Allocation.BOGUS"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "persistent" : {
+          "indices.recovery.max_bytes_per_sec" : "abc"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse setting [indices.recovery.max_bytes_per_sec] with value [abc] as a size in bytes: unit is missing or unrecognized"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to parse setting [indices.recovery.max_bytes_per_sec] with value [abc] as a size in bytes: unit is missing or unrecognized",
+          "caused_by" : {
+            "type" : "parse_exception",
+            "reason" : "failed to parse setting [indices.recovery.max_bytes_per_sec] with value [abc] as a size in bytes: unit is missing or unrecognized"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "persistent" : {
+          "index.number_of_shards" : 1
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "persistent setting [index.number_of_shards], not recognized"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "persistent setting [index.number_of_shards], not recognized"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: no settings to update;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: no settings to update;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_cluster/settings",
+      "body" : {
+        "persistent" : {
+          "path.data" : "/tmp"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "persistent setting [path.data], not dynamically updateable"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "persistent setting [path.data], not dynamically updateable"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/pending_tasks",
+      "status" : 200,
+      "response" : {
+        "tasks" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/allocation/explain",
+      "body" : {
+        "index" : "esm-c1",
+        "shard" : 0,
+        "primary" : false
+      },
+      "mask" : [
+        "node_id",
+        "node_name",
+        "transport_address",
+        "node_attributes",
+        "roles",
+        "explanation",
+        "at"
+      ],
+      "status" : 200,
+      "response" : {
+        "index" : "esm-c1",
+        "shard" : 0,
+        "primary" : false,
+        "current_state" : "unassigned",
+        "unassigned_info" : {
+          "reason" : "INDEX_CREATED",
+          "at" : "2026-10-20T19:15:09.714Z",
+          "last_allocation_status" : "no_attempt"
+        },
+        "can_allocate" : "no",
+        "allocate_explanation" : "Elasticsearch isn't allowed to allocate this shard to any of the nodes in the cluster. Choose a node to which you expect this shard to be allocated, find this node in the node-by-node explanation, and address the reasons which prevent Elasticsearch from allocating this shard there.",
+        "node_allocation_decisions" : [
+          {
+            "node_id" : "2AU6uEV5S82s9FCi0WUJKg",
+            "node_name" : "9a12ac153b52",
+            "transport_address" : "172.17.0.2:9300",
+            "node_attributes" : {
+              "ml.allocated_processors_double" : "18.0",
+              "ml.max_jvm_size" : "805306368",
+              "ml.config_version" : "12.0.0",
+              "xpack.installed" : "true",
+              "transform.config_version" : "10.0.0",
+              "ml.machine_memory" : "1610612736",
+              "ml.allocated_processors" : "18"
+            },
+            "roles" : [
+              "data",
+              "data_cold",
+              "data_content",
+              "data_frozen",
+              "data_hot",
+              "data_warm",
+              "ingest",
+              "master",
+              "ml",
+              "remote_cluster_client",
+              "transform"
+            ],
+            "node_decision" : "no",
+            "weight_ranking" : 1,
+            "deciders" : [
+              {
+                "decider" : "same_shard",
+                "decision" : "NO",
+                "explanation" : "a copy of this shard is already allocated to this node [[esm-c1][0], node[2AU6uEV5S82s9FCi0WUJKg], [P], s[STARTED], a[id=bM33Ue29Q3Sy16zsv7Iz0w], failed_attempts[0]]"
+              }
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/allocation/explain",
+      "body" : {
+        "index" : "esm-nope",
+        "shard" : 0,
+        "primary" : true
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/allocation/explain",
+      "body" : {
+        "index" : "esm-c1",
+        "shard" : 5,
+        "primary" : true
+      },
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "shard_not_found_exception",
+              "reason" : "no such shard",
+              "index_uuid" : "ercNQkH9RmKfEgckr2NMLw",
+              "shard" : "5",
+              "index" : "esm-c1"
+            }
+          ],
+          "type" : "shard_not_found_exception",
+          "reason" : "no such shard",
+          "index_uuid" : "ercNQkH9RmKfEgckr2NMLw",
+          "shard" : "5",
+          "index" : "esm-c1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/allocation/explain",
+      "body" : {
+        "index" : "esm-c1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: shard must be specified;2: primary must be specified;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: shard must be specified;2: primary must be specified;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_cluster/allocation/explain",
+      "body" : {
+        "index" : "esm-c2",
+        "shard" : 0,
+        "primary" : false
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unable to find any shards to explain [ClusterAllocationExplainRequest[index=esm-c2,shard=0,primary?=false,include_yes_decisions?=false,include_disk_info?=false] in the routing table"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unable to find any shards to explain [ClusterAllocationExplainRequest[index=esm-c2,shard=0,primary?=false,include_yes_decisions?=false,include_disk_info?=false] in the routing table"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_info/bogus",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_info/bogus] contains unrecognized target: [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_info/bogus] contains unrecognized target: [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/settings?include_defaults=true&flat_settings=true&filter_path=defaults.cluster.routing.allocation.enable,defaults.action.destructive_requires_name,defaults.search.default_search_timeout,defaults.indices.recovery.max_bytes_per_sec,defaults.cluster.max_shards_per_node",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/settings?include_defaults=true&filter_path=defaults.cluster.routing.allocation.enable,defaults.cluster.routing.allocation.awareness,defaults.action,defaults.search.default_search_timeout",
+      "status" : 200,
+      "response" : {
+        "defaults" : {
+          "cluster" : {
+            "routing" : {
+              "allocation" : {
+                "awareness" : {
+                  "attributes" : [ ]
+                },
+                "enable" : "all"
+              }
+            }
+          },
+          "action" : {
+            "auto_create_index" : "true",
+            "search" : {
+              "pre_filter_shard_size" : {
+                "default" : "128"
+              },
+              "shard_count" : {
+                "limit" : "9223372036854775807"
+              }
+            },
+            "destructive_requires_name" : "true"
+          },
+          "search" : {
+            "default_search_timeout" : "-1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cluster/settings?filter_path=persistent.esm*,transient.esm*",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

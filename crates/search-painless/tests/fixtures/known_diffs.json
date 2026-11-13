@@ -1,0 +1,182 @@
+{
+ "lang.json": [
+  {
+   "source": "def a = null; return a + 1",
+   "why": "Elasticsearch had run this source before the capture: its call site was linked, so the null operand fails in the guard (\"leftObject\"); a first execution says \"left\" (see call_sites.json)"
+  }
+ ],
+ "time.json": [
+  {
+   "source": "DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-01-01', f)",
+   "why": "java.time.format.Parsed lists fields in HashMap order of ChronoField identity hashes, which varies between JVM runs; we list them in parse order"
+  }
+ ],
+ "chars.json": [
+  {
+   "source": "return [Character.getName(65), Character.getName(0x1F600), Character.getName(0x378)]",
+   "why": "Character.getName needs the Unicode character name table, which is not bundled; it returns null"
+  }
+ ],
+ "time2.json": [
+  {
+   "source": "return LocalTime.of(1,2).get(IsoFields.QUARTER_OF_YEAR)",
+   "why": "the JDK frames of IsoFields' anonymous field classes (IsoFields$Field$2.rangeRefinedBy …) are not reproduced"
+  },
+  {
+   "source": "return LocalTime.of(1,2).getLong(IsoFields.WEEK_OF_WEEK_BASED_YEAR)",
+   "why": "the JDK frames of IsoFields' anonymous field classes (IsoFields$Field$3.getFrom …) are not reproduced"
+  }
+ ],
+ "lang6.json": [
+  {
+   "source": "synchronized (this) { return 1 }",
+   "why": "ANTLR's adaptive prediction reports the syntax error at a later token than our bounded-lookahead parser"
+  }
+ ],
+ "conditional.json": [
+  {
+   "source": "ctx.tags.equals(ctx.tags)",
+   "why": "Elasticsearch wraps each read of an ingest-condition view in a fresh UnmodifiableIngestData/List (so two reads are never identical); our views are built once, eagerly"
+  },
+  {
+   "source": "ctx.tags == ctx.tags",
+   "why": "Elasticsearch wraps each read of an ingest-condition view in a fresh UnmodifiableIngestData/List (so two reads are never identical); our views are built once, eagerly"
+  },
+  {
+   "source": "ctx.o.hashCode() == ctx.o.hashCode()",
+   "why": "Elasticsearch wraps each read of an ingest-condition view in a fresh UnmodifiableIngestData/List (so two reads are never identical); our views are built once, eagerly"
+  },
+  {
+   "source": "ctx.o.equals(ctx.o)",
+   "why": "Elasticsearch wraps each read of an ingest-condition view in a fresh UnmodifiableIngestData/List (so two reads are never identical); our views are built once, eagerly"
+  },
+  {
+   "source": "ctx.o.entrySet().toString().contains('UnmodifiableIngestData$1@')",
+   "why": "the entries of an ingest-condition view's entrySet() print as plain HashMap entries, not as identity strings of Elasticsearch's anonymous entry class"
+  }
+ ],
+ "lang7.json": [
+  {
+   "source": "Exception e = new Exception('x'); return e.toString() + e.getLocalizedMessage() + e.getStackTrace().length",
+   "why": "getStackTrace() is empty here: the Java stack of the script's own frames is not reproduced"
+  }
+ ],
+ "time3.json": [
+  {
+   "source": "return Collator.getInstance(Locale.ROOT).compare('a', 'B')",
+   "why": "java.text.Collator is not implemented"
+  },
+  {
+   "source": "return JapaneseDate.of(2020, 1, 1)",
+   "why": "non-ISO chronologies are not implemented"
+  },
+  {
+   "source": "return HijrahDate.now() != null",
+   "why": "non-ISO chronologies are not implemented"
+  },
+  {
+   "source": "return DateTimeFormatter.ofLocalizedTime(FormatStyle.FULL).format(LocalTime.of(3, 4))",
+   "why": "the JDK frames of the localized printer around the failing zone lookup are not reproduced"
+  },
+  {
+   "source": "return DateTimeFormatter.ofLocalizedDateTime(FormatStyle.LONG).format(LocalDateTime.of(2020, 1, 2, 3, 4))",
+   "why": "the JDK frames of the localized printer around the failing zone lookup are not reproduced"
+  },
+  {
+   "source": "return [ChronoField.MONTH_OF_YEAR.getDisplayName(Locale.FRENCH), ChronoField.DAY_OF_WEEK.getDisplayName(Locale.GERMAN), ChronoField.YEAR.getDisplayName(Locale.ROOT)]",
+   "why": "localized field display names are not bundled (English names are returned)"
+  },
+  {
+   "source": "return DateTimeFormatter.ofPattern('EEE d MMM uuuu', Locale.US).parse('Fri 3 Feb 2021')",
+   "why": "parse failure frames (createError) are not reproduced"
+  },
+  {
+   "source": "return LocalTime.parse('3 in the afternoon', DateTimeFormatter.ofPattern('h B', Locale.US))",
+   "why": "parsed day periods are not resolved into the hour"
+  },
+  {
+   "source": "return DateTimeFormatter.ofPattern('B').format(LocalDate.of(2020, 1, 1))",
+   "why": "the JDK frames of the day period printer's failure are not reproduced"
+  }
+ ],
+ "locale.json": [
+  {
+   "source": "return [new Locale('en', 'US').getDisplayName(), new Locale('fr', 'CA').getDisplayName(Locale.FRENCH), new Locale('xx', 'YY').getDisplayName(), new Locale('haw').getDisplayLanguage(), new Locale('en').getISO3Language(), new Locale('en', 'GB').getISO3Country(), Locale.US.getDisplayCountry(Locale.GERMAN)]",
+   "why": "display names in other display locales are not bundled (English names are returned)"
+  },
+  {
+   "source": "return Locale.FRANCE.getDisplayLanguage(Locale.FRANCE) + Locale.GERMANY.getDisplayCountry(Locale.GERMANY)",
+   "why": "display names in other display locales are not bundled (English names are returned)"
+  }
+ ],
+ "docs2.json": [
+  {
+   "source": "return params.f",
+   "why": "an integer literal beyond 64 bits in params is a BigInteger in Jackson; serde_json without arbitrary_precision only gives the double"
+  }
+ ],
+ "legacy_dates.json": [
+  {
+   "source": "SimpleDateFormat f = new SimpleDateFormat(\"EEEE d MMMM yyyy HH:mm z zzzz\", Locale.GERMANY); f.setTimeZone(TimeZone.getTimeZone('Europe/Berlin')); return f.format(new Date(1600000000000L))",
+   "why": "zone names are bundled in English only (plus the UTC/GMT names of other locales)"
+  },
+  {
+   "source": "Calendar c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); return [c.getDisplayName(Calendar.ERA, Calendar.LONG, Locale.FRANCE), c.getDisplayName(Calendar.ERA, Calendar.NARROW_FORMAT, Locale.US), c.getDisplayName(Calendar.ERA, Calendar.SHORT, Locale.GERMANY), c.getDisplayNames(Calendar.ERA, Calendar.ALL_STYLES, Locale.US), c.getDisplayNames(Calendar.AM_PM, Calendar.ALL_STYLES, Locale.US), c.getDisplayNames(Calendar.DAY_OF_WEEK, Calendar.SHORT_STANDALONE, Locale.US), c.getDisplayName(Calendar.HOUR, Calendar.LONG, Locale.US)]",
+   "why": "narrow AM/PM markers (a, p) are not bundled"
+  },
+  {
+   "source": "TimeZone z = TimeZone.getTimeZone('America/New_York'); return [z.getID(), z.getRawOffset(), z.getDSTSavings(), z.useDaylightTime(), z.observesDaylightTime(), z.getOffset(1600000000000L), z.inDaylightTime(new Date(1600000000000L)), z.toZoneId(), z.getDisplayName(), z.getDisplayName(true, TimeZone.SHORT), z.getDisplayName(false, TimeZone.LONG, Locale.FRENCH)]",
+   "why": "zone names are bundled in English only (plus the UTC/GMT names of other locales)"
+  }
+ ],
+ "lang9.json": [
+  {
+   "source": "return [1, 2].stream().map(ArrayList::new)",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "def x = [1, 2].stream().filter(x -> true); return x",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "return [[1, 2].stream().map(x -> x), [1].stream().filter(x -> true), [1].stream().sorted(), [1].stream().distinct(), [1].stream().limit(1), [1].stream().skip(1), [1].stream().peek(x -> x), [1].stream().flatMap(x -> [x].stream()), [1].stream().mapToInt(x -> x), [1].stream().mapToLong(x -> x), [1].stream().mapToDouble(x -> x), [1].stream()].stream().map(x -> x.getClass().getName()).collect(Collectors.toList())",
+   "why": "the JDK frames of a collector failure inside a flatMap'ed inner pipeline (Head.forEach, $7$1FlatMap.accept) are not reproduced"
+  },
+  {
+   "source": "Debug.explain([1].stream())",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "Debug.explain(Comparator.naturalOrder())",
+   "why": "Comparator.naturalOrder() is a function value here: Debug.explain reports java.util.Comparator, not Comparators$NaturalOrderComparator"
+  },
+  {
+   "source": "return [1, null, 3].stream().flatMap(x -> [x].stream()).collect(Collectors.toMap(x -> 'k' + x, x -> x))",
+   "why": "the JDK frames of a collector failure inside a flatMap'ed inner pipeline (Head.forEach, $7$1FlatMap.accept) are not reproduced"
+  },
+  {
+   "source": "return [Comparator.naturalOrder().toString(), Comparator.reverseOrder().toString(), Collections.reverseOrder().toString()]",
+   "why": "the JDK comparators print as function values here (NaturalOrderComparator's enum name INSTANCE, ReverseComparator's identity string)"
+  },
+  {
+   "source": "def s = [1, 2].stream(); s.count(); return s.skip(0)",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "def s = [1,2].stream(); s.count(); return s.unordered()",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "def s = [1,2].stream(); s.count(); return s.sequential()",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "def s = [1,2].stream(); s.count(); return s.onClose(() -> 1)",
+   "why": "streams print and report their runtime class as the pipeline interface (ReferencePipeline, IntPipeline …), not the JDK's per-operation classes (ReferencePipeline$Head, $2, SortedOps$OfRef, …)"
+  },
+  {
+   "source": "return [TemporalQueries.zoneId(), TemporalQueries.precision().toString()]",
+   "why": "TemporalQueries' queries are function values here: their toString is not the JDK query's name (ZoneId, Precision, …)"
+  }
+ ]
+}

@@ -354,7 +354,7 @@ async fn full_mode_with_postgres() {
     let (proxy, redis, redis_http, kafka) = (free_port(), free_port(), free_port(), free_port());
     // roll storage's defaults (:59000, :59001) sit in the ephemeral range: any outgoing
     // connection on the machine can hold one.
-    let (s3, storage_api) = (free_port(), free_port());
+    let (s3, storage_api, search) = (free_port(), free_port(), free_port());
     let spawn = || {
         Rolld(
             Command::new(env!("CARGO_BIN_EXE_rolld"))
@@ -370,6 +370,7 @@ async fn full_mode_with_postgres() {
                 .args(["--s3", &format!("127.0.0.1:{s3}"), "--storage-api", &format!("127.0.0.1:{storage_api}")])
                 .args(["--nosql-cql", &format!("127.0.0.1:{}", p.cql), "--nosql-cql-shard-aware", &format!("127.0.0.1:{}", p.shard)])
                 .args(["--nosql-rest", &format!("127.0.0.1:{}", p.rest), "--nosql-alternator", &format!("127.0.0.1:{}", p.alternator)])
+                .args(["--search-http", &format!("127.0.0.1:{search}")])
                 .spawn()
                 .expect("rolld starts"),
         )

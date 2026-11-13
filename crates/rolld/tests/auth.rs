@@ -53,7 +53,7 @@ fn loopback_args(api: u16) -> Vec<String> {
     for flag in [
         "--proxy", "--redis", "--redis-http", "--kafka", "--s3", "--storage-api",
         "--queues-amqp", "--queues-management", "--queues-stomp", "--queues-web-stomp", "--queues-mqtt", "--queues-web-mqtt", "--queues-stream", "--queues-http",
-        "--nosql-cql", "--nosql-cql-shard-aware", "--nosql-rest", "--nosql-alternator",
+        "--nosql-cql", "--nosql-cql-shard-aware", "--nosql-rest", "--nosql-alternator", "--search-http",
     ] {
         args.extend([flag.to_string(), format!("127.0.0.1:{}", free_port())]);
     }
@@ -220,7 +220,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
             protected += 1;
             // A product's own credential gets past the gate: a wrong one must not get further
             // than the route's method (a GET on a POST route is a 405 either way).
-            let credential = access.starts_with("operator or");
+            let credential = access.starts_with("operator or") || access.starts_with("user or");
             for (who, auth) in [("no token", None), ("a wrong token", Some("Bearer not-the-token")), ("Basic", Some("Basic eDp5"))] {
                 let status = send(via, host.clone(), path.clone(), auth.map(str::to_string)).await;
                 if status != 401 && !(credential && auth.is_some() && status == 405) {
@@ -246,7 +246,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
             Err(e) if e.is_timeout() => 0,
             Err(e) => panic!("GET {path}: {e}"),
         };
-        let fine = if access.starts_with("user:") { status != 401 && status != 403 } else { status == 403 };
+        let fine = if access.starts_with("user:") || access.starts_with("user or") { status != 401 && status != 403 } else { status == 403 };
         if !fine {
             wrong.push(format!("{host} {route} ({access}): {status} with a user's session"));
         }
@@ -333,6 +333,8 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/code/names", "public name lookups"),
         ("/v1/apps/hooks", "deploy hooks: the secret in the URL"),
         ("/v1/accounts", "people's accounts: sign-in, sessions and invites are a person's, never a token's"),
+        ("/v1/secrets/shares/{id}", "a one-time share: the link's key is the credential"),
+        ("/v1/secrets/login", "workload identities: the workload's OIDC token is the credential"),
     ];
     let unscoped: Vec<_> = scoped
         .lock()

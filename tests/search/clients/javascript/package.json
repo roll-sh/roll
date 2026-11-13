@@ -1,0 +1,9 @@
+{
+  "name": "roll-search-client-javascript",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@elastic/elasticsearch": "9.5.1",
+    "@opensearch-project/opensearch": "3.9.0"
+  }
+}

@@ -1,0 +1,28 @@
+# Tests of Elasticsearch 9.5.5's `streams` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+streams:streams/logs/10_basic/Basic toggle of logs.ecs state enable to disable and back
+streams:streams/logs/10_basic/Basic toggle of logs.otel state enable to disable and back
+streams:streams/logs/10_basic/Check for repeated toggle to same state
+streams:streams/logs/10_basic/Check streams can't be enabled with existing logs.ecs indices
+streams:streams/logs/10_basic/Check streams can't be enabled with existing logs.otel indices
+streams:streams/logs/10_basic/Original logs stream deprecated
+streams:streams/logs/20_substream_restrictions/Check Bulk Index With Reroute Processor To Substream Is Rejected
+streams:streams/logs/20_substream_restrictions/Check Bulk Index With Script Processor To Substream Is Rejected
+streams:streams/logs/20_substream_restrictions/Check Delete By Query Directly On Substream After Reroute Succeeds
+streams:streams/logs/20_substream_restrictions/Check User Can't Write To Substream Directly
+streams:streams/logs/20_substream_restrictions/Check User Can't Write To Substream Directly With Single Doc
+streams:streams/logs/20_substream_restrictions/Enable sub-stream type still works
+streams:streams/logs/30_param_restrictions/Allowed Params Only - Bulk Should Succeed
+streams:streams/logs/30_param_restrictions/Allowed Params Only - Single Doc Should Succeed
+streams:streams/logs/30_param_restrictions/Allowed Params Only - Single Doc with ID Should Succeed
+streams:streams/logs/30_param_restrictions/Check User Can't Use Restricted Params On Logs Endpoint
+streams:streams/logs/30_param_restrictions/Check User Can't Use Restricted Params On Logs Endpoint - Single Doc
+streams:streams/logs/30_param_restrictions/Mixed Allowed and Disallowed Params - Bulk Should Fail
+streams:streams/logs/30_param_restrictions/Mixed Allowed and Disallowed Params - Single Doc Should Fail
+streams:streams/logs/30_param_restrictions/Multiple Disallowed Params - Bulk Should Fail
+streams:streams/logs/30_param_restrictions/Multiple Disallowed Params - Single Doc Should Fail
+streams:streams/logs/30_param_restrictions/No Params - Bulk Should Succeed
+streams:streams/logs/30_param_restrictions/No Params - Single Doc Should Succeed
+streams:streams/logs/40_index_request_restrictions/Check User Can't Provide Pipeline to Logs ECS Stream
+streams:streams/logs/40_index_request_restrictions/Check User Can't Provide Pipeline to Logs OTel Stream

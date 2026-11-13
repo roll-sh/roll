@@ -20,7 +20,7 @@ region=${4:-us-east-1}
 
 # The edge's two certificate sets (roll_edge::Hostnames::cert_sets), in one certificate.
 names=("$domain" "api.$domain" "git.$domain" "tasks.$region.$domain")
-for p in pg redis kafka nosql mq; do names+=("*.$p.$region.$domain"); done
+for p in pg redis kafka nosql mq search; do names+=("*.$p.$region.$domain"); done
 names+=("*.$site" "s3.$region.$site" "*.s3.$region.$site")
 san=$(printf 'DNS:%s,' "${names[@]}")
 san=${san%,}
