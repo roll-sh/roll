@@ -786,7 +786,8 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
-- a health check before "ready" (`roll.toml` `health`);
+- a health check before "ready" (`roll.toml` `health`), and the start/stop race it found live
+  (a sleep removing the container a start was making; a request stopping a fresh start);
 - a feedback button on a preview's pages for people who came in through roll, posting on the
   change from roll (Vercel Comments);
 - a preview's own variables over the project's (`…/env`, the sheet, `roll preview env`);
