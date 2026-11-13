@@ -1149,6 +1149,23 @@ direct parser (tuning log).
 | 8 | Elasticsearch 9.5.5 | 66,346 (61,663-78,655) | 510.6 | 1,257.9 | 51.6 (47.8-58.7) |
 | 8 | OpenSearch 3.9 | 59,610 (49,214-64,886) | 641.4 | 1,200.7 | 62.5 (56.4-75.6) |
 
+### An ECS access log
+
+The same harness on `scripts/bench-search-ecs.py`'s corpus (1M documents, objects up to three
+levels deep), at host load 28-36 (wider spreads):
+
+| clients | target | docs/s | p50 bulk ms | p99 bulk ms | CPU µs/doc |
+|---|---|---:|---:|---:|---:|
+| 1 | roll | **51,478** (46,717-52,096) | **87.0** | **240.9** | 51.8 (49.4-56.4) |
+| 1 | Elasticsearch 9.5.5 | 35,118 (32,638-35,277) | 129.2 | 317.6 | **34.6** (32.2-55.5) |
+| 1 | OpenSearch 3.9 | 24,342 (22,421-27,141) | 183.5 | 393.7 | 53.8 (42.1-78.8) |
+| 8 | roll | **74,523** (61,551-84,847) | **520.7** | **935.1** | **50.9** (45.1-59.1) |
+| 8 | Elasticsearch 9.5.5 | 59,031 (51,791-72,111) | 608.5 | 1,434.1 | 57.3 (51.8-63.7) |
+| 8 | OpenSearch 3.9 | 41,291 (34,073-44,665) | 921.7 | 1,647.7 | 91.0 (82.9-92.6) |
+
+With one client Elasticsearch spends less CPU per document than roll (it waits on each request
+longer); that is the next thing to look at.
+
 ## Footprint and cold start
 
 `scripts/bench-search.sh footprint` (r4g, same pinning):
