@@ -1,7 +1,10 @@
-import { Check, ChevronsUpDown, LogOut, Settings, Users } from "lucide-react";
+import { Check, ChevronsUpDown, LogOut, Settings, UserRound, Users } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { codeApi, type Owner } from "@/lib/code-api";
-import { requestSignIn, setToken } from "@/lib/code-token";
+import { signOut, useSession } from "@/lib/accounts-api";
+import { getToken, setToken } from "@/lib/code-token";
+import { Link } from "@/components/link";
 import { seedColor } from "@/lib/agents-identity";
 import { showAgents } from "@/lib/agents-surface";
 import { tint } from "../agents/identity";
@@ -27,6 +30,9 @@ function Avatar({ name, size = 22 }: { name: string; size?: number }) {
  */
 export function AccountMenu() {
   const shown = useShownOwner();
+  const session = useSession();
+  const navigate = useNavigate();
+  const user = session.status === "signed_in" ? session.user : null;
   const [open, setOpen] = useState(false);
   const [owners, setOwners] = useState<readonly Owner[] | null>(null);
   const [q, setQ] = useState("");
@@ -45,20 +51,21 @@ export function AccountMenu() {
   }, [open]);
 
   useEffect(() => {
-    if (!open || !shown?.admin || owners) return;
+    if (!open || !(shown?.admin || (session.status === "signed_in" && session.user.admin)) || owners) return;
     codeApi.owners().then(setOwners, () => setOwners([]));
-  }, [open, shown?.admin, owners]);
+  }, [open, shown?.admin, session, owners]);
 
-  if (shown === undefined) return <div className="h-9" />;
-  if (!shown.owner)
+  if (shown === undefined && !user) return <div className="h-9" />;
+  if (!shown?.owner && !user)
     return (
-      <button onClick={requestSignIn} className={`${item} mt-1 text-muted hover:text-fg`}>
+      <Link href="/signin" className={`${item} mt-1 text-muted hover:text-fg`}>
         <LogOut className="size-3.5 rotate-180" />
         Sign in
-      </button>
+      </Link>
     );
 
-  const owner = shown.owner;
+  const owner = shown?.owner ?? user?.handle ?? "";
+  const admin = Boolean(user?.admin || shown?.admin);
   const list = (owners ?? []).filter((o) => o.name.includes(q.trim().toLowerCase()));
   return (
     <div ref={ref} className="relative mt-1">
@@ -67,10 +74,10 @@ export function AccountMenu() {
         aria-expanded={open}
         className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/[0.04] ${open ? "bg-white/[0.05]" : ""}`}
       >
-        <Avatar name={owner} />
+        <Avatar name={user?.name || owner} />
         <span className="min-w-0 flex-1 leading-tight">
-          <span className="block truncate text-[12.5px] font-medium">{owner}</span>
-          <span className="block text-[10.5px] text-subtle">{shown.admin ? "Admin" : "Signed in"}</span>
+          <span className="block truncate text-[12.5px] font-medium">{user?.name || owner}</span>
+          <span className="block truncate text-[10.5px] text-subtle">{user ? user.email : admin ? "Admin token" : "Signed in"}</span>
         </span>
         <ChevronsUpDown className="size-3.5 text-subtle" />
       </button>
@@ -81,7 +88,7 @@ export function AccountMenu() {
         }`}
         inert={!open}
       >
-        {shown.admin && (
+        {admin && (
           <>
             <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1 text-[10.5px] font-medium text-subtle">
               <Users className="size-3" /> Work as
@@ -114,6 +121,11 @@ export function AccountMenu() {
             <div className="my-1 h-px bg-line" />
           </>
         )}
+        {user && (
+          <Link href="/dashboard/account" onClick={() => setOpen(false)} className={`${item} text-muted hover:text-fg`}>
+            <UserRound className="size-3.5" /> Account
+          </Link>
+        )}
         <button
           onClick={() => {
             setOpen(false);
@@ -121,12 +133,14 @@ export function AccountMenu() {
           }}
           className={`${item} text-muted hover:text-fg`}
         >
-          <Settings className="size-3.5" /> Settings
+          <Settings className="size-3.5" /> Agent settings
         </button>
         <button
-          onClick={() => {
+          onClick={async () => {
             setOpen(false);
-            setToken(null);
+            if (getToken()) setToken(null);
+            if (user) await signOut();
+            navigate({ href: "/signin" });
           }}
           className={`${item} text-muted hover:text-fg`}
         >

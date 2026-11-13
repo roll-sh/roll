@@ -5,7 +5,6 @@ import { useEffect, useState, type ReactNode } from "react";
 import { WaitingApprovals } from "./access/waiting";
 import { AgentsControl } from "./agents/agents-control";
 import { AskPanel } from "./ask";
-import { SignIn } from "./code/sign-in";
 import { useMarkState } from "./mark-state";
 import { NewProjectDialog } from "./workspace/new-project";
 import { Sidebar } from "./workspace/sidebar";
@@ -69,7 +68,6 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
               </span>
               <WaitingApprovals />
               <AgentsControl pill={false} />
-              <SignIn />
             </header>
 
             {bleed ? (

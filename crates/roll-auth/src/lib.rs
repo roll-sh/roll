@@ -13,27 +13,38 @@
 //!   to the product, which verifies it. Without one it's a 401.
 //! - [`Access::Product`] routes decide everything themselves, anonymous callers included (roll
 //!   code's owners, tokens and public repositories; signed internal hops).
+//! - [`Access::User`] routes take the operator or any signed-in user; the product scopes what a
+//!   user sees (workspace projects).
 //! - Everything else, and every path no route matches, is [`Access::Operator`]: the token or 401.
 //!
+//! People sign in with a session cookie (docs/accounts.md). The gate resolves it through
+//! [`Sessions`] on every request (nothing is cached), checks CSRF on writes, and puts
+//! [`SignedIn`] in the request's extensions; an admin's session also carries [`Operator`]. A
+//! signed-in user who isn't an admin gets 403 on [`Access::Operator`] routes (and on
+//! [`Access::Credential`] routes without the product's credential).
+//!
 //! Without a token (a daemon on loopback, local development) the gate lets everything through
-//! and products behave as they always have.
+//! and products behave as they always have; a session cookie still says who is signed in.
 //!
 //! Scoped tokens (docs/permissions.md) are an [`Authorizer`]'s: a request bearing one goes to it
 //! whatever the route and whether or not the operator's token is set, so a token's limits hold
 //! everywhere. It sends allowed requests on with [`Operator`] and a [`Grant`] in their extensions.
 
 pub mod scope;
+pub mod totp;
 
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tower_http::cors::{AllowHeaders, AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer, ExposeHeaders};
 
 /// The operator's token. `Debug` never shows it.
 #[derive(Clone)]
@@ -169,12 +180,79 @@ pub trait Authorizer: Send + Sync + 'static {
     fn handle(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
 }
 
+/// A signed-in user, in a request's extensions: the gate resolved the session cookie. Products
+/// read who it is from here (roll code: the user's owner; workspace: the user's projects).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedIn {
+    /// `usr_…`
+    pub user: String,
+    pub handle: String,
+    /// An admin acts as the operator (the request carries [`Operator`] too).
+    pub admin: bool,
+    /// The user's roll code owner (`own_…`), once it exists.
+    pub code_owner: Option<String>,
+    /// The session's public id (`ses_…`).
+    pub session: String,
+}
+
+/// A session that still owes its second factor, in a request's extensions: only the
+/// second-factor routes accept it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecondFactorOwed {
+    pub user: String,
+    pub session: String,
+}
+
+/// What a session cookie's token stands for.
+#[derive(Clone, Debug)]
+pub enum Session {
+    Full(SignedIn),
+    SecondFactor(SecondFactorOwed),
+}
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Resolves session cookies (`roll-accounts`): one lookup per request, never cached, so
+/// revocation is immediate. `Err` is a database failure (the gate answers 503).
+pub trait Sessions: Send + Sync + 'static {
+    /// The cookie's name: `__Host-roll_session`, or `roll_session` on plain-HTTP local setups.
+    fn cookie(&self) -> &str;
+    fn resolve<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Session>, String>>;
+}
+
+/// The CSRF header a write with a session cookie carries (docs/accounts.md, "CSRF").
+pub const CSRF_HEADER: &str = "x-roll-csrf";
+
+/// The CSRF token of a session: derived from its token, so it needs no storage and changes with
+/// every session.
+pub fn csrf_token(session_token: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"roll-csrf:");
+    h.update(session_token.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.finalize())
+}
+
+/// The value of cookie `name` in the request's `Cookie` headers.
+pub fn cookie<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|kv| kv.trim().split_once('='))
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v.trim())
+        .filter(|v| !v.is_empty())
+}
+
 /// Who may call a route; the text says why (or which credential).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
     Public(&'static str),
     Product(&'static str),
     Credential(&'static str),
+    /// The operator or any signed-in user; the product scopes what each sees.
+    User(&'static str),
     Operator,
 }
 
@@ -184,6 +262,7 @@ impl fmt::Display for Access {
             Access::Public(why) => write!(f, "public: {why}"),
             Access::Product(why) => write!(f, "product: {why}"),
             Access::Credential(what) => write!(f, "operator or {what}"),
+            Access::User(why) => write!(f, "user: {why}"),
             Access::Operator => f.write_str("operator"),
         }
     }
@@ -200,16 +279,27 @@ pub struct Gate {
     token: Option<AdminToken>,
     rules: Vec<Rule>,
     authorizer: OnceLock<Arc<dyn Authorizer>>,
+    sessions: Option<Arc<dyn Sessions>>,
+    /// Origins a write with a session cookie may come from (the dashboard's, and the API's own).
+    origins: Origins,
+    own_origin: Option<HeaderValue>,
 }
 
 impl Gate {
     pub fn new(token: Option<AdminToken>, rules: Vec<Rule>) -> Arc<Self> {
-        Arc::new(Self { token, rules, authorizer: OnceLock::new() })
+        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: None, origins: Origins::List(Vec::new()), own_origin: None })
     }
 
     /// Scoped tokens' evaluator, set once when it's ready (before serving).
     pub fn set_authorizer(&self, a: Arc<dyn Authorizer>) {
         let _ = self.authorizer.set(a);
+    }
+
+    /// A gate that also signs people in with session cookies. `origins`: the dashboard's
+    /// (`ROLL_DASHBOARD_ORIGIN`); `own`: the API's public URL, whose origin may send writes too.
+    pub fn with_sessions(token: Option<AdminToken>, rules: Vec<Rule>, sessions: Arc<dyn Sessions>, origins: Origins, own: &str) -> Arc<Self> {
+        let own_origin = origin_of(own).and_then(|o| HeaderValue::from_str(&o).ok());
+        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: Some(sessions), origins, own_origin })
     }
 
     /// The access of a route pattern (as the router has it): its longest matching rule's, else
@@ -240,20 +330,93 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
     }
     // A public route is public whatever a request carries (a grant holder opening a shared link).
     let public = req.extensions().get::<MatchedPath>().is_some_and(|m| matches!(gate.access(m.as_str()), Access::Public(_)));
-    // A grant, or something that looks like one, never passes as anything else.
+    // A grant, or something that looks like one, never passes as anything else (nor with a cookie).
     if !public
         && let (Some(a), Some(p)) = (gate.authorizer.get(), grant_credential(req.headers()))
         && a.claims(&p)
     {
         return a.handle(req, next).await;
     }
-    let Some(_) = &gate.token else { return next.run(req).await };
+    // A request with an `Authorization` header is judged by it alone: the cookie is ignored.
+    let authorization = req.headers().contains_key(header::AUTHORIZATION);
+    let mut signed_in = None;
+    if !authorization
+        && let Some(sessions) = &gate.sessions
+        && let Some(token) = cookie(req.headers(), sessions.cookie())
+    {
+        let session = match sessions.resolve(token).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "sessions: lookup failed");
+                return error(StatusCode::SERVICE_UNAVAILABLE, "sessions are unavailable; try again", "unavailable");
+            }
+        };
+        if let Some(session) = session {
+            if !safe(req.method()) && !gate.csrf_ok(req.headers(), token) {
+                return error(StatusCode::FORBIDDEN, "this request needs the X-Roll-CSRF header from GET /v1/accounts/session", "csrf");
+            }
+            match session {
+                Session::Full(s) => {
+                    if s.admin {
+                        req.extensions_mut().insert(Operator);
+                    }
+                    signed_in = Some(s.admin);
+                    req.extensions_mut().insert(s);
+                }
+                Session::SecondFactor(s) => {
+                    req.extensions_mut().insert(s);
+                }
+            }
+        }
+    }
+    if gate.token.is_none() || signed_in == Some(true) {
+        return next.run(req).await;
+    }
     let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
     match access {
         Access::Public(_) | Access::Product(_) => next.run(req).await,
-        Access::Credential(_) if req.headers().contains_key(header::AUTHORIZATION) => next.run(req).await,
+        Access::Credential(_) if authorization => next.run(req).await,
+        Access::User(_) if signed_in.is_some() => next.run(req).await,
+        _ if signed_in.is_some() => error(
+            StatusCode::FORBIDDEN,
+            "your account can use roll code, agents and projects; this API is for roll's admins for now",
+            "operator_only",
+        ),
         _ => unauthorized(),
     }
+}
+
+fn safe(m: &Method) -> bool {
+    matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+impl Gate {
+    /// The CSRF header matches the session, and the origin (when sent) is one we serve.
+    fn csrf_ok(&self, headers: &HeaderMap, session_token: &str) -> bool {
+        let header_ok = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()).is_some_and(|v| constant_eq(v.trim().as_bytes(), csrf_token(session_token).as_bytes()));
+        let origin_ok = match headers.get(header::ORIGIN) {
+            None => true,
+            Some(o) => {
+                self.own_origin.as_ref() == Some(o)
+                    || match &self.origins {
+                        Origins::Local => is_local(o),
+                        Origins::List(l) => l.iter().any(|a| a.as_bytes().eq_ignore_ascii_case(o.as_bytes())),
+                    }
+            }
+        };
+        header_ok && origin_ok
+    }
+}
+
+/// `scheme://host[:port]` of a URL.
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    (!host.is_empty()).then(|| format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase()))
+}
+
+fn error(status: StatusCode, msg: &str, code: &str) -> Response {
+    (status, axum::Json(serde_json::json!({ "error": msg, "code": code }))).into_response()
 }
 
 fn unauthorized() -> Response {
@@ -297,8 +460,12 @@ fn is_local(origin: &HeaderValue) -> bool {
     })
 }
 
+/// Response headers the dashboard may read besides the CORS-safelisted ones (with credentials
+/// allowed, `*` isn't an option).
+const EXPOSED: [&str; 9] = ["location", "retry-after", "www-authenticate", "content-disposition", "etag", "last-modified", "x-roll-changeset", "mcp-session-id", "x-request-id"];
+
 /// One CORS policy for every control-plane API: these origins, any method and request header,
-/// every response header readable, no cookies (the dashboard sends tokens, not credentials).
+/// with credentials (the session cookie, docs/accounts.md).
 pub fn cors(origins: &Origins) -> CorsLayer {
     let allow = match origins {
         Origins::Local => AllowOrigin::predicate(|o, _| is_local(o)),
@@ -306,9 +473,10 @@ pub fn cors(origins: &Origins) -> CorsLayer {
     };
     CorsLayer::new()
         .allow_origin(allow)
+        .allow_credentials(true)
         .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
         .allow_headers(AllowHeaders::mirror_request())
-        .expose_headers(Any)
+        .expose_headers(ExposeHeaders::list(EXPOSED.map(axum::http::HeaderName::from_static)))
         .max_age(Duration::from_secs(3600))
 }
 
@@ -334,5 +502,15 @@ mod tests {
         let t = AdminToken::new("0123456789abcdef0123456789abcdef").unwrap();
         assert!(t.matches("0123456789abcdef0123456789abcdef") && !t.matches("0123456789abcdef0123456789abcdeX"));
         assert!(!format!("{t:?}").contains("0123"));
+    }
+
+    #[test]
+    fn cookies_and_origins() {
+        let mut h = HeaderMap::new();
+        h.append(header::COOKIE, HeaderValue::from_static("a=1; roll_session=tok; b=2"));
+        assert_eq!(cookie(&h, "roll_session"), Some("tok"));
+        assert_eq!(cookie(&h, "roll"), None);
+        assert_eq!(origin_of("https://API.roll.sh/v1"), Some("https://api.roll.sh".into()));
+        assert_ne!(csrf_token("a"), csrf_token("b"));
     }
 }

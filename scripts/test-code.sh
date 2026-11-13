@@ -27,7 +27,7 @@ source scripts/lib/gate.sh
 # roll-auth, roll-access, roll-mcp and roll-net are roll code's gate and evaluator too (docs/permissions.md):
 # their suites run here, and with --docker on Postgres like the stores.
 CODE_CRATES=(code-sql roll-cluster code-store code-git code-github code-index code-review code-chat code-control code-preview roll-fetch roll-workspace
-             roll-auth roll-access roll-mcp roll-net)
+             roll-auth roll-access roll-mcp roll-net roll-accounts)
 RUST_PATHS=("${CODE_CRATES[@]/#/crates/}" crates/agent-proto/src crates/roll-cli/src/code crates/roll-cli/src/code.rs crates/roll-cli/src/main.rs
             crates/roll-cli/src/access.rs crates/roll-cli/tests/code.rs crates/roll-cli/tests/token.rs crates/roll-cli/tests/common crates/roll-cli/Cargo.toml
             docs/code/test-coverage.md Cargo.toml Cargo.lock scripts/test-code.sh scripts/lib/gate.sh)
