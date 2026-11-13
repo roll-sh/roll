@@ -70,6 +70,14 @@ export function SyncsView() {
   );
 }
 
+/** The kind picker's groups, in order; `[]`: every kind no group names. */
+const GROUPS: [string, string[]][] = [
+  ["CI", ["github", "gitlab", "circleci", "bitbucket"]],
+  ["Hosting", ["vercel", "netlify", "render", "fly", "railway", "heroku", "cloudflare"]],
+  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "kubernetes"]],
+  ["Anything else", []],
+];
+
 /** What a sync's target is, in a few words: `owner/app · production`, or a URL's host. */
 function targetSummary(s: Sync): string {
   const t = s.target;
@@ -81,6 +89,13 @@ function targetSummary(s: Sync): string {
   if (s.kind === "netlify") return `${str("site")} · ${str("context") || "all"}`;
   if (s.kind === "fly") return str("app");
   if (s.kind === "railway") return `${str("project")} · ${str("environment")}${str("service") ? ` · ${str("service")}` : ""}`;
+  if (s.kind === "heroku") return str("app");
+  if (s.kind === "circleci") return str("project");
+  if (s.kind === "bitbucket") return `${str("workspace")}/${str("repo")}${str("environment") ? " · deployment" : ""}`;
+  if (s.kind === "aws-ssm") return `${str("region")} · ${str("prefix")}`;
+  if (s.kind === "aws-secrets-manager") return `${str("region")} · ${str("secret_name")}`;
+  if (s.kind === "google-secret-manager") return `${str("project")}${str("prefix") ? ` · ${str("prefix")}…` : ""}`;
+  if (s.kind === "azure-key-vault") return str("vault");
   if (str("url")) {
     try {
       return new URL(str("url")).host;
@@ -235,11 +250,20 @@ function NewSyncForm({ kinds, onCreate, onCancel }: { kinds: SyncKind[]; onCreat
             }}
             className={field}
           >
-            {kinds.map((k) => (
-              <option key={k.kind} value={k.kind}>
-                {k.label}
-              </option>
-            ))}
+            {GROUPS.map(([group, members]) => {
+              const these = kinds.filter((k) => (members.length ? members.includes(k.kind) : !GROUPS.some(([, m]) => m.includes(k.kind))));
+              return (
+                these.length > 0 && (
+                  <optgroup key={group} label={group}>
+                    {these.map((k) => (
+                      <option key={k.kind} value={k.kind}>
+                        {k.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                )
+              );
+            })}
           </select>
         </label>
         <label>
