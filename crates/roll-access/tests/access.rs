@@ -799,8 +799,9 @@ async fn approvals_can_be_remembered() {
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{asks_id}"), None).await;
     assert_eq!(g["rules"].as_array().map(Vec::len), Some(2), "{g}");
     // A token's page lists its own approvals, however many others there are.
-    let (_, its) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals?grant={asks_id}&limit=1"), None).await;
-    assert_eq!(its.as_array().map(|l| l.iter().filter(|x| x["grant_id"] == json!(asks_id)).count()), Some(1), "{its}");
+    // (`id`'s approvals are older than `asks`' just now.)
+    let (_, its) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals?grant={id}&limit=1"), None).await;
+    assert_eq!(its.as_array().map(|l| l.iter().filter(|x| x["grant_id"] == json!(id)).count()), Some(1), "{its}");
     // Only a token that asks may make one that asks.
     let child = |ask: bool| json!({ "name": "child", "rules": [{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }], "ask_otherwise": ask });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child(false))).await.0, StatusCode::CREATED);
