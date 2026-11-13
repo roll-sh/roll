@@ -81,6 +81,52 @@ impl FieldFilter {
         }
     }
 
+    /// A mapping (`{"properties": …}`, as `GET _mapping` prints it) without the hidden fields
+    /// (`FieldPermissions` filtering `MappingMetadata`): a field goes when its full path is
+    /// hidden, a multi-field when its own path is, an object when nothing under it is left.
+    pub fn filter_mapping(&self, mapping: Value) -> Value {
+        match mapping {
+            Value::Obj(mut m) => {
+                if let Some(Value::Obj(props)) = m.shift_remove("properties") {
+                    m.insert("properties".into(), Value::Obj(self.filter_properties(props, "")));
+                }
+                if let Some(Value::Obj(rt)) = m.shift_remove("runtime") {
+                    m.insert("runtime".into(), Value::Obj(rt.into_iter().filter(|(k, _)| self.allows(k)).collect()));
+                }
+                Value::Obj(m)
+            }
+            other => other,
+        }
+    }
+
+    fn filter_properties(&self, props: Map, prefix: &str) -> Map {
+        let mut out = Map::new();
+        for (k, v) in props {
+            let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+            let Value::Obj(mut m) = v else { continue };
+            if let Some(Value::Obj(inner)) = m.shift_remove("properties") {
+                let kept = self.filter_properties(inner, &path);
+                if kept.is_empty() && !self.allows(&path) {
+                    continue;
+                }
+                m.insert("properties".into(), Value::Obj(kept));
+                out.insert(k, Value::Obj(m));
+                continue;
+            }
+            if !self.allows(&path) {
+                continue;
+            }
+            if let Some(Value::Obj(multi)) = m.shift_remove("fields") {
+                let kept: Map = multi.into_iter().filter(|(s, _)| self.allows(&format!("{path}.{s}"))).collect();
+                if !kept.is_empty() {
+                    m.insert("fields".into(), Value::Obj(kept));
+                }
+            }
+            out.insert(k, Value::Obj(m));
+        }
+        out
+    }
+
     /// A `fields` (or stored fields) response map, keyed by full field paths, without the
     /// hidden fields.
     pub fn filter_fields(&self, m: Map) -> Map {

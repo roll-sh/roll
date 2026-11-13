@@ -957,3 +957,70 @@ async fn esql_and_sql_read_as_their_client() {
     let (s, v) = ask("/_sql?format=json", json!({"query": "SELECT k FROM notes"})).await;
     assert_eq!((s, v["rows"].clone()), (200, json!([["a"]])), "{v}");
 }
+
+/// Field level security: a role that hides `secret` lets no read path give its content out
+/// (Elasticsearch filters every one through the same field permissions). Each probe is a
+/// request a user of that role may send; none may answer with the hidden value.
+#[tokio::test]
+async fn field_security_hides_a_field_on_every_read_path() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "fls"})).await;
+    let (owner, pw) = creds(&c);
+    let mapping = json!({"mappings": {"properties": {
+        "name": {"type": "text", "term_vector": "with_positions_offsets", "fields": {"raw": {"type": "keyword"}}},
+        "secret": {"type": "text", "term_vector": "with_positions_offsets", "fields": {"raw": {"type": "keyword"}}},
+        "tags": {"type": "nested", "properties": {"secret": {"type": "keyword"}, "name": {"type": "keyword"}}},
+        "suggest": {"type": "completion"}
+    }}});
+    let (s, v) = e.es(&owner, &pw, reqwest::Method::PUT, "/docs", Some(mapping)).await;
+    assert_eq!(s, 200, "{v}");
+    let doc = json!({"name": "alpha zebra", "secret": "zebra topsecretvalue", "tags": [{"secret": "topsecretvalue", "name": "t"}], "suggest": "alpha"});
+    let (s, v) = e.es(&owner, &pw, reqwest::Method::PUT, "/docs/_doc/1?refresh=true", Some(doc)).await;
+    assert_eq!(s, 201, "{v}");
+    let role = json!({"indices": [{"names": ["docs"], "privileges": ["read", "view_index_metadata"], "field_security": {"grant": ["*"], "except": ["secret", "secret.*", "tags.secret"]}}]});
+    assert_eq!(e.es(&owner, &pw, reqwest::Method::PUT, "/_security/role/no_secret", Some(role)).await.0, 200);
+    let user = json!({"password": "reader-password-1", "roles": ["no_secret"]});
+    assert_eq!(e.es(&owner, &pw, reqwest::Method::PUT, "/_security/user/reader", Some(user)).await.0, 200);
+    let probes: Vec<(&str, reqwest::Method, &str, Option<Value>)> = vec![
+        ("search _source", reqwest::Method::POST, "/docs/_search", Some(json!({}))),
+        ("get", reqwest::Method::GET, "/docs/_doc/1", None),
+        ("fields *", reqwest::Method::POST, "/docs/_search", Some(json!({"fields": ["*"]}))),
+        ("docvalue_fields", reqwest::Method::POST, "/docs/_search", Some(json!({"docvalue_fields": ["secret.raw"]}))),
+        ("query on it", reqwest::Method::POST, "/docs/_search", Some(json!({"query": {"match": {"secret": "topsecretvalue"}}}))),
+        ("highlight", reqwest::Method::POST, "/docs/_search", Some(json!({"query": {"match": {"name": "zebra"}}, "highlight": {"require_field_match": false, "fields": {"*": {}}}}))),
+        ("highlight named", reqwest::Method::POST, "/docs/_search", Some(json!({"query": {"match": {"name": "zebra"}}, "highlight": {"require_field_match": false, "fields": {"secret": {}}}}))),
+        ("script_fields doc", reqwest::Method::POST, "/docs/_search", Some(json!({"script_fields": {"x": {"script": "doc['secret.raw'].size() > 0 ? doc['secret.raw'].value : ''"}}}))),
+        ("script_fields _source", reqwest::Method::POST, "/docs/_search", Some(json!({"script_fields": {"x": {"script": "params._source.secret"}}}))),
+        ("runtime field", reqwest::Method::POST, "/docs/_search", Some(json!({"runtime_mappings": {"x": {"type": "keyword", "script": "emit(params._source.secret)"}}, "fields": ["x"]}))),
+        ("runtime field agg", reqwest::Method::POST, "/docs/_search", Some(json!({"size": 0, "runtime_mappings": {"x": {"type": "keyword", "script": "emit(params._source.secret)"}}, "aggs": {"a": {"terms": {"field": "x"}}}}))),
+        ("terms agg", reqwest::Method::POST, "/docs/_search", Some(json!({"size": 0, "aggs": {"a": {"terms": {"field": "secret.raw"}}}}))),
+        ("nested inner_hits", reqwest::Method::POST, "/docs/_search", Some(json!({"query": {"nested": {"path": "tags", "query": {"match_all": {}}, "inner_hits": {}}}}))),
+        ("term suggester", reqwest::Method::POST, "/docs/_search", Some(json!({"suggest": {"s": {"text": "topsecretvalu", "term": {"field": "secret"}}}}))),
+        ("termvectors", reqwest::Method::GET, "/docs/_termvectors/1?fields=secret", None),
+        ("termvectors all", reqwest::Method::GET, "/docs/_termvectors/1", None),
+        ("explain", reqwest::Method::POST, "/docs/_explain/1", Some(json!({"query": {"match": {"name": "zebra"}}}))),
+        ("mget", reqwest::Method::POST, "/_mget", Some(json!({"docs": [{"_index": "docs", "_id": "1"}]}))),
+        ("esql", reqwest::Method::POST, "/_query", Some(json!({"query": "FROM docs"}))),
+        ("sql", reqwest::Method::POST, "/_sql?format=json", Some(json!({"query": "SELECT * FROM docs"}))),
+        ("count by it", reqwest::Method::POST, "/docs/_count", Some(json!({"query": {"term": {"secret.raw": "zebra topsecretvalue"}}}))),
+        ("sort script", reqwest::Method::POST, "/docs/_search", Some(json!({"sort": {"_script": {"type": "string", "script": "params._source.secret", "order": "asc"}}}))),
+    ];
+    // The reader reads the document (its visible fields), so a probe that answers says something.
+    let (s, v) = e.es("reader@fls", "reader-password-1", reqwest::Method::POST, "/docs/_search", Some(json!({}))).await;
+    assert_eq!((s, v["hits"]["hits"][0]["_source"]["name"].as_str()), (200, Some("alpha zebra")), "{v}");
+    let mut leaks = Vec::new();
+    for (name, method, path, body) in probes {
+        let (s, v) = e.es("reader@fls", "reader-password-1", method, path, body).await;
+        if v.to_string().contains("topsecretvalue") {
+            leaks.push(format!("{name} ({s}): {}", v.to_string().chars().take(300).collect::<String>()));
+        }
+    }
+    assert!(leaks.is_empty(), "{} read paths give the hidden field out:\n{}", leaks.len(), leaks.join("\n"));
+    // Nor its name: field capabilities and mappings list only what the reader may see.
+    for path in ["/docs/_field_caps?fields=*", "/docs/_mapping", "/docs/_mapping/field/*"] {
+        let (s, v) = e.es("reader@fls", "reader-password-1", reqwest::Method::GET, path, None).await;
+        let text = v.to_string();
+        assert_eq!(s, 200, "{path}: {v}");
+        assert!(text.contains("\"name") && !text.contains("\"secret"), "{path} lists the hidden field: {text}");
+    }
+}

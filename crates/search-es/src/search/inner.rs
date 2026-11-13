@@ -25,6 +25,13 @@ fn path_of(seg: &search_index::SegmentContext, d: u32, path: &str) -> bool {
 
 /// The `inner_hits` object of one hit.
 pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent: u32, source: Option<&Value>, total_as_int: bool) -> EsResult<Value> {
+    // Nested hits' sources are cut out of their root's: under field level security, of the
+    // fields the reader may see.
+    let visible = match (source, &qctx.table.source_filter) {
+        (Some(s), Some(_)) => Some(qctx.table.visible_source(s.clone())),
+        _ => None,
+    };
+    let source = visible.as_ref().or(source);
     let mut out = Map::new();
     for def in &r.inner_hits {
         let mut h = match &def.join {
