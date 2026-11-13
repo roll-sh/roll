@@ -24,6 +24,7 @@
 //! right subtree. Over that tree the replay applies OpenSearch's visitor (`compare`,
 //! `visitPoints`, the range iteration and its early termination) and counts what it counts.
 
+use search_codec::points::{PointVisitor, Relation, encode};
 use search_index::query::basic::{ConstantScoreQuery, FieldExistsQuery};
 use search_index::query::range::{IndexOrDocValuesQuery, PointRangeQuery};
 use search_index::search::{QueryRef, ScoreMode, Searcher, SegmentContext, Weight};
@@ -319,18 +320,17 @@ impl FilterRewrite {
         if points.doc_count() as u64 != points.size() || points.spec().packed_len() != 8 {
             return None;
         }
-        let mut out = Vec::with_capacity(ranges.len());
-        for &(lo, hi) in ranges {
-            if hi <= lo {
-                continue;
+        // One walk of the tree for every range: cells inside one range count whole, crossing
+        // leaves are bucketed value by value.
+        let ranges: Vec<(i64, i64)> = ranges.iter().copied().filter(|&(lo, hi)| hi > lo).collect();
+        let mut v = MultiCount { counts: vec![0; ranges.len()], ranges: &ranges, last_inside: None };
+        let mut inside = vec![0u64; ranges.len()];
+        points.count_cells(&mut v, &mut |min, n| {
+            if let Some(i) = find_range(&ranges, encode::i64_from(min)) {
+                inside[i] += n;
             }
-            let q = PointRangeQuery::long(self.field, lo, hi - 1);
-            let n = q.count_points(seg)?;
-            if n > 0 {
-                out.push(((lo, hi), n));
-            }
-        }
-        Some(out)
+        });
+        Some(ranges.iter().zip(v.counts.iter().zip(&inside)).filter(|(_, (a, b))| **a + **b > 0).map(|(&r, (a, b))| (r, a + b)).collect())
     }
 
     /// A `range` aggregation: non-overlapping ranges (sorted by `from`, then `to`) over a
@@ -446,6 +446,69 @@ fn is_utc(r: &Rounding) -> bool {
     match &r.zone {
         crate::format::TimeZone::Fixed { offset_secs, .. } => *offset_secs == 0,
         crate::format::TimeZone::Named(tz) => matches!(tz.name(), "UTC" | "Etc/UTC" | "Etc/UCT" | "UCT" | "Zulu" | "Etc/Zulu" | "Universal" | "Etc/Universal"),
+    }
+}
+
+/// The range of `ranges` (sorted, disjoint, `[lo, hi)`) holding `v`.
+#[inline]
+fn find_range(ranges: &[(i64, i64)], v: i64) -> Option<usize> {
+    let i = ranges.partition_point(|r| r.1 <= v);
+    (i < ranges.len() && ranges[i].0 <= v).then_some(i)
+}
+
+/// Counts the points of a segment in each of several ranges in one walk of its tree
+/// ([`FilterRewrite::count_segment`]).
+struct MultiCount<'a> {
+    ranges: &'a [(i64, i64)],
+    /// Points of crossing leaves, per range.
+    counts: Vec<u64>,
+    /// The range of the cell `compare` last called inside (a leaf re-checked inside is
+    /// reported doc by doc).
+    last_inside: Option<usize>,
+}
+
+impl PointVisitor for MultiCount<'_> {
+    fn compare(&mut self, min: &[u8], max: &[u8]) -> Relation {
+        let (lo, hi) = (encode::i64_from(min), encode::i64_from(max));
+        let (first, last) = (self.ranges.first().map_or(i64::MAX, |r| r.0), self.ranges.last().map_or(i64::MIN, |r| r.1));
+        if hi < first || lo >= last {
+            return Relation::CellOutsideQuery;
+        }
+        let (a, b) = (find_range(self.ranges, lo), find_range(self.ranges, hi));
+        if a.is_some() && a == b {
+            self.last_inside = a;
+            return Relation::CellInsideQuery;
+        }
+        if a.is_none() && b.is_none() && self.ranges.partition_point(|r| r.1 <= lo) == self.ranges.partition_point(|r| r.1 <= hi) {
+            // Inside one gap between ranges.
+            return Relation::CellOutsideQuery;
+        }
+        Relation::CellCrossesQuery
+    }
+    fn visit(&mut self, _doc: u32) {
+        if let Some(i) = self.last_inside {
+            self.counts[i] += 1;
+        }
+    }
+    fn visit_docs(&mut self, docs: &[u32]) {
+        if let Some(i) = self.last_inside {
+            self.counts[i] += docs.len() as u64;
+        }
+    }
+    fn visit_doc_range(&mut self, start: u32, end: u32) {
+        if let Some(i) = self.last_inside {
+            self.counts[i] += u64::from(end.saturating_sub(start));
+        }
+    }
+    fn visit_value(&mut self, _doc: u32, packed: &[u8]) {
+        if let Some(i) = find_range(self.ranges, encode::i64_from(packed)) {
+            self.counts[i] += 1;
+        }
+    }
+    fn visit_value_docs(&mut self, docs: &[u32], packed: &[u8]) {
+        if let Some(i) = find_range(self.ranges, encode::i64_from(packed)) {
+            self.counts[i] += docs.len() as u64;
+        }
     }
 }
 

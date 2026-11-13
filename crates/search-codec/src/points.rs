@@ -996,8 +996,17 @@ impl PointsReader {
     /// [`intersect`](Self::intersect) would. Returns the points of the inside cells; the
     /// caller adds what its visitor counted in the crossing leaves.
     pub fn count_inside(&self, visitor: &mut dyn PointVisitor) -> u64 {
+        let mut total = 0;
+        self.count_cells(visitor, &mut |_, n| total += n);
+        total
+    }
+
+    /// [`count_inside`](Self::count_inside), reporting each cell inside the query with its
+    /// min packed value and point count (a visitor answering for several ranges at once tells
+    /// which one the cell is in).
+    pub fn count_cells(&self, visitor: &mut dyn PointVisitor, inside: &mut dyn FnMut(&[u8], u64)) {
         if self.num_points == 0 {
-            return 0;
+            return;
         }
         let (mut min, mut max) = self.index_bounds();
         let plen = self.spec.packed_len();
@@ -1008,9 +1017,10 @@ impl PointsReader {
             min: vec![0; plen],
             max: vec![0; plen],
         };
-        self.count_rec(1, self.num_points as usize, &mut min, &mut max, visitor, &mut leaf)
+        self.count_rec(1, self.num_points as usize, &mut min, &mut max, visitor, &mut leaf, inside);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn count_rec(
         &self,
         node: usize,
@@ -1019,14 +1029,15 @@ impl PointsReader {
         max: &mut [u8],
         v: &mut dyn PointVisitor,
         leaf: &mut Leaf,
-    ) -> u64 {
+        inside: &mut dyn FnMut(&[u8], u64),
+    ) {
         match v.compare(min, max) {
-            Relation::CellOutsideQuery => 0,
-            Relation::CellInsideQuery => count as u64,
+            Relation::CellOutsideQuery => {}
+            Relation::CellInsideQuery => inside(min, count as u64),
             Relation::CellCrossesQuery => {
                 if node >= self.leaves {
                     self.visit_leaf_crossing(node, leaf, v);
-                    return 0;
+                    return;
                 }
                 let bpd = self.spec.bytes_per_dim as usize;
                 let d = self.split_dims[node] as usize;
@@ -1036,13 +1047,12 @@ impl PointsReader {
                 let mut saved = [0u8; 32];
                 saved[..bpd].copy_from_slice(&max[r.clone()]);
                 max[r.clone()].copy_from_slice(split);
-                let a = self.count_rec(2 * node, left, min, max, v, leaf);
+                self.count_rec(2 * node, left, min, max, v, leaf, inside);
                 max[r.clone()].copy_from_slice(&saved[..bpd]);
                 saved[..bpd].copy_from_slice(&min[r.clone()]);
                 min[r.clone()].copy_from_slice(split);
-                let b = self.count_rec(2 * node + 1, count - left, min, max, v, leaf);
+                self.count_rec(2 * node + 1, count - left, min, max, v, leaf, inside);
                 min[r].copy_from_slice(&saved[..bpd]);
-                a + b
             }
         }
     }
