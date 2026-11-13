@@ -282,6 +282,9 @@ pub enum Secrets {
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
     Find { key: String },
+    /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
+    #[command(subcommand, name = "aws-roles")]
+    AwsRoles(AwsRolesCmd),
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -494,6 +497,16 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AwsRolesCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a role: its trust policy lets roll's role assume it with
+    /// `sts:ExternalId = roll-secrets:<project>`.
+    Add { name: String, role_arn: String },
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1165,6 +1178,29 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{} is {}", s(&v["id"]), s(&v["state"]));
         }
+        Secrets::AwsRoles(a) => match a {
+            AwsRolesCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/aws-roles", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for r in v.as_array().into_iter().flatten() {
+                    println!("{}  {:<16} {}", s(&r["id"]), s(&r["name"]), s(&r["role_arn"]));
+                }
+                eprintln!("Trust policies need sts:ExternalId = roll-secrets:{}", c.project);
+            }
+            AwsRolesCmd::Add { name, role_arn } => {
+                let v = c.call(Method::POST, &format!("{}/aws-roles", c.base()), Some(json!({ "name": name, "role_arn": role_arn }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN to it, dynamic.", s(&v["name"]), s(&v["id"]));
+            }
+            AwsRolesCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/aws-roles/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
                 let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;

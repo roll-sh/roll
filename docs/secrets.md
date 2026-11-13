@@ -86,6 +86,24 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 
+## AWS
+
+Short-lived AWS credentials for each lease, as Vault's AWS engine and Infisical's dynamic secrets
+give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn}`,
+`roll secrets aws-roles add`, the Integrations tab; admin), and three keys link to it in `dynamic`
+mode (`access_key_id`, `secret_access_key`, `session_token`: one credential, so they share one
+session per resolve). Each resolve assumes the role (STS AssumeRole with roll's own credentials) for
+the lease's TTL plus five minutes (15 minutes to 12 hours, within the role's own maximum).
+
+- **The trust policy** lets roll's role assume it with the condition `sts:ExternalId =
+  roll-secrets:<project>`. Registering a role assumes it once, and first tries a made-up project's
+  ExternalId: a role that takes any (another customer's that trusts roll, say) is refused, so no
+  tenant can register and assume someone else's role.
+- **Ending a lease** doesn't end its session early (STS can't revoke one session): it stays valid at
+  AWS until it expires, the TTL plus five minutes at most. To cut every session at once, revoke the
+  role's older sessions in IAM. A session can't be renewed: resolve again for a new one.
+- A role keys still link to can't be deleted (409 `in_use`); deleting the project deletes its roles.
+
 ## Where it runs
 
 roll secrets is always on, like workspace projects: it is not a product in `ROLL_PRODUCTS`.
@@ -1411,6 +1429,9 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `GET /aws-roles` | | `AwsRole[]` (`read` on the project) |
+| `POST /aws-roles` | `{name, role_arn}` | 201 `AwsRole` after assuming it (admin; 400 when its trust policy doesn't pin `sts:ExternalId`) |
+| `DELETE /aws-roles/{id}` | | 204 (admin; 409 `in_use` while a key links to it) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |

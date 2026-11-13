@@ -179,8 +179,32 @@ impl roll_workspace::Owners for People {
     }
 }
 
+/// STS for one role whose trust policy pins one ExternalId (or, unpinned, takes any).
+#[derive(Default)]
+struct FakeSts {
+    pinned: Mutex<Option<String>>,
+    sessions: Mutex<u32>,
+}
+
+impl roll_secrets::aws::Sts for FakeSts {
+    fn assume(&self, role_arn: &str, external_id: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) {
+            return Err("AccessDenied".into());
+        }
+        let mut n = self.sessions.lock().unwrap();
+        *n += 1;
+        Ok(roll_secrets::aws::Session {
+            access_key_id: Secret::new(format!("ASIA{n}")),
+            secret_access_key: Secret::new(format!("secret-{n}")),
+            session_token: Secret::new(format!("token-{n}")),
+            expires_at: i64::from(seconds) * 1000,
+        })
+    }
+}
+
 struct Api {
     sent: Arc<Sent>,
+    sts: Arc<FakeSts>,
     people: Arc<People>,
     router: Router,
     secrets: Arc<Secrets>,
@@ -205,11 +229,12 @@ impl Api {
         syncs.register(sync.clone());
         let sent = Arc::new(Sent::default());
         let people = Arc::new(People::default());
+        let sts = Arc::new(FakeSts::default());
         ws.set_owners(people.clone());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()), sts: Some(sts.clone()) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
-        let mut api = Api { sent, people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
+        let mut api = Api { sent, sts, people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -1112,6 +1137,38 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
     for t in [&token, &child] {
         assert_eq!(api.req(Method::GET, &at(&mine, "/environments"), None, Some(t)).await.0, StatusCode::UNAUTHORIZED);
     }
+}
+
+#[tokio::test]
+async fn an_aws_role_gives_each_lease_a_short_lived_session() {
+    let api = Api::new().await;
+    let role = json!({ "name": "deploy", "role_arn": "arn:aws:iam::123456789012:role/roll" });
+    // A role whose trust policy takes any ExternalId (another customer's that trusts roll, say)
+    // is refused: it must pin this project's.
+    let (s, e) = api.call(Method::POST, "/aws-roles", Some(role.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert!(e["error"].as_str().unwrap().contains(&format!("sts:ExternalId = roll-secrets:{}", api.project)), "{e}");
+    *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    let made = api.ok(Method::POST, "/aws-roles", Some(role)).await;
+    let id = made["id"].as_str().unwrap().to_string();
+    // Its three keys share one session per resolve; each resolve gets a session of its own.
+    for (key, field) in [("AWS_ACCESS_KEY_ID", "access_key_id"), ("AWS_SECRET_ACCESS_KEY", "secret_access_key"), ("AWS_SESSION_TOKEN", "session_token")] {
+        api.ok(Method::PUT, &format!("/environments/production/secrets/{key}"), Some(json!({ "link": { "kind": "aws", "ref": id, "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15 } } }))).await;
+    }
+    let before = *api.sts.sessions.lock().unwrap();
+    let a = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    let b = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    assert_eq!(*api.sts.sessions.lock().unwrap() - before, 2, "one session per resolve, for all three keys");
+    let n = a["values"]["AWS_ACCESS_KEY_ID"].as_str().unwrap().trim_start_matches("ASIA").to_string();
+    assert_eq!((a["values"]["AWS_SECRET_ACCESS_KEY"].as_str(), a["values"]["AWS_SESSION_TOKEN"].as_str()), (Some(format!("secret-{n}").as_str()), Some(format!("token-{n}").as_str())));
+    assert_ne!(a["values"]["AWS_SESSION_TOKEN"], b["values"]["AWS_SESSION_TOKEN"]);
+    assert_eq!(a["dynamic"].as_array().map(Vec::len), Some(3));
+    // An AWS session can't be extended: resolve again for a new one.
+    let lease = a["leases"][0].as_str().unwrap();
+    let (s, _) = api.call(Method::POST, &format!("/leases/{lease}/renew"), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // A role keys still link to stays.
+    assert_eq!(api.call(Method::DELETE, &format!("/aws-roles/{id}"), None).await.0, StatusCode::CONFLICT);
 }
 
 #[tokio::test]

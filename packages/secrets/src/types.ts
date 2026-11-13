@@ -236,6 +236,8 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 /** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
+/** An AWS role a project registered for dynamic credentials (its trust policy pins `sts:ExternalId` = `roll-secrets:<project>`). */
+export type AwsRole = { id: string; name: string; role_arn: string; created_at: number; created_by: string };
 export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };

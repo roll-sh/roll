@@ -6893,6 +6893,7 @@ dependencies = [
  "aws-sdk-dynamodb",
  "aws-sdk-kms",
  "aws-sdk-s3",
+ "aws-sdk-sts",
  "aws-smithy-http-client",
  "aws-smithy-runtime-api",
  "axum",
