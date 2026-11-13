@@ -501,6 +501,27 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
 }
 
+/// `roll.toml` sets run settings in the tree, an environment's block on top, and a redeploy
+/// (no build) keeps what the file set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn roll_toml_sets_run_settings_per_environment() {
+    let w = world().await;
+    w.code.push("e5e5e5e5e5e5", "config", &[("roll.toml", "[app.run]\nconcurrency = 7\n[app.environments.production.run]\nmin_instances = 1\n")]);
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let up = |w: &World| w.fake.instances(&id).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+    assert_eq!(up(&w), 1, "production's block keeps one up (the service's setting is 0)");
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{}/logs", d["id"].as_str().unwrap()), None).await;
+    assert!(log.to_string().contains("roll.toml sets run.min_instances: 1 (production)"), "{log}");
+    let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(up(&w), 1, "a redeploy keeps what roll.toml set");
+}
+
 /// A project past its alert gets `spend.alert` once; past its hard limit it's capped: its
 /// instances stop, a visitor gets a 402, deploys are refused; raising the limit lifts it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

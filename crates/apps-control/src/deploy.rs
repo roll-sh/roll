@@ -172,7 +172,7 @@ impl Apps {
         let active = row.active.clone().ok_or_else(|| Error::Conflict(format!("nothing is deployed in {env} yet")))?;
         let old = self.deployment(service, env, &active).await?;
         let image = old.image.clone().ok_or_else(|| Error::Conflict(format!("{active} has no image")))?;
-        let mut run = svc.run.clone();
+        let mut run = self.run_for(&svc, &old, env).await;
         if run.port.is_none() {
             run.port = old.run.port;
         }
@@ -213,7 +213,7 @@ impl Apps {
         let active = source.active.clone().ok_or_else(|| Error::Conflict(format!("nothing is deployed in {from} yet")))?;
         let old = self.deployment(service, from, &active).await?;
         let image = old.image.clone().ok_or_else(|| Error::Conflict(format!("{active} has no image")))?;
-        let mut run = svc.run.clone();
+        let mut run = self.run_for(&svc, &old, env).await;
         if run.port.is_none() {
             run.port = old.run.port;
         }
@@ -561,7 +561,7 @@ impl Apps {
         // roll.toml `[app]` in the root: config as code, over the service's settings.
         let (build_cfg, mut run) = match crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))? {
             Some(app) => {
-                let (b, r, said) = app.apply(&svc.build, &svc.run).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let (b, r, said) = app.apply(&svc.build, &svc.run, Some(&d.environment)).map_err(|e| anyhow::anyhow!("{e}"))?;
                 for l in said {
                     log.line(l);
                 }
@@ -943,19 +943,28 @@ impl Apps {
         }
     }
 
-    /// The paths a push must touch to deploy `svc`: roll.toml `[app] watch` at the pushed
-    /// revision, else the service's setting; `None` when everything counts.
-    async fn watch_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<Vec<String>> {
+    /// The run settings a deployment of `old`'s image gets in `env` now: the service's, with
+    /// roll.toml's at `old`'s revision on top (its `[app.run]` and `env`'s block), as a build
+    /// would set them. A file that doesn't read leaves the service's.
+    async fn run_for(self: &Arc<Self>, svc: &ServiceRow, old: &Deployment, env: &str) -> Run {
+        let file = match &old.revision {
+            Some(rev) => self.app_config_at(svc, rev).await,
+            None => None,
+        };
+        file.and_then(|f| f.apply(&svc.build, &svc.run, Some(env)).ok()).map_or_else(|| svc.run.clone(), |(_, r, _)| r)
+    }
+
+    /// `roll.toml` `[app]` at a pushed revision (in the service's root), if it reads.
+    async fn app_config_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<crate::config::AppConfig> {
         let (Source::Repo { repo, root }, Some(sources)) = (&svc.source, &self.deps.sources) else { return None };
         let path = match root {
             Some(r) => format!("{r}/roll.toml"),
             None => "roll.toml".into(),
         };
-        let from_file = match sources.read_file(repo, revision, &path).await {
-            Ok(Some(bytes)) => crate::config::parse(&String::from_utf8_lossy(&bytes)).ok().flatten().and_then(|a| a.watch),
+        match sources.read_file(repo, revision, &path).await {
+            Ok(Some(bytes)) => crate::config::parse(&String::from_utf8_lossy(&bytes)).ok().flatten(),
             _ => None,
-        };
-        from_file.or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty())
+        }
     }
 
     /// Whether `revision` changes a watched path since what `env` runs (no active deployment, or
@@ -971,8 +980,11 @@ impl Apps {
         let all = self.db(|s| Ok((s.services(None)?, s.all_environments()?))).await?;
         let (services, envs) = all;
         for svc in services.iter().filter(|s| matches!(&s.source, Source::Repo { repo, .. } if *repo == l.repo)) {
-            let watch = self.watch_at(svc, &l.revision.sha).await;
+            // The paths a push must touch: roll.toml's at the pushed revision (the environment's
+            // block first), else the service's setting; none: every push counts.
+            let file = self.app_config_at(svc, &l.revision.sha).await;
             for e in envs.iter().filter(|e| e.service == svc.id && !e.ephemeral && e.branch.as_deref() == Some(l.branch.as_str())) {
+                let watch = file.as_ref().and_then(|f| f.watch_for(&e.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty());
                 if let Some(patterns) = &watch
                     && !self.push_touches(svc, e, &l.revision.sha, patterns).await
                 {

@@ -152,7 +152,7 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         // What a build would use: roll.toml `[app]` over the settings sent, said in the notes.
         let (build, said) = match crate::config::read(&root)? {
             Some(app) => {
-                let (b, _, said) = app.apply(&overrides, &crate::model::Run::default())?;
+                let (b, _, said) = app.apply(&overrides, &crate::model::Run::default(), None)?;
                 (b, said)
             }
             None => (overrides, Vec::new()),

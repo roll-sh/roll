@@ -78,7 +78,13 @@ every deployment is immutable with instant rollback.
   what it sets wins over the service's settings and is named in the build log and the plan's
   notes (`POST /v1/apps/plan` shows it too). It's checked as the API checks settings, an unknown
   key is an error (a typo never silently does nothing), and it must be a regular file. The
-  file's other sections are roll code's; code-preview allows `[app]` in it.
+  file's other sections are roll code's; code-preview allows `[app]` in it. `[app.run]` sets any
+  run setting (`type`, `port`, `min_instances`, `concurrency`, `cpu`, `memory_mb`, `schedule`,
+  timings) but the volume, and `[app.environments.<name>]` (with its own `.run`) goes on top in
+  that environment only, as Railway's environment overrides do. A redeploy or a promotion
+  applies the file at the deployment's revision for the target environment, so neither drops
+  what the file set. What a push can't touch stays the service's: its volume, domains, access
+  and variables.
 - **Why a generated Dockerfile instead of Nix or buildpacks' lifecycle**: BuildKit's layer cache
   makes dependency installs incremental, multi-stage builds give slim runtime images (cold
   starts scale with image size), and one build path (Dockerfile → BuildKit) serves detected and
@@ -694,18 +700,16 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-2. **Config as code**: `[app]` in `roll.toml` covering run settings (type, size, instances,
-   schedule) and per-environment blocks, with an end-to-end test.
-3. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+2. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-4. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+3. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-5. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-6. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+5. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-7. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+6. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-8. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
+7. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
