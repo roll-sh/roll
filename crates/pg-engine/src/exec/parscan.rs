@@ -707,13 +707,12 @@ impl Iterator for IndexChunk {
                             self.buf.push_back(Err(e));
                         }
                         Ok(got) => {
-                            let found: std::collections::HashMap<&[u8], bytes::Bytes> = keys
-                                .iter()
-                                .zip(got)
-                                .filter_map(|(k, v)| Some((*k, v?.1?)))
-                                .collect();
+                            // (`keys` sorted and without duplicates: an entry's row is at its
+                            // key's place, found by a search.)
                             for (_, d) in &ents {
-                                if let Some(b) = found.get(&d[..]) {
+                                if let Ok(j) = keys.binary_search(&&d[..])
+                                    && let Some((_, Some(b))) = &got[j]
+                                {
                                     self.buf.push_back(Ok((d.to_vec(), b.clone())));
                                 }
                             }

@@ -489,6 +489,8 @@ pub struct Partials<'a> {
     wtable: hashbrown::HashTable<u32>,
     wkey: Vec<u64>,
     wst: Vec<u64>,
+    /// The group `add_words` took the last row into (its key compared before it is used).
+    wlast: Option<usize>,
     hasher: super::fasthash::FastState,
     /// The keys and arguments a row computes (those that aren't columns or constants), and
     /// per argument its exact number when a numeric sum's was computed without a value
@@ -629,6 +631,7 @@ impl<'a> Partials<'a> {
             wtable: hashbrown::HashTable::new(),
             wkey: Vec::new(),
             wst: Vec::new(),
+            wlast: None,
             hasher: Default::default(),
             key: Vec::with_capacity(spec.keys.len()),
             args: Vec::with_capacity(spec.aggs.len()),
@@ -927,9 +930,11 @@ impl<'a> Partials<'a> {
         let Some(l) = self.spec.words.as_deref() else { return false };
         let (stride, nk) = (l.stride, self.wkey.len());
         let words = &self.words;
-        let h = self.hasher.hash_one(&self.wkey[..]);
         let key = &self.wkey[..];
-        let g = self.wtable.find(h, |&g| words[g as usize * stride..][..nk] == *key).map(|g| *g as usize);
+        // (Sorted input's rows come a group at a time: the last row's group first.)
+        let last = self.wlast.filter(|&g| words.get(g * stride..g * stride + nk) == Some(key));
+        let h = if last.is_some() { 0 } else { self.hasher.hash_one(key) };
+        let g = last.or_else(|| self.wtable.find(h, |&g| words[g as usize * stride..][..nk] == *key).map(|g| *g as usize));
         // (The group's states after the row, in `wst`: checked before anything changes.)
         self.wst.clear();
         match g {
@@ -990,6 +995,7 @@ impl<'a> Partials<'a> {
                 g
             }
         };
+        self.wlast = Some(g);
         if self.spec.seq {
             self.seq.push(g as u32);
         }
