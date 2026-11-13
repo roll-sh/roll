@@ -1193,7 +1193,8 @@ Done and in PR #20:
   identities pinned to client addresses; encrypted project backup and restore;
 - the dashboard's Secrets surface, with the deployment key's source and a rotation's progress,
   suggested links for the canvas's resources, and one key set in several environments from the
-  overview (one change each, a request where protected);
+  overview (one change each, a request where protected), and each environment's activity (its
+  changes, reads, requests and syncs' pushes as one timeline, by key);
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1214,11 +1215,13 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **A change's activity in one place**: the audit log, change requests and syncs' pushes as one
-   per-environment timeline in the environment view, filterable by key, so "who changed what, and
-   where did it go" is one page.
-3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Find a key across projects**: `GET /v1/secrets/search?key=` lists every project, environment
+   and folder holding a key (names and versions, never values) among those the caller may read, for
+   rotating an organisation-wide key; `roll secrets find KEY` and the dashboard's search.
+3. **More export formats**: a Docker `--env-file` (no quoting, one line each) and a Kubernetes
+   Secret manifest (`kubectl apply -f -`), next to dotenv, shell, JSON and YAML.
+4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-4. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+5. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
