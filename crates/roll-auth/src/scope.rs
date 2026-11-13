@@ -138,6 +138,13 @@ pub struct Rule {
     pub actions: BTreeMap<Action, Effect>,
 }
 
+/// Whether environment entry `pattern` covers `env` (a name, or another entry): the same name, or,
+/// for a pattern ending in `*`, any name starting with what's before it (`pv-*` covers `pv-42`, a
+/// preview's own environment).
+fn env_covers(pattern: &str, env: &str) -> bool {
+    pattern == env || pattern.strip_suffix('*').is_some_and(|prefix| !prefix.is_empty() && env.starts_with(prefix))
+}
+
 /// One resource a request is about, as far as the evaluator found it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Resource {
@@ -194,7 +201,7 @@ impl Rule {
     fn environment_matches(&self, env: Option<&str>) -> bool {
         match &self.environments {
             None => true,
-            Some(list) => env.is_some_and(|e| list.iter().any(|l| l == e)),
+            Some(list) => env.is_some_and(|e| list.iter().any(|l| env_covers(l, e))),
         }
     }
 
@@ -244,7 +251,7 @@ impl Rule {
         let environments = match (&self.environments, &other.environments) {
             (None, _) => true,
             (Some(_), None) => false,
-            (Some(mine), Some(theirs)) => theirs.iter().all(|t| mine.contains(t)),
+            (Some(mine), Some(theirs)) => theirs.iter().all(|t| mine.iter().any(|m| env_covers(m, t))),
         };
         let paths = match (&self.paths, &other.paths) {
             (None, _) => true,
@@ -320,6 +327,9 @@ impl Scope {
                     out.push(format!("{at}: {name} must list 1-32 non-empty names"));
                 }
             }
+            if r.environments.as_ref().is_some_and(|l| l.iter().any(|e| e == "*")) {
+                out.push(format!("{at}: \"*\" alone isn't an environment (leave environments out for all of them)"));
+            }
             if let Some(paths) = &r.paths
                 && paths.iter().any(|p| !p.starts_with('/'))
             {
@@ -336,6 +346,15 @@ mod tests {
 
     fn rule(json: serde_json::Value) -> Rule {
         serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn an_environment_ending_in_a_star_is_a_prefix() {
+        let r: Rule = serde_json::from_value(serde_json::json!({ "product": "apps", "resources": "*", "environments": ["preview", "pv-*"], "actions": { "write": "allow" } })).unwrap();
+        assert!(r.environment_matches(Some("pv-42")) && r.environment_matches(Some("preview")));
+        assert!(!r.environment_matches(Some("production")) && !r.environment_matches(None));
+        let narrower: Rule = serde_json::from_value(serde_json::json!({ "product": "apps", "resources": "*", "environments": ["pv-42"], "actions": { "write": "allow" } })).unwrap();
+        assert!(r.covers(&narrower) && !narrower.covers(&r));
     }
 
     /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;

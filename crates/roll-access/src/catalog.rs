@@ -893,6 +893,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A job is a command run with the environment's variables: its output can be them.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
     row("GET", "/v1/previews", "previews", R, list("id")),
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
