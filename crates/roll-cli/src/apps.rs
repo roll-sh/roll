@@ -281,6 +281,9 @@ pub enum AppsCmd {
         deployment: Option<String>,
         #[command(flatten)]
         target: Target,
+        /// Keep today's variables (by default they come back as they were when it was live).
+        #[arg(long)]
+        keep_variables: bool,
     },
     /// Variables: list (masked), `--reveal`, or change with `KEY=value` and `-u KEY`.
     Vars {
@@ -1618,7 +1621,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Rollback { deployment, target } => {
+        AppsCmd::Rollback { deployment, target, keep_variables } => {
             let svc = service(api, &target).await?;
             let deployment = match deployment {
                 Some(d) => d,
@@ -1638,7 +1641,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     s(&prev["id"])
                 }
             };
-            let dep = api.post(&format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(&deployment)), json!({})).await?;
+            let dep = api.post(&format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(&deployment)), json!({ "keep_variables": keep_variables })).await?;
             if !json_out {
                 return watch(api, &svc, &target.env, &dep).await;
             }

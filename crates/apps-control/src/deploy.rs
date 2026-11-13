@@ -12,7 +12,7 @@ use crate::runtime::{BuildJob, InstanceSpec};
 use crate::store::{EnvRow, NewDeployment, ServiceRow, Switch};
 use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -256,10 +256,26 @@ impl Apps {
 
     /// `POST …/deploys/{dep}/rollback`: deploy an earlier deployment's image and settings
     /// again, without a build.
-    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>) -> Result<Deployment> {
+    /// `keep_variables`: run its image with the variables as they are; else (the default) its
+    /// variables come back as they were when it was live (Heroku's and Railway's rollbacks), the
+    /// change in the audit trail. A deployment that never went live has none kept.
+    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
         self.refuse_capped(service)?;
         let old = self.deployment(service, env, dep).await?;
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
+        let did = old.id.clone();
+        if !keep_variables && let Some(then) = self.db(move |s| s.snapshot(&did)).await? {
+            let (sid, e) = (service.to_string(), env.to_string());
+            let now = self.db(move |s| s.variables(&sid, &e)).await?;
+            let set: std::collections::BTreeMap<String, String> = then.iter().filter(|(k, v)| now.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+            let unset: Vec<String> = now.keys().filter(|k| !then.contains_key(*k)).cloned().collect();
+            if !set.is_empty() || !unset.is_empty() {
+                let (sid, e, s2, u2) = (service.to_string(), env.to_string(), set.clone(), unset.clone());
+                self.db(move |s| s.change_variables(&sid, &e, &s2, &u2)).await?;
+                self.settings_changed();
+                self.audit("variables.restored", service, env, actor.clone(), json!({ "from": old.id, "set": set.keys().collect::<Vec<_>>(), "unset": unset })).await;
+            }
+        }
         let d = NewDeployment {
             trigger: Trigger::Rollback,
             revision: old.revision.clone(),
@@ -585,6 +601,11 @@ impl Apps {
                 live.promote_canary().await;
                 log.stream(Stream::System).line("the new deployment takes every request");
             }
+        }
+        // Live: its variables as they are now are what a rollback to it restores.
+        let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
+        if let Err(err) = self.db(move |s| s.snapshot_variables(&sid, &e, &did)).await {
+            warn!(deployment = %d.id, error = %err, "apps: a deployment's variables weren't kept for its rollback");
         }
         Ok(())
     }

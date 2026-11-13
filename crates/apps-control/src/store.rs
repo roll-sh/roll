@@ -144,6 +144,10 @@ CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_vars (
+    deployment TEXT PRIMARY KEY,
+    sealed TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS apps_sites (
     key TEXT PRIMARY KEY,
     size INTEGER NOT NULL
@@ -1112,6 +1116,20 @@ impl Store {
 
     fn aad(service: &str, env: &str, name: &str) -> String {
         format!("{service}/{env}/{name}")
+    }
+
+    /// What `env`'s own variables were when `deployment` went live, sealed under it (what a
+    /// rollback to it restores).
+    pub fn snapshot_variables(&self, service: &str, env: &str, deployment: &str) -> Result<()> {
+        let vars = self.variables(service, env)?;
+        let sealed = self.sealer.seal(&format!("snapshot:{deployment}"), &serde_json::to_string(&vars).expect("JSON"));
+        self.db.execute("INSERT INTO deploy_vars (deployment, sealed) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET sealed = excluded.sealed", params![deployment, sealed])?;
+        Ok(())
+    }
+
+    pub fn snapshot(&self, deployment: &str) -> Result<Option<BTreeMap<String, String>>> {
+        let row: Option<String> = self.db.query_row("SELECT sealed FROM deploy_vars WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?;
+        row.map(|s| Ok(serde_json::from_str(&self.sealer.open(&format!("snapshot:{deployment}"), &s)?).unwrap_or_default())).transpose()
     }
 
     pub fn variables(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {

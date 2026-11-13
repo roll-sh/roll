@@ -1605,3 +1605,31 @@ async fn a_private_service_has_no_public_url() {
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"public": true}}))).await;
     assert_eq!(visit(&w, &h, "/").await.0, StatusCode::OK);
 }
+
+/// A rollback brings back the variables of the deployment it returns to (in the activity), or
+/// keeps today's when asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rollback_restores_its_deployments_variables() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "api", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"MODE": "old"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d1 = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"MODE": "broken", "EXTRA": "1"}}))).await;
+    let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
+    let vals = |w: &World| {
+        let (api, base) = (w.api.clone(), base.clone());
+        async move { call(&api, "GET", &format!("{base}/variables/values"), None).await.1 }
+    };
+    let (_, r) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", d1["id"].as_str().unwrap()), None).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    let v = vals(&w).await;
+    assert_eq!((v["MODE"].as_str(), v.get("EXTRA")), (Some("old"), None), "{v}");
+    let (_, act) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert!(act.as_array().unwrap().iter().any(|e| e["kind"] == "audit.variables.restored"), "{act}");
+    let (_, r) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", d2["id"].as_str().unwrap()), Some(json!({"keep_variables": true}))).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(vals(&w).await["MODE"], "old", "kept");
+}

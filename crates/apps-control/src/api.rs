@@ -703,8 +703,9 @@ async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
-    let d = apps.rollback(&id, &env, &dep, actor(&ext)).await?;
+async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
+    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
