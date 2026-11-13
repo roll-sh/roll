@@ -577,8 +577,14 @@ fn respond(
     // field -> type -> (index, cap)
     let mut merged: BTreeMap<String, BTreeMap<String, Vec<(String, Cap)>>> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
+    let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
     for idx in &indices {
-        let fields = select(index_fields(idx, &runtime_request), &patterns, &filters, &types);
+        let mut all = index_fields(idx, &runtime_request);
+        // Under field level security the fields the reader may not see have no capabilities.
+        if let Some(f) = security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name)) {
+            all.retain(|(name, _)| f.allows(name));
+        }
+        let fields = select(all, &patterns, &filters, &types);
         let with_values = if include_empty { None } else { Some(fields_with_values(ctx, &st, idx)) };
         for (name, cap) in fields {
             // `include_empty_fields=false`: fields no segment holds data of are left out.

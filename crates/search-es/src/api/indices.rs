@@ -746,8 +746,14 @@ pub fn get_mapping(ctx: &Ctx) -> EsResult<Reply> {
     let indices = get_indices(&st, &names);
     blocks::check(indices.iter().copied(), Level::MetadataRead)?;
     let mut out = Map::new();
+    // Under field level security the fields the reader may not see aren't listed.
+    let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
     for idx in indices {
-        out.insert(idx.name.clone(), obj! { "mappings" => idx.mapping_json(false) });
+        let mut mappings = idx.mapping_json(false);
+        if let Some(f) = security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name)) {
+            mappings = f.filter_mapping(mappings);
+        }
+        out.insert(idx.name.clone(), obj! { "mappings" => mappings });
     }
     Reply::ok(Value::Obj(out))
 }
@@ -826,10 +832,12 @@ pub fn get_field_mapping(ctx: &Ctx) -> EsResult<Reply> {
     let indices = get_indices(&st, &names);
     blocks::check(indices.iter().copied(), Level::MetadataRead)?;
     let mut out = Map::new();
+    let security = crate::xpack::security::dls::ReadSecurity::of(ctx);
     for idx in indices {
         let mctx = idx.mapping_ctx();
         let mut fields = Map::new();
-        let paths = idx.mapping.field_paths();
+        let fls = security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name));
+        let paths: Vec<_> = idx.mapping.field_paths().into_iter().filter(|(p, _)| fls.as_ref().is_none_or(|f| f.allows(p))).collect();
         for p in &patterns {
             for meta in MAPPING_METADATA_FIELDS {
                 if glob_match(p, meta) && !fields.contains_key(*meta) {

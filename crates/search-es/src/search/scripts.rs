@@ -856,6 +856,12 @@ impl Host for DocHost {
         let stored = self.seg.reader.stored().document(self.doc).ok()?;
         let b = crate::fetch::source_bytes(&stored)?;
         let s = std::str::from_utf8(b).ok()?;
+        // Under field level security the script sees the fields its reader may (as its
+        // `doc[...]` does).
+        if self.table.source_filter.is_some() {
+            let v = self.table.visible_source(crate::json::parse(b).ok()??);
+            return search_painless::xcontent::parse_source(&v.to_json()).ok();
+        }
         search_painless::xcontent::parse_source(s).ok()
     }
 

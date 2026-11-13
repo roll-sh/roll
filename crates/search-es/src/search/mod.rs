@@ -119,7 +119,7 @@ impl Target {
     pub fn table(&self) -> Arc<crate::engine::fields::FieldTable> {
         let table = self.engine.table();
         match self.security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &self.idx.name)) {
-            Some(f) => Arc::new(table.filtered(|n| f.allows(n))),
+            Some(f) => Arc::new(table.restricted(&f)),
             None => table,
         }
     }
