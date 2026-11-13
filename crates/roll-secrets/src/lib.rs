@@ -410,14 +410,17 @@ impl Secrets {
         self.revoke_leases_where("project_id = ?", project);
         let managed = self.managed_where("project_id = ?", project);
         let done = self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices"] {
+            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
             }
             let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;
             for e in &envs {
                 c.execute("DELETE FROM folders WHERE env_id = ?", [e])?;
-                c.execute("DELETE FROM imports WHERE env_id = ?", [e])?;
+                c.execute("DELETE FROM imports WHERE env_id = ? OR from_env_id = ?", [e, e])?;
+                c.execute("DELETE FROM exports WHERE env_id = ?", [e])?;
             }
+            // What other projects shared with this one goes with it.
+            c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;
             c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM projects WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())

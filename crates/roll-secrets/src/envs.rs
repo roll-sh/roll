@@ -570,6 +570,7 @@ impl Secrets {
             for f in folders.iter().filter(|f| under(f)) {
                 c.execute("DELETE FROM folders WHERE env_id = ? AND path = ?", [&env.id, f])?;
                 c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, f])?;
+                c.execute("DELETE FROM exports WHERE env_id = ? AND path = ?", [&env.id, f])?;
             }
             audit::record(c, project, caller, "folder.delete", Some(slug), Some(&path), &[], &format!("deleted {path}"), now)?;
             Ok(change)
@@ -656,7 +657,7 @@ pub(crate) fn ensure_folders(c: &Conn<'_>, env_id: &str, path: &str, now: i64) -
 }
 
 fn drop_env(c: &Conn<'_>, env: &EnvRow) -> Result<()> {
-    for t in ["secrets", "versions", "requests", "leases", "folders", "imports"] {
+    for t in ["secrets", "versions", "requests", "leases", "folders", "imports", "exports"] {
         c.execute(&format!("DELETE FROM {t} WHERE env_id = ?"), [&env.id])?;
     }
     c.execute("DELETE FROM imports WHERE from_env_id = ?", [&env.id])?;
