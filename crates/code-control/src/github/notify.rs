@@ -351,9 +351,53 @@ fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
     format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.\n\n", t(s.load_ms), t(s.ttfb_ms))
 }
 
+/// What the screenshot's browser found on the first page, folded under one line of counts
+/// (Vercel's bot comment): problems first, and nothing from the page itself in the summary.
+fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
+    let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let pct = |p: f64| format!("{:.1}%", p.max(0.1));
+    let (mut summary, mut details) = (Vec::new(), String::new());
+    if let Some(h) = &e.page_health {
+        let mut parts = Vec::new();
+        if h.errors > 0 {
+            parts.push(plural(h.errors as u64, "error", "errors"));
+        }
+        if h.failed > 0 {
+            parts.push(plural(h.failed as u64, "failed request", "failed requests"));
+        }
+        summary.push(if parts.is_empty() { "no errors".to_string() } else { parts.join(", ") });
+        details.push_str(&health_line(h));
+    }
+    if let Some(a) = &e.page_a11y {
+        let n = a.issues.iter().map(|i| i.count as u64).sum::<u64>() + u64::from(!a.lang) + u64::from(!a.title);
+        summary.push(if n == 0 { "no accessibility problems".into() } else { plural(n, "accessibility problem", "accessibility problems") });
+        details.push_str(&a11y_line(a));
+    }
+    if let Some(b) = &e.base_change {
+        let branch = branch_name(&b.branch);
+        summary.push(if b.percent <= 0.0 { format!("the same as {branch}") } else { format!("differs from {branch} by {}", pct(b.percent)) });
+        details.push_str(&base_line(b));
+    }
+    if let Some(v) = &e.visual_change {
+        summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
+        details.push_str(&visual_line(v));
+    }
+    if let Some(s) = &e.page_speed {
+        let t = if s.load_ms < 1000 { format!("{} ms", s.load_ms) } else { format!("{:.1} s", s.load_ms as f64 / 1000.0) };
+        summary.push(format!("loads in {t}"));
+        details.push_str(&speed_line(s));
+    }
+    (!summary.is_empty()).then(|| format!("<details><summary>Page checks: {}</summary>\n\n{details}</details>\n\n", summary.join(" · ")))
+}
+
+/// A branch's name as the comment may show it (no markup).
+fn branch_name(b: &str) -> String {
+    b.chars().filter(|c| c.is_ascii_alphanumeric() || "-_./".contains(*c)).take(60).collect()
+}
+
 /// The comment's line on how much the page differs from the default branch's preview.
 fn base_line(b: &crate::model::PreviewBaseChange) -> String {
-    let branch: String = b.branch.chars().filter(|c| c.is_ascii_alphanumeric() || "-_./".contains(*c)).take(60).collect();
+    let branch = branch_name(&b.branch);
     let pct = |p: f64| if p <= 0.0 { "the same".to_string() } else { format!("{:.1}%", p.max(0.1)) };
     let phone = b.phone_percent.map(|p| format!(", at a phone's width {}", pct(p))).unwrap_or_default();
     if b.percent <= 0.0 {
@@ -443,20 +487,8 @@ fn preview_comment(c: &Change) -> String {
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
             ));
-            if let Some(line) = e.page_a11y.as_ref().map(a11y_line) {
-                out.push_str(&line);
-            }
-            if let Some(line) = e.page_health.as_ref().map(health_line) {
-                out.push_str(&line);
-            }
-            if let Some(line) = e.page_speed.as_ref().map(speed_line) {
-                out.push_str(&line);
-            }
-            if let Some(line) = e.base_change.as_ref().map(base_line) {
-                out.push_str(&line);
-            }
-            if let Some(line) = e.visual_change.as_ref().map(visual_line) {
-                out.push_str(&line);
+            if let Some(block) = page_checks(e) {
+                out.push_str(&block);
             }
             if let Some(line) = earlier_line(&e.earlier) {
                 out.push_str(&line);
@@ -553,5 +585,13 @@ mod preview_tests {
         assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
         let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0) };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
+        // In the comment, one folded block whose summary is counts only.
+        let mut e = p.environment.clone().unwrap();
+        (e.page_health, e.page_a11y, e.base_change, e.visual_change, e.page_speed) = (Some(h(2, 1)), Some(a), Some(b), Some(v(12.34)), Some(sp(1200, Some(900))));
+        let comment = page_checks(&e).unwrap();
+        assert!(
+            comment.starts_with("<details><summary>Page checks: 2 errors, 1 failed request · 5 accessibility problems · differs from mainx by 8.0% · changed 12.3% since the push before · loads in 1.2 s</summary>\n\n**While its first page loaded:**"),
+            "{comment}"
+        );
     }
 }

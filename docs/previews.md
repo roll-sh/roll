@@ -787,6 +787,10 @@ type Settings = {
     first of each, one bounded line each because they're the page's own words; "**While its
     first page loaded:** 2 errors (first: `TypeError: …`); 1 failed request" in the comment), so a
     broken page that still looks right in its screenshot shows.
+    In the comment these are one folded block whose summary has only counts and numbers, problems
+    first ("Page checks: 2 errors · 5 accessibility problems · differs from main by 8.0% · changed
+    12.3% since the push before · loads in 1.2 s", as Vercel's bot comment folds its details), so
+    the comment stays short however much the page reports; the page's own words are only inside.
     For a `public` preview the pull request comment shows it through a signed link
     (`/v1/previews/{id}/screenshot.png?exp=…&sig=…`: HMAC-SHA256 of the preview and the expiry,
     30 days after the screenshot, under a key the previews store makes once; a public route,
@@ -893,6 +897,7 @@ Ranked by what a person notices first. Done so far:
 - accessibility per push (what a screen reader can't name, a missing language or title);
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
+- the comment's page checks folded under one line of counts;
 - what went wrong while the page loaded (exceptions, console errors, failed requests);
 - expiring share links for people outside the team (revocable, shown once);
 - page speed per push (timed with the screenshot, compared with the push before);
@@ -928,9 +933,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A tidier pull request comment**: the page's checks (speed, errors, accessibility, visual
-   change, against main) in one summary line with the details folded (Vercel's bot comment), so
-   the comment stays short however much it knows.
+1. **Screenshots of several pages** (Percy's snapshot list): only the first service's `/` is
+   taken, so a change that breaks `/pricing` shows nothing. A `github.pages` list (a few paths,
+   bounded) taken in the same browser session, each with its change since the push before and
+   against main, the worst one in the comment's summary.
 2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
