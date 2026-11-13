@@ -145,6 +145,11 @@ pub trait Source: Send + Sync {
     async fn paths(&self, _repo: &str, _head: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
+    /// The paths that differ between changesets `from` and `to` of `repo` (`None`: not known,
+    /// which the path filters take as a push that counts).
+    async fn paths_between(&self, _repo: &str, _from: &str, _to: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(None)
+    }
     /// The git commit of a changeset.
     async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
         Ok(None)

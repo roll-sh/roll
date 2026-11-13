@@ -213,6 +213,7 @@ export function PreviewSheet({
                 ["repo", p.repo],
                 ...(p.branch ? ([["branch", p.branch]] as [string, string][]) : []),
                 ["head", p.head.slice(0, 12)],
+                ...(p.runs ? ([["runs", `${p.runs.slice(0, 12)} (later pushes touched only ignored paths)`]] as [string, string][]) : []),
                 ["slug", p.slug],
                 ["last visit", since(p.last_active_at)],
                 ...(p.last_reset_at ? ([["last reset", since(p.last_reset_at)]] as [string, string][]) : []),

@@ -245,7 +245,7 @@ impl Engine {
                 let Ok(r) = this.store.row(&id) else { return };
                 let Ok(s) = this.store.settings(&r.project_id) else { return };
                 // Still wanted: ready, the rules still ask, not taken at this head meanwhile.
-                if r.state != State::Ready || !s.github.screenshot || this.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.head.as_str()) {
+                if r.state != State::Ready || !s.github.screenshot || this.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.build()) {
                     return;
                 }
                 if this.take_screenshot(&r).await {
@@ -274,21 +274,40 @@ impl Engine {
         if (s.paths.is_empty() && s.ignore_paths.is_empty()) || title_says(&c.title) == Some(true) {
             return Ok(true);
         }
-        let key = (c.repo.clone(), c.head.clone());
-        let cached = self.paths_seen.lock().get(&key).cloned();
-        let paths = match cached {
-            Some(p) => p,
-            None => {
-                let p = self.source.paths(&c.repo, &c.head).await?.map(Arc::new);
-                let mut seen = self.paths_seen.lock();
-                if seen.len() >= PATHS_KEPT {
-                    seen.clear();
-                }
-                seen.insert(key, p.clone());
-                p
-            }
-        };
+        let paths = self.paths_of(&c.repo, &c.head, None).await?;
         Ok(paths.is_none_or(|p| touches(s, &p)))
+    }
+
+    /// The paths `head` changes since its merge base, or (`from`) since changeset `from`: cached,
+    /// since neither ever changes.
+    async fn paths_of(&self, repo: &str, head: &str, from: Option<&str>) -> anyhow::Result<HeadPaths> {
+        let key = (repo.to_string(), match from {
+            Some(f) => format!("{f}..{head}"),
+            None => head.to_string(),
+        });
+        if let Some(p) = self.paths_seen.lock().get(&key).cloned() {
+            return Ok(p);
+        }
+        let p = match from {
+            Some(f) => self.source.paths_between(repo, f, head).await?,
+            None => self.source.paths(repo, head).await?,
+        }
+        .map(Arc::new);
+        let mut seen = self.paths_seen.lock();
+        if seen.len() >= PATHS_KEPT {
+            seen.clear();
+        }
+        seen.insert(key, p.clone());
+        Ok(p)
+    }
+
+    /// Whether every path that differs between `from` and `to` is one the path filters leave
+    /// out (false with no filters, or when that isn't known).
+    pub(super) async fn only_ignored(&self, s: &Settings, repo: &str, from: &str, to: &str) -> anyhow::Result<bool> {
+        if s.paths.is_empty() && s.ignore_paths.is_empty() {
+            return Ok(false);
+        }
+        Ok(self.paths_of(repo, to, Some(from)).await?.is_some_and(|p| !touches(s, &p)))
     }
 
     pub(super) async fn head_for(&self, repo: &str, branch: Option<&str>, default: Option<Option<String>>) -> anyhow::Result<Option<String>> {

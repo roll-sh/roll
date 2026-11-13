@@ -343,7 +343,7 @@ async fn another_repo_runs_its_branch_of_the_same_name() {
 }
 
 #[tokio::test]
-async fn path_filters_leave_out_a_change_that_touches_only_ignored_paths() {
+async fn path_filters_leave_out_changes_and_pushes_that_touch_only_ignored_paths() {
     let e = env(json!({ "enabled": true, "ignore_paths": ["docs/", "*.md"] }));
     e.code.paths.lock().insert("cs_9a".into(), vec!["docs/setup.md".into(), "README.md".into()]);
     e.code.open(change("chg_d", 9));
@@ -353,5 +353,34 @@ async fn path_filters_leave_out_a_change_that_touches_only_ignored_paths() {
     e.code.paths.lock().insert("cs_9b".into(), vec!["README.md".into(), "src/app.ts".into()]);
     e.code.edit("chg_d", |c| c.head = "cs_9b".into());
     e.engine.pass().await.unwrap();
-    assert!(e.engine.store.row_by_change("chg_d").unwrap().is_some());
+    let p = e.engine.store.row_by_change("chg_d").unwrap().unwrap();
+    let rev = || e.apps.deployed.lock().get(&(p.id.clone(), "web".to_string())).cloned();
+    assert_eq!(rev().as_deref(), Some("cs_9b"));
+    // A push that touches only ignored paths keeps the services; the preview stands for it.
+    e.code.between.lock().insert("cs_9b..cs_9c".into(), vec!["docs/faq.md".into()]);
+    e.code.edit("chg_d", |c| c.head = "cs_9c".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let row = e.engine.store.row(&p.id).unwrap();
+    assert_eq!((row.head.as_str(), row.build(), rev().as_deref()), ("cs_9c", "cs_9b", Some("cs_9b")));
+    assert_eq!(e.code.last_report("chg_d").head, "cs_9c", "reported for the new head");
+    // Rules that no longer leave that push out redeploy it.
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "ignore_paths": ["*.txt"] })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!((e.engine.store.row(&p.id).unwrap().runs, rev().as_deref()), (None, Some("cs_9c")));
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "ignore_paths": ["docs/", "*.md"] })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.code.between.lock().insert("cs_9c..cs_9e".into(), vec!["docs/faq.md".into()]);
+    e.code.edit("chg_d", |c| c.head = "cs_9e".into());
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&p.id).unwrap().build(), "cs_9c");
+    // The next push that counts (measured from what runs) redeploys.
+    e.code.between.lock().insert("cs_9c..cs_9d".into(), vec!["docs/faq.md".into(), "src/app.ts".into()]);
+    e.code.edit("chg_d", |c| c.head = "cs_9d".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(rev().as_deref(), Some("cs_9d"));
+    assert_eq!(e.engine.store.row(&p.id).unwrap().runs, None);
 }

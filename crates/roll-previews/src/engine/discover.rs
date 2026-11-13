@@ -115,6 +115,10 @@ impl Engine {
                     Some(c) if wanted => {
                         if c.head != r.head || c.title != r.title || c.trusted != r.trusted || c.github_pr != r.github_pr {
                             let moved = c.head != r.head;
+                            // A push that touches only ignored paths (since what the services
+                            // run) keeps them running; the preview stands for the new head.
+                            let keep = moved && matches!(r.state, State::Ready | State::Sleeping) && self.only_ignored(s, &r.repo, r.build(), &c.head).await?;
+                            let build = r.build().to_string();
                             let (head, title, trusted, pr) = (c.head.clone(), c.title.clone(), c.trusted, c.github_pr);
                             self.store.update(&r.id, |row| {
                                 row.head = head.clone();
@@ -125,14 +129,33 @@ impl Engine {
                                     row.last_active_at = now;
                                     row.next_at = 0;
                                     row.attempts = 0;
-                                    if matches!(row.state, State::Ready | State::Sleeping | State::Failed) {
-                                        row.state = State::Updating;
+                                    if keep {
+                                        row.runs = Some(build.clone());
+                                    } else {
+                                        row.runs = None;
+                                        if matches!(row.state, State::Ready | State::Sleeping | State::Failed) {
+                                            row.state = State::Updating;
+                                        }
                                     }
                                 }
                             })?;
-                            if moved {
+                            if moved && keep {
+                                self.store.log(&r.id, &format!("pushed: {} (only ignored paths: the services keep running {})", short(&c.head), short(&build)))?;
+                            } else if moved {
                                 self.store.log(&r.id, &format!("pushed: {}", short(&c.head)))?;
                             }
+                        }
+                        // Services kept on an earlier head redeploy once the path filters no
+                        // longer leave out what changed since (they were edited or removed).
+                        if c.head == r.head && let Some(runs) = &r.runs && !self.only_ignored(s, &r.repo, runs, &r.head).await? {
+                            self.store.update(&r.id, |row| {
+                                row.runs = None;
+                                row.next_at = 0;
+                                if matches!(row.state, State::Ready | State::Sleeping | State::Failed) {
+                                    row.state = State::Updating;
+                                }
+                            })?;
+                            self.store.log(&r.id, "the path filters changed: redeploying at the change's head")?;
                         }
                         // An approval (or its loss on a new head) is a change of state.
                         if c.may_run() == (r.state == State::AwaitingApproval) {

@@ -84,6 +84,10 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   Qovery do), else at their default branch's head, and are redeployed only when that head moves.
   This is Railway's "focused" environment, done the cheap way. Data
   branches stay (they hold the preview's own writes) unless the change resets them.
+  - With path filters set, a push whose diff from the head the services run touches only
+    ignored paths redeploys nothing (Render's skipped deploys): the preview stands for the new
+    head (its status, comment and `roll preview wait`) and says which one it `runs`. The next
+    push that touches a path that counts, measured from what runs, redeploys.
 - **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) stops. A
   request to any URL of the preview wakes it. The request is held for up to 60 s; after that the
   visitor gets a "starting" page that refreshes. Data products sleep on their own and wake on
@@ -583,6 +587,7 @@ type Preview = {
   id: string; project: string; slug: string; repo: string;
   change: string | null; number: number | null; github_pr: number | null; branch: string | null;
   title: string; head: string; trusted: boolean;
+  runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   desired: "active" | "deleted";
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   error: string | null;
@@ -725,7 +730,8 @@ Ranked by what a person notices first. Done so far:
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
 - `[skip preview]` and `[preview]` in a change's title, and path filters (`paths`,
-  `ignore_paths`) on what a change touches since its merge base;
+  `ignore_paths`) on what a change touches since its merge base, and pushes that touch only
+  ignored paths keep the running services;
 - the same branch across a project's repos (another repo runs its own branch of the change's name,
   and a push to it reaches the preview);
 - a look at the Previews tab and sheet from screenshots of the real thing (each row says its state
@@ -746,14 +752,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A push that touches only ignored paths keeps the running services**: with path filters
-   on, a docs-only push to a change with a preview still redeploys it at the new head. Render
-   skips that deploy; here the preview would need to say which head its services run.
-2. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
+1. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
    words do now. roll code changes have no labels yet; GitHub's go through the mirror.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

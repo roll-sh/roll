@@ -58,6 +58,8 @@ export interface Preview {
   branch: string | null;
   title: string;
   head: string;
+  /** The earlier head the change's services still run (later pushes touched only ignored paths). */
+  runs?: string | null;
   trusted: boolean;
   desired: "active" | "deleted";
   state: PreviewState;

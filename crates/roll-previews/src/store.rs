@@ -180,6 +180,16 @@ pub struct Row {
     /// Bumped by every write that asks for a converge (`next_at = 0`): a converge settles a
     /// row only if nothing asked for another one meanwhile.
     pub generation: i64,
+    /// The change's earlier head its own repo's services keep running, because every push since
+    /// touched only paths the path filters ignore (`None`: they run `head`).
+    pub runs: Option<String>,
+}
+
+impl Row {
+    /// The head the change's own repo's services, release, seed, schema and screenshot are of.
+    pub fn build(&self) -> &str {
+        self.runs.as_deref().unwrap_or(&self.head)
+    }
 }
 
 /// What a new preview is made from.
@@ -226,7 +236,7 @@ pub struct Store {
 }
 
 const COLUMNS: &str = "id, project_id, slug, repo, change_id, branch, number, title, github_pr, head, trusted, desired, state, error, attempts, \
-     next_at, asleep, reset_requested, last_reset_at, last_active_at, expires_at, created_by, created_at, updated_at, generation";
+     next_at, asleep, reset_requested, last_reset_at, last_active_at, expires_at, created_by, created_at, updated_at, generation, runs";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let desired: String = r.get(11)?;
@@ -258,6 +268,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         created_at: r.get(22)?,
         updated_at: r.get(23)?,
         generation: r.get(24)?,
+        runs: r.get(25)?,
     })
 }
 
@@ -355,7 +366,7 @@ impl Store {
         if !db.has_column("previews", "kept_until")? {
             db.add_column("previews", "kept_until", "INTEGER")?;
         }
-        for col in ["released", "schema_head", "schema_changes"] {
+        for col in ["released", "schema_head", "schema_changes", "runs"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -482,7 +493,7 @@ impl Store {
                 }
             }
             c.execute(
-                &format!("INSERT INTO previews ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, 0, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, 0)"),
+                &format!("INSERT INTO previews ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, 0, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, 0, NULL)"),
                 params![
                     id,
                     n.project_id,
@@ -546,7 +557,7 @@ impl Store {
             }
             c.execute(
                 "UPDATE previews SET title = ?, head = ?, trusted = ?, github_pr = ?, desired = ?, state = ?, error = ?, attempts = ?, next_at = ?, \
-                 asleep = ?, reset_requested = ?, last_reset_at = ?, last_active_at = ?, expires_at = ?, updated_at = ?, generation = ? WHERE id = ?",
+                 asleep = ?, reset_requested = ?, last_reset_at = ?, last_active_at = ?, expires_at = ?, updated_at = ?, generation = ?, runs = ? WHERE id = ?",
                 params![
                     new.title,
                     new.head,
@@ -564,6 +575,7 @@ impl Store {
                     new.expires_at,
                     new.updated_at,
                     new.generation,
+                    new.runs,
                     id
                 ],
             )?;
@@ -1065,6 +1077,7 @@ impl Store {
             github_pr: r.github_pr,
             branch: r.branch,
             title: r.title,
+            runs: r.runs,
             head: r.head,
             trusted: r.trusted,
             desired: r.desired,

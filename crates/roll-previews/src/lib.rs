@@ -179,6 +179,9 @@ pub struct Preview {
     pub branch: Option<String>,
     pub title: String,
     pub head: String,
+    /// The earlier head the change's own services still run: every push since touched only
+    /// paths the project's path filters ignore (`None`: they run `head`).
+    pub runs: Option<String>,
     pub trusted: bool,
     pub desired: Desired,
     pub state: State,

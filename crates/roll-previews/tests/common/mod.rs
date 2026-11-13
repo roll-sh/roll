@@ -18,6 +18,8 @@ pub struct FakeCode {
     pub heads: Mutex<HashMap<String, String>>,
     /// The paths a head changes, by head (unlisted: not known).
     pub paths: Mutex<HashMap<String, Vec<String>>>,
+    /// The paths between two heads, by `"<from>..<to>"` (unlisted: not known).
+    pub between: Mutex<HashMap<String, Vec<String>>>,
     pub reports: Mutex<Vec<Preview>>,
     pub forgotten: Mutex<Vec<String>>,
     /// Budget alerts sent: (the repos told, the alert).
@@ -51,6 +53,9 @@ impl Source for FakeCode {
     }
     async fn paths(&self, _repo: &str, head: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.paths.lock().get(head).cloned())
+    }
+    async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())
     }
     async fn services(&self, repo: &str, _revision: &str) -> anyhow::Result<Vec<ServiceSpec>> {
         let name = repo.rsplit('/').next().unwrap().to_string();

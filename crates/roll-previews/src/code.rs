@@ -197,6 +197,12 @@ impl Source for CodeSource {
         Ok(Some(self.code.change_paths(&r, &cs)?))
     }
 
+    async fn paths_between(&self, repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let r = self.repo(repo)?;
+        let (Some(a), Some(b)) = (self.code.store.resolve(&r.id, from)?, self.code.store.resolve(&r.id, to)?) else { return Ok(None) };
+        Ok(Some(self.code.store.compare(&r.id, &a, &b)?.into_iter().map(|d| d.path.as_str().to_string()).collect()))
+    }
+
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;

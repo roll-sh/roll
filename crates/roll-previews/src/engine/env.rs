@@ -23,7 +23,7 @@ impl EnvSource for Engine {
         let svc = services.iter().find(|x| x.name == service).ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
         let rev = svc.revision.clone().ok_or_else(|| anyhow::anyhow!("{service} isn't deployed yet"))?;
         // The change's own repo runs only the head that was checked (and approved, for a fork).
-        if svc.repo == r.repo && rev != r.head {
+        if svc.repo == r.repo && rev != r.build() {
             anyhow::bail!("{service} is being redeployed at the change's new head");
         }
         // Data being replaced, seeded or masked isn't served yet.

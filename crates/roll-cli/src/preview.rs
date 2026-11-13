@@ -162,6 +162,9 @@ fn print_preview(p: &Value) {
         println!("error: {}", e.lines().next().unwrap_or(""));
     }
     println!("repo {}  head {}  created {}", s(&p["repo"]), &s(&p["head"])[..s(&p["head"]).len().min(12)], ago(p["created_at"].as_i64().unwrap_or(0) / 1000));
+    if let Some(runs) = p["runs"].as_str() {
+        println!("runs {} (later pushes touched only ignored paths)", &runs[..runs.len().min(12)]);
+    }
     for svc in p["services"].as_array().into_iter().flatten() {
         // The link with the access token when the preview is private: the one that opens it.
         let url = svc["share_url"].as_str().or(svc["url"].as_str()).unwrap_or("-");

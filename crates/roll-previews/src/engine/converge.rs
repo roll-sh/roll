@@ -279,17 +279,17 @@ impl Engine {
         }
         // 3c. The release (migrations) at each new head, on this data, before services deploy.
         if let Some(release) = &s.release
-            && self.store.released(&r.id)?.as_deref() != Some(r.head.as_str())
+            && self.store.released(&r.id)?.as_deref() != Some(r.build())
         {
             self.run_job(r, &s, &vars, "release", release).await?;
-            self.store.set_released(&r.id, &r.head)?;
+            self.store.set_released(&r.id, r.build())?;
             self.store.log(&r.id, "released")?;
         }
         // 3d. What that did to the schema, once per head (best effort: a reviewer's aid). Only
         // after a seed or release could have changed it: reading the parent's starts its compute.
         if s.seed.is_none() && s.release.is_none() {
             self.store.clear_schema_changes(&r.id)?;
-        } else if self.store.schema_head(&r.id)?.as_deref() != Some(r.head.as_str()) {
+        } else if self.store.schema_head(&r.id)?.as_deref() != Some(r.build()) {
             self.read_schema(r).await;
         }
 
@@ -300,7 +300,7 @@ impl Engine {
         // (spec, repo, revision, whether roll apps runs it)
         let mut wanted: Vec<(ServiceSpec, String, String, bool)> = Vec::new();
         let head_of = |repo: String| async move {
-            if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.head.clone())) } else { self.head_for(&repo, r.branch.as_deref(), None).await }
+            if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.build().to_string())) } else { self.head_for(&repo, r.branch.as_deref(), None).await }
         };
         match self.apps.catalog(&r.project_id).await.map_err(|e| anyhow::anyhow!("reading the project's services: {e:#}"))? {
             Some(catalog) if !catalog.is_empty() => {
@@ -418,7 +418,7 @@ impl Engine {
         self.report(row).await;
         // 6. A screenshot of the first service, once per head (best effort; it wakes the service):
         // taken after the pass, never in a converge slot.
-        if ready && s.github.screenshot && self.store.screenshot_head(&r.id)?.as_deref() != Some(r.head.as_str()) {
+        if ready && s.github.screenshot && self.store.screenshot_head(&r.id)?.as_deref() != Some(r.build()) {
             self.shots_wanted.lock().insert(r.id.clone());
         }
         Ok(())
@@ -431,19 +431,19 @@ impl Engine {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
         match self.apps.screenshot(&r.id, &first.name).await {
             Ok(Some(png)) => {
-                let kept = self.store.set_screenshot(&r.id, &r.head, &png).is_ok();
+                let kept = self.store.set_screenshot(&r.id, r.build(), &png).is_ok();
                 if kept {
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
                 }
                 kept
             }
             Ok(None) => {
-                let _ = self.store.set_screenshot_tried(&r.id, &r.head);
+                let _ = self.store.set_screenshot_tried(&r.id, r.build());
                 false
             }
             Err(e) => {
                 let _ = self.store.log(&r.id, &format!("couldn't take a screenshot of {}: {e:#}", first.name));
-                let _ = self.store.set_screenshot_tried(&r.id, &r.head);
+                let _ = self.store.set_screenshot_tried(&r.id, r.build());
                 false
             }
         }
@@ -460,8 +460,8 @@ impl Engine {
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
         set(&mut env, "ROLL_REPO", r.repo.clone());
-        set(&mut env, "ROLL_CHANGESET", r.head.clone());
-        let run = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.head.clone(), seed: job.clone(), env };
+        set(&mut env, "ROLL_CHANGESET", r.build().to_string());
+        let run = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.build().to_string(), seed: job.clone(), env };
         self.store.log(&r.id, &format!("{what}: {}", job.run.lines().next().unwrap_or("")))?;
         let (code, tail) = self.apps.seed(&run).await.map_err(|e| anyhow::anyhow!("{what}: {e:#}"))?;
         if code != 0 {
@@ -491,7 +491,7 @@ impl Engine {
         };
         match read.await {
             Ok(changes) => {
-                if let Err(e) = self.store.set_schema_changes(&r.id, &r.head, changes.as_deref()) {
+                if let Err(e) = self.store.set_schema_changes(&r.id, r.build(), changes.as_deref()) {
                     warn!(preview = %r.id, error = %e, "previews: keeping the schema's changes");
                 }
             }
