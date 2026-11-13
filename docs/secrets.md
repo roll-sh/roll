@@ -1586,7 +1586,9 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Reviewed again on 2026-11-14: an independent security review of #39–#41 found racing rotations
+Measured again on 2026-11-14 (load about 20): values at 9,900 keys took 89–122 ms on SQLite and
+155 ms on Postgres, within the noise of the Performance table; nothing to fix. Reviewed again on
+2026-11-14: an independent security review of #39–#41 found racing rotations
 could reset the login in use (now a claim never takes a busy role), a `#` in a password shown as
 the host, Postgres connections outliving their timeout, and deleted projects leaving credentials
 unrevoked (now revoked first, the rest retried by the sweeper); all fixed and tested. Earlier,
@@ -1602,17 +1604,19 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **A measured performance pass on resolving** (`…/resolve`, `roll run`): a project with
-   thousands of keys, references across environments, imports, shares and dynamic links, timed
-   on SQLite and Postgres (`examples/bench.rs`), with what limits it named and fixed.
-2. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
+1. **A project's own certificate authority** (Vault's PKI engine, Infisical's PKI): a CA per
+   project (its key sealed like a value), and `dynamic` links that issue a short-lived TLS
+   certificate and key per lease for the names the CA's policy allows, for mTLS between services.
+2. **SSH certificates** from a project's CA (Vault's SSH engine): a short-lived user certificate
+   per lease for the principals the policy allows.
+3. **AWS through roll's issuer** (once #38 and #43 land): `AssumeRoleWithWebIdentity` with roll's
    own token, so roll needs no AWS keys of its own and the trust policy pins `sub` as GCP's and
    Azure's do.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+4. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
+5. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+6. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
