@@ -1,7 +1,7 @@
 //! roll apps end to end in process: `/v1/apps` and the waking proxy on SQLite, with the fake
 //! runtime and builder (no Docker), a fake roll code and a fake DNS.
 
-use apps_control::integrations::{Landing, NoResources, NoSecrets, Revision, Sources, StaticDns};
+use apps_control::integrations::{Landing, NoSecrets, Revision, Sources, StaticDns};
 use apps_control::runtime::fake::{Fake, FakeState};
 use apps_control::store::{Sealer, Store};
 use apps_control::{Apps, AppsConfig, Deps};
@@ -105,6 +105,19 @@ impl apps_control::integrations::DomainTls for FakeTls {
     }
 }
 
+/// Two Postgres projects a service can link: `main` and `orders`.
+struct FakeResources;
+
+#[async_trait]
+impl apps_control::integrations::Resources for FakeResources {
+    async fn link_vars(&self, kind: apps_control::model::LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        match (kind.as_str(), r#ref) {
+            ("postgres", "main" | "orders") => Ok(vec![("DATABASE_URL".into(), format!("postgres://app:pw@db.roll.test:5432/{ref}"))]),
+            _ => anyhow::bail!("no {} {ref}", kind.as_str()),
+        }
+    }
+}
+
 struct World {
     apps: Arc<Apps>,
     api: axum::Router,
@@ -144,7 +157,7 @@ async fn world_with(setup: impl FnOnce(&mut AppsConfig)) -> World {
         builder: fake.clone(),
         sources: Some(code.clone()),
         secrets: Arc::new(NoSecrets),
-        resources: Arc::new(NoResources),
+        resources: Arc::new(FakeResources),
         resolver: dns.clone(),
         tls: tls.clone(),
         objects: None,
@@ -505,6 +518,28 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert!(w.tls.calls.lock().iter().all(|c| c.ends_with(" www.example.com")), "{:?}", w.tls.calls.lock());
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/www.example.com"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
+}
+
+/// A link puts its resource's variables in the service's environment (prefixed when asked),
+/// and a running instance has them; a resource that doesn't exist can't be linked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_postgres_link_puts_its_variables_in_the_instances() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let links = format!("/v1/apps/services/{id}/links");
+    let (st, l) = call(&w.api, "PUT", &format!("{links}/postgres/main"), Some(json!({}))).await;
+    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["DATABASE_URL"])), "{l}");
+    let (_, l) = call(&w.api, "PUT", &format!("{links}/postgres/orders"), Some(json!({"prefix": "ORDERS"}))).await;
+    assert_eq!(l["vars"], json!(["ORDERS_DATABASE_URL"]), "{l}");
+    assert_eq!(call(&w.api, "PUT", &format!("{links}/postgres/nope"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL"}}))).await;
+    let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    let (st, body) = visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders"}));
 }
 
 /// Requests that pile up past an instance's concurrency start more instances, up to

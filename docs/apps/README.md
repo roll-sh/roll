@@ -716,22 +716,20 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **A Postgres link's variables reaching an instance**, end to end: the test world needs a fake
-   `Resources` (rolld wires the real one; nothing in apps-control's tests covers the injection).
-2. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+1. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-3. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+2. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-4. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+3. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-5. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-6. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+5. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-7. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+6. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-8. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
+7. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
