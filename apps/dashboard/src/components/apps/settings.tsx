@@ -51,6 +51,8 @@ interface Form {
   rolloutErrors: string;
   h2c: boolean;
   public: boolean;
+  restart: "always" | "on_failure" | "never";
+  restartTries: string;
   scaleStream: string;
   scaleGroup: string;
   scalePer: string;
@@ -99,6 +101,8 @@ export function formOf(s: Service): Form {
     rolloutErrors: str(s.run.rollout?.error_pct),
     h2c: !!s.run.h2c,
     public: s.run.public !== false,
+    restart: s.run.restart ?? "always",
+    restartTries: str(s.run.restart_tries),
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
     scalePer: str(s.run.scale?.per_instance),
@@ -157,6 +161,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
+  if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
+    run.restart = f.restart === "always" ? null : f.restart;
+    run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
+  }
   if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer)
     run.scale = f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...(f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {}) } : null;
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
@@ -167,7 +175,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -418,6 +426,18 @@ export function SettingsTab({
           )}
           {form.type === "worker" && (
             <>
+              <Field label="Restart" hint="when it stops; a deploy or a restart starts fresh ones whatever it says">
+                <select value={form.restart} onChange={(e) => set("restart", e.target.value as Form["restart"])} className={`${input} w-full`}>
+                  <option value="always">Always</option>
+                  <option value="on_failure">On failure</option>
+                  <option value="never">Never</option>
+                </select>
+              </Field>
+              {form.restart === "on_failure" && (
+                <Field label="Tries" hint="failures in a row before it's left stopped">
+                  {t("restartTries", "10")}
+                </Field>
+              )}
               <Field label="Follow a stream" hint={streams.length ? "instances follow a consumer group's lag" : "a stream on this project can drive it"}>
                 <select value={form.scaleStream} onChange={(e) => set("scaleStream", e.target.value)} className={`${input} w-full`} disabled={!streams.length && !form.scaleStream}>
                   <option value="">No: run min instances</option>

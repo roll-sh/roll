@@ -126,6 +126,14 @@ impl Fake {
         self.crash(name);
     }
 
+    /// The process ends by itself with `code` (0: done with its work).
+    pub fn exit(&self, name: &str, code: i32) {
+        self.crash(name);
+        if let Some(i) = self.instances.lock().get_mut(name) {
+            i.exited.send_replace(Some(code));
+        }
+    }
+
     /// The process dies on its own (killed, out of memory): its port stops answering.
     pub fn crash(&self, name: &str) {
         if let Some(i) = self.instances.lock().get_mut(name) {

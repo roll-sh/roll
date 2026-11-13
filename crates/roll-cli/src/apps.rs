@@ -247,6 +247,12 @@ pub enum AppsCmd {
         /// percent for a minute (10–100); `0` turns it off.
         #[arg(long, value_name = "PERCENT")]
         cpu_target: Option<u32>,
+        /// A worker that stops: `always` started again, `on_failure`, or `never`.
+        #[arg(long, value_parser = ["always", "on_failure", "never"])]
+        restart: Option<String>,
+        /// With `--restart on_failure`: failures in a row before it's left stopped (default 10).
+        #[arg(long)]
+        restart_tries: Option<u32>,
     },
     /// Delete a service: its environments, instances, deployments and images (asks first;
     /// `--yes` doesn't).
@@ -1701,7 +1707,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -1769,6 +1775,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("public", public.map(Value::from)),
                 ("drain_s", drain.map(|d| if d == 0 { Value::Null } else { Value::from(d) })),
                 ("cpu_target", cpu_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("restart", restart.map(Value::from)),
+                ("restart_tries", restart_tries.map(Value::from)),
                 ("scale", match scale.as_deref() {
                     None => None,
                     Some("none") => Some(Value::Null),

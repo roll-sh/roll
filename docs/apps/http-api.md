@@ -199,6 +199,12 @@ type Run = {
    *  to max_instances), and fewer stay once they'd be under it. 10–100; unset, requests only.
    *  Only what the runtime measures counts (Docker's cgroup; not Fargate, which bills by size). */
   cpu_target?: number;
+  /** A worker that stops: started again `always` (default), on `on_failure` only (a nonzero
+   *  exit or out of memory, up to restart_tries in a row, default 10, 1–100), or `never`; a
+   *  clean exit under the last two isn't a crash. What it leaves stopped isn't replaced until a
+   *  deploy or `…/restart`. 400 on another type. */
+  restart?: "always" | "on_failure" | "never";
+  restart_tries?: number;
 };
 
 type Service = {

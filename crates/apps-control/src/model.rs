@@ -400,6 +400,36 @@ pub struct Run {
     /// `max_instances`), and fewer stay once they'd be under it. 10–100; unset, requests only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_target: Option<u32>,
+    /// A worker that stops (Railway's restart policy): started again `always`, only when it
+    /// failed (`on_failure`, up to `restart_tries` in a row), or `never`. A deploy or a restart
+    /// starts fresh ones whatever it says.
+    #[serde(skip_serializing_if = "Restart::is_always")]
+    pub restart: Restart,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_tries: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Restart {
+    #[default]
+    Always,
+    OnFailure,
+    Never,
+}
+
+impl Restart {
+    fn is_always(&self) -> bool {
+        *self == Restart::Always
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Restart::Always => "always",
+            Restart::OnFailure => "on_failure",
+            Restart::Never => "never",
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -505,6 +535,8 @@ impl Default for Run {
             public: true,
             drain_s: None,
             cpu_target: None,
+            restart: Restart::Always,
+            restart_tries: None,
         }
     }
 }
@@ -560,6 +592,17 @@ impl Run {
         }
         if self.drain_s.is_some_and(|d| !(1..=300).contains(&d)) {
             return bad("drain_s is 1–300");
+        }
+        if self.restart != Restart::Always && self.kind != RunType::Worker {
+            return bad("restart is for a worker (a web service starts on its requests, a cron run once)");
+        }
+        if let Some(t) = self.restart_tries {
+            if self.restart != Restart::OnFailure {
+                return bad("restart_tries goes with restart = on_failure");
+            }
+            if !(1..=100).contains(&t) {
+                return bad("restart_tries is 1–100");
+            }
         }
         if let Some(t) = self.cpu_target {
             if !(10..=100).contains(&t) {

@@ -1817,6 +1817,8 @@ async fn a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry() {
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
     let h = host(&svc["environments"][0]["url"]);
+    // Asleep first: the deploy's health-checked instance goes back to rest a moment after.
+    get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production"), |e| e["state"] == "stopped").await;
     let get = || async {
         let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
         let resp = w.public.clone().oneshot(req).await.unwrap();
@@ -2182,4 +2184,47 @@ async fn a_rate_limit_slows_each_client_down() {
     assert_eq!(from("10.0.0.2:1").await.0, StatusCode::OK, "another client has its own");
     call(&w.api, "PUT", &base, Some(json!({"rate_limit": null}))).await;
     assert_eq!(from("10.0.0.1:4").await.0, StatusCode::OK);
+}
+
+/// A worker's restart policy: `on_failure` starts it again after a crash but leaves it stopped
+/// once it ends cleanly, nothing taking its place, until a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workers_restart_policy_decides_whether_it_runs_again() {
+    let w = world_with(|c| c.live.restart_backoff = Duration::from_millis(5)).await;
+    let (st, e) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "restart": "never"} }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "workers only: {e}");
+    let (svc, d) = image_service(&w, "jobs", json!({"type": "worker", "restart": "on_failure", "restart_tries": 3})).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let live = w.apps.live(&id, "production");
+    fn running(w: &World, id: &str) -> Vec<String> {
+        w.fake.instances(id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).map(|(n, _, _)| n).collect()
+    }
+    async fn ticks(live: &Arc<apps_control::live::EnvLive>, w: &World, id: &str, want: usize) -> bool {
+        for _ in 0..100 {
+            live.tick().await;
+            if running(w, id).len() == want {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+    // A crash: started again.
+    let name = running(&w, &id)[0].clone();
+    w.fake.crash(&name);
+    live.tick().await;
+    assert!(ticks(&live, &w, &id, 1).await, "restarted after a failure");
+    // Done with its work: left stopped, and nothing takes its place.
+    w.fake.exit(&running(&w, &id)[0], 0);
+    for _ in 0..20 {
+        live.tick().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(running(&w, &id).is_empty(), "{:?}", w.fake.instances(&id));
+    let made = w.fake.instances(&id).len();
+    assert_eq!(made, 1, "no new instance");
+    // A restart runs it again.
+    assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/restart"), None).await.0, StatusCode::ACCEPTED);
+    assert!(ticks(&live, &w, &id, 1).await, "running after a restart");
 }

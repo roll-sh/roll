@@ -76,6 +76,9 @@ export interface Run {
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
   public?: boolean;
+  /** A worker that stops: started again always (default), on failure (up to restart_tries in a row), or never. */
+  restart?: "always" | "on_failure" | "never";
+  restart_tries?: number;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
 }

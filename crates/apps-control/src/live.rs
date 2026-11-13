@@ -9,7 +9,7 @@
 
 use crate::logs::{LogSink, Stream};
 use crate::metrics::Meter;
-use crate::model::{InstanceState, Run, RunType};
+use crate::model::{InstanceState, Restart, Run, RunType};
 use crate::runtime::{InstanceSpec, Runtime};
 use parking_lot::Mutex;
 use std::net::SocketAddr;
@@ -57,6 +57,8 @@ pub struct Inst {
     cpu_seen: Mutex<Option<u64>>,
     /// Consecutive crashes (a worker's restart backoff).
     crashes: AtomicU32,
+    /// A worker its restart policy leaves stopped: it isn't started again or replaced.
+    done: AtomicBool,
     /// Failed health checks in a row while running.
     health_fails: AtomicU32,
     /// The stop a crash started: a start of the same instance waits for it, so it never stops
@@ -75,6 +77,7 @@ impl Inst {
             started_at: Mutex::new(None),
             cpu_seen: Mutex::new(None),
             crashes: AtomicU32::new(0),
+            done: AtomicBool::new(false),
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
         })
@@ -1213,6 +1216,12 @@ impl EnvLive {
     /// Restart: stop everything and start what `min_instances` asks for again.
     pub async fn restart(self: &Arc<Self>) {
         self.sleep().await;
+        // What a restart policy left stopped goes: fresh ones take its place.
+        let done: Vec<Arc<Inst>> = self.insts.lock().iter().filter(|i| i.done.load(Ordering::SeqCst)).cloned().collect();
+        self.insts.lock().retain(|i| !i.done.load(Ordering::SeqCst));
+        for i in done {
+            self.runtime.remove(&i.name).await;
+        }
         self.tick().await;
     }
 
@@ -1529,15 +1538,35 @@ impl EnvLive {
             match i.phase() {
                 Phase::Running(_) if self.runtime.running(&i.name).await => up += 1,
                 Phase::Running(_) => {
+                    let exit = self.runtime.exited(&i.name).await;
+                    let clean = exit.as_ref().is_some_and(|e| e.code == Some(0) && !e.oom);
                     let why = self.exit_reason(&i.name, run).await;
-                    self.crashed(i, &why);
-                    i.crashes.fetch_add(1, Ordering::SeqCst);
-                    self.log.stream(Stream::System).line(format!("{} stopped: {why}; restarting", i.name));
+                    let tries = run.restart_tries.unwrap_or(10);
+                    let again = match run.restart {
+                        Restart::Always => true,
+                        Restart::OnFailure => !clean && i.crashes.load(Ordering::SeqCst) + 1 < tries,
+                        Restart::Never => false,
+                    };
+                    if clean && run.restart != Restart::Always {
+                        // Done with its work, not a crash.
+                        *i.phase.lock() = Phase::Created;
+                    } else {
+                        self.crashed(i, &why);
+                        i.crashes.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if again {
+                        self.log.stream(Stream::System).line(format!("{} stopped: {why}; restarting", i.name));
+                    } else {
+                        i.done.store(true, Ordering::SeqCst);
+                        self.log.stream(Stream::System).line(format!("{} stopped: {why}; its restart policy ({}) leaves it stopped until a deploy or a restart", i.name, run.restart.as_str()));
+                    }
                 }
                 _ => {}
             }
         }
-        for i in insts.iter().filter(|i| i.phase() == Phase::Crashed) {
+        // Left stopped by the policy: they count, so nothing replaces them.
+        let finished = insts.iter().filter(|i| i.done.load(Ordering::SeqCst)).count() as u32;
+        for i in insts.iter().filter(|i| i.phase() == Phase::Crashed && !i.done.load(Ordering::SeqCst)) {
             if up >= target {
                 break;
             }
@@ -1555,7 +1584,7 @@ impl EnvLive {
                 i.crashes.fetch_add(1, Ordering::SeqCst);
             }
         }
-        while up < target {
+        while up + finished < target {
             let Ok(inst) = self.make(tpl).await else { break };
             self.insts.lock().push(inst.clone());
             let deadline = Instant::now() + self.cfg.wake_timeout;
