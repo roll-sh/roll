@@ -1357,7 +1357,13 @@ pub struct VarView {
     /// A reference variable's template (`${{ api.KEY }}`): names, never a value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    /// Set and run with, never shown again: not by `…/variables/values`, nor its length here.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sealed: bool,
 }
+
+/// What a sealed value shows, whatever it is.
+pub const SEALED_MASK: &str = "••••••••";
 
 /// A value as the masked list shows it: dots, between 4 and 12 of them, so its length barely
 /// shows either.

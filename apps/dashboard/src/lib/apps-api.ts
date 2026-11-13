@@ -401,8 +401,11 @@ export interface Link {
 export type VariableSource = "service" | "secret" | "link" | "roll" | "reference";
 
 export interface Variables {
-  /** reference: a reference variable's template (names, never a value). */
-  vars: { name: string; masked: string; source: VariableSource; reference?: string }[];
+  /**
+   * reference: a reference variable's template (names, never a value). sealed: run with, never
+   * shown again (not by `reveal` either); a reference that reads a sealed value is sealed too.
+   */
+  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean }[];
 }
 
 export interface LogLine {
@@ -602,7 +605,8 @@ export const appsApi = {
   pending: (id: string, e: string) => call<Pending>("GET", `${env(id, e)}/pending`),
   /** The values in the clear (the `reveal` action). */
   reveal: (id: string, e: string) => call<Record<string, string>>("GET", `${env(id, e)}/variables/values`),
-  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[] }) =>
+  /** `seal`: names set here or already set, sealed for good (a new value keeps them sealed). */
+  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[] }) =>
     call<Variables>("PATCH", `${env(id, e)}/variables`, change),
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),

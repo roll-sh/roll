@@ -775,7 +775,7 @@ async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)
     apps.settings_changed();
     // Names only: a value never reaches the trail.
     let set: Vec<String> = change["set"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
-    apps.audit("variables", &id, &env, actor(&ext), json!({ "set": set, "unset": change["unset"] })).await;
+    apps.audit("variables", &id, &env, actor(&ext), json!({ "set": set, "unset": change["unset"], "seal": change["seal"] })).await;
     ok(v)
 }
 

@@ -1,4 +1,4 @@
-import { ClipboardPaste, Copy, Eye, EyeOff, Link2, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
+import { ClipboardPaste, Copy, Eye, EyeOff, Link2, Lock, LockOpen, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { appsApi, describePending, parseEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
@@ -19,7 +19,7 @@ const SOURCE_TONE: Record<VariableSource, string> = {
 /** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
 export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", service: "service" };
 
-type Edit = { name: string; value: string };
+type Edit = { name: string; value: string; seal?: boolean };
 
 /**
  * The environment's variables (masked; Reveal asks for the values), edited in place and saved in
@@ -46,6 +46,8 @@ export function VariablesTab({
   const [error, setError] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [removed, setRemoved] = useState<Set<string>>(new Set());
+  // Existing variables to seal at Save: for good, so staged until then.
+  const [sealing, setSealing] = useState<Set<string>>(new Set());
   const [added, setAdded] = useState<Edit[]>([]);
   const [pasting, setPasting] = useState(false);
   const [pasted, setPasted] = useState("");
@@ -85,6 +87,7 @@ export function VariablesTab({
     setValues(null);
     setEdits({});
     setRemoved(new Set());
+    setSealing(new Set());
     setAdded([]);
     void load();
   }, [load]);
@@ -96,19 +99,31 @@ export function VariablesTab({
   };
 
   const badNew = added.filter((a) => a.name && !VARIABLE_NAME.test(a.name)).length > 0;
-  const dirty = Object.keys(edits).length > 0 || removed.size > 0 || added.some((a) => a.name);
+  const toSeal = [...[...sealing].filter((n) => !removed.has(n)), ...added.filter((a) => a.name && a.seal).map((a) => a.name)];
+  const dirty = Object.keys(edits).length > 0 || removed.size > 0 || added.some((a) => a.name) || sealing.size > 0;
+  const discard = () => {
+    setEdits({});
+    setRemoved(new Set());
+    setSealing(new Set());
+    setAdded([]);
+  };
   const save = async () => {
     const set: Record<string, string> = { ...edits };
     for (const a of added) if (a.name) set[a.name] = a.value;
-    const out = await runner.run("variables", () => appsApi.setVariables(service, env.name, { set, unset: [...removed] }));
+    const out = await runner.run("variables", () => appsApi.setVariables(service, env.name, { set, unset: [...removed], seal: toSeal }));
     if (out) {
       setVars(out);
-      setEdits({});
-      setRemoved(new Set());
-      setAdded([]);
+      discard();
       setValues(null);
     }
   };
+  const toggle = (set: (f: (s: Set<string>) => Set<string>) => void, name: string) =>
+    set((r) => {
+      const n = new Set(r);
+      if (n.has(name)) n.delete(name);
+      else n.add(name);
+      return n;
+    });
 
   return (
     <div className="space-y-6">
@@ -202,10 +217,15 @@ export function VariablesTab({
                 <li key={v.name} className={`flex flex-wrap items-center gap-3 px-5 py-2.5 ${gone ? "opacity-50" : ""}`}>
                   <span className={`w-56 max-w-full truncate font-mono text-[12px] ${gone ? "line-through" : ""}`}>{v.name}</span>
                   <span className={`rounded border px-1.5 font-mono text-[10.5px] ${SOURCE_TONE[v.source]}`}>{SOURCE_LABEL[v.source]}</span>
+                  {v.sealed && (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-subtle" title="Sealed: the app runs with it, nothing shows it again">
+                      <Lock className="size-3" strokeWidth={1.5} /> sealed
+                    </span>
+                  )}
                   {editing ? (
                     <input
                       autoFocus
-                      placeholder="new value"
+                      placeholder={v.sealed ? "new value (stays sealed)" : "new value"}
                       value={edits[v.name]}
                       onChange={(e) => setEdits((x) => ({ ...x, [v.name]: e.target.value }))}
                       className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
@@ -214,22 +234,28 @@ export function VariablesTab({
                   ) : (
                     <button
                       disabled={!editable || gone}
-                      onClick={() => setEdits((x) => ({ ...x, [v.name]: v.reference ?? values?.[v.name] ?? "" }))}
+                      onClick={() => setEdits((x) => ({ ...x, [v.name]: v.sealed ? "" : (v.reference ?? values?.[v.name] ?? "") }))}
                       className="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-muted enabled:hover:text-fg"
                       title={editable ? "Edit" : `Set by ${v.source === "link" ? "a link" : v.source === "secret" ? "the project's secrets" : "roll"}`}
                     >
-                      {v.reference ?? values?.[v.name] ?? v.masked}
+                      {v.sealed ? v.masked : (v.reference ?? values?.[v.name] ?? v.masked)}
+                    </button>
+                  )}
+                  {editable && !v.sealed && !gone && (
+                    <button
+                      onClick={() => toggle(setSealing, v.name)}
+                      className={`p-1 hover:text-fg ${sealing.has(v.name) ? "text-accent" : "text-subtle"}`}
+                      aria-pressed={sealing.has(v.name)}
+                      aria-label={`Seal ${v.name}`}
+                      title={sealing.has(v.name) ? "Sealed at Save: click to keep it readable" : "Seal: the app runs with it, nothing shows it again"}
+                    >
+                      {sealing.has(v.name) ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
                     </button>
                   )}
                   {editable && (
                     <button
                       onClick={() => {
-                        setRemoved((r) => {
-                          const n = new Set(r);
-                          if (n.has(v.name)) n.delete(v.name);
-                          else n.add(v.name);
-                          return n;
-                        });
+                        toggle(setRemoved, v.name);
                         setEdits(({ [v.name]: _, ...rest }) => rest);
                       }}
                       className="p-1 text-subtle hover:text-fg"
@@ -259,6 +285,15 @@ export function VariablesTab({
                   className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
                   spellCheck={false}
                 />
+                <button
+                  onClick={() => setAdded((l) => l.map((x, j) => (j === i ? { ...x, seal: !x.seal } : x)))}
+                  className={`p-1 hover:text-fg ${a.seal ? "text-accent" : "text-subtle"}`}
+                  aria-pressed={!!a.seal}
+                  aria-label="Seal"
+                  title={a.seal ? "Sealed at Save" : "Seal: the app runs with it, nothing shows it again"}
+                >
+                  {a.seal ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
+                </button>
                 <button onClick={() => setAdded((l) => l.filter((_, j) => j !== i))} className="p-1 text-subtle hover:text-fg" aria-label="Drop">
                   <Trash2 className="size-3.5" />
                 </button>
@@ -268,14 +303,8 @@ export function VariablesTab({
         )}
         {dirty && (
           <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
-            <button
-              className={btn}
-              onClick={() => {
-                setEdits({});
-                setRemoved(new Set());
-                setAdded([]);
-              }}
-            >
+            {toSeal.length > 0 && <span className="mr-auto text-[12px] text-subtle">Sealing {toSeal.join(", ")} is for good: nothing shows {toSeal.length === 1 ? "it" : "them"} again.</span>}
+            <button className={btn} onClick={discard}>
               Discard
             </button>
             <button className={primary} disabled={runner.busy !== null || badNew} onClick={save}>

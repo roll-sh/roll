@@ -51,7 +51,7 @@ use parking_lot::Mutex;
 use runtime::{Builder, Runtime};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -261,12 +261,17 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// What makes up an environment's variables, highest precedence last.
+/// Another service's values a reference may read, and which of them are sealed.
+type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
+
 pub struct ResolvedVars {
     pub vars: Vec<(String, String)>,
     pub sources: HashMap<String, &'static str>,
     /// References that named nothing ([`refs`]), as `VAR: service.NAME`: empty, and the deploy
     /// says so.
     pub unresolved: Vec<String>,
+    /// Never shown again: the environment's own sealed variables, and references that read one.
+    pub sealed: BTreeSet<String>,
 }
 
 impl Apps {
@@ -693,6 +698,7 @@ impl Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         let now = self.db(move |s| s.variables(&sid, &e)).await?;
         let variables = then.map(|then| {
+            let then = then.vars;
             let added: Vec<&String> = now.keys().filter(|k| !then.contains_key(*k)).collect();
             let removed: Vec<&String> = then.keys().filter(|k| !now.contains_key(*k)).collect();
             let changed: Vec<&String> = now.iter().filter(|(k, v)| then.get(*k).is_some_and(|t| t != *v)).map(|(k, _)| k).collect();
@@ -916,7 +922,7 @@ impl Apps {
                 let (sid, f) = (service.to_string(), f.clone());
                 Some(self.db(move |s| {
                     s.environment(&sid, &f)?;
-                    s.variables(&sid, &f)
+                    Ok((s.variables(&sid, &f)?, s.sealed_variables(&sid, &f)?))
                 })
                 .await?)
             }
@@ -961,9 +967,10 @@ impl Apps {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
         }
         self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
-        if let Some(vars) = copied.filter(|v| !v.is_empty()) {
+        // A sealed one stays sealed in the copy.
+        if let Some((vars, sealed)) = copied.filter(|(v, _)| !v.is_empty()) {
             let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.change_variables(&sid, &e, &vars, &[])).await?;
+            self.db(move |s| s.change_variables(&sid, &e, &vars, &[], &sealed)).await?;
         }
         // Its own size and scale: each field replaces the service's, null goes back to it.
         if let Some(patch) = o.get("run") {
@@ -1211,24 +1218,26 @@ impl Apps {
             Err(e) => return Err(Error::Internal(format!("the project's {} secrets couldn't be read: {e}", env.name))),
         }
         let (sid, e) = (svc.id.clone(), env.name.clone());
-        for (k, v) in self.db(move |s| s.variables(&sid, &e)).await? {
+        let (own, mut sealed) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.sealed_variables(&sid, &e)?))).await?;
+        for (k, v) in own {
             vars.insert(k, (v, "service"));
         }
         // Reference variables, one level deep: against what resolved above, and other services'.
-        let unresolved = self.fill_references(svc, &env.name, &mut vars).await;
+        let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved })
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed })
     }
 
-    /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing.
-    async fn fill_references(self: &Arc<Self>, svc: &ServiceRow, env: &str, vars: &mut BTreeMap<String, (String, &'static str)>) -> Vec<String> {
+    /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
+    /// reference that reads a sealed value is sealed too (`sealed`): it would show it.
+    async fn fill_references(self: &Arc<Self>, svc: &ServiceRow, env: &str, vars: &mut BTreeMap<String, (String, &'static str)>, sealed: &mut BTreeSet<String>) -> Vec<String> {
         let referring: Vec<String> = vars.iter().filter(|(_, (v, s))| *s == "service" && v.contains("${{")).map(|(k, _)| k.clone()).collect();
         if referring.is_empty() {
             return Vec::new();
         }
         let own: HashMap<String, String> = vars.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect();
         // Another service's: by name in this project, the same environment.
-        let mut others: HashMap<String, Option<HashMap<String, String>>> = HashMap::new();
+        let mut others: HashMap<String, Option<ServiceValues>> = HashMap::new();
         for k in &referring {
             for (r, _) in refs::refs(&vars[k].0) {
                 if let Some(name) = r.service.filter(|n| !others.contains_key(*n) && *n != svc.name) {
@@ -1238,28 +1247,35 @@ impl Apps {
             }
         }
         let mut unresolved = Vec::new();
+        let own_sealed = sealed.clone();
         for k in referring {
+            let mut reads_sealed = false;
             let (filled, missing) = refs::fill(&vars[&k].0, |r| match r.service {
-                None => own.get(r.var).cloned(),
-                Some(n) if n == svc.name => own.get(r.var).cloned(),
-                Some(n) => others.get(n).and_then(|o| o.as_ref()).and_then(|o| o.get(r.var).cloned()),
+                None => own.get(r.var).cloned().inspect(|_| reads_sealed |= own_sealed.contains(r.var)),
+                Some(n) if n == svc.name => own.get(r.var).cloned().inspect(|_| reads_sealed |= own_sealed.contains(r.var)),
+                Some(n) => others.get(n).and_then(|o| o.as_ref()).and_then(|(o, s)| o.get(r.var).cloned().inspect(|_| reads_sealed |= s.contains(r.var))),
             });
             unresolved.extend(missing.into_iter().map(|m| format!("{k}: {m}")));
+            if reads_sealed {
+                sealed.insert(k.clone());
+            }
             vars.insert(k, (filled, "reference"));
         }
         unresolved
     }
 
     /// What another service of `project` offers a reference in `env`: its own variables, and
-    /// `PORT`, `ROLL_PRIVATE_HOST` and `ROLL_PUBLIC_URL`. None: no such service or environment.
-    async fn service_values(self: &Arc<Self>, project: &str, name: &str, env: &str) -> Option<HashMap<String, String>> {
+    /// `PORT`, `ROLL_PRIVATE_HOST` and `ROLL_PUBLIC_URL`, and which of them are sealed. None: no
+    /// such service or environment.
+    async fn service_values(self: &Arc<Self>, project: &str, name: &str, env: &str) -> Option<ServiceValues> {
         let (p, n, e) = (project.to_string(), name.to_string(), env.to_string());
-        let (svc, row, own) = self
+        let (svc, row, own, sealed) = self
             .db(move |s| {
                 let Some(svc) = s.services(Some(&p))?.into_iter().find(|x| x.name == n) else { return Ok(None) };
                 let row = s.environment(&svc.id, &e)?;
                 let own = s.variables(&svc.id, &e)?;
-                Ok(Some((svc, row, own)))
+                let sealed = s.sealed_variables(&svc.id, &e)?;
+                Ok(Some((svc, row, own, sealed)))
             })
             .await
             .ok()
@@ -1274,7 +1290,7 @@ impl Apps {
         if svc.run.public {
             out.insert("ROLL_PUBLIC_URL".into(), self.url(&row.slug));
         }
-        Some(out)
+        Some((out, sealed))
     }
 
     /// Before values with references are stored: every other service they name is the
@@ -1324,7 +1340,8 @@ impl Apps {
             if !secret.is_empty() && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
                 return Err(Error::Forbidden(format!("{} come from roll secrets, which you may not reveal in {env}", secret.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "))));
             }
-            let m: serde_json::Map<String, Value> = r.vars.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
+            // A sealed one is never in the clear, to anyone.
+            let m: serde_json::Map<String, Value> = r.vars.into_iter().filter(|(k, _)| !r.sealed.contains(k)).map(|(k, v)| (k, Value::String(v))).collect();
             return Ok(Value::Object(m));
         }
         // A reference's template is names, not a value: shown, and what an edit starts from.
@@ -1336,9 +1353,10 @@ impl Apps {
             .map(|(k, v)| {
                 let source = r.sources.get(k).copied().unwrap_or("service");
                 // roll's own values aren't secret.
-                let masked = if source == "roll" { v.clone() } else { mask(v) };
+                let sealed = r.sealed.contains(k);
+                let masked = if sealed { SEALED_MASK.to_string() } else if source == "roll" { v.clone() } else { mask(v) };
                 let reference = (source == "reference").then(|| raw.get(k).cloned()).flatten();
-                VarView { name: k.clone(), masked, source, reference }
+                VarView { name: k.clone(), masked, source, reference, sealed }
             })
             .collect();
         Ok(json!({ "vars": vars }))
@@ -1364,11 +1382,23 @@ impl Apps {
                 unset.push(n.as_str().ok_or_else(|| Error::BadRequest("unset is a list of names".into()))?.to_string());
             }
         }
-        if set.len() + unset.len() > 500 {
+        // Seal: set and run with, never shown again (Railway's sealed variables).
+        let mut seal = BTreeSet::new();
+        if let Some(n) = o.get("seal") {
+            for n in n.as_array().ok_or_else(|| Error::BadRequest("seal is a list of names".into()))? {
+                seal.insert(n.as_str().ok_or_else(|| Error::BadRequest("seal is a list of names".into()))?.to_string());
+            }
+        }
+        if set.len() + unset.len() + seal.len() > 500 {
             return Err(Error::BadRequest("at most 500 variables at once".into()));
         }
         let (sid, e) = (service.to_string(), env.to_string());
-        self.db(move |s| s.change_variables(&sid, &e, &set, &unset)).await?;
+        let have = self.db(move |s| s.variables(&sid, &e)).await?;
+        if let Some(n) = seal.iter().find(|n| unset.contains(n) || !(set.contains_key(*n) || have.contains_key(*n))) {
+            return Err(Error::BadRequest(format!("{n} isn't one of the environment's own variables to seal")));
+        }
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.change_variables(&sid, &e, &set, &unset, &seal)).await?;
         self.variables(service, env, None).await
     }
 

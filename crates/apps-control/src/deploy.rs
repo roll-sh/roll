@@ -267,11 +267,12 @@ impl Apps {
         if !keep_variables && let Some(then) = self.db(move |s| s.snapshot(&did)).await? {
             let (sid, e) = (service.to_string(), env.to_string());
             let now = self.db(move |s| s.variables(&sid, &e)).await?;
-            let set: std::collections::BTreeMap<String, String> = then.iter().filter(|(k, v)| now.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
-            let unset: Vec<String> = now.keys().filter(|k| !then.contains_key(*k)).cloned().collect();
+            let set: std::collections::BTreeMap<String, String> = then.vars.iter().filter(|(k, v)| now.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+            let unset: Vec<String> = now.keys().filter(|k| !then.vars.contains_key(*k)).cloned().collect();
             if !set.is_empty() || !unset.is_empty() {
-                let (sid, e, s2, u2) = (service.to_string(), env.to_string(), set.clone(), unset.clone());
-                self.db(move |s| s.change_variables(&sid, &e, &s2, &u2)).await?;
+                // Sealed as they were then (and what's sealed since stays so).
+                let (sid, e, s2, u2, sealed) = (service.to_string(), env.to_string(), set.clone(), unset.clone(), then.sealed);
+                self.db(move |s| s.change_variables(&sid, &e, &s2, &u2, &sealed)).await?;
                 self.settings_changed();
                 self.audit("variables.restored", service, env, actor.clone(), json!({ "from": old.id, "set": set.keys().collect::<Vec<_>>(), "unset": unset })).await;
             }
@@ -530,7 +531,7 @@ impl Apps {
         // The environment's own variables as this deployment reads them: what a rollback to it
         // restores, kept with its switch to live.
         let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
-        let snapshot = self.db(move |s| Ok(s.seal_snapshot(&did, &s.variables(&sid, &e)?))).await?;
+        let snapshot = self.db(move |s| s.seal_snapshot(&did, &sid, &e)).await?;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             fingerprint(&r.vars_for_hash(), &svc)

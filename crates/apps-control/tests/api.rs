@@ -1750,7 +1750,7 @@ async fn a_rollback_restores_its_deployments_variables() {
     let id = svc["id"].as_str().unwrap().to_string();
     let d1 = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
     let base = format!("/v1/apps/services/{id}/environments/production");
-    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"MODE": "broken", "EXTRA": "1"}}))).await;
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"MODE": "broken", "EXTRA": "1", "TOKEN": "t"}, "seal": ["TOKEN"]}))).await;
     let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
     let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
     let vals = |w: &World| {
@@ -1766,6 +1766,13 @@ async fn a_rollback_restores_its_deployments_variables() {
     let (_, r) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", d2["id"].as_str().unwrap()), Some(json!({"keep_variables": true}))).await;
     assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
     assert_eq!(vals(&w).await["MODE"], "old", "kept");
+    // What a rollback brings back sealed comes back sealed.
+    let (_, r) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", d2["id"].as_str().unwrap()), None).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    let v = vals(&w).await;
+    assert_eq!((v["MODE"].as_str(), v.get("TOKEN")), (Some("broken"), None), "{v}");
+    let (_, listed) = call(&w.api, "GET", &format!("{base}/variables"), None).await;
+    assert!(listed["vars"].as_array().unwrap().iter().any(|x| x["name"] == "TOKEN" && x["sealed"] == true), "{listed}");
 }
 
 /// "Roll back" with no deployment walks back in time, through earlier rollbacks too, and never
@@ -2567,4 +2574,25 @@ async fn reference_variables_are_filled_at_the_deploy() {
         .unwrap();
     req.extensions_mut().insert(grant);
     assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+    // Sealed (Railway's): run with, never shown again, nor through a reference; a new value
+    // stays sealed, and so does a copy into another environment.
+    let db_vars = format!("/v1/apps/services/{}/environments/production/variables", db["id"].as_str().unwrap());
+    assert_eq!(call(&w.api, "PATCH", &db_vars, Some(json!({"seal": ["NOPE"]}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, v) = call(&w.api, "PATCH", &db_vars, Some(json!({"seal": ["PASS"]}))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, v) = call(&w.api, "PATCH", &db_vars, Some(json!({"set": {"PASS": "s3cret"}}))).await;
+    let pass = v["vars"].as_array().unwrap().iter().find(|x| x["name"] == "PASS").unwrap().clone();
+    assert_eq!((pass["sealed"].as_bool(), pass["masked"].as_str()), (Some(true), Some("••••••••")), "{v}");
+    assert!(call(&w.api, "GET", &format!("{db_vars}/values"), None).await.1.get("PASS").is_none());
+    let api_vars = format!("/v1/apps/services/{id}/environments/production/variables");
+    let (_, vals) = call(&w.api, "GET", &format!("{api_vars}/values"), None).await;
+    assert!(vals.get("DB_URL").is_none() && vals["SELF"] == "api-", "a reference that reads it is sealed too: {vals}");
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let (_, body) = visit_deployment(&w, &host(&api["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    assert_eq!(body["vars"]["DB_URL"], "postgres://app:s3cret@db.production.internal:5432/x", "the app still gets it");
+    let staging = db_vars.replace("production", "staging");
+    let (st, _) = call(&w.api, "PUT", staging.trim_end_matches("/variables"), Some(json!({"variables_from": "production"}))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(call(&w.api, "GET", &format!("{staging}/values"), None).await.1.get("PASS").is_none());
 }

@@ -347,7 +347,12 @@ pub enum AppsCmd {
         /// Names to remove.
         #[arg(long, short = 'u')]
         unset: Vec<String>,
-        /// Print the values.
+        /// Seal these (set here or already set): the app runs with them, and nothing shows them
+        /// again, `--reveal` included. A sealed variable can be replaced or removed, never
+        /// unsealed.
+        #[arg(long, value_name = "NAME")]
+        seal: Vec<String>,
+        /// Print the values (never a sealed one's).
         #[arg(long)]
         reveal: bool,
         /// Set every `KEY=value` line of a `.env` file (`export`, comments and quotes as in a
@@ -1913,7 +1918,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, reveal, from_file } => {
+        AppsCmd::Vars { target, set, unset, seal, reveal, from_file } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -1925,12 +1930,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 m.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
             }
-            if !set.is_empty() || !unset.is_empty() || !m.is_empty() {
+            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() {
                 for kv in set {
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
                 }
-                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset }))).await?;
+                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
                 if !json_out {
                     eprintln!("saved; `roll apps redeploy` puts them live (a new deploy or push does too)");
                 }
@@ -1943,7 +1948,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     }
                 } else {
                     for x in v["vars"].as_array().into_iter().flatten() {
-                        println!("{:<32} {:<10} {}", s(&x["name"]), s(&x["source"]), s(&x["masked"]));
+                        let sealed = if x["sealed"] == true { "  sealed" } else { "" };
+                        println!("{:<32} {:<10} {}{sealed}", s(&x["name"]), s(&x["source"]), s(&x["masked"]));
                     }
                 }
                 return Ok(());

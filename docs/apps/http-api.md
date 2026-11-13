@@ -73,8 +73,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/pending` | | `{ variables: { added, removed, changed } \| null, run: string[] }`: what the next deploy changes (names, never values; variables against the snapshot kept at the live deployment's switch, null without one; run: fields the service sets that the live deployment doesn't run with). Links and project secrets move `needs_deploy` too, unnamed | read |
-| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`; 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
-| `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[]}` | `Variables` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
+| `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[]}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed) | `Variables` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&q=&http=&status=&min_ms=` | | `LogLine[]` or SSE; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`) and `min_ms` filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
@@ -380,7 +380,7 @@ type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosq
 // `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
 // when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.
 
-type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" | "reference"; reference?: string /* a reference variable's template, `${{ api.KEY }}` */ }[] };
+type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" | "reference"; reference?: string /* a reference variable's template, `${{ api.KEY }}` */; sealed?: true /* never shown again: masked "••••••••" whatever its length */ }[] };
 // A value set with `${{ VAR }}` / `${{ service.VAR }}` is a reference, filled in at each deploy;
 // setting one that names another service needs `reveal` on it (403), and one naming no service of
 // the project is a 400.

@@ -12,7 +12,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use code_sql::{Db, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS services (
@@ -341,6 +341,14 @@ pub struct EnvRow {
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
+/// An environment's own variables as a deployment went live with them, and which were sealed.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Snapshot {
+    pub vars: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sealed: BTreeSet<String>,
+}
+
 pub type LinkRow = (LinkKind, String, String, Option<crate::integrations::Minted>);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -556,6 +564,7 @@ impl Store {
         db.add_column("environments", "hook_hash", "TEXT")?;
         db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "tag_seen", "TEXT")?;
+        db.add_column("variables", "write_only", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("links", "minted", "TEXT")?;
         db.add_column("environments", "maintenance", "TEXT")?;
@@ -1169,15 +1178,21 @@ impl Store {
         format!("{service}/{env}/{name}")
     }
 
-    /// `env`'s own variables as `deployment` went live with them, sealed under it (what a
-    /// rollback to it restores; stored by [`Store::switch_active`]).
-    pub fn seal_snapshot(&self, deployment: &str, vars: &BTreeMap<String, String>) -> String {
-        self.sealer.seal(&format!("snapshot:{deployment}"), &serde_json::to_string(vars).expect("JSON"))
+    /// `env`'s own variables as `deployment` went live with them, and which were sealed, sealed
+    /// under it (what a rollback to it restores; stored by [`Store::switch_active`]).
+    pub fn seal_snapshot(&self, deployment: &str, service: &str, env: &str) -> Result<String> {
+        let snap = Snapshot { vars: self.variables(service, env)?, sealed: self.sealed_variables(service, env)? };
+        Ok(self.sealer.seal(&format!("snapshot:{deployment}"), &serde_json::to_string(&snap).expect("JSON")))
     }
 
-    pub fn snapshot(&self, deployment: &str) -> Result<Option<BTreeMap<String, String>>> {
+    pub fn snapshot(&self, deployment: &str) -> Result<Option<Snapshot>> {
         let row: Option<String> = self.db.query_row("SELECT sealed FROM deploy_vars WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?;
-        row.map(|s| Ok(serde_json::from_str(&self.sealer.open(&format!("snapshot:{deployment}"), &s)?).unwrap_or_default())).transpose()
+        row.map(|s| {
+            let json = self.sealer.open(&format!("snapshot:{deployment}"), &s)?;
+            // Before sealed variables, a snapshot was the map alone.
+            Ok(serde_json::from_str(&json).or_else(|_| serde_json::from_str(&json).map(|vars| Snapshot { vars, sealed: Default::default() })).unwrap_or_default())
+        })
+        .transpose()
     }
 
     pub fn variables(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
@@ -1186,15 +1201,27 @@ impl Store {
         rows.into_iter().map(|(n, s)| Ok((n.clone(), self.sealer.open(&Self::aad(service, env, &n), &s)?))).collect()
     }
 
-    pub fn change_variables(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String]) -> Result<()> {
+    /// The names of `env`'s sealed variables: set and run with, never shown again.
+    pub fn sealed_variables(&self, service: &str, env: &str) -> Result<BTreeSet<String>> {
+        Ok(self.db.query("SELECT name FROM variables WHERE service = ? AND env = ? AND write_only = 1", [service, env], |r| r.get(0))?.into_iter().collect())
+    }
+
+    /// Set, then unset, then seal (`seal`: names set here or kept). A sealed variable a new
+    /// value replaces stays sealed: nothing unseals one.
+    pub fn change_variables(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>) -> Result<()> {
         let sealed: Vec<(String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v))).collect();
         self.db.write(|c| {
             for n in unset {
                 c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
             for (n, s) in &sealed {
-                c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
-                c.execute("INSERT INTO variables (service, env, name, sealed) VALUES (?, ?, ?, ?)", [service, env, n, s])?;
+                c.execute(
+                    "INSERT INTO variables (service, env, name, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, name) DO UPDATE SET sealed = excluded.sealed",
+                    [service, env, n, s],
+                )?;
+            }
+            for n in seal {
+                c.execute("UPDATE variables SET write_only = 1 WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
             Ok(())
         })
