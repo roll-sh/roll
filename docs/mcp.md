@@ -348,22 +348,25 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with feature/roll-secrets
-   merged; lands after #20 and #25): a person's canvas stands only for what's theirs in project
-   rules (`Workspace::trusted_projects_of`), and people's tokens reach secrets. Keep it merged
-   with secrets' swap (`feature/roll-secrets-access`: `rlst_` gone, tokens on `/v1/access/tokens`,
-   identity logins on `mint_workload`; merged there and green). The canvas check costs nothing
-   measurable (`gate_latency`, release, pinned, A/B twice: a token's one-resource request 83–115 µs
-   p50 with it, 105–116 µs without).
-2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+1. **Postgres 18 on the integration branch:** roll-access, roll-mcp and roll-workspace's suites on
+   Postgres (`trusted_projects_of`'s join, `revoke_workload`, workloads' prune) (in progress).
+2. **Live on the integration branch:** a person's own token over MCP reads their own secrets
+   project and gets 404 for someone else's; disabled, a sync their token made stops.
+3. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+   lands after #20, #25 and #30): kept merged both ways. Waits on secrets' fixes from the tenth
+   review: an admin's token reaching operator projects, a workload's scope taken from its
+   identity, project metadata filtered per environment. The canvas check costs nothing measurable
+   (`gate_latency`, release, pinned, A/B twice: a token's one-resource request 83–115 µs p50 with
+   it, 105–116 µs without).
+4. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+5. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
+Done lately: the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
 #28 and search #29 pass rolld's route test); a preview's share link is reveal (`previews_share`);
 search's index mapping, settings, refresh and analyze as MCP tools; the ninth review's findings
 (apps settings that change what production runs, its source, build, start and pre-deploy commands,
