@@ -12271,7 +12271,7 @@ Recorded against a private PostgreSQL 18.6 (`select version()`: 18.6, Debian 18.
 every case is in the wire test `protocol_cases` (`tests/data/protocol_cases.out` recorded from
 it with `PROTOCOL_RECORD`). `PROTOCOL_SERVER=host:port` now runs the cases against a running
 server instead of the test's own: run against a build without a change, it shows the cases
-the change fixes (52 of 171 differ on `1d59e6856`'s roll-engine, none on these commits).
+the change fixes (55 of 174 differ on `1d59e6856`'s roll-engine, none on these commits).
 
 - **Implicit transaction blocks** (`Session::guc_in_txn`, `Settings::abort_level`,
   `Session::set_txn_options`). A multi-statement simple query is one transaction from its
@@ -12287,9 +12287,11 @@ the change fixes (52 of 171 differ on `1d59e6856`'s roll-engine, none on these c
   call_bool_check_hook's, read-write after read-only too, each "within a subtransaction"
   variant in a savepoint. SET TRANSACTION in the implicit block ends with it; LOCK TABLE is
   allowed in it. An error in an explicit block undoes its (sub)transaction level's settings
-  at once (AbortTransaction's AtEOXact_GUC), so their ParameterStatus goes out with the error,
-  and ROLLBACK AND CHAIN after an error starts with the default characteristics (PostgreSQL
-  saves them after the abort restored them). Stack entries restore the parameter stacked last
+  at once (AbortTransaction's AtEOXact_GUC), so their ParameterStatus goes out with the error.
+  AND CHAIN saves the characteristics after that abort: a BEGIN's or SET TRANSACTION's options
+  in the failed transaction itself are back at the defaults, what a chain gave it (set
+  directly, `Session::chain_base`) or what an error in a savepoint left stands
+  (transactions.sql's chain units: the first train found them). Stack entries restore the parameter stacked last
   first (guc_stack_list), which orders the reports. Transactional: every SET'able parameter,
   client_encoding, role and session_authorization (is_superuser with them); LISTEN too (it
   already was); PREPARE and DEALLOCATE are not (as in PostgreSQL). Locations: the
@@ -12353,7 +12355,7 @@ the change fixes (52 of 171 differ on `1d59e6856`'s roll-engine, none on these c
   isolation specs that exercise multixacts' behaviour (multixact-no-deadlock,
   multixact-no-forget, pgrowlocks' spec) already pass on the lock manager.
 
-Verification (agent 229): release wire (73, `protocol_cases` 171), wire_waits, golden
+Verification (agent 229): release wire (73, `protocol_cases` 174), wire_waits, golden
 (in-process, wire, shuffled), lib (218), kept_plans (11), twophase (4), clean `cargo check`
 of every target after the rebase. Lane A, plain dist builds, `290dba2a4` against it with these
 commits, 8 clients, five alternating pairs, user instructions per operation: point reads
