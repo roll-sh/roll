@@ -737,7 +737,7 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
 
     // An environment with a limit and somewhere to say so is reminded of its stale keys, once a day.
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
-    api.db.write(|c| c.execute("UPDATE secrets SET updated_at = updated_at - 100 * 86400000 WHERE key = 'USED'", ())).unwrap();
+    api.db.write(|c| c.execute("UPDATE secrets SET updated_at = updated_at - 8640000000 WHERE key = 'USED'", ())).unwrap();
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || {
         s.sweep().unwrap();
