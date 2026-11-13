@@ -18,6 +18,7 @@ pub mod hooks;
 pub mod tags;
 pub mod sites;
 pub mod feedback;
+pub mod scale;
 pub mod registry;
 pub mod config;
 pub mod cron;
@@ -184,6 +185,8 @@ pub struct Apps {
     backing_up: std::sync::atomic::AtomicBool,
     /// Watched tags are being checked (on their own task).
     watching: std::sync::atomic::AtomicBool,
+    /// Scaling workers' backlogs are being read (on their own task).
+    scaling: std::sync::atomic::AtomicBool,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Environments in a crash loop whose event is written (one per loop).
@@ -267,6 +270,7 @@ impl Apps {
             changes: tokio::sync::broadcast::channel(256).0,
             backing_up: std::sync::atomic::AtomicBool::new(false),
             watching: std::sync::atomic::AtomicBool::new(false),
+            scaling: std::sync::atomic::AtomicBool::new(false),
             sites: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),

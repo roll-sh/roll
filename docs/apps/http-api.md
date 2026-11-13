@@ -179,6 +179,10 @@ type Run = {
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;
+  /** A worker only: its instances follow `group`'s lag on `stream` (a roll stream on the
+   *  service's project; another's is never read), one per `per_instance` (default 1000) behind,
+   *  within min_instances–max_instances; read every 10 s on the owner, scaled in one at a time. */
+  scale?: { stream: string; group: string; per_instance?: number };
 };
 
 type Service = {

@@ -283,10 +283,26 @@ impl Sources for CodeSources {
 struct RollResources {
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    streams: Option<Arc<stream_broker::broker::Broker>>,
 }
 
 #[async_trait]
 impl Resources for RollResources {
+    /// A group's lag on a stream: its committed offset on every partition against the
+    /// partition's high watermark, as the broker's own `GET …/groups/{g}` adds it up.
+    async fn backlog(&self, stream: &str, group: &str) -> anyhow::Result<u64> {
+        let b = self.streams.clone().ok_or_else(|| anyhow::anyhow!("roll streams isn't on this node"))?;
+        let s = b.find_stream(stream).ok_or_else(|| anyhow::anyhow!("no stream {stream}"))?;
+        let rows = b.store.offsets(&s.id, group)?;
+        let mut lag = 0u64;
+        for r in rows {
+            if let Some(end) = s.topic(&r.topic).and_then(|t| t.partition(r.partition).and_then(|p| b.log(&t, &p).ok())).map(|l| l.high_watermark()) {
+                lag += (end - r.offset).max(0) as u64;
+            }
+        }
+        Ok(lag)
+    }
+
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         match kind {
             LinkKind::Postgres => {
@@ -356,6 +372,7 @@ pub async fn start(
     code: Option<Arc<code_control::Code>>,
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    streams: Option<Arc<stream_broker::broker::Broker>>,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -416,7 +433,7 @@ pub async fn start(
         builder,
         sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         secrets: Arc::new(NoSecrets),
-        resources: Arc::new(RollResources { postgres, redis }),
+        resources: Arc::new(RollResources { postgres, redis, streams }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
         objects,

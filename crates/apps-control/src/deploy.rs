@@ -1138,6 +1138,13 @@ impl Apps {
                     self.judge_alerts(&l).await;
                 }
             }
+            if n.is_multiple_of(10) && !self.scaling.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.scale_workers().await;
+                    this.scaling.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
             if n.is_multiple_of(300) && !self.watching.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let this = self.clone();
                 tokio::spawn(async move {

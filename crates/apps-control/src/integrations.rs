@@ -112,6 +112,11 @@ pub trait Resources: Send + Sync {
     /// The variables a link to this resource injects, under their unprefixed names
     /// (`DATABASE_URL`, `REDIS_URL`, …). An error when the resource doesn't exist.
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// How far `group` is behind on `stream` (messages, every partition): what a worker with
+    /// `run.scale` follows.
+    async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {
+        anyhow::bail!("roll streams isn't on this node")
+    }
 }
 
 /// No data products on this node: links can't be made.
