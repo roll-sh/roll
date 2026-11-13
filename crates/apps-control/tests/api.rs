@@ -116,8 +116,12 @@ impl apps_control::integrations::DomainTls for FakeTls {
     }
 }
 
-/// Two Postgres projects a service can link: `main` and `orders`.
+/// Two Postgres projects a service can link, `main` and `orders`, whose variables are read
+/// fresh; and a Redis database, `cache`, that makes each link a key of its own.
 struct FakeResources;
+
+/// What the fake made and revoked for `cache` links, in order.
+static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 #[async_trait]
 impl apps_control::integrations::Resources for FakeResources {
@@ -126,6 +130,21 @@ impl apps_control::integrations::Resources for FakeResources {
             ("postgres", "main" | "orders") => Ok(vec![("DATABASE_URL".into(), format!("postgres://app:pw@db.roll.test:5432/{ref}"))]),
             _ => anyhow::bail!("no {} {ref}", kind.as_str()),
         }
+    }
+
+    async fn link(&self, kind: apps_control::model::LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        if (kind.as_str(), r#ref) != ("redis", "cache") {
+            return Ok(None);
+        }
+        let mut m = MINTED.lock();
+        let key = format!("key{}", m.len());
+        m.push(format!("link {service} {key}"));
+        Ok(Some(apps_control::integrations::Minted { vars: vec![("REDIS_URL".into(), format!("redis://{key}@cache.roll.test:6379"))], kept: key }))
+    }
+
+    async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
+        MINTED.lock().push(format!("unlink {kept}"));
+        Ok(())
     }
 
     async fn backlog(&self, stream: &str, _group: &str) -> anyhow::Result<u64> {
@@ -554,10 +573,11 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
 }
 
-/// A link puts its resource's variables in the service's environment (prefixed when asked),
+/// A link puts its resource's variables (or credentials it made for itself, once, revoked when it
+/// goes) in the service's environment (prefixed when asked),
 /// and a running instance has them; a resource that doesn't exist can't be linked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_postgres_link_puts_its_variables_in_the_instances() {
+async fn a_link_puts_its_variables_in_the_instances() {
     let w = world().await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
@@ -567,13 +587,23 @@ async fn a_postgres_link_puts_its_variables_in_the_instances() {
     let (_, l) = call(&w.api, "PUT", &format!("{links}/postgres/orders"), Some(json!({"prefix": "ORDERS"}))).await;
     assert_eq!(l["vars"], json!(["ORDERS_DATABASE_URL"]), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/postgres/nope"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
+    // A link that makes credentials of its own makes them once: setting it again keeps them.
+    let (st, l) = call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
+    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["REDIS_URL"])), "{l}");
+    call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
+    assert_eq!(*MINTED.lock(), [format!("link {id} key0")]);
     let base = format!("/v1/apps/services/{id}/environments/production");
-    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL"}}))).await;
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,REDIS_URL"}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
     let (st, body) = visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders"}));
+    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "REDIS_URL": "redis://key0@cache.roll.test:6379"}));
+    // Unlinking revokes them, and so does deleting the service.
+    assert_eq!(call(&w.api, "DELETE", &format!("{links}/redis/cache"), None).await.0, StatusCode::NO_CONTENT);
+    call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*MINTED.lock(), [format!("link {id} key0"), "unlink key0".into(), format!("link {id} key2"), "unlink key2".into()]);
     // Linked when it's made, the first deploy has them; a link that doesn't resolve makes nothing.
     let (st, made) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "worker", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "links": [{"kind": "postgres", "ref": "main"}], "variables": {"FAKE_ECHO": "DATABASE_URL"} }))).await;
     assert_eq!(st, StatusCode::CREATED, "{made}");

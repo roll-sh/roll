@@ -33,8 +33,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `DELETE /v1/apps/services/{id}` | | 204 | delete |
 | `GET /v1/apps/services/{id}/activity` | | `Event[]` (`audit.*`, newest first, 200): who changed what, never a value | read |
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
-| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` | write |
-| `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 | write |
+| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it) | write |
+| `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 (revokes a credential the link made) | write |
 | `GET /v1/apps/projects/{project}/notifications` | | `NotifyTarget[]` (the URL never returned, only its host) | read |
 | `POST /v1/apps/projects/{project}/notifications` | `{ kind?: "webhook" \| "slack" \| "discord", url, events? }` | 201 `NotifyTarget` (+ `secret` once, for a webhook) | reveal for a webhook (its secret comes back), write for Slack and Discord |
 | `DELETE /v1/apps/projects/{project}/notifications/{nid}` | | 204 | write |

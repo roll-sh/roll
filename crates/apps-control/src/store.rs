@@ -331,6 +331,9 @@ pub struct EnvRow {
     pub feedback: bool,
 }
 
+/// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
+pub type LinkRow = (LinkKind, String, String, Option<crate::integrations::Minted>);
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceRow {
     pub id: String,
@@ -538,6 +541,7 @@ impl Store {
         db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "tag_seen", "TEXT")?;
         db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("links", "minted", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -1155,15 +1159,26 @@ impl Store {
     // ── links ──
 
     pub fn links(&self, service: &str) -> Result<Vec<(LinkKind, String, String)>> {
-        let rows: Vec<(String, String, String)> =
-            self.db.query("SELECT kind, ref, prefix FROM links WHERE service = ? ORDER BY kind, ref", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        rows.into_iter().map(|(k, r, p)| Ok((LinkKind::parse(&k)?, r, p))).collect()
+        Ok(self.links_minted(service)?.into_iter().map(|(k, r, p, _)| (k, r, p)).collect())
     }
 
-    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str) -> Result<()> {
+    /// A service's links, with the credentials each made for itself (opened), if any.
+    pub fn links_minted(&self, service: &str) -> Result<Vec<LinkRow>> {
+        let rows: Vec<(String, String, String, Option<String>)> =
+            self.db.query("SELECT kind, ref, prefix, minted FROM links WHERE service = ? ORDER BY kind, ref", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        rows.into_iter()
+            .map(|(k, r, p, m)| {
+                let minted = m.map(|m| self.sealer.open(&format!("link:{service}:{k}:{r}"), &m)).transpose()?.and_then(|j| serde_json::from_str(&j).ok());
+                Ok((LinkKind::parse(&k)?, r, p, minted))
+            })
+            .collect()
+    }
+
+    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>) -> Result<()> {
+        let sealed = minted.map(|m| self.sealer.seal(&format!("link:{service}:{}:{ref}", kind.as_str()), &serde_json::to_string(m).expect("JSON")));
         self.db.write(|c| {
             c.execute("DELETE FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref])?;
-            c.execute("INSERT INTO links (service, kind, ref, prefix) VALUES (?, ?, ?, ?)", [service, kind.as_str(), r#ref, prefix])?;
+            c.execute("INSERT INTO links (service, kind, ref, prefix, minted) VALUES (?, ?, ?, ?, ?)", params![service, kind.as_str(), r#ref, prefix, sealed])?;
             Ok(())
         })
     }

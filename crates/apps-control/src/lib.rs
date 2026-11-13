@@ -591,6 +591,13 @@ impl Apps {
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
+        // Its links' own credentials are revoked with it.
+        let sid = id.to_string();
+        for (kind, r, _, minted) in self.db(move |s| s.links_minted(&sid)).await? {
+            if let Some(m) = minted {
+                self.revoke_link(id, kind, &r, &m.kept).await;
+            }
+        }
         let sid = id.to_string();
         let deps = self.db(move |s| s.deployments_all(&sid)).await?;
         for d in deps {
@@ -1014,9 +1021,14 @@ impl Apps {
             vars.insert(k.to_string(), (v, "roll"));
         }
         let sid = svc.id.clone();
-        let links = self.db(move |s| s.links(&sid)).await?;
-        for (kind, r, prefix) in links {
-            match self.deps.resources.link_vars(kind, &r).await {
+        let links = self.db(move |s| s.links_minted(&sid)).await?;
+        for (kind, r, prefix, minted) in links {
+            // A link's own credentials as made, else the resource's variables now.
+            let read = match minted {
+                Some(m) => Ok(m.vars),
+                None => self.deps.resources.link_vars(kind, &r).await,
+            };
+            match read {
                 Ok(vs) => {
                     for (k, v) in vs {
                         vars.insert(format!("{prefix}{k}"), (self.deps.runtime.reach(&v), "link"));
@@ -1100,10 +1112,14 @@ impl Apps {
         let sid = service.to_string();
         self.db(move |s| s.service(&sid)).await?;
         let sid = service.to_string();
-        let rows = self.db(move |s| s.links(&sid)).await?;
+        let rows = self.db(move |s| s.links_minted(&sid)).await?;
         let mut out = Vec::new();
-        for (kind, r, prefix) in rows {
-            let vars = self.deps.resources.link_vars(kind, &r).await.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
+        for (kind, r, prefix, minted) in rows {
+            let names = match minted {
+                Some(m) => Ok(m.vars),
+                None => self.deps.resources.link_vars(kind, &r).await,
+            };
+            let vars = names.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
             out.push(Link { kind, r#ref: r, prefix, vars });
         }
         Ok(out)
@@ -1122,16 +1138,46 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("prefix is a variable name prefix".into())),
         };
-        let vars = self.deps.resources.link_vars(kind, r#ref).await.map_err(|e| Error::BadRequest(e.to_string()))?;
-        let (sid, r, p) = (service.to_string(), r#ref.to_string(), prefix.clone());
-        self.db(move |s| s.put_link(&sid, kind, &r, &p)).await?;
+        // Credentials the link makes for itself, once: a link that's there already keeps its own
+        // (setting its prefix again never makes another).
+        let (sid, r) = (service.to_string(), r#ref.to_string());
+        let had = self.db(move |s| s.links_minted(&sid)).await?.into_iter().find(|(k, rr, _, _)| *k == kind && *rr == r).and_then(|(_, _, _, m)| m);
+        let minted = match had {
+            Some(m) => Some(m),
+            None => self.deps.resources.link(kind, r#ref, service).await.map_err(|e| Error::BadRequest(e.to_string()))?,
+        };
+        let vars = match &minted {
+            Some(m) => m.vars.clone(),
+            None => self.deps.resources.link_vars(kind, r#ref).await.map_err(|e| Error::BadRequest(e.to_string()))?,
+        };
+        let (sid, r, p, m) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone());
+        if let Err(e) = self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref())).await {
+            // Not kept: what was just made for it goes again.
+            if let Some(m) = &minted {
+                let _ = self.deps.resources.unlink(kind, r#ref, &m.kept).await;
+            }
+            return Err(e);
+        }
         Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix })
     }
 
     pub async fn delete_link(self: &Arc<Self>, service: &str, kind: &str, r#ref: &str) -> Result<()> {
         let kind = LinkKind::parse(kind)?;
+        let sid = service.to_string();
+        let minted = self.db(move |s| s.links_minted(&sid)).await?.into_iter().find(|(k, rr, _, _)| *k == kind && rr == r#ref).and_then(|(_, _, _, m)| m);
         let (sid, r) = (service.to_string(), r#ref.to_string());
-        self.db(move |s| s.delete_link(&sid, kind, &r)).await
+        self.db(move |s| s.delete_link(&sid, kind, &r)).await?;
+        if let Some(m) = minted {
+            self.revoke_link(service, kind, r#ref, &m.kept).await;
+        }
+        Ok(())
+    }
+
+    /// Revoke a link's own credentials (a failure is in the log: the link is gone either way).
+    async fn revoke_link(self: &Arc<Self>, service: &str, kind: LinkKind, r#ref: &str, kept: &str) {
+        if let Err(e) = self.deps.resources.unlink(kind, r#ref, kept).await {
+            tracing::warn!(service, kind = kind.as_str(), r#ref, error = %e, "apps: a link's credentials couldn't be revoked");
+        }
     }
 
     // ── domains ──

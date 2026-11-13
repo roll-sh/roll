@@ -112,11 +112,29 @@ pub trait Resources: Send + Sync {
     /// The variables a link to this resource injects, under their unprefixed names
     /// (`DATABASE_URL`, `REDIS_URL`, …). An error when the resource doesn't exist.
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// A new link's own credentials, made once when the link is made and kept sealed with it
+    /// (a search cluster's API key for this service): `None` for a kind whose variables are
+    /// read fresh with [`Resources::link_vars`] (a database's own URL).
+    async fn link(&self, _kind: LinkKind, _ref: &str, _service: &str) -> anyhow::Result<Option<Minted>> {
+        Ok(None)
+    }
+    /// Revoke what [`Resources::link`] made (`kept`: what it said to keep, a key's id) when
+    /// the link goes.
+    async fn unlink(&self, _kind: LinkKind, _ref: &str, _kept: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// How far `group` is behind on `stream` (messages, every partition): what a worker with
     /// `run.scale` follows.
     async fn backlog(&self, _stream: &str, _group: &str) -> anyhow::Result<u64> {
         anyhow::bail!("roll streams isn't on this node")
     }
+}
+
+/// Credentials a link made for itself: its variables, and what revoking them needs.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Minted {
+    pub vars: Vec<(String, String)>,
+    pub kept: String,
 }
 
 /// No data products on this node: links can't be made.
