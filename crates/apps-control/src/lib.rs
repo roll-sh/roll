@@ -292,7 +292,7 @@ impl Apps {
 
     fn project_name(&self, project: &str) -> Result<String> {
         match &self.deps.workspace {
-            Some(ws) => match ws.get(project) {
+            Some(ws) => match ws.get(roll_workspace::Scope::All, project) {
                 Ok(p) => Ok(p.name),
                 Err(roll_workspace::Error::NotFound(_)) => Err(Error::BadRequest(format!("no project {project}"))),
                 Err(e) => Err(Error::Internal(e.to_string())),
@@ -381,7 +381,7 @@ impl Apps {
             let spot = (x.unwrap_or(0.0), y.unwrap_or(0.0));
             let placed = tokio::task::spawn_blocking(move || {
                 let (x, y) = if spot == (0.0, 0.0) { free_spot(&ws, &project) } else { spot };
-                ws.place(&project, roll_workspace::Kind::Service, &id, x, y)
+                ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Service, &id, x, y)
             })
             .await;
             if let Ok(Err(e)) = placed {
@@ -608,8 +608,8 @@ impl Apps {
         if let Some(ws) = self.deps.workspace.clone() {
             let sid = id.to_string();
             let _ = tokio::task::spawn_blocking(move || {
-                if let Some(p) = ws.list().ok().and_then(|ps| ps.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == sid))) {
-                    let _ = ws.remove(&p.id, roll_workspace::Kind::Service, &sid);
+                if let Some(p) = ws.list(roll_workspace::Scope::All).ok().and_then(|ps| ps.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == sid))) {
+                    let _ = ws.remove(roll_workspace::Scope::All, &p.id, roll_workspace::Kind::Service, &sid);
                 }
             })
             .await;
@@ -1514,7 +1514,7 @@ pub fn network_name(project: &str, env: &str) -> String {
 
 /// A free spot on a project's canvas for a new card (the same grid the dashboard uses).
 fn free_spot(ws: &roll_workspace::Workspace, project: &str) -> (f64, f64) {
-    let taken: Vec<(f64, f64)> = ws.get(project).map(|p| p.resources.iter().map(|r| (r.x, r.y)).collect()).unwrap_or_default();
+    let taken: Vec<(f64, f64)> = ws.get(roll_workspace::Scope::All, project).map(|p| p.resources.iter().map(|r| (r.x, r.y)).collect()).unwrap_or_default();
     let (w, h) = (208.0, 96.0);
     for row in 0..50 {
         for col in 0..3 {

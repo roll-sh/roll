@@ -117,7 +117,8 @@ function TintedHeader({ children }: { children: ReactNode }) {
  * A card's tools: a small floating toolbar over its top-right corner while the pointer is on it
  * (always on touch screens, and while one has keyboard focus). It takes no room in the card, so
  * names never truncate for buttons that aren't showing. Its buttons mount once they're first
- * needed (`useToolsArmed`).
+ * needed (`useToolsArmed`). An invisible strip (`::before`) spans the gap down to the card: it's
+ * part of the card, so the pointer on its way up to the toolbar never leaves the card's hover.
  */
 function HoverActions({ children, className = "", ...data }: { children: ReactNode; className?: string; "data-card-tools"?: boolean }) {
   const { armed, ref } = useToolsArmed();
@@ -125,7 +126,7 @@ function HoverActions({ children, className = "", ...data }: { children: ReactNo
     <div
       ref={ref}
       {...data}
-      className={`pointer-events-none absolute right-2 bottom-[calc(100%+6px)] z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 bg-popover p-0.5 text-fg/80 opacity-0 shadow-pop inset-shadow-highlight transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! motion-reduce:transition-none group-hover/card:pointer-events-auto group-hover/card:translate-y-0 group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${armed ? "" : "hidden"} ${className}`}
+      className={`pointer-events-none absolute right-2 bottom-[calc(100%+6px)] z-10 flex before:absolute before:inset-x-0 before:top-full before:h-2 before:content-[''] translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 bg-popover p-0.5 text-fg/80 opacity-0 shadow-pop inset-shadow-highlight transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! motion-reduce:transition-none group-hover/card:pointer-events-auto group-hover/card:translate-y-0 group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${armed ? "" : "hidden"} ${className}`}
       data-nodrag
       data-touch-tools
     >

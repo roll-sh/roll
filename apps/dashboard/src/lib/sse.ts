@@ -4,6 +4,8 @@
  * EventSource does.
  */
 
+import { withSession } from "./code-token";
+
 export interface SseEvent {
   event: string;
   data: string;
@@ -59,7 +61,7 @@ export function streamSse(url: string | (() => string), opts: SseOptions): () =>
   (async () => {
     while (!ctrl.signal.aborted) {
       try {
-        const res = await doFetch(typeof url === "function" ? url() : url, { headers: { accept: "text/event-stream", ...opts.headers?.() }, signal: ctrl.signal, cache: "no-store" });
+        const res = await doFetch(typeof url === "function" ? url() : url, withSession({ headers: { accept: "text/event-stream", ...opts.headers?.() }, signal: ctrl.signal, cache: "no-store" }));
         if (!res.ok || !res.body) throw new Error(`${res.status}`);
         opts.onOpen?.(true);
         attempt = 0;

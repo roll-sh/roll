@@ -57,6 +57,10 @@ serde_yaml_ng.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# `tests/token.rs`: scoped tokens behind the real gate in process.
+roll-access.workspace = true
+roll-auth.workspace = true
+roll-workspace.workspace = true
 code-chat.workspace = true
 code-control.workspace = true
 code-sql.workspace = true

@@ -445,6 +445,33 @@ async fn live_resize_keeps_sessions() {
     assert!(h.control.update_endpoint(&db.ep.id, Some(4.0), Some(1.0), None).await.is_err());
 }
 
+// ── SQL console ──
+
+/// Read-only SQL (what a read-only token's `postgres_query` sends) reads everything and writes
+/// nothing, whatever the SQL tries; SQL that may write still does; nothing stays behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_sql_cannot_write() {
+    let h = harness!();
+    let db = h.project(None).await;
+    let c = h.connect(&db, &db.ep.id).await;
+    seed(&c, 10).await;
+    let rows = h.control.query(&db.ep.id, "SELECT count(*) FROM t", true).await.unwrap();
+    assert_eq!(rows[0].rows[0][0].as_deref(), Some("10"));
+    for sql in [
+        "INSERT INTO t VALUES (99, 'x')",
+        "SET default_transaction_read_only = off; DELETE FROM t",
+        "COMMIT; BEGIN READ WRITE; DROP TABLE t",
+        "CREATE TABLE sneaky (id int)",
+        "ALTER ROLE roll PASSWORD 'x'",
+    ] {
+        assert!(h.control.query(&db.ep.id, sql, true).await.is_err(), "{sql} ran read-only");
+    }
+    assert_eq!(count(&c, "SELECT count(*) FROM t").await, 10);
+    h.control.query(&db.ep.id, "INSERT INTO t VALUES (99, 'x')", false).await.unwrap();
+    assert_eq!(count(&c, "SELECT count(*) FROM t").await, 11);
+    assert_eq!(count(&c, "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'roll_ro_%'").await, 0);
+}
+
 // ── branching ──
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

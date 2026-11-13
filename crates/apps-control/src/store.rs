@@ -1502,6 +1502,11 @@ impl Store {
         Ok(())
     }
 
+    /// The environment whose deploy hook's token hashes to `hash`.
+    pub fn environment_by_hook(&self, hash: &str) -> Result<Option<EnvRow>> {
+        Ok(self.db.query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE hook_hash = ?"), [hash], env_row).optional()?)
+    }
+
     pub fn set_hook(&self, service: &str, env: &str, hash: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET hook_hash = ? WHERE service = ? AND name = ?", params![hash, service, env])?;
         Ok(())

@@ -12,7 +12,7 @@ use axum::Extension;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
@@ -290,7 +290,7 @@ async fn revoke_machine(State(code): S, caller: Caller, Path((owner, machine)): 
 }
 
 /// Revoke a live machine of an owner; false if there's none.
-async fn revoke(code: &Code, owner_id: &str, machine: &str) -> Result<bool> {
+pub(crate) async fn revoke(code: &Code, owner_id: &str, machine: &str) -> Result<bool> {
     let hub = code.agents.hub(owner_id);
     let _order = hub.order.lock().await;
     let Some(cursor) = store::revoke_machine(code.db.sql(), owner_id, machine)? else { return Ok(false) };
@@ -562,7 +562,7 @@ async fn events(State(code): S, caller: Caller, parts: Parts, Path(owner): Path<
 async fn command(
     State(code): S,
     caller: Caller,
-    headers: HeaderMap,
+    fwd: super::code::Forward,
     api: Option<Extension<ApiRouter>>,
     Path((owner, machine)): Path<(String, String)>,
     Body(b): Body,
@@ -614,7 +614,7 @@ async fn command(
     let (grant, repo) = granted.map_or((None, None), |(g, r)| (Some(g), Some(r)));
     let reply = code.machine_command(&m, req.id, sender(&caller), req.command.clone(), grant).await;
     let reply = match repo {
-        Some(r) => super::code::published(&code, api.as_ref().map(|e| &e.0), &headers, &m, &req.command, &r, reply).await,
+        Some(r) => super::code::published(&code, api.as_ref().map(|e| &e.0), &fwd, &m, &req.command, &r, reply).await,
         None => reply,
     };
     Ok(reply_response(reply))
@@ -651,7 +651,7 @@ pub(super) fn live_machine(code: &Code, o: &Owner, machine: &str) -> Result<stor
 async fn create_project(
     State(code): S,
     caller: Caller,
-    headers: HeaderMap,
+    fwd: super::code::Forward,
     api: Option<Extension<ApiRouter>>,
     Path((owner, machine)): Path<(String, String)>,
     Body(b): Body,
@@ -662,7 +662,7 @@ async fn create_project(
         super::policy::agent_may(&add, None).map_err(Error::Forbidden)?;
     }
     let m = live_machine(&code, &o, &machine)?;
-    let reply = super::code::create_project(&code, api.as_ref().map(|e| &e.0), &caller, &headers, &o, &m, &b).await?;
+    let reply = super::code::create_project(&code, api.as_ref().map(|e| &e.0), &caller, &fwd, &o, &m, &b).await?;
     Ok(reply_response(reply))
 }
 
@@ -670,13 +670,13 @@ async fn create_project(
 async fn take_work(
     State(code): S,
     caller: Caller,
-    headers: HeaderMap,
+    fwd: super::code::Forward,
     api: Option<Extension<ApiRouter>>,
     Path((owner, thread)): Path<(String, String)>,
     Body(b): Body,
 ) -> Result<Response> {
     let o = drivable(&code, &caller, &owner)?;
-    Ok(match super::code::take_work(&code, api.as_ref().map(|e| &e.0), &caller, &headers, &o, &thread, &b).await? {
+    Ok(match super::code::take_work(&code, api.as_ref().map(|e| &e.0), &caller, &fwd, &o, &thread, &b).await? {
         Some(w) => Json(w).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     })
