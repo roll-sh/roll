@@ -391,6 +391,10 @@ pub struct Change {
     pub queue: Option<QueueInfo>,
     /// Why it can't land right now (empty: it can).
     pub blockers: Vec<Blocker>,
+    /// What it should know but needn't block on: `secret_missing` (it reads an environment
+    /// variable a roll secrets environment doesn't set; docs/secrets.md).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<Blocker>,
     /// Its review state under the repo's rules.
     pub review: Option<crate::review::ReviewSummary>,
     pub created_at: i64,

@@ -424,6 +424,9 @@ pub struct Code {
     /// The secrets a change's added lines hold, per (repo, head), with the merge base they were
     /// found from (`leaks.rs`).
     pub(crate) leak_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, secret_leaks::Leaks)>,
+    /// The environment variables a change reads that a roll secrets environment lacks, per
+    /// (repo, head), with the merge base they were found from (`secret_leaks.rs`).
+    pub(crate) env_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, secret_leaks::Missing)>,
     /// Review-app webhook deliveries.
     pub(crate) deliveries: review::Deliveries,
     /// roll's own reviewer: its job queue, the codebase index, sealed keys.
@@ -548,6 +551,7 @@ impl Code {
             review_configs: Mutex::new(HashMap::new()),
             review_facts: Cache::new(16_384),
             leak_facts: Cache::new(16_384),
+            env_facts: Cache::new(16_384),
             deliveries: review::Deliveries::default(),
             ai,
             worktrees: checkout::Worktrees::default(),

@@ -690,6 +690,18 @@ the change`. The blocker names keys and environments, never the value or the lin
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
 
+#### Keys a change starts reading
+
+The same pass over the lines a change adds also picks out the environment variables they read, by
+their usual spellings (`process.env.X`, `process.env["X"]`, `import.meta.env.X`, `os.environ["X"]`,
+`os.getenv("X")`, `env::var("X")`, `os.Getenv("X")`, `ENV["X"]`, `System.getenv("X")`; upper-case
+names, and not the ones platforms set themselves such as `PATH`, `PORT` or `GITHUB_*`). Each one a
+standard environment of the repository's project doesn't define (set in any folder, or reaching its
+root through an import or its base) becomes a `secret_missing` notice on the change: "reads
+SENTRY_DSN, which production doesn't set in roll secrets". A notice never blocks a landing, since
+a variable can come from elsewhere: it's there so the key is added before the code that needs it
+ships.
+
 #### Before a commit: `roll secrets scan`
 
 The same check runs on a laptop, before anything is pushed: `roll secrets scan [PATH…]` walks
@@ -1472,11 +1484,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Keys a change starts reading** (roll code): a change whose diff adds a read of an environment
-   variable (`process.env.X`, `os.environ["X"]`, `env::var("X")`, `os.Getenv("X")`, `ENV["X"]`) that a
-   standard environment of the repository's project doesn't define is told so before it lands
-   (names only, never a blocker: a key may come from elsewhere).
-2. **Sync preview**: before a sync is created, the names it would set and delete at the target
+1. **Sync preview**: before a sync is created, the names it would set and delete at the target
    (from the environment and what the target already has, where the platform lists them).
 
 Waiting on other pull requests:

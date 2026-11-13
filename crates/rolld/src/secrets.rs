@@ -638,6 +638,23 @@ impl ForCode {
 
 #[async_trait::async_trait]
 impl code_control::SecretEnv for ForCode {
+    async fn missing(&self, repo: &str, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        let ws = self.workspace()?;
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let r = repo.to_string();
+        tokio::task::spawn_blocking(move || {
+            // Every project with the repo on its canvas: a key missing from any of their environments.
+            let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+            for p in ws.list()?.into_iter().filter(|p| p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref == r)) {
+                for (k, envs) in secrets.keys_missing(&p.id, &keys)? {
+                    out.entry(k).or_default().extend(envs);
+                }
+            }
+            Ok(out.into_iter().collect())
+        })
+        .await?
+    }
+
     async fn for_repo(&self, repo: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
         let ws = self.workspace()?;
         let r = repo.to_string();

@@ -561,6 +561,10 @@ impl code_control::SecretEnv for FakeSecrets {
         let hit = candidates.iter().position(|c| c == "sk_live_51Hx9Q2").filter(|_| repo == "acme/api");
         Ok(hit.map(|i| (i, "STRIPE_KEY".into(), "production".into(), "/".into())).into_iter().collect())
     }
+    /// Only STRIPE_KEY is set (in production).
+    async fn missing(&self, _: &str, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        Ok(keys.into_iter().filter(|k| k != "STRIPE_KEY").map(|k| (k, vec!["production".to_string()])).collect())
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -574,9 +578,12 @@ async fn a_change_that_adds_a_secrets_value_is_blocked_until_it_is_removed() {
     let (s, v) = a.req("POST", &format!("/v1/code/changes/{}/enqueue", id(&c)), None, None).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(leak(&v).is_some() && !v.to_string().contains("sk_live_51Hx9Q2"), "{v}");
-    let c = a.ok("POST", &format!("/v1/code/changes/{}/revise", id(&c)), Some(json!({ "message": "config", "files": { "config.js": { "content": "const stripe = process.env.STRIPE_KEY;\n" } } }))).await;
+    let c = a.ok("POST", &format!("/v1/code/changes/{}/revise", id(&c)), Some(json!({ "message": "config", "files": { "config.js": { "content": "const stripe = process.env.STRIPE_KEY;\nconst dsn = process.env.SENTRY_DSN;\n" } } }))).await;
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(leak(&c), None);
+    // A variable it starts reading that an environment lacks: a notice, never a blocker.
+    assert_eq!(c["notices"], json!([{ "kind": "secret_missing", "message": "reads SENTRY_DSN, which production doesn't set in roll secrets" }]));
+    assert!(!c["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "secret_missing"));
 
     // A value that landed before (here, before roll secrets was on): a scan says where, not what.
     let b = app(None);

@@ -553,6 +553,15 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                     </div>
                   </Panel>
                 )}
+                {!!c.notices?.length && c.state !== "landed" && c.state !== "closed" && (
+                  <Panel title="Worth knowing">
+                    <ul className="space-y-1 px-5 py-4 text-[12.5px] text-muted">
+                      {c.notices.map((n) => (
+                        <li key={n.message}>{n.message}</li>
+                      ))}
+                    </ul>
+                  </Panel>
+                )}
                 <ChecksPanel repo={r.full_name} change={c} policy={r.land_policy} required={r.required_checks} />
                 {c.state !== "landed" && c.state !== "closed" && (
                   <Panel title="Search this change">

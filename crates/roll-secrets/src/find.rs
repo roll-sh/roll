@@ -73,4 +73,21 @@ impl Secrets {
         }
         Ok(out)
     }
+
+    /// Of `keys`, the ones a standard environment of `project` doesn't define, with those
+    /// environments (roll code's notice that a change starts reading one: names only). Defined
+    /// means set in any of its folders, or reaching its root through an import or its base.
+    pub fn keys_missing(&self, project: &str, keys: &[String]) -> Result<Vec<(String, Vec<String>)>> {
+        let operator = Caller::operator();
+        let envs: Vec<crate::envs::EnvRow> = self.db.read(|c| crate::envs::all(c, project))?.into_iter().filter(|e| e.kind == crate::envs::Kind::Standard).collect();
+        let mut missing: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for e in &envs {
+            let mut have: std::collections::HashSet<String> = self.db.read(|c| c.query("SELECT DISTINCT key FROM secrets WHERE env_id = ? AND owner = ''", [&e.id], |r| r.get::<_, String>(0)))?.into_iter().collect();
+            have.extend(self.view(project, &e.slug, "/", &operator, true, Action::Read)?.into_iter().map(|x| x.row.key));
+            for k in keys.iter().filter(|k| !have.contains(*k)) {
+                missing.entry(k.clone()).or_default().push(e.slug.clone());
+            }
+        }
+        Ok(missing.into_iter().collect())
+    }
 }

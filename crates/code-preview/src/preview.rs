@@ -699,6 +699,7 @@ mod tests {
             conflict: None,
             queue: None,
             blockers: Vec::new(),
+            notices: Vec::new(),
             review: None,
             created_at: 0,
             updated_at: 0,

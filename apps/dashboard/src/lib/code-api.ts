@@ -353,6 +353,8 @@ export interface Change {
   queue?: QueueInfo | null;
   /** Why it can't be queued or land right now; empty when it can. */
   blockers?: Blocker[];
+  /** What it should know but needn't block on (`secret_missing`); absent when there's nothing. */
+  notices?: Blocker[];
   /** Where its review stands under the repo's rules. */
   review?: ReviewSummary;
   checks: Check[];

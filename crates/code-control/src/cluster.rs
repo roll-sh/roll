@@ -382,6 +382,7 @@ impl Code {
         self.baselines.retain(|k| k.0 != repo_id);
         self.review_facts.retain(|k| k.0 != repo_id);
         self.leak_facts.retain(|k| k.0 != repo_id);
+        self.env_facts.retain(|k| k.0 != repo_id);
         self.forget_repo_webhooks(repo_id);
     }
 

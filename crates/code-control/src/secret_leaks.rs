@@ -13,7 +13,7 @@ use crate::model::{Blocker, Change, ChangeState, RepoRow};
 use crate::{Code, Result};
 use code_store::{ChangesetId, EntryKind, Mode};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 /// The most candidate tokens checked per change.
@@ -123,6 +123,10 @@ pub struct InHistory {
 
 /// (key, environment) of every secret whose value a change adds.
 pub(crate) type Leaks = Arc<Vec<(String, String)>>;
+/// (key, environments that lack it) of every environment variable a change starts reading.
+pub(crate) type Missing = Arc<Vec<(String, Vec<String>)>>;
+/// The most variable names a change's reads are looked up for.
+const MAX_ENV_READS: usize = 200;
 
 impl Code {
     /// Make sure [`leak_blockers`](Self::leak_blockers) knows whether `c`'s head adds a
@@ -138,11 +142,19 @@ impl Code {
         if self.leak_facts.get(&key).is_some_and(|(at, _)| at == mb) {
             return;
         }
-        let found = match self.added_candidates(r, mb.as_ref(), &head).await {
-            Ok(candidates) if candidates.is_empty() => Ok(Vec::new()),
-            Ok(candidates) => secrets.leaks(&r.full_name(), candidates).await.map(|l| l.into_iter().map(|(_, key, env, _)| (key, env)).collect()),
-            Err(e) => Err(e.into()),
+        let (candidates, reads) = match self.added_candidates(r, mb.as_ref(), &head).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets");
+                return;
+            }
         };
+        // The variables it starts reading that an environment lacks: a notice, never a blocker.
+        match if reads.is_empty() { Ok(Vec::new()) } else { secrets.missing(&r.full_name(), reads.into_iter().collect()).await } {
+            Ok(missing) => self.env_facts.put(key.clone(), (mb, Arc::new(missing))),
+            Err(e) => tracing::warn!(change = %c.id, error = %e, "checking a change's environment variables"),
+        }
+        let found = if candidates.is_empty() { Ok(Vec::new()) } else { secrets.leaks(&r.full_name(), candidates).await.map(|l| l.into_iter().map(|(_, key, env, _)| (key, env)).collect()) };
         match found {
             Ok(mut leaks) => {
                 leaks.sort();
@@ -169,6 +181,17 @@ impl Code {
             .into_iter()
             .map(|(key, envs)| Blocker::new("secret_leak", format!("adds the value of {key} ({}): rotate it and remove it from the change", envs.join(", "))))
             .collect()
+    }
+
+    /// One `secret_missing` notice per environment variable `c` starts reading that a roll secrets
+    /// environment lacks (from what [`prepare_leaks`](Self::prepare_leaks) last found).
+    pub(crate) fn env_notices(&self, r: &RepoRow, c: &Change) -> Vec<Blocker> {
+        if matches!(c.state, ChangeState::Landed | ChangeState::Closed) || self.secret_env.get().is_none() {
+            return Vec::new();
+        }
+        let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return Vec::new() };
+        let Some((_, missing)) = self.env_facts.get(&(r.id.clone(), head)) else { return Vec::new() };
+        missing.iter().map(|(key, envs)| Blocker::new("secret_missing", format!("reads {key}, which {} doesn't set in roll secrets", envs.join(", ")))).collect()
     }
 
     /// Scan the default branch's head (see the module doc). Text files up to 1 MiB, lines up to
@@ -295,8 +318,9 @@ impl Code {
 
     /// The candidate tokens of the lines `head` adds since `mb`, bounded by [`MAX_CANDIDATES`].
     /// Binary files, files over [`MAX_FILE`] and lines over [`MAX_LINE`] are skipped.
-    async fn added_candidates(&self, r: &RepoRow, mb: Option<&ChangesetId>, head: &ChangesetId) -> Result<Vec<String>> {
-        let mut out = HashSet::new();
+    /// The candidate tokens of the lines a change adds, and the environment variables they read.
+    async fn added_candidates(&self, r: &RepoRow, mb: Option<&ChangesetId>, head: &ChangesetId) -> Result<(Vec<String>, BTreeSet<String>)> {
+        let (mut out, mut reads) = (HashSet::new(), BTreeSet::new());
         for d in self.changed_paths(r, mb, head)? {
             if out.len() >= MAX_CANDIDATES {
                 break;
@@ -304,12 +328,15 @@ impl Code {
             let Some(patch) = self.added_patch(r, &d).await? else { continue };
             for line in added_lines(&patch) {
                 candidates(line, &mut out);
+                if reads.len() < MAX_ENV_READS {
+                    env_reads(line, &mut reads);
+                }
                 if out.len() >= MAX_CANDIDATES {
                     break;
                 }
             }
         }
-        Ok(out.into_iter().take(MAX_CANDIDATES).collect())
+        Ok((out.into_iter().take(MAX_CANDIDATES).collect(), reads))
     }
 
     /// A file diff's unified patch, when it adds text worth reading: not a deletion, a
@@ -324,6 +351,45 @@ impl Code {
         }
         let patch = self.store.unified_diff(&r.id, d).await?;
         Ok((!patch.starts_with("Binary files")).then_some(patch))
+    }
+}
+
+/// Variables a platform or roll sets itself: never a roll secrets key to miss.
+const ENV_IGNORED: &[&str] = &["NODE_ENV", "PATH", "HOME", "USER", "PWD", "SHELL", "TERM", "LANG", "TZ", "CI", "HOSTNAME", "TMPDIR", "TEMP", "TMP", "PORT", "DEBUG", "RUST_LOG", "RUST_BACKTRACE", "LOG_LEVEL"];
+const ENV_IGNORED_PREFIXES: &[&str] = &["ROLL_", "GITHUB_", "GITLAB_", "VERCEL_", "CI_", "RUNNER_", "npm_", "CARGO_", "AWS_LAMBDA_"];
+
+/// The environment variables a line reads, by the usual spellings: `process.env.X`,
+/// `process.env["X"]`, `import.meta.env.X`, `os.environ["X"]`, `os.environ.get("X")`,
+/// `os.getenv("X")`, `env::var("X")`, `os.Getenv("X")`, `os.LookupEnv("X")`, `ENV["X"]`,
+/// `ENV.fetch("X")`, `System.getenv("X")`. Upper-case names only (`DATABASE_URL`), which is
+/// what environment variables are; the ones platforms set themselves are left out.
+fn env_reads(line: &str, out: &mut BTreeSet<String>) {
+    let name = |s: &str| -> Option<String> {
+        let n: String = s.chars().take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_').collect();
+        let ok = (2..=128).contains(&n.len())
+            && n.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+            && n.chars().any(|c| c.is_ascii_uppercase())
+            && !ENV_IGNORED.contains(&n.as_str())
+            && !ENV_IGNORED_PREFIXES.iter().any(|p| n.starts_with(p));
+        ok.then_some(n)
+    };
+    // A dotted name right after the marker.
+    for marker in ["process.env.", "import.meta.env."] {
+        for (i, _) in line.match_indices(marker) {
+            out.extend(name(&line[i + marker.len()..]));
+        }
+    }
+    // A quoted name right after the marker.
+    for marker in ["process.env[", "os.environ[", "os.environ.get(", "getenv(", "env::var(", "env::var_os(", "os.Getenv(", "os.LookupEnv(", "ENV[", "ENV.fetch(", "System.getenv("] {
+        for (i, _) in line.match_indices(marker) {
+            let rest = line[i + marker.len()..].trim_start();
+            if let Some(q) = rest.chars().next().filter(|q| ['"', '\'', '`'].contains(q))
+                && let Some(n) = name(&rest[q.len_utf8()..])
+                && rest[q.len_utf8() + n.len()..].starts_with(q)
+            {
+                out.insert(n);
+            }
+        }
     }
 }
 
@@ -390,6 +456,21 @@ fn candidates(line: &str, out: &mut HashSet<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_line_reads_environment_variables_by_their_usual_spellings() {
+        let mut found = std::collections::BTreeSet::new();
+        for line in [
+            "const db = process.env.DATABASE_URL ?? process.env['REDIS_URL'];",
+            "url = os.environ[\"SENTRY_DSN\"]; key = os.getenv('API_KEY')",
+            "let s = std::env::var(\"STRIPE_KEY\")?; let t = os.Getenv(\"TOKEN\")",
+            "port = process.env.PORT; home = os.getenv('HOME'); ci = ENV['GITHUB_SHA']; x = process.env.lower",
+        ] {
+            super::env_reads(line, &mut found);
+        }
+        let found: Vec<&str> = found.iter().map(String::as_str).collect();
+        assert_eq!(found, ["API_KEY", "DATABASE_URL", "REDIS_URL", "SENTRY_DSN", "STRIPE_KEY", "TOKEN"]);
+    }
+
     #[test]
     fn configuration_never_looks_like_a_credential() {
         for plain in ["https://shop.example.com/api", "production", "staging-database", "aaaaaaaaaaaaaaaa", "postgres://db.internal:5432/app"] {

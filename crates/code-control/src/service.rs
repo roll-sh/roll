@@ -641,6 +641,7 @@ impl Code {
             None => None,
         };
         c.blockers = self.blockers(&r, &c, &self.settings_cached(&r.id));
+        c.notices = self.env_notices(&r, &c);
         c.review = self.review_summary(&r, &c);
         Ok(c)
     }
