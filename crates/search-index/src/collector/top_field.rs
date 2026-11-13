@@ -878,6 +878,9 @@ struct TopFieldLeaf<'a> {
     /// The first key is `_doc` ascending (a scroll's `sort=_doc`): docs arrive in sort order,
     /// so once the queue is full no later doc can enter it (Lucene's `DocComparator`).
     doc_first: bool,
+    /// The segment's docs before this one sort before `search_after` (a segment sorted by the
+    /// request's sort): not visited once the total hits passed their threshold.
+    skip_before: u32,
 }
 
 const MIN_SKIP_INTERVAL: u32 = 32;
@@ -1514,11 +1517,14 @@ impl LeafCollector for TopFieldLeaf<'_> {
     }
 
     fn skips(&self) -> bool {
-        self.pruner.is_some()
+        self.pruner.is_some() || self.skip_before > 0
     }
 
     #[inline]
     fn competitive_from(&mut self, doc: u32) -> u32 {
+        // Docs before `search_after` still count towards the total until it passes the
+        // threshold (Lucene's competitive iterator waits for it the same way).
+        let doc = if self.c.passed { doc.max(self.skip_before) } else { doc };
         let retry = match self.pruner.as_mut() {
             Some(p) if p.pending && doc >= p.retry_at => {
                 p.retry_at = doc.saturating_add(RETRY_DOCS);
@@ -1765,6 +1771,7 @@ impl Collector for TopFieldCollector {
             single_numeric,
             scripted,
             doc_first: false,
+            skip_before: 0,
         };
         if let Some((vals, _)) = leaf.c.after.clone() {
             if vals.len() != leaf.keys.len() {
@@ -1778,6 +1785,26 @@ impl Collector for TopFieldCollector {
         }
         leaf.doc_first = matches!(leaf.keys.first(), Some(LeafKeyKind::Doc(false))) && leaf.c.n > 0;
         leaf.pruner = Pruner::new(leaf.c, seg, &leaf.keys, leaf.after.as_deref());
+        // A segment sorted by the request's sort (what early termination needs): the docs
+        // sorting before `search_after` are a prefix of it, found by a binary search over their
+        // sort values instead of read one by one (deep `search_after` pages of an index-sorted
+        // index: TSDB, logsdb, a downsample's reads). Ties with `search_after` stay: the doc id
+        // breaks them.
+        if leaf.c.early_terminate
+            && let Some(after) = leaf.after.clone()
+        {
+            let (mut lo, mut hi) = (0u32, seg.reader.max_doc());
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                leaf.compute(mid, f32::NAN);
+                if leaf.cmp(&leaf.natives, &after) == Ordering::Less {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            leaf.skip_before = lo;
+        }
         leaf.refresh_bottom();
         leaf.prune(0);
         Ok(Box::new(leaf))
