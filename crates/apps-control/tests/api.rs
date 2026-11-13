@@ -99,10 +99,15 @@ impl Sources for FakeCode {
 struct FakeTls {
     calls: Mutex<Vec<String>>,
     issued: Mutex<Vec<String>>,
+    /// It can issue a wildcard's certificate (DNS-01).
+    dns01: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
 impl apps_control::integrations::DomainTls for FakeTls {
+    fn wildcards(&self) -> bool {
+        self.dns01.load(Ordering::SeqCst)
+    }
     async fn ensure(&self, host: &str) -> anyhow::Result<Option<(apps_control::model::TlsStatus, Option<String>)>> {
         self.calls.lock().push(format!("ensure {host}"));
         Ok(Some(match self.issued.lock().iter().any(|h| h == host) {
@@ -1887,5 +1892,34 @@ async fn a_service_link_gives_another_services_urls() {
     assert_eq!(call(&w.api, "GET", &links, None).await.1[0]["vars"], json!(["API_URL"]));
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{aid}"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(call(&w.api, "GET", &links, None).await.1, json!([]), "gone with the service");
+}
+
+/// A wildcard domain serves every name one label under it once its DNS points at roll, after
+/// any exact domain; where certificates can't be wildcards it's refused, not left pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wildcard_domain_serves_the_names_under_it() {
+    let w = world().await;
+    let (shop, _) = image_service(&w, "shop", json!({"port": 80})).await;
+    let (api, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let domains = |svc: &Value| format!("/v1/apps/services/{}/environments/production/domains", svc["id"].as_str().unwrap());
+    let (st, e) = call(&w.api, "POST", &domains(&shop), Some(json!({"hostname": "*.example.com"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "no DNS-01 here: {e}");
+    w.tls.dns01.store(true, Ordering::SeqCst);
+    let (st, d) = call(&w.api, "POST", &domains(&shop), Some(json!({"hostname": "*.Example.com."}))).await;
+    assert_eq!((st, d["hostname"].as_str()), (StatusCode::CREATED, Some("*.example.com")), "{d}");
+    assert_eq!(call(&w.api, "POST", &domains(&shop), Some(json!({"hostname": "*.*.example.com"}))).await.0, StatusCode::BAD_REQUEST);
+    // Its CNAME (the wildcard record itself) routes it; the proof can be the TXT on the name under it.
+    w.dns.add("_roll-challenge.example.com", "TXT", d["token"].as_str().unwrap());
+    let (_, v) = call(&w.api, "POST", &format!("{}/*.example.com/verify", domains(&shop)), None).await;
+    assert_eq!(v["status"], "active", "{v}");
+    let me = |(_, b): (StatusCode, Value)| b["instance"].as_str().unwrap_or("").to_string();
+    assert!(me(visit(&w, "store.example.com", "/").await).contains(&shop["id"].as_str().unwrap()[4..]));
+    assert_eq!(visit(&w, "a.b.example.com", "/").await.0, StatusCode::NOT_FOUND, "one label only");
+    assert_eq!(visit(&w, "example.com", "/").await.0, StatusCode::NOT_FOUND, "not the name itself");
+    // An exact name comes first.
+    let (_, x) = call(&w.api, "POST", &domains(&api), Some(json!({"hostname": "api.example.com"}))).await;
+    w.dns.add("_roll-challenge.api.example.com", "TXT", x["token"].as_str().unwrap());
+    call(&w.api, "POST", &format!("{}/api.example.com/verify", domains(&api)), None).await;
+    assert!(me(visit(&w, "api.example.com", "/").await).contains(&api["id"].as_str().unwrap()[4..]));
 }
 

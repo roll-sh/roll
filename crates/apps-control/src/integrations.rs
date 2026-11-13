@@ -158,6 +158,11 @@ pub trait DomainTls: Send + Sync {
     fn issues(&self) -> bool {
         true
     }
+    /// Whether it can issue a wildcard's (DNS-01; HTTP-01 can't). Where it issues and can't, a
+    /// wildcard domain is refused rather than left pending.
+    fn wildcards(&self) -> bool {
+        false
+    }
     /// Make sure the provider knows `host` (creating it there if it doesn't), and say where its
     /// certificate is: `None` when the issuer reports that itself.
     async fn ensure(&self, _host: &str) -> anyhow::Result<Option<(TlsStatus, Option<String>)>> {

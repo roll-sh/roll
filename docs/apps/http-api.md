@@ -385,7 +385,10 @@ type Domain = {
   /** What the DNS needs: a CNAME to `target` (a subdomain), or the TXT challenge (an apex). */
   record: "cname" | "txt" | "both" | "none"; // both: a shared CNAME target routes, the TXT proves ownership
   status: "pending" | "issuing" | "active" | "failed";
-  /** What the user puts in DNS: a CNAME to `target`, or (apex) a TXT `_roll-challenge.<host>` with `token`. */
+  /** What the user puts in DNS: a CNAME to `target`, or (apex) a TXT `_roll-challenge.<host>` with `token`.
+   * A wildcard (`*.example.com`: every name one label under it, after exact domains) has its
+   * CNAME on `*.example.com` and its TXT on `_roll-challenge.example.com`. It's refused (400)
+   * where custom domains' certificates can't be wildcards (no DNS-01). */
   target: string;
   token: string;
   error: string | null;

@@ -977,9 +977,17 @@ pub struct Domain {
 }
 
 /// A hostname a user may add: lowercase labels of `[a-z0-9-]`, at least two, at most 253
-/// characters, not an IP address and not under roll's own domains.
+/// characters, not an IP address and not under roll's own domains; or `*.` and one (a wildcard:
+/// every name one label under it).
 pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
     let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
+    if let Some(base) = h.strip_prefix("*.") {
+        // One `*`, leftmost: what a wildcard certificate covers.
+        if base.contains('*') {
+            return Err(Error::BadRequest(format!("{h:?}: a wildcard is one `*.` in front of a hostname")));
+        }
+        return check_hostname(base, reserved).map(|b| format!("*.{b}"));
+    }
     let labels: Vec<&str> = h.split('.').collect();
     let ok = h.len() <= 253
         && labels.len() >= 2
@@ -992,6 +1000,18 @@ pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
         return Err(Error::BadRequest(format!("{h} is under {d}, which roll manages")));
     }
     Ok(h)
+}
+
+/// Where a custom domain's TXT challenge goes: `_roll-challenge.<host>`, a wildcard's on the
+/// name under it (DNS providers rarely take a `*` mid-name; a TXT name holds several values).
+pub fn challenge_name(host: &str) -> String {
+    format!("_roll-challenge.{}", host.strip_prefix("*.").unwrap_or(host))
+}
+
+/// The wildcard that would cover `host` (`a.example.com` → `*.example.com`), if it has one.
+pub fn covering_wildcard(host: &str) -> Option<String> {
+    let (_, rest) = host.split_once('.')?;
+    rest.contains('.').then(|| format!("*.{rest}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

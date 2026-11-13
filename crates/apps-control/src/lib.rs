@@ -1273,6 +1273,9 @@ impl Apps {
         let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
         reserved.push(&self.cfg.domain);
         let host = check_hostname(host, &reserved)?;
+        if host.starts_with("*.") && self.deps.tls.issues() && !self.deps.tls.wildcards() {
+            return Err(Error::BadRequest(format!("{host}: a wildcard's certificate needs DNS-01, which this node's certificates don't do yet; add the names it would cover one by one")));
+        }
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
         let tls = if self.deps.tls.issues() { TlsStatus::Pending } else { TlsStatus::None };
@@ -1330,14 +1333,15 @@ impl Apps {
         };
         let target = self.target(&row.slug);
         let cname_ok = self.deps.resolver.cname(&h).await.contains(&target);
-        let txt_ok = self.deps.resolver.txt(&format!("_roll-challenge.{h}")).await.contains(&d.token);
+        let challenge = crate::model::challenge_name(&h);
+        let txt_ok = self.deps.resolver.txt(&challenge).await.contains(&d.token);
         let shared = self.cfg.cname_target.is_some();
         let (status, error) = if txt_ok || (cname_ok && !shared) {
             (DomainStatus::Active, None)
         } else if shared {
-            (DomainStatus::Pending, Some(format!("no TXT _roll-challenge.{h} with the token yet (the CNAME to {target} routes it; the TXT record proves it's yours)")))
+            (DomainStatus::Pending, Some(format!("no TXT {challenge} with the token yet (the CNAME to {target} routes it; the TXT record proves it's yours)")))
         } else {
-            (DomainStatus::Pending, Some(format!("no CNAME to {target} and no TXT _roll-challenge.{h} with the token yet")))
+            (DomainStatus::Pending, Some(format!("no CNAME to {target} and no TXT {challenge} with the token yet")))
         };
         let (hh, err) = (h.clone(), error.clone());
         self.db(move |s| s.set_domain_status(&hh, status, err.as_deref())).await?;
@@ -1401,6 +1405,9 @@ impl Apps {
             return Err(Error::NotFound(format!("{h} isn't a custom domain of {service} in {env}")));
         }
         if let Some(t) = &to {
+            if t.starts_with("*.") {
+                return Err(Error::BadRequest("redirect_to is one hostname, not a wildcard".into()));
+            }
             let target = all.iter().find(|d| &d.hostname == t).ok_or_else(|| Error::BadRequest(format!("{t} isn't a hostname of this environment")))?;
             if *t == h || target.redirect_to.is_some() {
                 return Err(Error::BadRequest("redirect_to is another hostname of the environment that serves it (no loops or chains)".into()));
@@ -1421,7 +1428,17 @@ impl Apps {
         if host.ends_with(&format!(".{}", self.cfg.domain)) {
             return None;
         }
-        self.db(move |s| s.domain_owner(&host)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active).and_then(|(_, _, d)| d.redirect_to)
+        self.active_domain(&host).await.and_then(|(_, _, d)| d.redirect_to)
+    }
+
+    /// The active custom domain a hostname is: its own, else the wildcard one label above it.
+    async fn active_domain(self: &Arc<Self>, host: &str) -> Option<(String, String, Domain)> {
+        let exact = host.to_string();
+        if let Some(d) = self.db(move |s| s.domain_owner(&exact)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active) {
+            return Some(d);
+        }
+        let wild = crate::model::covering_wildcard(host)?;
+        self.db(move |s| s.domain_owner(&wild)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active)
     }
 
     /// Write the audit trail's entry for a change someone made (`audit.<what>`): who, and what
@@ -1468,7 +1485,7 @@ impl Apps {
             let (dep, slug) = (format!("dep_{dep}"), slug.to_string());
             return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep)));
         }
-        self.db(move |s| s.domain_owner(&host)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active).map(|(s, e, _)| (s, e, None))
+        self.active_domain(&host).await.map(|(s, e, _)| (s, e, None))
     }
 
     /// Where a preview's feedback goes (the preview in roll's dashboard), for a visitor who came

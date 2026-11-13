@@ -1472,7 +1472,8 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
                 } else {
                     println!("or, for an apex domain, keep its records and add:");
                 }
-                println!("  TXT    _roll-challenge.{}  \"{}\"", s(&v["hostname"]), s(&v["token"]));
+                let h = s(&v["hostname"]);
+                println!("  TXT    _roll-challenge.{}  \"{}\"", h.strip_prefix("*.").unwrap_or(&h), s(&v["token"]));
                 println!("roll checks every minute; `roll domains verify {}` checks now.", s(&v["hostname"]));
                 return Ok(());
             }
