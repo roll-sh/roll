@@ -277,25 +277,33 @@ previews are listed once those products are on.
 
 ## Next
 
-Ranked; the top item is in progress. A watchdog reads this list.
+Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
+waits on a sibling PR reaching main is last.
 
-1. **As the sibling branches merge** (secrets #20, apps #21, search #22, previews #23): rerun
-   `extract-routes.py` and `examples/classify` on their routers (every route at their heads has a
-   row today), and wire their lookups in `rolld/src/access.rs`:
-   - previews' `Store::environment_of` (done on their side, in wip/previews-on-secrets-mcp);
-   - search's `resolve_id` (async: through the runtime handle);
-   - apps' services to their projects;
-   - secrets' `Grant` swap, `roll_auth::Grants` for its syncs, and its ephemeral environments as
-     "preview";
-   - secrets' audit sinks and access's (same wire contract already): one delivery module;
-   - the products' `Product` entries in rolld, so their MCP tools appear;
-   - apps' and secrets' environment resolvers (`Resolvers::environments`: a preview's own
-     environment is "preview"), which they register once #19 is on main.
-2. **Users' own tokens** (built: branch `feature/mcp-user-tokens`, on top of
-   `integrate/mcp-accounts`): its PR opens once #18 and #19 are on main; until then keep it merged.
-3. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+1. **The evaluator in the gates** (in progress): roll-auth, roll-access, roll-mcp and roll-net
+   now run in `pnpm test:code` (on Postgres with `--docker`), and CI has an `access` job for the
+   permission model. Until now nothing ran their suites but me. Confirm a green gate run.
+2. **Builder: pick resources by name.** Choosing "only these" lists the product's resources
+   (databases, buckets, repos, apps services, secrets projects, search indexes) to tick, as
+   Cloudflare's builder lists zones, instead of typing ids; and a plain summary of what the token
+   can and can't do above the Create button.
+3. **MCP tools for every route the sibling branches have now:** compare tools.rs with search's,
+   apps' and previews' routers at their heads (`extract-routes.py`), add what an agent needs
+   (search's indexes and documents, previews' resources), each mapped onto a classified route.
+4. **Approvals UX:** browser notifications while the dashboard is open, approve and deny from the
+   header's waiting badge, and the request's arguments shown as a readable diff where they're a
+   body.
+5. **Sibling wiring behind small interfaces, before they merge:** a one-call registration for a
+   product's resolvers (`Resolvers::by_kind` and `environments`) that search's async ids and apps'
+   environments can use from their branches today, and a check that their branches compile with
+   `roll_auth::Grant`'s new fields (`user`, `ask_otherwise`).
+6. **A fourth security review** of `ask_otherwise`, `variables_from`, the gates and users' own
+   tokens' latest changes.
+7. **Blocked on sibling PRs reaching main:** wire previews', search's, apps' and secrets' lookups
+   and environment resolvers; secrets' `Grant` swap; one sink module with secrets; apps' deploys
+   by id; users' own tokens' PR (#18 and #19 on main).
+8. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-4. **Finer resources:** apps' deploys by id (once #21 is on main).
 
 Done lately: "ask for anything else" (`ask_otherwise`: what a token's rules don't allow asks a person, and remembered approvals grow it); hop hardening for users' own tokens (the carried route is judged too, on their branch); copying another environment's variables needs reveal there; the third security review's findings (remembered approvals keep their environment and path, every MCP tool call counts against a rate limit, GitHub key fetching single-flight with fallback, the leak scanner skips unreadable files under a budget and hides private repos, per-person and live-only token caps, admin tokens owned by the admin); tokens about to expire are named in the list and posted to the approvals channel daily; `apps_deploy` takes an `idempotency_key` (sent as `Idempotency-Key`); an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
 one action on one resource, a while never made permanent through a child token); leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
