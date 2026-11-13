@@ -2758,6 +2758,19 @@ pub struct Scan {
     dead_run: u32,
 }
 
+/// The files of `l1` (in key order, none overlapping another: each file's first and last
+/// user keys at or past the one before's) holding a key of [start, end) (an empty `end`:
+/// unbounded), found by two binary searches: they are those `SstReader::overlaps` keeps,
+/// without a comparison per file (a lookup's merging scan is made, or sought on, for every
+/// outer row of an index join, and SF1's L1 has dozens of files).
+fn l1_in<'a>(l1: &'a [Arc<SstReader>], start: &[u8], end: &[u8]) -> &'a [Arc<SstReader>] {
+    let lo = l1.partition_point(|s| sst::user_key(&s.meta.last_key) < start);
+    let rest = &l1[lo..];
+    let n = if end.is_empty() { rest.len() } else { rest.partition_point(|s| sst::user_key(&s.meta.first_key) < end) };
+    debug_assert!(l1.iter().filter(|s| s.overlaps(start, end)).map(|s| s.meta.id).eq(rest[..n].iter().map(|s| s.meta.id)));
+    &rest[..n]
+}
+
 /// A cursor per source of `view` over [start, end), newest source first.
 fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
     // (Files holding no key of the range aren't sources: each source is looked at whenever
@@ -2777,9 +2790,9 @@ fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
     for s in view.l0.iter().filter(overlaps) {
         sources.push(Cursor::level(vec![s.clone()], start, end));
     }
-    let l1: Vec<_> = view.l1.iter().filter(overlaps).cloned().collect();
+    let l1 = l1_in(&view.l1, start, end);
     if !l1.is_empty() {
-        sources.push(Cursor::level(l1, start, end));
+        sources.push(Cursor::level(l1.to_vec(), start, end));
     }
     sources
 }
@@ -2809,19 +2822,12 @@ fn same_sources(view: &View, cursors: &[Cursor], start: &[u8], end: &[u8]) -> bo
             return false;
         }
     }
-    let mut l1 = view.l1.iter().filter(|s| overlaps(s)).peekable();
-    if l1.peek().is_some() {
+    let l1 = l1_in(&view.l1, start, end);
+    if !l1.is_empty() {
         let Some(files) = c.next().and_then(Cursor::files) else {
             return false;
         };
-        let mut n = 0;
-        for s in l1 {
-            if files.get(n).is_none_or(|f| !Arc::ptr_eq(f, s)) {
-                return false;
-            }
-            n += 1;
-        }
-        if n != files.len() {
+        if files.len() != l1.len() || !files.iter().zip(l1).all(|(f, s)| Arc::ptr_eq(f, s)) {
             return false;
         }
     }
