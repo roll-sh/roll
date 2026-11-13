@@ -18631,6 +18631,18 @@ impl Render<'_> {
             });
         }
         let s = self.stats(n.key)?;
+        // A plain partial aggregation under a Gather returns a row from each process that
+        // runs it (the run here made one), and the Gather above gets them all.
+        let partial_plain = |n: &ExNode| n.node_type == "Aggregate" && n.strategy == Some("Plain") && n.partial_mode == Some("Partial");
+        if partial_plain(n) && self.procs > 1 {
+            return Some(NodeStats { rows: s.loops, ..s });
+        }
+        if matches!(n.node_type, "Gather" | "Gather Merge")
+            && n.workers > 0
+            && n.children.first().is_some_and(partial_plain)
+        {
+            return Some(NodeStats { rows: s.loops * (n.workers as u64 + u64::from(self.leader)), ..s });
+        }
         // (A Hash's rows are the tuples it put in its table: not those of a NULL key it
         // dropped, partialTuples.)
         if n.node_type == "Hash"
@@ -18653,11 +18665,19 @@ impl Render<'_> {
 
     fn children_of(&mut self, n: &ExNode, f: &mut dyn FnMut(&mut Self, &ExNode)) {
         for (i, c) in n.initplans.iter().chain(&n.children).chain(&n.subplans).enumerate() {
-            if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
+            let inner = n.node_type == "Nested Loop" && i == n.initplans.len() + 1;
+            if inner && c.node_type == "Materialize" {
                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
                 self.mat_loops = Some(outer_rows);
             }
+            // (A nested loop's inner side starts once per outer row, whichever process reads
+            // it: its loops counted are the processes' together already.)
+            let procs = self.procs;
+            if inner {
+                self.procs = 1;
+            }
             f(self, c);
+            self.procs = procs;
             self.mat_loops = None;
         }
     }

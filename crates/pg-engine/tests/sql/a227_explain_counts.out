@@ -1,0 +1,160 @@
+> create table a227_c (ck int primary key, nk int, bal int, name text, pad text)
+-- CREATE TABLE
+
+> create table a227_o (ok int primary key, ck int, st char(1), pad text)
+-- CREATE TABLE
+
+> insert into a227_c select g, g % 25, (g * 37) % 1000, 'C' || g, repeat('c', 60) from generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> insert into a227_o select g, (g * 7) % 2000 + 1, case when g % 3 = 0 then 'F' else 'O' end, repeat('o', 40) from generate_series(1, 12000) g
+-- INSERT 0 12000
+
+> create index a227_o_ck on a227_o (ck)
+-- CREATE INDEX
+
+> vacuum analyze a227_c, a227_o
+-- VACUUM
+
+> set parallel_setup_cost = 0
+-- SET
+
+> set parallel_tuple_cost = 0
+-- SET
+
+> set min_parallel_table_scan_size = 0
+-- SET
+
+> set min_parallel_index_scan_size = 0
+-- SET
+
+> set max_parallel_workers_per_gather = 2
+-- SET
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> set enable_material = off
+-- SET
+
+> set enable_memoize = off
+-- SET
+
+> set enable_bitmapscan = off
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select count(*) from a227_c c join a227_o o on o.ck = c.ck where c.bal < 300
+QUERY PLAN:text
+Finalize Aggregate (actual rows=1.00 loops=1)
+  ->  Gather (actual rows=3.00 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        ->  Partial Aggregate (actual rows=1.00 loops=3)
+              ->  Nested Loop (actual rows=1200.00 loops=3)
+                    ->  Parallel Seq Scan on a227_c c (actual rows=300.00 loops=3)
+                          Filter: (bal < 300)
+                          Rows Removed by Filter: 700
+                    ->  Index Only Scan using a227_o_ck on a227_o o (actual rows=4.00 loops=900)
+                          Index Cond: (ck = c.ck)
+                          Heap Fetches: 0
+                          Index Searches: 900
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select count(*) from a227_c c where c.bal < 500 and not exists (select from a227_o o where o.ck = c.ck)
+QUERY PLAN:text
+Finalize Aggregate (actual rows=1.00 loops=1)
+  ->  Gather (actual rows=3.00 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        ->  Partial Aggregate (actual rows=1.00 loops=3)
+              ->  Nested Loop Anti Join (actual rows=166.67 loops=3)
+                    ->  Parallel Seq Scan on a227_c c (actual rows=500.00 loops=3)
+                          Filter: (bal < 500)
+                          Rows Removed by Filter: 500
+                    ->  Index Only Scan using a227_o_ck on a227_o o (actual rows=0.67 loops=1500)
+                          Index Cond: (ck = c.ck)
+                          Heap Fetches: 0
+                          Index Searches: 1500
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select count(*) from a227_c c where c.bal < 500 and exists (select from a227_o o where o.ck = c.ck)
+QUERY PLAN:text
+Finalize Aggregate (actual rows=1.00 loops=1)
+  ->  Gather (actual rows=3.00 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        ->  Partial Aggregate (actual rows=1.00 loops=3)
+              ->  Nested Loop Semi Join (actual rows=333.33 loops=3)
+                    ->  Parallel Seq Scan on a227_c c (actual rows=500.00 loops=3)
+                          Filter: (bal < 500)
+                          Rows Removed by Filter: 500
+                    ->  Index Only Scan using a227_o_ck on a227_o o (actual rows=0.67 loops=1500)
+                          Index Cond: (ck = c.ck)
+                          Heap Fetches: 0
+                          Index Searches: 1500
+-- EXPLAIN
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> reset enable_material
+-- RESET
+
+> reset enable_memoize
+-- RESET
+
+> reset enable_bitmapscan
+-- RESET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select sum(bal) from a227_c where bal > 100
+QUERY PLAN:text
+Finalize Aggregate (actual rows=1.00 loops=1)
+  ->  Gather (actual rows=3.00 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        ->  Partial Aggregate (actual rows=1.00 loops=3)
+              ->  Parallel Seq Scan on a227_c (actual rows=899.00 loops=3)
+                    Filter: (bal > 100)
+                    Rows Removed by Filter: 101
+-- EXPLAIN
+
+> reset max_parallel_workers_per_gather
+-- RESET
+
+> reset min_parallel_index_scan_size
+-- RESET
+
+> reset min_parallel_table_scan_size
+-- RESET
+
+> reset parallel_tuple_cost
+-- RESET
+
+> reset parallel_setup_cost
+-- RESET
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select c.name from a227_c c where c.nk = 3 and c.ck in (select o.ck from a227_o o where o.st = 'F')
+QUERY PLAN:text
+Hash Right Semi Join (actual rows=80.00 loops=1)
+  Hash Cond: (o.ck = c.ck)
+  ->  Seq Scan on a227_o o (actual rows=4000.00 loops=1)
+        Filter: (st = 'F'::bpchar)
+        Rows Removed by Filter: 8000
+  ->  Hash (actual rows=120.00 loops=1)
+        Buckets: 1024  Batches: 1  Memory Usage: 14kB
+        ->  Seq Scan on a227_c c (actual rows=120.00 loops=1)
+              Filter: (nk = 3)
+              Rows Removed by Filter: 2880
+-- EXPLAIN
+

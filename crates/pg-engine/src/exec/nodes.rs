@@ -5174,6 +5174,18 @@ impl NestLoopNode {
                 if (self.params.is_empty() || self.fixed) && j < self.right_matched.len() {
                     self.right_matched[j] = true;
                 }
+                // EXPLAIN ANALYZE: a semi or anti join reads its inner side up to its first
+                // match (ExecNestLoop's single_match); the rows collected after it were never
+                // read there.
+                if matches!(self.kind, JoinKind::Semi | JoinKind::Anti)
+                    && self.memo.is_none()
+                    && let InnerRows::Rows(all, i) = rows
+                    && all.len() > *i
+                    && ctx.instrumented()
+                {
+                    let unread = (all.len() - *i) as u64;
+                    ctx.count(Arc::as_ptr(&self.right_plan) as usize, |st| st.rows = st.rows.saturating_sub(unread));
+                }
                 match self.kind {
                     JoinKind::Semi => {
                         let out = l.clone();
