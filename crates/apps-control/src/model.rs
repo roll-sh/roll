@@ -1345,6 +1345,9 @@ pub struct VarView {
     pub name: String,
     pub masked: String,
     pub source: &'static str,
+    /// A reference variable's template (`${{ api.KEY }}`): names, never a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 /// A value as the masked list shows it: dots, between 4 and 12 of them, so its length barely

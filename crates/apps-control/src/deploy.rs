@@ -899,7 +899,11 @@ impl Apps {
         }
         let mut probe = svc.clone();
         probe.run.port = run.port;
-        let mut vars = self.resolve_vars(&probe, env, &dep.id).await?.vars;
+        let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
+        if !resolved.unresolved.is_empty() {
+            self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
+        }
+        let mut vars = resolved.vars;
         if run.kind != RunType::Web {
             vars.retain(|(k, _)| k != "PORT");
         }

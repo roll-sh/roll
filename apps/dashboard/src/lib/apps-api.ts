@@ -397,10 +397,12 @@ export interface Link {
   vars: string[];
 }
 
-export type VariableSource = "service" | "secret" | "link" | "roll";
+/** `reference`: one of its own with `${{ … }}` in it, filled in at the deploy. */
+export type VariableSource = "service" | "secret" | "link" | "roll" | "reference";
 
 export interface Variables {
-  vars: { name: string; masked: string; source: VariableSource }[];
+  /** reference: a reference variable's template (names, never a value). */
+  vars: { name: string; masked: string; source: VariableSource; reference?: string }[];
 }
 
 export interface LogLine {

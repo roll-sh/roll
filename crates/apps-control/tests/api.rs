@@ -1838,7 +1838,8 @@ async fn a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry() {
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
     let h = host(&svc["environments"][0]["url"]);
-    // Asleep first: the deploy's health-checked instance goes back to rest a moment after.
+    // Asleep first, and stopped (a rested instance may be frozen, which resumes at once).
+    w.apps.live(&id, "production").sleep().await;
     get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production"), |e| e["state"] == "stopped").await;
     let get = || async {
         let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
@@ -2272,15 +2273,21 @@ async fn affinity_keeps_a_visitor_on_one_instance() {
     let id = svc["id"].as_str().unwrap().to_string();
     let h = host(&svc["environments"][0]["url"]);
     let live = w.apps.live(&id, "production");
-    let running = || w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).map(|(n, _, _)| n).collect::<Vec<_>>();
+    // Running as roll sees them (its phase follows the runtime's a moment later).
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let running = || async {
+        let (_, e) = call(&w.api, "GET", &base, None).await;
+        e["instances"].as_array().unwrap().iter().filter(|i| i["state"] == "running").map(|i| i["id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
     for _ in 0..100 {
         live.tick().await;
-        if running().len() == 2 {
+        if running().await.len() == 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let up = running();
+    let mut up = running().await;
+    up.sort();
     assert_eq!(up.len(), 2, "{:?}", w.fake.instances(&id));
     let get = |cookie: Option<String>| {
         let mut b = Request::builder().uri("/").header("host", h.as_str());
@@ -2469,4 +2476,40 @@ async fn a_deployment_that_crash_loops_is_rolled_back() {
     let env = get_until(&w.api, &base, |e| e["active"]["id"] != d2["id"] && e["active"]["id"].is_string()).await;
     let (_, now) = call(&w.api, "GET", &format!("{base}/deploys/{}", env["active"]["id"].as_str().unwrap()), None).await;
     assert_eq!((now["rollback_of"].as_str(), now["actor"].as_str()), (d1["id"].as_str(), Some("crash loop")), "{now}");
+}
+
+/// Reference variables: `${{ VAR }}` and `${{ service.VAR }}` are filled in at the deploy (the
+/// listing shows the template, never the value); one that names no service is refused, and a
+/// token needs reveal on the service it reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reference_variables_are_filled_at_the_deploy() {
+    let w = world().await;
+    let (st, db) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "db", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 5432}, "variables": {"PASS": "s3cret"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{db}");
+    let (st, _) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "bad", "source": {"kind": "image", "image": "nginx:1.27"}, "variables": {"X": "${{ nobody.Y }}"} }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "no such service");
+    let vars = json!({"DB_URL": "postgres://app:${{ db.PASS }}@${{ db.ROLL_PRIVATE_HOST }}:${{db.PORT}}/x", "SELF": "${{ ROLL_SERVICE }}-${{ MISSING }}", "FAKE_ECHO": "DB_URL,SELF"});
+    let (st, api) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "api", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": vars }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{api}");
+    let id = api["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, "production", api["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let (_, body) = visit_deployment(&w, &host(&api["environments"][0]["url"]), d["id"].as_str().unwrap()).await;
+    assert_eq!(body["vars"], json!({"DB_URL": "postgres://app:s3cret@db.production.internal:5432/x", "SELF": "api-"}), "{body}");
+    let (_, listed) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/variables"), None).await;
+    let db_url = listed["vars"].as_array().unwrap().iter().find(|v| v["name"] == "DB_URL").unwrap().clone();
+    assert_eq!((db_url["source"].as_str(), db_url["reference"].as_str()), (Some("reference"), Some("postgres://app:${{ db.PASS }}@${{ db.ROLL_PRIVATE_HOST }}:${{db.PORT}}/x")));
+    assert!(!listed.to_string().contains("s3cret"), "the listing never shows the value");
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?tail=50"), None).await;
+    assert!(log.to_string().contains("SELF: MISSING"), "{log}");
+    // A token that may write apps but not reveal db's values can't reference them.
+    let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": "*", "actions": {"write": "allow", "read": "allow"}}])).unwrap();
+    let grant = roll_auth::Grant { id: "tok_t".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), ask_otherwise: false };
+    let mut req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/v1/apps/services/{id}/environments/production/variables"))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"set": {"STOLEN": "${{ db.PASS }}"}}).to_string()))
+        .unwrap();
+    req.extensions_mut().insert(grant);
+    assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
 }

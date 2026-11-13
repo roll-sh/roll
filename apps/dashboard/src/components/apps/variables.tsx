@@ -6,12 +6,13 @@ import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
 import { message, SureButton, type Runner } from "./shared";
 
-const SOURCE_LABEL: Record<VariableSource, string> = { service: "service", secret: "secret", link: "link", roll: "roll" };
+const SOURCE_LABEL: Record<VariableSource, string> = { service: "service", secret: "secret", link: "link", roll: "roll", reference: "reference" };
 const SOURCE_TONE: Record<VariableSource, string> = {
   service: "border-line-2 text-muted",
   secret: "border-line-2 text-fg",
   link: "border-accent/40 text-accent",
   roll: "border-line text-subtle",
+  reference: "border-line-2 text-muted",
 };
 
 /** Workspace kinds a service can link to, by their link kind. */
@@ -62,7 +63,7 @@ export function VariablesTab({
 
   /** Stage `set` for review: an existing service variable becomes an edit, a new name a row. */
   const stage = (set: Record<string, string>) => {
-    const have = new Set((vars?.vars ?? []).filter((v) => v.source === "service").map((v) => v.name));
+    const have = new Set((vars?.vars ?? []).filter((v) => v.source === "service" || v.source === "reference").map((v) => v.name));
     setEdits((e) => ({ ...e, ...Object.fromEntries(Object.entries(set).filter(([k]) => have.has(k))) }));
     setAdded((a) => [...a.filter((x) => !(x.name in set)), ...Object.entries(set).filter(([k]) => !have.has(k)).map(([name, value]) => ({ name, value }))]);
   };
@@ -193,7 +194,8 @@ export function VariablesTab({
           <ul className="divide-y divide-line">
             {vars.vars.length === 0 && added.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">No variables yet. roll sets PORT and ROLL_* on every deploy.</li>}
             {vars.vars.map((v) => {
-              const editable = v.source === "service";
+              // A reference is its own variable: edited as its template, never as what it resolves to.
+              const editable = v.source === "service" || v.source === "reference";
               const gone = removed.has(v.name);
               const editing = v.name in edits;
               return (
@@ -212,11 +214,11 @@ export function VariablesTab({
                   ) : (
                     <button
                       disabled={!editable || gone}
-                      onClick={() => setEdits((x) => ({ ...x, [v.name]: values?.[v.name] ?? "" }))}
+                      onClick={() => setEdits((x) => ({ ...x, [v.name]: v.reference ?? values?.[v.name] ?? "" }))}
                       className="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-muted enabled:hover:text-fg"
                       title={editable ? "Edit" : `Set by ${v.source === "link" ? "a link" : v.source === "secret" ? "the project's secrets" : "roll"}`}
                     >
-                      {values?.[v.name] ?? v.masked}
+                      {v.reference ?? values?.[v.name] ?? v.masked}
                     </button>
                   )}
                   {editable && (

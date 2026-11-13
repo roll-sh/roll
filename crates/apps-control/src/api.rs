@@ -212,7 +212,14 @@ async fn project_services(State(apps): S, Path(project): Path<String>) -> R {
 }
 
 async fn create_service(State(apps): S, ext: Extensions, b: Bytes) -> R {
-    let s = apps.create_service(body(&b)?, actor(&ext)).await?;
+    let b = body(&b)?;
+    let values: Vec<&str> = b["variables"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
+    if let (Some(project), Some(name)) = (b["project"].as_str(), b["name"].as_str())
+        && values.iter().any(|v| v.contains("${{"))
+    {
+        apps.check_references(project, name, crate::model::PRODUCTION, &values, asker(&ext)).await?;
+    }
+    let s = apps.create_service(b, actor(&ext)).await?;
     Ok((StatusCode::CREATED, Json(s)).into_response())
 }
 
@@ -759,6 +766,11 @@ async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ex
 
 async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let change = body(&b)?;
+    let values: Vec<&str> = change["set"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
+    if values.iter().any(|v| v.contains("${{")) {
+        let svc = apps.service(&id).await?;
+        apps.check_references(&svc.project, &svc.name, &env, &values, asker(&ext)).await?;
+    }
     let v = apps.change_variables(&id, &env, change.clone()).await?;
     apps.settings_changed();
     // Names only: a value never reaches the trail.

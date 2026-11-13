@@ -20,6 +20,7 @@ pub mod sites;
 pub mod site_rules;
 pub mod tunnel;
 pub mod tcp;
+pub mod refs;
 pub mod feedback;
 pub mod scale;
 pub mod registry;
@@ -263,6 +264,9 @@ fn hex(b: &[u8]) -> String {
 pub struct ResolvedVars {
     pub vars: Vec<(String, String)>,
     pub sources: HashMap<String, &'static str>,
+    /// References that named nothing ([`refs`]), as `VAR: service.NAME`: empty, and the deploy
+    /// says so.
+    pub unresolved: Vec<String>,
 }
 
 impl Apps {
@@ -1178,8 +1182,91 @@ impl Apps {
         for (k, v) in self.db(move |s| s.variables(&sid, &e)).await? {
             vars.insert(k, (v, "service"));
         }
+        // Reference variables, one level deep: against what resolved above, and other services'.
+        let unresolved = self.fill_references(svc, &env.name, &mut vars).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources })
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved })
+    }
+
+    /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing.
+    async fn fill_references(self: &Arc<Self>, svc: &ServiceRow, env: &str, vars: &mut BTreeMap<String, (String, &'static str)>) -> Vec<String> {
+        let referring: Vec<String> = vars.iter().filter(|(_, (v, s))| *s == "service" && v.contains("${{")).map(|(k, _)| k.clone()).collect();
+        if referring.is_empty() {
+            return Vec::new();
+        }
+        let own: HashMap<String, String> = vars.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect();
+        // Another service's: by name in this project, the same environment.
+        let mut others: HashMap<String, Option<HashMap<String, String>>> = HashMap::new();
+        for k in &referring {
+            for (r, _) in refs::refs(&vars[k].0) {
+                if let Some(name) = r.service.filter(|n| !others.contains_key(*n) && *n != svc.name) {
+                    let found = self.service_values(&svc.project, name, env).await;
+                    others.insert(name.to_string(), found);
+                }
+            }
+        }
+        let mut unresolved = Vec::new();
+        for k in referring {
+            let (filled, missing) = refs::fill(&vars[&k].0, |r| match r.service {
+                None => own.get(r.var).cloned(),
+                Some(n) if n == svc.name => own.get(r.var).cloned(),
+                Some(n) => others.get(n).and_then(|o| o.as_ref()).and_then(|o| o.get(r.var).cloned()),
+            });
+            unresolved.extend(missing.into_iter().map(|m| format!("{k}: {m}")));
+            vars.insert(k, (filled, "reference"));
+        }
+        unresolved
+    }
+
+    /// What another service of `project` offers a reference in `env`: its own variables, and
+    /// `PORT`, `ROLL_PRIVATE_HOST` and `ROLL_PUBLIC_URL`. None: no such service or environment.
+    async fn service_values(self: &Arc<Self>, project: &str, name: &str, env: &str) -> Option<HashMap<String, String>> {
+        let (p, n, e) = (project.to_string(), name.to_string(), env.to_string());
+        let (svc, row, own) = self
+            .db(move |s| {
+                let Some(svc) = s.services(Some(&p))?.into_iter().find(|x| x.name == n) else { return Ok(None) };
+                let row = s.environment(&svc.id, &e)?;
+                let own = s.variables(&svc.id, &e)?;
+                Ok(Some((svc, row, own)))
+            })
+            .await
+            .ok()
+            .flatten()?;
+        let mut out: HashMap<String, String> = own.into_iter().collect();
+        let port = match row.active.clone() {
+            Some(a) => self.db(move |s| s.deployment(&a)).await.ok().and_then(|d| d.run.port),
+            None => None,
+        };
+        out.insert("PORT".into(), port.or(svc.run.port).unwrap_or(8080).to_string());
+        out.insert("ROLL_PRIVATE_HOST".into(), format!("{}.{env}.internal", svc.name));
+        if svc.run.public {
+            out.insert("ROLL_PUBLIC_URL".into(), self.url(&row.slug));
+        }
+        Some(out)
+    }
+
+    /// Before values with references are stored: every other service they name is the
+    /// project's, and the caller may see its values (a token's `reveal` on it, as reading them
+    /// would need): a reference is a way to read them.
+    pub async fn check_references(self: &Arc<Self>, project: &str, own: &str, env: &str, values: &[&str], who: integrations::Asker<'_>) -> Result<()> {
+        let mut names: Vec<&str> = values.iter().flat_map(|v| refs::refs(v)).filter_map(|(r, _)| r.service).filter(|n| *n != own).collect();
+        names.sort();
+        names.dedup();
+        for name in names {
+            let (p, n) = (project.to_string(), name.to_string());
+            let Some(target) = self.db(move |s| Ok(s.services(Some(&p))?.into_iter().find(|x| x.name == n))).await? else {
+                return Err(Error::BadRequest(format!("${{{{ {name}.… }}}} names no service of this project")));
+            };
+            if !who.operator
+                && let Some(g) = who.grant
+            {
+                let resource = roll_auth::scope::Resource { product: "apps".into(), id: Some(target.id.clone()), project: Some(project.to_string()), environment: Some(env.to_string()), ..Default::default() };
+                if g.allows(&resource, roll_auth::scope::Action::Reveal) != roll_auth::scope::Outcome::Allow {
+                    return Err(Error::Forbidden(format!("a reference to {name}'s variables needs reveal on {name}")));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// What reads a job's output or opens a shell needs when the environment has values from
@@ -1208,6 +1295,9 @@ impl Apps {
             let m: serde_json::Map<String, Value> = r.vars.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
             return Ok(Value::Object(m));
         }
+        // A reference's template is names, not a value: shown, and what an edit starts from.
+        let (sid, e) = (service.to_string(), env.to_string());
+        let raw = self.db(move |s| s.variables(&sid, &e)).await?;
         let vars: Vec<VarView> = r
             .vars
             .iter()
@@ -1215,7 +1305,8 @@ impl Apps {
                 let source = r.sources.get(k).copied().unwrap_or("service");
                 // roll's own values aren't secret.
                 let masked = if source == "roll" { v.clone() } else { mask(v) };
-                VarView { name: k.clone(), masked, source }
+                let reference = (source == "reference").then(|| raw.get(k).cloned()).flatten();
+                VarView { name: k.clone(), masked, source, reference }
             })
             .collect();
         Ok(json!({ "vars": vars }))

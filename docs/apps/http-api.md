@@ -380,7 +380,10 @@ type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosq
 // `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
 // when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.
 
-type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" }[] };
+type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" | "reference"; reference?: string /* a reference variable's template, `${{ api.KEY }}` */ }[] };
+// A value set with `${{ VAR }}` / `${{ service.VAR }}` is a reference, filled in at each deploy;
+// setting one that names another service needs `reveal` on it (403), and one naming no service of
+// the project is a 400.
 
 type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string };
 

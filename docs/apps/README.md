@@ -555,6 +555,15 @@ every deployment is immutable with instant rollback.
 - Service variables per environment (Railway's service variables), sealed at rest, are roll
   apps' own: a service's config (`PORT`, `NODE_ENV`) belongs to the service; project secrets
   come from roll secrets and service variables win on a clash.
+- Reference variables (Railway's): a variable's value may hold `${{ VAR }}` (another of the
+  environment's variables as it resolves: roll's, a link's, a secret, its own) or `${{ api.VAR }}`
+  (another service of the project in the same environment: its own variables, `PORT`,
+  `ROLL_PRIVATE_HOST`, `ROLL_PUBLIC_URL`), filled in at each deploy one level deep (`refs.rs`).
+  One naming nothing is empty, and the deploy's log says so; one naming a service the project
+  doesn't have is refused when it's set. A reference reads another service's values, so setting
+  one needs what reading them would (a token's `reveal` on that service); once set, the value is
+  part of this service's own (its reveal shows it, as with a link). The listing shows the
+  template (names, never a value), and the dashboard edits that, not what it resolves to.
 - What the next deploy changes (Railway's staged changes): `GET …/pending` names the
   environment's own variables added, removed or changed since its live deployment (from the
   snapshot sealed at its switch, values never shown) and the run settings the service sets that
