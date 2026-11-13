@@ -170,7 +170,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
     let mut action = row.action(&method, &params, c.body.as_ref());
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
-    if let Some((copied, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, c.body.as_ref(), &scope).await
+    if let Some((copied, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (copied, Action::Reveal);
@@ -331,11 +331,13 @@ async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
 #[derive(Deserialize)]
 struct ApprovalsQuery {
     state: Option<String>,
+    /// One token's approvals (its page).
+    grant: Option<String>,
     limit: Option<usize>,
 }
 
 async fn approvals(State(a): S, Query(q): Query<ApprovalsQuery>) -> crate::Result<Json<Value>> {
-    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), q.limit.unwrap_or(100))).await?;
+    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), q.grant.as_deref(), q.limit.unwrap_or(100))).await?;
     Ok(Json(json!(list)))
 }
 
@@ -416,6 +418,10 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         paths: found.scope_path.clone().map(|p| vec![p]),
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     };
+    // What the request named becomes a rule: it meets the rules' own checks (one line, sizes).
+    if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
+        return Err(Error::BadRequest(format!("this request can't be remembered ({p}): approve it once")));
+    }
     // For good is a change to the token: it meets the policy as it is now.
     if until.is_none() {
         let g = found.grant_id.clone();
