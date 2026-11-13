@@ -268,6 +268,9 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
     assert_eq!(detail["message"], "launch");
     assert!(!detail.to_string().contains("\"10\""), "a change shows fingerprints, never values: {detail}");
 
+    // What production had then, without rolling back.
+    let then = api.ok(Method::GET, &format!("/environments/production/values?seq={seq}"), None).await;
+    assert_eq!((then["values"].clone(), then["seq"].as_i64()), (json!({ "A": "10", "B": "2" }), Some(seq)));
     let r = api.ok(Method::POST, "/environments/production/rollback", Some(json!({ "to": seq }))).await;
     assert_eq!(r["change"]["kind"], "rollback");
     assert_eq!(api.values("production", "/").await["values"], json!({ "A": "10", "B": "2" }));

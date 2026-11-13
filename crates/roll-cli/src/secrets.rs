@@ -197,6 +197,12 @@ pub enum Secrets {
         /// kubernetes: its namespace.
         #[arg(long)]
         namespace: Option<String>,
+        /// The folder's own values as they were after this change (as written then).
+        #[arg(long, value_name = "SEQ", conflicts_with = "at")]
+        change: Option<i64>,
+        /// ...or at this time (RFC 3339, unix seconds, or how long ago: 2h).
+        #[arg(long, value_name = "TIME")]
+        at: Option<String>,
     },
     /// Environments: list, add, rename, delete, order, protect.
     #[command(subcommand, alias = "env")]
@@ -924,9 +930,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
         }
-        Secrets::Export { format, name, namespace } => {
+        Secrets::Export { format, name, namespace, change, at } => {
+            let at = at.as_deref().map(when).transpose()?;
             let mut url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
-            for (k, v) in [("name", name), ("namespace", namespace)] {
+            for (k, v) in [("name", name), ("namespace", namespace), ("seq", change.map(|c| c.to_string())), ("at", at.map(|t| t.to_string()))] {
                 if let Some(v) = v {
                     url.push_str(&format!("&{k}={}", enc(&v)));
                 }

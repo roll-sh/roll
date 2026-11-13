@@ -1,10 +1,10 @@
-import { ArrowLeft, Columns2, Flame, History as HistoryIcon, RotateCcw, X } from "lucide-react";
+import { ArrowLeft, Columns2, Download, Flame, History as HistoryIcon, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { needsApproval, type Change, type Environment, type SecretType, type Version } from "@/lib/secrets-api";
 import { Dialog } from "../agents/ui/dialog";
 import { ItemWhat } from "./requests";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, dangerButton, ErrorNote, errorText, field, ghost, LinkChip, primary, Reveal, stamp, useLoad, useMaskAgain } from "./ui";
+import { ActorMark, ago, button, dangerButton, ErrorNote, errorText, field, ghost, LinkChip, primary, Reveal, saveText, stamp, useLoad, useMaskAgain } from "./ui";
 import { ValueCompare, type Shown } from "./value-compare";
 
 export type Drawer = { kind: "changes" } | { kind: "change"; seq: number } | { kind: "versions"; key: string; type: SecretType };
@@ -135,6 +135,7 @@ function Changes({ env, onClose, onOpen }: { env: Environment; onClose: () => vo
 function ChangeView({ env, seq, onBack, onClose, onChanged }: { env: Environment; seq: number; onBack: () => void; onClose: () => void; onChanged: () => void }) {
   const { api } = useSecrets();
   const detail = useLoad(() => api.change(env.slug, seq), [api, env.slug, seq]);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
   const d = detail.data;
   return (
@@ -156,9 +157,19 @@ function ChangeView({ env, seq, onBack, onClose, onChanged }: { env: Environment
               ))}
             </ul>
             <p className="mt-2 text-[11px] text-subtle">Fingerprints show which values changed without revealing them.</p>
-            <button className={`${button} mt-4`} onClick={() => setConfirm(true)}>
-              <RotateCcw className="size-3.5" /> Roll back to #{seq}
-            </button>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button className={button} onClick={() => setConfirm(true)}>
+                <RotateCcw className="size-3.5" /> Roll back to #{seq}
+              </button>
+              <button
+                className={button}
+                title="This folder's own values as they were after this change, as a .env file (audited; references as written then)"
+                onClick={() => api.exportText(env.slug, "dotenv", d.path, seq).then((t) => saveText(`${env.slug}.at-${seq}.env`, t), (e) => setDownloadError(errorText(e)))}
+              >
+                <Download className="size-3.5" /> Values then
+              </button>
+            </div>
+            <ErrorNote error={downloadError} onDismiss={() => setDownloadError(null)} className="mt-2" />
           </>
         )}
       </div>

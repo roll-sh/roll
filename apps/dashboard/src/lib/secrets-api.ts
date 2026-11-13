@@ -132,7 +132,8 @@ export function secretsApi(project: string) {
 
     values: (env: string, path = "/", resolve = true) => req<Values>("GET", `${E(env)}/values${qs({ path, resolve: resolve ? undefined : "false" })}`),
     /** The environment's values as a file (`dotenv`, `json`, `shell`, `yaml`): text, not JSON. */
-    exportText: (env: string, format: ExportFormat, path = "/") => text(`${E(env)}/values${qs({ path, format })}`),
+    /** `seq`: the folder's own values as they were after that change (as written then). */
+    exportText: (env: string, format: ExportFormat, path = "/", seq?: number) => text(`${E(env)}/values${qs({ path, format, seq })}`),
 
     changes: (env: string, before?: number, limit?: number) => req<Change[]>("GET", `${E(env)}/changes${qs({ before, limit })}`),
     batch: (env: string, b: Batch) => req<Applied>("POST", `${E(env)}/changes`, b),

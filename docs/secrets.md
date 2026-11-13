@@ -229,6 +229,13 @@ new version of its secret, and a delete makes a tombstone version, so history is
   back.
 - **Snapshot.** `GET …/changes/{seq}` with `?state=1` lists every key as it was after that change
   (metadata and fingerprints).
+- **Values as they were.** `GET …/values?seq=` (or `?at=` a time) answers a folder's own values as
+  they were stored after that change, without rolling anything back: "what did production have
+  before the incident". They're as written then: a reference isn't resolved against the past, and
+  a live or dynamic link, which stores nothing, and a purged value come back as problems. It needs
+  `reveal`, is audited as an export ("as of change #N"), and takes `format=` like any export.
+  `roll secrets export --change N` (or `--at 2h`), and the history's "Values then" in the
+  dashboard.
 
 ### Purge and retention
 
@@ -1120,7 +1127,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=` | | `Values`, or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=&seq=&at=` | | `Values` (with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
@@ -1307,7 +1314,7 @@ Done and in PR #20:
 - leaked secrets don't land, plus scans of a repo's default branch and history, and `roll secrets
   scan [--staged]` before a commit;
 - required and typed keys; insights, rotation reminders and expiry dates for values that expire
-  outside roll; weak credentials; a protected environment's values that are also set in an unprotected one; read
+  outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
@@ -1333,10 +1340,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Values as they were**: `GET …/values?seq=` resolves an environment as it was after a change
-   (reveal, audited), for "what did production have before the incident"; `roll secrets export
-   --at`.
-2. **`roll secrets check .env.example`**: the keys a template names that the environment lacks (and
+1. **`roll secrets check .env.example`**: the keys a template names that the environment lacks (and
    the ones it has that the template doesn't), without reading a value, for CI and onboarding.
 
 Waiting on other pull requests:
