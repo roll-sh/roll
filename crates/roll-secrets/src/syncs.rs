@@ -442,12 +442,16 @@ impl Secrets {
         let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
         // A person's: as they are now, while their account can sign in.
         if crate::access::is_person(&r.info.created_by) {
-            let person = self.people.as_ref().and_then(|p| p.person(&r.info.created_by)).ok_or_else(gone)?;
-            let mut c = self.person_caller(&r.info.created_by, person.admin, person.code_owner)?;
+            let person = self.person(&r.info.created_by)?.ok_or_else(gone)?;
+            let mut c = self.person_caller(&r.info.created_by, person.admin)?;
             c.principal = principal;
             return Ok(c);
         }
         let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
+        // A token a person made (or a token's token): only while they still reach the project.
+        if !self.maker_reaches(&r.info.created_by, &r.project)? {
+            return Err(gone());
+        }
         let now = self.db.now_ms()?;
         let ours: bool = self.db.read(|c| c.query_row("SELECT 1 FROM tokens WHERE id = ? AND project_id = ?", [token, r.project.as_str()], |_| Ok(())).optional())?.is_some();
         // A roll-access grant: as it is now, or gone once revoked or expired.

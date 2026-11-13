@@ -518,7 +518,7 @@ Revoking a role ends
 its sessions and gives what it made (a migration's tables) to `roll` before dropping it, so revoking
 a credential never drops data.
 
-| `search` | `url`, `host`, `port`, `username` | an API key of its own, credential `key`: `api_key` (`Authorization: ApiKey …`; a dynamic one expires by itself 5 minutes after its lease) | no (never the cluster's password) |
+| `search` | `url`, `host`, `port`, `username` | an API key of its own with data access only (no keys or users; `"access": "data"`), credential `key`: `api_key` (`Authorization: ApiKey …`; a dynamic one expires by itself 5 minutes after its lease) | no (never the cluster's password) |
 
 `search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
@@ -1162,28 +1162,34 @@ tokens are to become roll-access's (Next).
 
 #### People (signed-in accounts)
 
-Someone signed in to roll (docs/accounts.md) manages the secrets of the workspace projects they own:
+Someone signed in to roll (docs/accounts.md) who isn't an admin manages the secrets of the
+workspace projects they own (an admin's session is the operator):
 rolld's gate lets a session through `/v1/secrets` (`Access::UserOrCredential`: a session, or a
 request carrying a credential secrets checks), with `X-Roll-CSRF` on writes. Their caller is
 `OwnProjects`: everything on their own projects as the workspace has them on this request, nothing
-on anyone else's, which answers 404 as the workspace does. Search, findings and `health --all`
-keep only their projects. An admin's session is everything. Either way the audit log names the
-person by user id (`usr_…`), and their personal overrides are theirs.
+on anyone else's, which answers 404 as the workspace does (sharing a folder with a project they
+can't see is refused the same way as with one that doesn't exist). Search, findings and
+`health --all` keep only their projects. The audit log names the person by user id (`usr_…`), and
+their personal overrides are theirs. The deployment key's state (`GET /v1/secrets/health`) is the
+operator's.
 
-What a person made acts later only while they can sign in: their tokens, their identities' logins
-and their syncs stop when their account is disabled (rolld asks roll-accounts on every use,
-`People`). A sync a person made pushes as them, as they are then.
+What a person made acts later only while they can sign in and still reach its project (an admin
+then, or its owner now): their tokens, any token one of those made, their identities' logins and
+their syncs. rolld asks roll-accounts on every use (`People`); a lookup that fails is an error, not
+a disabled account. A sync a person made pushes as them, as they are then.
 
-Anyone may put any resource on their own canvas, so on a person's project the canvas proves
-nothing about who owns what's on it:
+Anyone may put any resource on their own canvas, so a project reaches a resource only where the
+workspace trusts it to (`Workspace::trusts`, docs/workspace.md "What a canvas stands for"): the
+operator's and an admin's projects their whole canvas, a person's only repos under their own roll
+code owner (`ada/…`).
 
-- **Links, audit sinks and syncs to roll's products** (`members`) work only on the operator's
-  projects: a link reaches a resource's credentials as the operator. A person's project can link
+- **Links, audit sinks and syncs to roll's products** (`members`) take only what the project is
+  trusted for: a link reaches a resource's credentials as the operator. A person's project can link
   its own rotators. This lifts per product once each says who owns a resource.
-- **roll code** (checks, previews and sandboxes getting values, leak blockers, missing-key
-  notices) counts a person's project only for repositories under the person's own roll code owner
-  (`ada/…`): otherwise anyone could hand a stranger's previews their variables (say, a
-  `DATABASE_URL` pointing at their own server), or watch a stranger's landings for their values.
+- **roll code and roll previews** (checks, previews and sandboxes getting values, leak blockers,
+  missing-key notices) count a project only for repositories it's trusted for: otherwise anyone
+  could hand a stranger's previews their variables (say, a `DATABASE_URL` pointing at their own
+  server), or watch a stranger's landings for their values.
 
 ### Workload identities (OIDC)
 

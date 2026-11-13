@@ -83,6 +83,10 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
         let _ = project;
         true
     }
+    /// The operator itself: what's about the whole server (the deployment key) is only theirs.
+    fn everything(&self) -> bool {
+        false
+    }
 }
 
 /// A signed-in person who isn't an admin (docs/accounts.md): everything on the projects they own,
@@ -123,8 +127,8 @@ impl Grants for OwnProjects {
 /// People's accounts as they are now (docs/accounts.md; rolld asks roll-accounts). What a person
 /// made that acts later (a sync, a token, an identity) acts only while they can still sign in.
 pub trait People: Send + Sync {
-    /// `None` when the account is gone or disabled.
-    fn person(&self, user: &str) -> Option<Person>;
+    /// `None` when the account is gone or disabled; an error when it couldn't be looked up.
+    fn person(&self, user: &str) -> Result<Option<Person>, String>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +169,9 @@ pub struct Everything;
 
 impl Grants for Everything {
     fn allows(&self, _: Action, _: &Scope<'_>) -> bool {
+        true
+    }
+    fn everything(&self) -> bool {
         true
     }
     fn reads_code(&self, _: &str, _: &str) -> bool {

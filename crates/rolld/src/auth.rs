@@ -65,6 +65,8 @@ pub const RULES: &[Rule] = &[
     // (`rlst_…`) scoped to a project's environments and folders, checked on every request
     // (docs/secrets.md, "Access").
     Rule { route: "/v1/secrets", access: Access::UserOrCredential("a secrets token (rlst_…)") },
+    // The deployment key's state is about the whole server: never a person's session.
+    Rule { route: "/v1/secrets/health", access: Access::Credential("a secrets token (rlst_…); the operator's answer") },
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },

@@ -178,9 +178,12 @@ fn int(q: &HashMap<String, String>, k: &str) -> crate::Result<Option<i64>> {
     q.get(k).map(|v| v.parse().map_err(|_| Error::BadRequest(format!("{k} is a number")))).transpose()
 }
 
-/// The deployment key's state: any caller roll secrets knows (a wrong token is a 401, not the
-/// key's source).
-async fn health(State(s): S, Who(_): Who) -> crate::Result<Response> {
+/// The deployment key's state: the operator's (it's about the whole server, and opens every
+/// project's data key to count a rotation's progress).
+async fn health(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    if !c.grants.everything() {
+        return Err(Error::Forbidden("the deployment key's state is the operator's".into()));
+    }
     Ok(ok(blocking(s, |s| s.health()).await?))
 }
 

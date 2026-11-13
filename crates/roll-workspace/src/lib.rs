@@ -158,10 +158,19 @@ pub struct Resource {
 /// Called with a project's id after the project is deleted (roll secrets forgets its secrets).
 pub type OnDelete = Box<dyn Fn(&str) + Send + Sync>;
 
+/// Who owns a product's resource, as far as a person's project may stand for it: rolld answers
+/// from the products' own records (a repo under the person's roll code owner), and an admin's
+/// projects stand for anything. Looked up on every use; a failed lookup is a no.
+pub trait Owners: Send + Sync {
+    /// Whether `user`'s project (`usr_…`) may stand for `kind ref` on its canvas.
+    fn trusts(&self, user: &str, kind: Kind, r#ref: &str) -> bool;
+}
+
 /// The workspace store.
 pub struct Workspace {
     db: Db,
     on_delete: std::sync::RwLock<Vec<OnDelete>>,
+    owners: std::sync::OnceLock<std::sync::Arc<dyn Owners>>,
 }
 
 impl Workspace {
@@ -195,7 +204,7 @@ impl Workspace {
                  DROP TABLE projects_v1; DROP TABLE resources_v1;",
             ))
         })?;
-        Ok(Workspace { db, on_delete: Default::default() })
+        Ok(Workspace { db, on_delete: Default::default(), owners: Default::default() })
     }
 
     /// Every project `scope` sees, with its resources, oldest first.
@@ -293,6 +302,25 @@ impl Workspace {
             f(id);
         }
         Ok(())
+    }
+
+    /// Who owns what a person's canvas holds (set once, by rolld).
+    pub fn set_owners(&self, owners: std::sync::Arc<dyn Owners>) {
+        let _ = self.owners.set(owners);
+    }
+
+    /// Whether `project`'s canvas may stand for `kind ref`: what may act on the resource through the
+    /// project (its secrets reaching a repo's checks and previews, a link reaching a database's
+    /// credentials). Anyone may put any resource on their own canvas, so a person's project stands
+    /// only for what [`Owners`] says is theirs; the operator's projects stand for their canvas.
+    /// The one check every consumer asks: never decide this from canvas membership alone.
+    pub fn trusts(&self, project: &Project, kind: Kind, r#ref: &str) -> bool {
+        project.owner.is_empty() || self.owners.get().is_some_and(|o| o.trusts(&project.owner, kind, r#ref))
+    }
+
+    /// The ids of `owner`'s projects (a user's id), without their canvases.
+    pub fn ids_of(&self, owner: &str) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| c.query("SELECT id FROM projects WHERE owner = ? ORDER BY id", [owner], |r| r.get(0)))?)
     }
 
     /// Run `f` after each project is deleted, outside the transaction.

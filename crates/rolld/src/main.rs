@@ -532,10 +532,14 @@ async fn run() -> anyhow::Result<()> {
     // roll secrets: always on (secrets also take their scoped tokens). Its links call the
     // products' routes in process, through the copy taken below: every product's router merges
     // above this line, or its links 404.
+    // People's accounts: what a person made acts while they can sign in, and a person's canvas
+    // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
+    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) };
+    workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Grants from roll-access are looked up when a sync made by one pushes.
     let products_api = secrets::Api::default();
     let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
-    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) })?;
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), people)?;
     code_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {

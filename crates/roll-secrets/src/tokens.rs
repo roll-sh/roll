@@ -154,10 +154,7 @@ impl Secrets {
             // A person's grant acts as them (the evaluator puts their `SignedIn` beside it): never
             // past their own projects, whatever its rules name.
             let grants: Arc<dyn crate::access::Grants> = match parts.extensions.get::<roll_auth::SignedIn>().filter(|u| !u.admin) {
-                Some(u) => {
-                    let code_owner = self.people.as_ref().and_then(|p| p.person(&u.user)).and_then(|p| p.code_owner);
-                    Arc::new(crate::access::Within(grant, self.own_projects(&u.user, code_owner)?))
-                }
+                Some(u) => Arc::new(crate::access::Within(grant, self.own_projects(&u.user)?)),
                 None => Arc::new(grant),
             };
             return Ok(Caller { principal: format!("token:{}", g.id), grants, ip });
@@ -167,11 +164,10 @@ impl Secrets {
             caller.ip = ip;
             return Ok(caller);
         }
-        // A signed-in person (the gate resolved the session on this request): their own projects,
-        // or everything for an admin. Named by their user id in the audit log.
-        if let Some(u) = parts.extensions.get::<roll_auth::SignedIn>() {
-            let code_owner = self.people.as_ref().and_then(|p| p.person(&u.user)).and_then(|p| p.code_owner);
-            let mut caller = self.person_caller(&u.user, u.admin, code_owner)?;
+        // A signed-in person (the gate resolved the session on this request): their own projects.
+        // An admin's session is the operator, as their token would be.
+        if let Some(u) = parts.extensions.get::<roll_auth::SignedIn>().filter(|u| !u.admin) {
+            let mut caller = self.person_caller(&u.user, false)?;
             caller.ip = ip;
             return Ok(caller);
         }
@@ -192,35 +188,61 @@ impl Secrets {
         if self.trust_forwarded_for { forwarded().or_else(peer) } else { peer() }
     }
 
-    /// A person as a caller: an admin is everything; anyone else, the projects they own as the
-    /// workspace has them now.
-    pub(crate) fn person_caller(&self, user: &str, admin: bool, code_owner: Option<String>) -> Result<Caller> {
-        let grants: Arc<dyn crate::access::Grants> = if admin { Arc::new(crate::access::Everything) } else { Arc::new(self.own_projects(user, code_owner)?) };
-        Ok(Caller { principal: user.to_string(), grants, ip: None })
+    /// A person as a caller: an admin is the operator; anyone else, the projects they own as the
+    /// workspace has them now, named by their user id.
+    pub(crate) fn person_caller(&self, user: &str, admin: bool) -> Result<Caller> {
+        if admin {
+            return Ok(Caller::operator());
+        }
+        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None })
     }
 
-    /// The projects `user` owns, as the workspace has them now.
-    fn own_projects(&self, user: &str, code_owner: Option<String>) -> Result<crate::access::OwnProjects> {
-        let projects = self.workspace.list(roll_workspace::Scope::Owner(user)).map_err(|e| Error::Internal(e.to_string()))?.into_iter().map(|p| p.id).collect();
-        Ok(crate::access::OwnProjects { projects, code_owner })
+    /// The projects `user` owns, as the workspace has them now, and their roll code owner.
+    fn own_projects(&self, user: &str) -> Result<crate::access::OwnProjects> {
+        let projects = self.workspace.ids_of(user).map_err(|e| Error::Internal(e.to_string()))?.into_iter().collect();
+        Ok(crate::access::OwnProjects { projects, code_owner: self.person(user)?.and_then(|p| p.code_owner) })
+    }
+
+    /// `user`'s account as it is now: `None` once it's gone or disabled (or nothing tells).
+    pub(crate) fn person(&self, user: &str) -> Result<Option<crate::access::Person>> {
+        match &self.people {
+            Some(p) => p.person(user).map_err(|e| Error::Internal(format!("looking up a person's account: {e}"))),
+            None => Ok(None),
+        }
     }
 
     /// Whether `project`'s secrets may reach repository `repo` (`owner/name`) through roll code
-    /// (its checks and previews, leak blockers, missing-key notices): any repository on an
-    /// operator's project, only the person's own on a person's (anyone may put any repository on
-    /// their own canvas).
+    /// (its checks and previews, leak blockers, missing-key notices): the workspace's one rule
+    /// ([`roll_workspace::Workspace::trusts`]).
     pub fn counts_for_repo(&self, project: &str, repo: &str) -> bool {
-        let Ok(p) = self.workspace.get(roll_workspace::Scope::All, project) else { return false };
-        if p.owner.is_empty() {
-            return true;
-        }
-        let person = self.people.as_ref().and_then(|people| people.person(&p.owner));
-        crate::access::OwnProjects::owns_repo(person.and_then(|p| p.code_owner).as_deref(), repo)
+        self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| self.workspace.trusts(&p, roll_workspace::Kind::Repo, repo))
     }
 
-    /// Whether what `by` made may still act: a person's only while their account can sign in.
-    pub(crate) fn maker_active(&self, by: &str) -> bool {
-        !crate::access::is_person(by) || self.people.as_ref().is_some_and(|p| p.person(by).is_some())
+    /// Whether what `by` made (a token, an identity, a sync) may still act on `project`: walked
+    /// back to whoever made the first link of the chain. A person must still be able to sign in
+    /// and still reach the project (an admin then, or its owner now); the operator and
+    /// roll-access's grants (roll-access answers for those) always.
+    pub(crate) fn maker_reaches(&self, by: &str, project: &str) -> Result<bool> {
+        let mut by = by.to_string();
+        for _ in 0..16 {
+            if crate::access::is_person(&by) {
+                let Some(p) = self.person(&by)? else { return Ok(false) };
+                return Ok(p.admin || self.workspace.ids_of(&by).map_err(|e| Error::Internal(e.to_string()))?.iter().any(|x| x == project));
+            }
+            let parent: Option<String> = if let Some(t) = by.strip_prefix("token:") {
+                let found = self.db.read(|c| c.query_row("SELECT created_by FROM tokens WHERE id = ?", [t], |r| r.get::<_, String>(0)).optional())?;
+                // Not one of ours: a roll-access grant, which roll-access answers for.
+                let Some(parent) = found else { return Ok(true) };
+                Some(parent)
+            } else if let Some(i) = by.strip_prefix("identity:") {
+                self.db.read(|c| c.query_row("SELECT created_by FROM identities WHERE id = ?", [i], |r| r.get::<_, String>(0)).optional())?
+            } else {
+                return Ok(true);
+            };
+            let Some(parent) = parent else { return Ok(false) };
+            by = parent;
+        }
+        Ok(false)
     }
 
     fn token_caller(&self, token: &str, ip: Option<&str>) -> Result<Caller> {
@@ -235,8 +257,8 @@ impl Secrets {
         if t.expires_at.is_some_and(|at| at <= now) {
             return Err(Error::Unauthorized("this secrets token expired".into()));
         }
-        if !self.maker_active(&t.created_by) {
-            return Err(Error::Unauthorized("the person who made this secrets token can't sign in any more".into()));
+        if !self.maker_reaches(&t.created_by, &project)? {
+            return Err(Error::Unauthorized("whoever made this secrets token can't sign in any more, or can't reach its project".into()));
         }
         if let Some(list) = &t.allowed_ips
             && !ip_allowed(list, ip)

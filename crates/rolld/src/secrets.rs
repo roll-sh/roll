@@ -557,7 +557,9 @@ impl LinkProvider for Search {
         }
     }
     fn issue(&self, r#ref: &str, _: &str, _: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
-        let mut body = json!({ "name": label.chars().take(64).collect::<String>() });
+        // Data access only (indices, templates, pipelines, lifecycle): a leaked app key can't make
+        // more keys or users. Builds of roll search before `access` ignore it.
+        let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": "data" });
         // A dynamic key expires by itself a little after its lease, should a revoke fail.
         if let Some(m) = ttl {
             body["expires_in_s"] = json!((m + 5) * 60);
@@ -599,19 +601,37 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
     }
 }
 
-/// People's accounts for roll secrets (docs/accounts.md): whether a person can still sign in, and
-/// their roll code owner's name. Looked up on every use.
+/// People's accounts for roll secrets and the workspace (docs/accounts.md): whether a person can
+/// still sign in, their roll code owner's name, and what of a canvas is theirs. Looked up on every
+/// use.
+#[derive(Clone)]
 pub struct People {
     pub accounts: Arc<roll_accounts::Accounts>,
     pub code: Option<Arc<code_control::Code>>,
 }
 
 impl roll_secrets::People for People {
-    fn person(&self, user: &str) -> Option<roll_secrets::Person> {
-        let u = self.accounts.user(user).ok().filter(|u| !u.disabled)?;
-        let owner_id = self.accounts.code_owner_id(user).ok().flatten();
-        let code_owner = owner_id.and_then(|id| self.code.as_ref()?.db.owner_by_id(&id).ok().flatten()).map(|o| o.name);
-        Some(roll_secrets::Person { admin: u.admin, code_owner })
+    fn person(&self, user: &str) -> Result<Option<roll_secrets::Person>, String> {
+        let u = match self.accounts.user(user) {
+            Ok(u) if !u.disabled => u,
+            Ok(_) | Err(roll_accounts::Error::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        let owner_id = self.accounts.code_owner_id(user).map_err(|e| e.to_string())?;
+        let code_owner = match (owner_id, &self.code) {
+            (Some(id), Some(code)) => code.db.owner_by_id(&id).map_err(|e| e.to_string())?.map(|o| o.name),
+            _ => None,
+        };
+        Ok(Some(roll_secrets::Person { admin: u.admin, code_owner }))
+    }
+}
+
+/// What of a person's canvas is theirs: everything for an admin; a repo under their roll code
+/// owner; nothing else until each product says who owns its resources. A failed lookup is a no.
+impl roll_workspace::Owners for People {
+    fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
+        p.admin || (kind == roll_workspace::Kind::Repo && roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref))
     }
 }
 

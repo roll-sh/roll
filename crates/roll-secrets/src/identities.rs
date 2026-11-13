@@ -233,7 +233,7 @@ impl Secrets {
         let deliver = self.deliver.clone().ok_or_else(|| Error::NotFound("workload identities aren't on this server".into()))?;
         let found = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [identity], identity_row).optional())?;
         let (i, project) = found.ok_or_else(denied)?;
-        if !self.maker_active(&i.created_by) {
+        if !self.maker_reaches(&i.created_by, &project)? {
             return Err(denied());
         }
         if let Some(list) = &i.allowed_ips

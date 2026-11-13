@@ -153,15 +153,29 @@ fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
-/// People's accounts: `ada` until disabled.
+/// People's accounts: `ada` until disabled, and `root`, an admin.
 #[derive(Default)]
 struct People {
     disabled: std::sync::Mutex<bool>,
 }
 
 impl roll_secrets::People for People {
-    fn person(&self, user: &str) -> Option<roll_secrets::Person> {
-        (user == "usr_ada" && !*self.disabled.lock().unwrap()).then(|| roll_secrets::Person { admin: false, code_owner: Some("ada".into()) })
+    fn person(&self, user: &str) -> Result<Option<roll_secrets::Person>, String> {
+        Ok(match user {
+            "usr_ada" if !*self.disabled.lock().unwrap() => Some(roll_secrets::Person { admin: false, code_owner: Some("ada".into()) }),
+            "usr_root" => Some(roll_secrets::Person { admin: true, code_owner: None }),
+            _ => None,
+        })
+    }
+}
+
+/// As rolld answers: an admin's canvas stands for anything, a person's for their own repos.
+impl roll_workspace::Owners for People {
+    fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        match roll_secrets::People::person(self, user) {
+            Ok(Some(p)) => p.admin || (kind == roll_workspace::Kind::Repo && r#ref.starts_with(&format!("{}/", p.code_owner.unwrap_or_default()))),
+            _ => false,
+        }
     }
 }
 
@@ -191,6 +205,7 @@ impl Api {
         syncs.register(sync.clone());
         let sent = Arc::new(Sent::default());
         let people = Arc::new(People::default());
+        ws.set_owners(people.clone());
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone()));
@@ -215,8 +230,15 @@ impl Api {
 
     /// As `usr_ada`, signed in and not an admin (the gate put her session on the request).
     async fn as_ada(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.signed_in("ada", false, method, path, body).await
+    }
+
+    async fn signed_in(&self, handle: &str, admin: bool, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
-        req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_ada".into() });
+        req.extensions_mut().insert(roll_auth::SignedIn { user: format!("usr_{handle}"), handle: handle.into(), admin, code_owner: None, session: format!("ses_{handle}") });
+        if admin {
+            req.extensions_mut().insert(roll_auth::Operator);
+        }
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1072,12 +1094,24 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
         req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_ada".into() });
         assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), want, "{project}");
     }
-    // A token she made works while her account can sign in.
-    let (_, t) = api.as_ada(Method::POST, &at(&mine, "/tokens"), Some(json!({ "name": "ci", "actions": ["read"] }))).await;
+    // An admin's project is a whole canvas, though made through a session.
+    let (_, theirs) = api.signed_in("root", true, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "root-shop" }))).await;
+    let theirs = theirs["id"].as_str().unwrap().to_string();
+    api.signed_in("root", true, Method::PUT, &format!("/v1/workspace/projects/{theirs}/resources/bucket/archive"), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (s, e) = api.signed_in("root", true, Method::POST, &at(&theirs, "/audit/sinks"), Some(json!({ "url": "bucket:archive" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
+    // A token she made, and a token that token made, work while her account can sign in.
+    let (_, t) = api.as_ada(Method::POST, &at(&mine, "/tokens"), Some(json!({ "name": "ci", "actions": ["read", "admin"] }))).await;
     let token = t["token"].as_str().expect("a token").to_string();
-    assert_eq!(api.req(Method::GET, &at(&mine, "/environments"), None, Some(&token)).await.0, StatusCode::OK);
+    let (_, child) = api.req(Method::POST, &at(&mine, "/tokens"), Some(json!({ "name": "child", "actions": ["read"] })), Some(&token)).await;
+    let child = child["token"].as_str().expect("a child token").to_string();
+    for t in [&token, &child] {
+        assert_eq!(api.req(Method::GET, &at(&mine, "/environments"), None, Some(t)).await.0, StatusCode::OK);
+    }
     *api.people.disabled.lock().unwrap() = true;
-    assert_eq!(api.req(Method::GET, &at(&mine, "/environments"), None, Some(&token)).await.0, StatusCode::UNAUTHORIZED);
+    for t in [&token, &child] {
+        assert_eq!(api.req(Method::GET, &at(&mine, "/environments"), None, Some(t)).await.0, StatusCode::UNAUTHORIZED);
+    }
 }
 
 #[tokio::test]

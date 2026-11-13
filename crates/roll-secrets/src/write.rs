@@ -573,22 +573,21 @@ impl Secrets {
     /// its own rotators, checked on every write, read, issue, rotation and delivery (a resource
     /// can move to another project).
     ///
-    /// A person's project (docs/accounts.md) has only its rotators: anyone may put any resource
-    /// on their own canvas, and a link reaches a resource as the operator, so a person's canvas
-    /// proves nothing about what's on it until products say who owns each resource.
+    /// A person's project (docs/accounts.md) has only what the workspace trusts it for
+    /// ([`roll_workspace::Workspace::trusts`]) and its rotators: anyone may put any resource on
+    /// their own canvas, and a link reaches a resource as the operator.
     pub(crate) fn members(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
         let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
-        let canvas = if p.owner.is_empty() { p.resources } else { Vec::new() };
-        let mut out: BTreeSet<(String, String)> = canvas.into_iter().map(|r| (r.kind.as_str().to_string(), r.r#ref)).collect();
+        let mut out: BTreeSet<(String, String)> = p.resources.iter().filter(|r| self.workspace.trusts(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect();
         out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
         Ok(out)
     }
 
     /// Why `kind ref` isn't something `project` may reach.
     pub(crate) fn not_linkable(&self, project: &str, kind: &str, r#ref: &str) -> String {
-        let personal = self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty());
-        if personal && kind != crate::rotators::KIND {
-            format!("{kind} {ref}: links, sinks and syncs to roll's products work on the operator's projects for now (a person's canvas doesn't prove who owns what's on it); a rotator works here", ref = r#ref)
+        let personal = self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.resources.iter().any(|r| r.kind.as_str() == kind && r.r#ref == r#ref));
+        if personal {
+            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (a rotator works anywhere)", ref = r#ref)
         } else {
             format!("{kind} {ref} isn't in this project", ref = r#ref)
         }

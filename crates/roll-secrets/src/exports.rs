@@ -86,6 +86,10 @@ impl Secrets {
             if p == project {
                 return Err(Error::BadRequest("a folder is shared with other projects (its own environments import it directly)".into()));
             }
+            // A project the caller can't see is as missing as one that doesn't exist.
+            if !caller.grants.sees(p) {
+                return Err(Error::BadRequest(format!("no project {p}")));
+            }
             self.workspace.get(roll_workspace::Scope::All, p).map_err(|_| Error::BadRequest(format!("no project {p}")))?;
         }
         self.project(project)?;

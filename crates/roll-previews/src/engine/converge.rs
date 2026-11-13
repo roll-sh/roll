@@ -299,7 +299,8 @@ impl Engine {
         // 4. Services: the change's repo at its head, every other repo at its default head.
         // From roll apps' catalog when the project has services there, else the repos'
         // `roll.toml`.
-        let repos: Vec<String> = project.resources.iter().filter(|x| x.kind == roll_workspace::Kind::Repo).map(|x| x.r#ref.clone()).collect();
+        // Only repos the project stands for (`Workspace::trusts`): they run with its secrets.
+        let repos: Vec<String> = project.resources.iter().filter(|x| x.kind == roll_workspace::Kind::Repo && self.workspace.trusts(&project, x.kind, &x.r#ref)).map(|x| x.r#ref.clone()).collect();
         // (spec, repo, revision, whether roll apps runs it)
         let mut wanted: Vec<(ServiceSpec, String, String, bool)> = Vec::new();
         let head_of = |repo: String| async move {
