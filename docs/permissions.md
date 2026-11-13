@@ -470,11 +470,17 @@ type AuditEvent = {
   so a large prune never holds the database's write lock) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
 
-Each node writes its audit rows through one writer, which takes what's queued and writes it in one
-transaction (`Store::queue_audit`): a write per request, serialized, held a token's requests to
-~9k a second on one node; batched, ~110k (`gate_latency`, release, 32 callers), every row kept. A
-full queue (16,384 rows) has the request write its own row: nothing is dropped. As before, these
-writes aren't synced: a crash can lose the last moment's rows.
+Each node writes its audit rows through one writer, which takes what's queued (up to 512 rows)
+and writes it in one statement (`Store::queue_audit`): a write per request, serialized, held a
+token's requests to ~9k a second on one node; batched, ~110k (`gate_latency`, release, 32
+callers), every row kept.
+
+- A full queue (4,096 rows, which drain well inside sinks' 30-second settling time, so no row lands
+  behind a sink's cursor) has the request write its own row: nothing is dropped.
+- A batch that fails is written row by row, so one bad row loses only itself; a NUL (a path's
+  `%00`) is dropped from text, since Postgres refuses it.
+- At shutdown, rolld waits (up to 5 seconds) for the queue to be written. As before, these writes
+  aren't synced: a crash can lose the last moment's rows.
 
 ### Audit sinks
 
@@ -570,14 +576,25 @@ writes a policy from activity:
 A token used from a network it hasn't been used from before is told where approvals go (GitHub
 and Google mail a sign-in from somewhere new): a leaked token is used from somewhere new.
 
-- A network is an address's /24 (IPv4) or /48 (IPv6), so one office or one pool of runners is one.
+- A network is an address's /24 (IPv4) or /48 (IPv6), so one office or one pool of runners is one;
+  an IPv4 client on a dual-stack listener (`::ffff:a.b.c.d`) is its IPv4 network.
 - Its first network is where it starts, and isn't news. Once a token has been used from five
   (`ROAMING`: CI runners, phones), it roams; the message about the fifth says that's the last.
 - Each node writes a token's use at most once a minute per network, so a new network is seen on its
-  first request. The token's page lists its networks with when each was first and last seen
-  (`GET /v1/access/tokens/{id}/networks`).
+  first request, and the row that's inserted decides what's new (two nodes tell one new network
+  once). The token's page lists its networks with when each was first and last seen
+  (`GET /v1/access/tokens/{id}/networks`); one unused for the log's days is forgotten.
+- Names in these messages, and in the daily expiry list, are plain text: markup a person or an
+  OAuth client put in a name (Slack's `<!channel>`, Discord's `[label](url)`) is dropped, and Slack
+  text is escaped.
 
 ## Leaked tokens
+
+Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
+(`rlh_`, the secret in a hook's URL) are in `SECRET_PREFIXES`, and a product registers how to
+revoke its own with `Access::on_leaked` (rolld wires apps' when apps is in). The audit log has each
+revocation.
+
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
 it's found, as GitHub does for its own tokens:

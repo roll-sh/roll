@@ -86,9 +86,16 @@ describe("toolsets", () => {
 });
 
 describe("approving together", () => {
-  it("groups a token's waiting reads and writes, never what's risky or has a body to review", () => {
-    const a = (id: string, grant: string, action: string, args: unknown = null) => ({ id, grant_id: grant, grant_name: grant, action, args }) as Approval;
-    const groups = approvableTogether([a("1", "cursor", "read"), a("2", "cursor", "write"), a("3", "cursor", "delete"), a("4", "cursor", "write", { sql: "x" }), a("5", "ci", "read")]);
+  it("groups a token's waiting reads and writes, never what's risky, in production or has a body to review", () => {
+    const a = (id: string, grant: string, action: string, args: unknown = null, environment?: string) => ({ id, grant_id: grant, grant_name: grant, action, args, environment }) as Approval;
+    const groups = approvableTogether([
+      a("1", "cursor", "read"),
+      a("2", "cursor", "write"),
+      a("3", "cursor", "delete"),
+      a("4", "cursor", "write", { sql: "x" }),
+      a("5", "ci", "read"),
+      a("6", "cursor", "write", null, "production"),
+    ]);
     expect(groups).toEqual([{ grant_id: "cursor", grant_name: "cursor", ids: ["1", "2"] }]);
   });
 });
