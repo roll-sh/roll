@@ -420,7 +420,9 @@ anyone else gets a 403 that doesn't name it (that would tell a caller who can't 
 the repository is there). In the
 dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
 made in the browser) and an expired or expiring key's new date, each one change, or a change
-request where the environment is protected. The Health tab and the sidebar's Secrets entry carry
+request where the environment is protected. "New values for all N in Staging" does every weak key
+of one environment at once: one change (or one change request) with a random value for each. The
+Health tab and the sidebar's Secrets entry carry
 the count of findings to fix now (expired, missing, exposed), and Home lists them across every
 project (`GET /v1/secrets/findings`, `roll secrets health --all`).
 
@@ -1497,9 +1499,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Fix every weak key at once**: Health's Weak section gets "New values for all" per environment,
-   one change (or one change request where protected) with a random value for each.
-2. **Key owners**: a key's optional owner (a person or team to ask), shown in health findings and
+1. **Key owners**: a key's optional owner (a person or team to ask), shown in health findings and
    the daily notice, so whoever fixes it knows who decides.
 
 Waiting on other pull requests:
