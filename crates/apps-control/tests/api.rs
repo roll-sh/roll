@@ -82,6 +82,29 @@ impl Sources for FakeCode {
     }
 }
 
+/// A certificate provider that records what it was told (Cloudflare for SaaS's shape: it says
+/// where a certificate is when asked).
+#[derive(Default)]
+struct FakeTls {
+    calls: Mutex<Vec<String>>,
+    issued: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl apps_control::integrations::DomainTls for FakeTls {
+    async fn ensure(&self, host: &str) -> anyhow::Result<Option<(apps_control::model::TlsStatus, Option<String>)>> {
+        self.calls.lock().push(format!("ensure {host}"));
+        Ok(Some(match self.issued.lock().iter().any(|h| h == host) {
+            true => (apps_control::model::TlsStatus::Issued, None),
+            false => (apps_control::model::TlsStatus::Pending, Some("waiting for HTTP validation".into())),
+        }))
+    }
+    async fn remove(&self, host: &str) -> anyhow::Result<()> {
+        self.calls.lock().push(format!("remove {host}"));
+        Ok(())
+    }
+}
+
 struct World {
     apps: Arc<Apps>,
     api: axum::Router,
@@ -89,6 +112,7 @@ struct World {
     fake: Arc<Fake>,
     code: Arc<FakeCode>,
     dns: Arc<StaticDns>,
+    tls: Arc<FakeTls>,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -104,6 +128,7 @@ async fn world() -> World {
     let code = Arc::new(FakeCode::default());
     code.push("a1a1a1a1a1a1", "first", &[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http')")]);
     let dns = Arc::new(StaticDns::default());
+    let tls = Arc::new(FakeTls::default());
     let mut cfg = AppsConfig::new(dir.path().to_path_buf());
     cfg.live.worker_grace = Duration::from_millis(20);
     cfg.live.probe_every = Duration::from_millis(2);
@@ -115,13 +140,14 @@ async fn world() -> World {
         secrets: Arc::new(NoSecrets),
         resources: Arc::new(NoResources),
         resolver: dns.clone(),
+        tls: tls.clone(),
         objects: None,
         cluster,
         workspace: Some(ws),
     };
     let apps = Apps::new(cfg, store, deps);
     apps.start();
-    World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, code, dns, project, _dir: dir }
+    World { api: apps_control::api::router(apps.clone()), public: apps_control::public::router(apps.clone()), apps, fake, code, dns, tls, project, _dir: dir }
 }
 
 async fn call(r: &axum::Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -412,6 +438,45 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     let (_, v) = call(&w.api, "POST", &format!("{base}/www.example.com/verify"), None).await;
     assert_eq!(v["status"], "active", "{v}");
     assert_eq!(visit(&w, "www.example.com", "/x").await.0, StatusCode::OK);
+    // The certificate: the provider heard of the hostname only once it was accepted (never the
+    // refused one), and verifying reads where its certificate is.
+    assert_eq!((d["tls"].as_str(), d["tls_error"].as_str()), (Some("pending"), Some("waiting for HTTP validation")), "{d}");
+    w.tls.issued.lock().push("www.example.com".into());
+    let (_, v) = call(&w.api, "POST", &format!("{base}/www.example.com/verify"), None).await;
+    assert_eq!((v["tls"].as_str(), &v["tls_error"]), (Some("issued"), &Value::Null), "{v}");
+    assert!(w.tls.calls.lock().iter().all(|c| c.ends_with(" www.example.com")), "{:?}", w.tls.calls.lock());
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/www.example.com"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
+}
+
+/// A claim nobody verifies expires (the hostname is free again, and gone from the certificate's
+/// provider); a verified one stays; a removed environment drops its claims.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unverified_domain_claims_expire_and_removed_environments_drop_theirs() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production/domains");
+    for h in ["squat.example.com", "mine.example.com"] {
+        assert_eq!(call(&w.api, "POST", &base, Some(json!({ "hostname": h }))).await.0, StatusCode::CREATED);
+    }
+    let (_, d) = call(&w.api, "GET", &base, None).await;
+    w.dns.add("mine.example.com", "CNAME", d[1]["target"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{base}/mine.example.com/verify"), None).await.1["status"], "active");
+    assert!(w.apps.expire_domain_claims(apps_control::PENDING_CLAIM_TTL).await.unwrap().is_empty(), "nothing is a week old");
+    assert_eq!(w.apps.expire_domain_claims(Duration::ZERO).await.unwrap(), ["squat.example.com"]);
+    let (_, d) = call(&w.api, "GET", &base, None).await;
+    let hosts: Vec<&str> = d.as_array().unwrap().iter().filter(|d| d["kind"] == "custom").map(|d| d["hostname"].as_str().unwrap()).collect();
+    assert_eq!(hosts, ["mine.example.com"]);
+    assert!(w.tls.calls.lock().contains(&"remove squat.example.com".to_string()));
+
+    // Another environment with a domain, removed: the claim goes with it.
+    let staging = format!("/v1/apps/services/{id}/environments/staging");
+    assert_eq!(call(&w.api, "PUT", &staging, Some(json!({}))).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "POST", &format!("{staging}/domains"), Some(json!({"hostname": "staging.example.com"}))).await.0, StatusCode::CREATED);
+    assert_eq!(call(&w.api, "DELETE", &staging, None).await.0, StatusCode::NO_CONTENT);
+    assert!(w.tls.calls.lock().contains(&"remove staging.example.com".to_string()));
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"hostname": "staging.example.com"}))).await.0, StatusCode::CREATED, "the hostname is free again");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

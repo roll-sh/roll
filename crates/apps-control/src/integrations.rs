@@ -1,8 +1,9 @@
 //! What roll apps needs from the rest of roll, each behind a trait rolld implements
 //! (`crates/rolld/src/apps.rs`): source trees from roll code, project secrets from roll secrets,
-//! connection variables from the data products, and DNS answers for custom domains.
+//! connection variables from the data products, and DNS answers and certificates for custom
+//! domains.
 
-use crate::model::LinkKind;
+use crate::model::{LinkKind, TlsStatus};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -90,6 +91,44 @@ impl Resources for NoResources {
         anyhow::bail!("roll {} isn't on this node", kind.as_str())
     }
 }
+
+/// Certificates for custom domains (docs/apps/README.md, "Networking"), one of three by
+/// configuration: none ([`NoTls`]: `tls` is `none`), the edge's own over ACME HTTP-01 on a node
+/// alone ([`EdgeTls`]: the edge reads the active domains and reports back through
+/// `Apps::set_domain_tls`), or Cloudflare for SaaS custom hostnames on the fleet (adapted in
+/// rolld). Only hostnames roll apps has accepted and stored reach it.
+#[async_trait]
+pub trait DomainTls: Send + Sync {
+    /// Whether custom domains get certificates here at all.
+    fn issues(&self) -> bool {
+        true
+    }
+    /// Make sure the provider knows `host` (creating it there if it doesn't), and say where its
+    /// certificate is: `None` when the issuer reports that itself.
+    async fn ensure(&self, _host: &str) -> anyhow::Result<Option<(TlsStatus, Option<String>)>> {
+        Ok(None)
+    }
+    /// `host` is no longer a domain here.
+    async fn remove(&self, _host: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// No certificates for custom domains (a node without the edge, serving plain HTTP).
+pub struct NoTls;
+
+#[async_trait]
+impl DomainTls for NoTls {
+    fn issues(&self) -> bool {
+        false
+    }
+}
+
+/// The edge issues and reports: it follows the active domains on its own.
+pub struct EdgeTls;
+
+#[async_trait]
+impl DomainTls for EdgeTls {}
 
 /// DNS lookups for verifying custom domains.
 #[async_trait]

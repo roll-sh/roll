@@ -71,6 +71,7 @@ async fn docker_world() -> Option<World> {
         secrets: Arc::new(NoSecrets),
         resources: Arc::new(NoResources),
         resolver: Arc::new(StaticDns::default()),
+        tls: Arc::new(apps_control::integrations::NoTls),
         objects: None,
         cluster,
         workspace: Some(ws),

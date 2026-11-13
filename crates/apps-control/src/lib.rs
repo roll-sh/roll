@@ -27,7 +27,7 @@ pub mod runtime;
 pub mod shell;
 pub mod store;
 
-use integrations::{Resolver, Resources, SecretSource, Sources};
+use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
 use live::{EnvLive, LiveConfig};
 use logs::{LogHub, Stream};
 use metrics::Prices;
@@ -67,6 +67,9 @@ impl From<anyhow::Error> for Error {
         Error::Internal(e.to_string())
     }
 }
+
+/// How long a custom domain may wait for its DNS before the claim is dropped.
+pub const PENDING_CLAIM_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// The ownership key of a service.
 pub fn lease_key(service: &str) -> String {
@@ -123,6 +126,8 @@ pub struct Deps {
     pub secrets: Arc<dyn SecretSource>,
     pub resources: Arc<dyn Resources>,
     pub resolver: Arc<dyn Resolver>,
+    /// Custom domains' certificates.
+    pub tls: Arc<dyn DomainTls>,
     pub objects: Option<pg_storage::Objects>,
     pub cluster: Arc<roll_cluster::Cluster>,
     pub workspace: Option<Arc<roll_workspace::Workspace>>,
@@ -462,7 +467,10 @@ impl Apps {
             self.logs.delete(&format!("build:{}", d.id)).await;
         }
         let sid = id.to_string();
+        let domains = self.db(move |s| s.custom_domains_of(&sid, None)).await?;
+        let sid = id.to_string();
         self.db(move |s| s.delete_service(&sid)).await?;
+        self.release_domains(&domains).await;
         if let Some(ws) = self.deps.workspace.clone() {
             let sid = id.to_string();
             let _ = tokio::task::spawn_blocking(move || {
@@ -581,7 +589,10 @@ impl Apps {
         // The row goes first: from here no request finds the environment, so nothing makes its
         // live state (or a container, or the volume) again behind the teardown.
         let (sid, e) = (service.to_string(), env.to_string());
+        let domains = self.db(move |s| s.custom_domains_of(&sid, Some(&e))).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
+        self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.access.lock().remove(&env_key(service, env));
         self.deps.runtime.remove_volume(&volume_name(service, env)).await;
@@ -825,6 +836,9 @@ impl Apps {
             target: String::new(),
             token: String::new(),
             error: None,
+            // The edge's wildcard covers it.
+            tls: if self.cfg.scheme == "https" { TlsStatus::Issued } else { TlsStatus::None },
+            tls_error: None,
             created_at: row.created_at,
         };
         Ok(std::iter::once(own).chain(custom).collect())
@@ -837,14 +851,48 @@ impl Apps {
         let host = check_hostname(host, &reserved)?;
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        let tls = if self.deps.tls.issues() { TlsStatus::Pending } else { TlsStatus::None };
         let (sid, e, h) = (service.to_string(), env.to_string(), host.clone());
-        let mut d = self.db(move |s| s.add_domain(&sid, &e, &h)).await?;
+        let mut d = self.db(move |s| s.add_domain(&sid, &e, &h, tls)).await?;
+        // Only now, accepted and claimed, does the hostname go to the certificate's provider.
+        if let Some((tls, tls_error)) = self.refresh_tls(&host).await {
+            (d.tls, d.tls_error) = (tls, tls_error);
+        }
         d.target = self.target(&row.slug);
         d.record = record_for(&d.hostname);
         Ok(d)
     }
 
-    /// Check a custom domain's DNS now: a CNAME to its target, or the TXT challenge.
+    /// Ask the certificate's provider where a custom domain's certificate is, and keep the answer.
+    /// `None`: the provider doesn't say (the edge reports on its own) or nothing issues.
+    async fn refresh_tls(self: &Arc<Self>, host: &str) -> Option<(TlsStatus, Option<String>)> {
+        if !self.deps.tls.issues() {
+            return None;
+        }
+        let (tls, error) = match self.deps.tls.ensure(host).await {
+            Ok(Some(state)) => state,
+            Ok(None) => return None,
+            // The provider didn't answer: still pending, saying why; checked again later.
+            Err(e) => (TlsStatus::Pending, Some(format!("{e:#}"))),
+        };
+        let (h, err) = (host.to_string(), error.clone());
+        self.db(move |s| s.set_domain_tls(&h, tls, err.as_deref())).await.ok()?;
+        Some((tls, error))
+    }
+
+    /// A custom domain's certificate state, from whatever issues it (the edge's reports).
+    pub async fn set_domain_tls(self: &Arc<Self>, host: &str, tls: TlsStatus, error: Option<String>) -> Result<bool> {
+        let h = host.to_ascii_lowercase();
+        self.db(move |s| s.set_domain_tls(&h, tls, error.as_deref())).await
+    }
+
+    /// Every active custom domain's hostname (what the edge holds certificates for).
+    pub async fn active_custom_domains(self: &Arc<Self>) -> Result<Vec<String>> {
+        self.db(|s| s.active_custom_domains()).await
+    }
+
+    /// Check a custom domain's DNS now (a CNAME to its target, or the TXT challenge), and where
+    /// its certificate is.
     pub async fn verify_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<Domain> {
         let h = host.to_ascii_lowercase();
         let (sid, e) = (service.to_string(), env.to_string());
@@ -853,10 +901,9 @@ impl Apps {
             let h = h.clone();
             self.db(move |s| s.domain_owner(&h)).await?
         };
-        let Some((s, en, mut d)) = found.filter(|(s, e, _)| s == service && e == env) else {
+        let Some((_, _, mut d)) = found.filter(|(s, e, _)| s == service && e == env) else {
             return Err(Error::NotFound(format!("{h} isn't a domain of {service} in {env}")));
         };
-        let _ = (s, en);
         let target = self.target(&row.slug);
         let cname_ok = self.deps.resolver.cname(&h).await.contains(&target);
         let txt_ok = self.deps.resolver.txt(&format!("_roll-challenge.{h}")).await.contains(&d.token);
@@ -867,6 +914,9 @@ impl Apps {
         };
         let (hh, err) = (h.clone(), error.clone());
         self.db(move |s| s.set_domain_status(&hh, status, err.as_deref())).await?;
+        if let Some((tls, tls_error)) = self.refresh_tls(&h).await {
+            (d.tls, d.tls_error) = (tls, tls_error);
+        }
         d.status = status;
         d.error = error;
         d.target = target;
@@ -876,7 +926,33 @@ impl Apps {
 
     pub async fn delete_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<()> {
         let (sid, e, h) = (service.to_string(), env.to_string(), host.to_ascii_lowercase());
-        self.db(move |s| s.delete_domain(&sid, &e, &h)).await
+        self.db(move |s| s.delete_domain(&sid, &e, &h)).await?;
+        self.release_domains(&[host.to_ascii_lowercase()]).await;
+        Ok(())
+    }
+
+    /// Tell the certificate's provider these hostnames are gone (their rows already are, so the
+    /// claim is free whatever it answers).
+    async fn release_domains(&self, hosts: &[String]) {
+        for h in hosts {
+            if let Err(e) = self.deps.tls.remove(h).await {
+                tracing::warn!(host = %h, error = %e, "apps: a removed domain is still at its certificate's provider");
+            }
+        }
+    }
+
+    /// Remove the custom domains still unverified `older_than` after they were added: the
+    /// hostname is free for its real owner. Returns them.
+    pub async fn expire_domain_claims(self: &Arc<Self>, older_than: Duration) -> Result<Vec<String>> {
+        let age = older_than.as_millis() as i64;
+        // The database's clock, which stamped them.
+        let expired = self.db(move |s| s.expire_domain_claims(s.now()? - age)).await?;
+        let hosts: Vec<String> = expired.into_iter().map(|(svc, env, h)| {
+            tracing::info!(service = %svc, env = %env, host = %h, "apps: an unverified custom domain expired");
+            h
+        }).collect();
+        self.release_domains(&hosts).await;
+        Ok(hosts)
     }
 
     /// The environment a request's `Host` names: a generated hostname, or an active custom domain.

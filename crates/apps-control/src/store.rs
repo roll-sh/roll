@@ -356,6 +356,8 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
     })
 }
 
+const DOMAIN_COLS: &str = "hostname, service, env, kind, status, token, error, created_at, tls, tls_error";
+
 fn domain_row(r: &code_sql::Row<'_>) -> code_sql::Result<(String, String, Domain)> {
     let kind: String = r.get(3)?;
     Ok((
@@ -370,6 +372,8 @@ fn domain_row(r: &code_sql::Row<'_>) -> code_sql::Result<(String, String, Domain
             token: r.get(5)?,
             error: r.get(6)?,
             created_at: r.get(7)?,
+            tls: TlsStatus::parse(&r.get::<_, String>(8)?),
+            tls_error: r.get(9)?,
         },
     ))
 }
@@ -377,6 +381,11 @@ fn domain_row(r: &code_sql::Row<'_>) -> code_sql::Result<(String, String, Domain
 impl Store {
     pub fn new(db: Db, sealer: Sealer) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
+        // Custom domains' certificates, and when a domain was first verified (a claim that never
+        // was expires).
+        db.add_column("domains", "tls", "TEXT NOT NULL DEFAULT 'pending'")?;
+        db.add_column("domains", "tls_error", "TEXT")?;
+        db.add_column("domains", "verified_at", "INTEGER")?;
         Ok(Store { db, sealer })
     }
 
@@ -772,33 +781,42 @@ impl Store {
     pub fn domains(&self, service: &str, env: &str) -> Result<Vec<Domain>> {
         Ok(self
             .db
-            .query(
-                "SELECT hostname, service, env, kind, status, token, error, created_at FROM domains WHERE service = ? AND env = ? ORDER BY created_at, hostname",
-                [service, env],
-                domain_row,
-            )?
+            .query(&format!("SELECT {DOMAIN_COLS} FROM domains WHERE service = ? AND env = ? ORDER BY created_at, hostname"), [service, env], domain_row)?
             .into_iter()
             .map(|(_, _, d)| d)
             .collect())
     }
 
-    /// The service and environment a hostname is a custom domain of.
-    pub fn domain_owner(&self, host: &str) -> Result<Option<(String, String, Domain)>> {
-        Ok(self
-            .db
-            .query_row("SELECT hostname, service, env, kind, status, token, error, created_at FROM domains WHERE hostname = ?", [host], domain_row)
-            .optional()?)
+    /// The custom domains of a service (`env`: of one environment).
+    pub fn custom_domains_of(&self, service: &str, env: Option<&str>) -> Result<Vec<String>> {
+        Ok(match env {
+            Some(e) => self.db.query("SELECT hostname FROM domains WHERE service = ? AND env = ? AND kind = 'custom'", [service, e], |r| r.get(0))?,
+            None => self.db.query("SELECT hostname FROM domains WHERE service = ? AND kind = 'custom'", [service], |r| r.get(0))?,
+        })
     }
 
-    pub fn pending_domains(&self) -> Result<Vec<(String, String, Domain)>> {
+    /// The service and environment a hostname is a custom domain of.
+    pub fn domain_owner(&self, host: &str) -> Result<Option<(String, String, Domain)>> {
+        Ok(self.db.query_row(&format!("SELECT {DOMAIN_COLS} FROM domains WHERE hostname = ?"), [host], domain_row).optional()?)
+    }
+
+    /// Custom domains to check: DNS not verified yet, or verified with a certificate that isn't
+    /// issued yet (or failed).
+    pub fn domains_to_check(&self) -> Result<Vec<(String, String, Domain)>> {
         Ok(self.db.query(
-            "SELECT hostname, service, env, kind, status, token, error, created_at FROM domains WHERE status IN ('pending', 'issuing') ORDER BY created_at",
+            &format!("SELECT {DOMAIN_COLS} FROM domains WHERE kind = 'custom' AND (status IN ('pending', 'issuing') OR tls IN ('pending', 'failed')) ORDER BY created_at"),
             (),
             domain_row,
         )?)
     }
 
-    pub fn add_domain(&self, service: &str, env: &str, host: &str) -> Result<Domain> {
+    /// Every active custom domain's hostname (what the edge holds certificates for).
+    pub fn active_custom_domains(&self) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT hostname FROM domains WHERE kind = 'custom' AND status = 'active' ORDER BY hostname", (), |r| r.get(0))?)
+    }
+
+    /// `tls`: where a new domain's certificate starts (`pending`, or `none` where nothing issues).
+    pub fn add_domain(&self, service: &str, env: &str, host: &str, tls: TlsStatus) -> Result<Domain> {
         let now = self.now()?;
         let token = random(24);
         self.db.write(|c| {
@@ -808,17 +826,25 @@ impl Store {
                 return Err(Error::Conflict(format!("{host} is already a domain of a service")));
             }
             c.execute(
-                "INSERT INTO domains (hostname, service, env, kind, status, token, error, created_at) VALUES (?, ?, ?, 'custom', 'pending', ?, NULL, ?)",
-                params![host, service, env, token, now],
+                "INSERT INTO domains (hostname, service, env, kind, status, token, error, created_at, tls) VALUES (?, ?, ?, 'custom', 'pending', ?, NULL, ?, ?)",
+                params![host, service, env, token, now, tls.as_str()],
             )?;
             Ok(())
         })?;
-        Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, created_at: now })
+        Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, tls, tls_error: None, created_at: now })
     }
 
+    /// A domain's DNS state; the first time it's `active` is kept (the claim no longer expires).
     pub fn set_domain_status(&self, host: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
-        self.db.execute("UPDATE domains SET status = ?, error = ? WHERE hostname = ?", params![status.as_str(), error, host])?;
+        let now = self.now()?;
+        let verified = (status == DomainStatus::Active).then_some(now);
+        self.db.execute("UPDATE domains SET status = ?, error = ?, verified_at = COALESCE(verified_at, ?) WHERE hostname = ?", params![status.as_str(), error, verified, host])?;
         Ok(())
+    }
+
+    /// A custom domain's certificate state. False if there's no such custom domain.
+    pub fn set_domain_tls(&self, host: &str, tls: TlsStatus, error: Option<&str>) -> Result<bool> {
+        Ok(self.db.execute("UPDATE domains SET tls = ?, tls_error = ? WHERE hostname = ? AND kind = 'custom'", params![tls.as_str(), error, host])? > 0)
     }
 
     pub fn delete_domain(&self, service: &str, env: &str, host: &str) -> Result<()> {
@@ -826,6 +852,22 @@ impl Store {
             0 => Err(Error::NotFound(format!("{host} isn't a domain of {service} in {env}"))),
             _ => Ok(()),
         }
+    }
+
+    /// Remove the custom domains added before `cutoff` (ms) that were never verified, and return
+    /// them: a claim nobody proves frees the hostname for its real owner.
+    pub fn expire_domain_claims(&self, cutoff: i64) -> Result<Vec<(String, String, String)>> {
+        self.db.write(|c| {
+            let expired: Vec<(String, String, String)> = c.query(
+                "SELECT service, env, hostname FROM domains WHERE kind = 'custom' AND status <> 'active' AND verified_at IS NULL AND created_at < ?",
+                [cutoff],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            for (_, _, host) in &expired {
+                c.execute("DELETE FROM domains WHERE hostname = ? AND status <> 'active' AND verified_at IS NULL", [host])?;
+            }
+            Ok(expired)
+        })
     }
 
     // ── cron runs ──

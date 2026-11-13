@@ -10,7 +10,7 @@ use crate::logs::{LogSink, Stream};
 use crate::model::*;
 use crate::runtime::{BuildJob, InstanceSpec, docker_reads};
 use crate::store::{EnvRow, NewDeployment, ServiceRow, Switch};
-use crate::{Apps, Error, Result, fingerprint, lease_key, network_name, volume_name};
+use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -936,7 +936,8 @@ impl Apps {
         Ok(run)
     }
 
-    /// Check pending custom domains' DNS every minute (one node).
+    /// Every minute (one node): expire unverified claims older than [`PENDING_CLAIM_TTL`], check
+    /// pending custom domains' DNS, and ask where verified ones' certificates are.
     async fn domains_loop(self: Arc<Self>) {
         loop {
             tokio::select! {
@@ -946,9 +947,14 @@ impl Apps {
             if !self.deps.cluster.singleton("apps:domains") {
                 continue;
             }
-            let Ok(pending) = self.db(|s| s.pending_domains()).await else { continue };
-            for (svc, env, d) in pending {
-                let _ = self.verify_domain(&svc, &env, &d.hostname).await;
+            let _ = self.expire_domain_claims(PENDING_CLAIM_TTL).await;
+            let Ok(due) = self.db(|s| s.domains_to_check()).await else { continue };
+            for (svc, env, d) in due {
+                if d.status == DomainStatus::Active {
+                    self.refresh_tls(&d.hostname).await;
+                } else {
+                    let _ = self.verify_domain(&svc, &env, &d.hostname).await;
+                }
             }
         }
     }

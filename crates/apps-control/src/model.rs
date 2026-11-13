@@ -599,6 +599,37 @@ impl DomainStatus {
     }
 }
 
+/// A domain's certificate (`integrations::DomainTls`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsStatus {
+    /// Nothing here issues certificates for custom domains (a node without the edge).
+    None,
+    Pending,
+    Issued,
+    Failed,
+}
+
+impl TlsStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TlsStatus::None => "none",
+            TlsStatus::Pending => "pending",
+            TlsStatus::Issued => "issued",
+            TlsStatus::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> TlsStatus {
+        match s {
+            "none" => TlsStatus::None,
+            "issued" => TlsStatus::Issued,
+            "failed" => TlsStatus::Failed,
+            _ => TlsStatus::Pending,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Domain {
     pub hostname: String,
@@ -610,6 +641,9 @@ pub struct Domain {
     pub target: String,
     pub token: String,
     pub error: Option<String>,
+    /// Its certificate, and why it failed or what it's waiting for.
+    pub tls: TlsStatus,
+    pub tls_error: Option<String>,
     pub created_at: i64,
 }
 
