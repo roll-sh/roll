@@ -202,6 +202,7 @@ async fn aws(State(f): State<Fake>, method: Method, uri: axum::http::Uri, header
             }
             ok(json!({ "repositories": repos }))
         }
+        "DescribeImages" => ok(json!({ "imageDetails": [{ "repositoryName": s("repositoryName"), "imageDigest": DIGEST, "imageTags": [req["imageIds"][0]["imageTag"]] }] })),
         "BatchDeleteImage" => ok(json!({ "imageIds": req["imageIds"], "failures": [] })),
         // Secrets Manager
         "CreateSecret" => {
@@ -489,8 +490,8 @@ async fn a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps() {
     let d = upload(&w, &id, &[("index.html", "<h1>hi</h1>")]).await;
     assert_eq!(d["status"], "active", "{d}");
     let short = id.trim_start_matches("svc_");
-    let tag = d["id"].as_str().unwrap().trim_start_matches("dep_");
-    let image = format!("{ECR}/apps/{short}:{tag}");
+    // By digest: a tag pushed again never changes what the deployment runs.
+    let image = format!("{ECR}/apps/{short}@{DIGEST}");
     assert_eq!(d["image"], image.as_str());
 
     // The build: its context zipped to the bucket, a buildspec that builds and pushes with a

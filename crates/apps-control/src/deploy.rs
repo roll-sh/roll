@@ -13,6 +13,7 @@ use crate::store::{EnvRow, NewDeployment, ServiceRow, Switch};
 use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -49,15 +50,6 @@ impl Apps {
     /// `image` to deploy another image), or of `upload` (a `roll up` tree).
     /// With `key` (an `Idempotency-Key`), a retry answers the deployment the first call queued.
     pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, trigger: Trigger, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
-        if let Some(k) = key {
-            if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
-                return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
-            }
-            let (sid, e, k) = (service.to_string(), env.to_string(), k.to_string());
-            if let Some(d) = self.db(move |s| s.keyed_deployment(&sid, &e, &k)).await? {
-                return Ok(d);
-            }
-        }
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
             if !["revision", "image", "message"].contains(&k.as_str()) {
@@ -72,6 +64,21 @@ impl Apps {
             }
         };
         let (revision, image, message) = (text("revision")?, text("image")?, text("message")?);
+        if let Some(k) = key {
+            if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
+            }
+            let (sid, e, kk) = (service.to_string(), env.to_string(), k.to_string());
+            if let Some(d) = self.db(move |s| s.keyed_deployment(&sid, &e, &kk)).await? {
+                // A retry repeats its request; the same key on another one is a client's bug,
+                // never silently the first request's deployment.
+                let differs = revision.as_ref().is_some_and(|r| d.revision.as_ref() != Some(r)) || message.as_ref().is_some_and(|m| *m != d.message);
+                if differs {
+                    return Err(Error::Conflict(format!("Idempotency-Key {k} was used for another deploy ({})", d.id)));
+                }
+                return Ok(d);
+            }
+        }
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e).ok()))).await?;
         let row = match row {
@@ -285,7 +292,6 @@ impl Apps {
         let id = d.id.clone();
         match result {
             Ok(()) => {
-                self.step(&d.id, "live").await;
                 log.stream(Stream::System).line(format!("deployed in {:.1} s", began.elapsed().as_secs_f64()));
                 info!(service = %d.service, env = %d.environment, deployment = %d.id, "apps: deployed");
             }
@@ -696,7 +702,11 @@ impl Apps {
 
     async fn release_service(self: &Arc<Self>, service: &str) {
         // Another node owns it now: what this one cached may change there, and its shells go.
-        self.access.lock().retain(|k, _| !k.starts_with(&format!("{service}/")));
+        {
+            let mut cache = self.access.lock();
+            self.access_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            cache.retain(|k, _| !k.starts_with(&format!("{service}/")));
+        }
         self.close_sessions_of(service);
         // Deploys in flight stop here; the new owner resumes them from the store.
         let sid = service.to_string();
@@ -833,6 +843,10 @@ impl Apps {
     /// deploy for every environment whose branch got a landing. One node does it (singleton).
     async fn landings(self: Arc<Self>) {
         let Some(sources) = self.deps.sources.clone() else { return };
+        // A landing whose deploys failed to queue is tried again (its deploys are keyed by the
+        // landing, so the ones that did queue aren't queued twice), and passed over only after
+        // a few tries: one broken landing never holds up every later push.
+        let mut failures: HashMap<i64, u32> = HashMap::new();
         loop {
             if self.deps.cluster.singleton("apps:landings") {
                 let cursor = match self.db(|s| s.get_state("landings")).await {
@@ -849,16 +863,25 @@ impl Apps {
                     && let Ok(page) = sources.landings(cursor, 200).await
                 {
                     let mut last = cursor;
+                    let mut stuck = false;
                     for l in &page {
                         if let Err(e) = self.on_landing(l).await {
-                            warn!(repo = %l.repo, branch = %l.branch, error = %e, "apps: queueing a deploy for a landing failed");
+                            let tries = failures.entry(l.seq).or_default();
+                            *tries += 1;
+                            if *tries < 5 {
+                                warn!(repo = %l.repo, branch = %l.branch, error = %e, tries = *tries, "apps: queueing a deploy for a landing failed; tried again");
+                                stuck = true;
+                                break;
+                            }
+                            warn!(repo = %l.repo, branch = %l.branch, error = %e, "apps: queueing a deploy for a landing failed five times; passed over");
                         }
+                        failures.remove(&l.seq);
                         last = l.seq;
                     }
                     if last != cursor {
                         let _ = self.db(move |s| s.set_state("landings", &last.to_string())).await;
                     }
-                    if page.len() == 200 {
+                    if page.len() == 200 && !stuck {
                         continue;
                     }
                 }
@@ -909,7 +932,8 @@ impl Apps {
                 }
                 let body = serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") });
                 // The owner queues it (it may be another node: the queue is in the store).
-                self.deploy(&svc.id, &e.name, body, Trigger::Push, None, None).await?;
+                let key = format!("landing:{}", l.seq);
+                self.deploy(&svc.id, &e.name, body, Trigger::Push, None, Some(&key)).await?;
                 info!(service = %svc.id, env = %e.name, revision = %l.revision.sha, "apps: deploying a push");
             }
         }
@@ -956,15 +980,13 @@ impl Apps {
             return Err(Error::Conflict("only a cron service has runs".into()));
         }
         let Some(active) = row.active.clone() else { return Err(Error::Conflict("this environment has no deployment yet".into())) };
-        let (sid, e) = (service.to_string(), env.to_string());
-        let running = self.db(move |s| Ok(s.runs(&sid, &e, 1)?.into_iter().any(|r| r.status == RunStatus::Running))).await?;
-        let (sid, e, a) = (service.to_string(), env.to_string(), active.clone());
-        if running {
-            return self.db(move |s| s.add_run(&sid, &e, &a, RunStatus::Skipped)).await;
-        }
-        let run = self.db(move |s| s.add_run(&sid, &e, &a, RunStatus::Running)).await?;
-        let live = self.load_live(service, env).await?;
         let timeout = Duration::from_secs(svc.run.timeout_s.unwrap_or(3600) as u64);
+        let (sid, e, a, t) = (service.to_string(), env.to_string(), active.clone(), timeout.as_millis() as i64 + 60_000);
+        let run = self.db(move |s| s.start_run(&sid, &e, &a, t)).await?;
+        if run.status == RunStatus::Skipped {
+            return Ok(run);
+        }
+        let live = self.load_live(service, env).await?;
         let (this, id) = (self.clone(), run.id.clone());
         tokio::spawn(async move {
             let (status, code) = match live.run_once(timeout).await {

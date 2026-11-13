@@ -153,12 +153,17 @@ pub struct Apps {
     running_jobs: Mutex<HashMap<String, String>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
+    /// Bumped by every change to the access cache: a cold read caches what it read only if
+    /// nothing changed meanwhile (a token rotated while it read would otherwise come back).
+    access_gen: std::sync::atomic::AtomicU64,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
     notify_client: reqwest::Client,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
+    /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
+    ws_shells: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
     pub(crate) client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     stop: CancellationToken,
 }
@@ -215,7 +220,9 @@ impl Apps {
             cancels: Mutex::new(HashMap::new()),
             running_jobs: Mutex::new(HashMap::new()),
             access: Mutex::new(HashMap::new()),
+            access_gen: std::sync::atomic::AtomicU64::new(0),
             sessions: Mutex::new(HashMap::new()),
+            ws_shells: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
@@ -617,7 +624,7 @@ impl Apps {
         if let Some(access) = access {
             let (sid, e, a) = (service.to_string(), env.to_string(), access.clone());
             self.db(move |s| s.set_access(&sid, &e, a.as_ref())).await?;
-            self.access.lock().insert(env_key(service, env), access);
+            self.set_access_cache(service, env, Some(access));
         }
         self.environment(service, env).await
     }
@@ -638,7 +645,7 @@ impl Apps {
         self.db(move |s| s.delete_environment(&sid, &e)).await?;
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
-        self.access.lock().remove(&env_key(service, env));
+        self.set_access_cache(service, env, None);
         self.deps.runtime.remove_volume(&volume_name(service, env)).await;
         self.logs.forget(&format!("env:{service}/{env}"));
         Ok(())
@@ -649,10 +656,24 @@ impl Apps {
         if let Some(a) = self.access.lock().get(&env_key(service, env)) {
             return Ok(a.clone());
         }
+        let seen = self.access_gen.load(std::sync::atomic::Ordering::SeqCst);
         let (sid, e) = (service.to_string(), env.to_string());
         let a = self.db(move |s| s.access(&sid, &e)).await?;
-        self.access.lock().insert(env_key(service, env), a.clone());
+        let mut cache = self.access.lock();
+        if self.access_gen.load(std::sync::atomic::Ordering::SeqCst) == seen {
+            cache.insert(env_key(service, env), a.clone());
+        }
         Ok(a)
+    }
+
+    /// Change the access cache after the store has the change: `Some` caches it, `None` forgets.
+    pub(crate) fn set_access_cache(&self, service: &str, env: &str, access: Option<Option<Access>>) {
+        let mut cache = self.access.lock();
+        self.access_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match access {
+            Some(a) => cache.insert(env_key(service, env), a),
+            None => cache.remove(&env_key(service, env)),
+        };
     }
 
     async fn teardown_live(&self, service: &str, env: &str) {

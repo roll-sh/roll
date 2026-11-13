@@ -34,6 +34,8 @@ enum Phase {
     Starting,
     Running(Option<SocketAddr>),
     Suspended(Option<SocketAddr>),
+    /// The reaper is stopping or suspending it: no request is sent to it, nothing starts it.
+    Stopping,
     Crashed,
 }
 
@@ -77,6 +79,8 @@ impl Inst {
             Phase::Starting => InstanceState::Waking,
             Phase::Running(_) => InstanceState::Running,
             Phase::Suspended(_) => InstanceState::Suspended,
+            // Up until the stop or suspend finishes (no request goes to it meanwhile).
+            Phase::Stopping => InstanceState::Running,
             Phase::Crashed => InstanceState::Crashed,
         }
     }
@@ -319,6 +323,18 @@ impl EnvLive {
             .min_by_key(|(i, _)| i.in_flight())?;
         best.0.in_flight.fetch_add(1, Ordering::SeqCst);
         Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false })
+    }
+
+    /// Take an idle instance out of rotation before stopping or suspending it: under the lock
+    /// [`Self::pick`] takes, so no request is handed to it in between. Its phase before, if it
+    /// was up and had nothing in flight.
+    fn claim_idle(&self, i: &Inst) -> Option<Phase> {
+        let _picking = self.insts.lock();
+        let mut phase = i.phase.lock();
+        if i.in_flight() > 0 || !matches!(*phase, Phase::Running(_) | Phase::Suspended(_)) {
+            return None;
+        }
+        Some(std::mem::replace(&mut *phase, Phase::Stopping))
     }
 
     fn running_count(&self) -> usize {
@@ -741,7 +757,10 @@ impl EnvLive {
                 (true, Some(t)) => t.elapsed() >= self.cfg.scale_down_after,
             }
         };
-        if scale_down && let Some(i) = insts.iter().filter(|i| matches!(i.phase(), Phase::Running(_)) && i.in_flight() == 0).min_by_key(|i| *i.last_used.lock()) {
+        if scale_down
+            && let Some(i) = insts.iter().filter(|i| matches!(i.phase(), Phase::Running(_)) && i.in_flight() == 0).min_by_key(|i| *i.last_used.lock())
+            && self.claim_idle(i).is_some()
+        {
             let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
             *i.phase.lock() = Phase::Created;
             awake -= 1;
@@ -763,14 +782,17 @@ impl EnvLive {
             match i.phase() {
                 Phase::Running(addr) if awake > run.min_instances => {
                     if idle >= sleep_after || (!self.runtime.can_suspend() && idle >= suspend_after.max(sleep_after)) {
-                        let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
-                        *i.phase.lock() = Phase::Created;
-                        awake -= 1;
-                    } else if self.runtime.can_suspend() && run.suspend_after_s > 0 && idle >= suspend_after && self.runtime.suspend(&i.name).await.is_ok() {
-                        *i.phase.lock() = Phase::Suspended(addr);
+                        if self.claim_idle(i).is_some() {
+                            let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+                            *i.phase.lock() = Phase::Created;
+                            awake -= 1;
+                        }
+                    } else if self.runtime.can_suspend() && run.suspend_after_s > 0 && idle >= suspend_after && self.claim_idle(i).is_some() {
+                        let suspended = self.runtime.suspend(&i.name).await.is_ok();
+                        *i.phase.lock() = if suspended { Phase::Suspended(addr) } else { Phase::Running(addr) };
                     }
                 }
-                Phase::Suspended(_) if idle >= sleep_after && awake > run.min_instances => {
+                Phase::Suspended(_) if idle >= sleep_after && awake > run.min_instances && self.claim_idle(i).is_some() => {
                     let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
                     *i.phase.lock() = Phase::Created;
                     awake -= 1;

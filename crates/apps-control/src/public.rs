@@ -102,7 +102,8 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         if !same(&token_hash(&t), &hash) {
             return Some(denied(apps, service, env).await);
         }
-        let path = req.uri().path();
+        // One leading slash: `//host/x` would send the visitor to another site.
+        let path = format!("/{}", req.uri().path().trim_start_matches('/'));
         let location = if rest.is_empty() { path.to_string() } else { format!("{path}?{}", rest.join("&")) };
         let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
         let cookie = format!("{name}={t}; Path=/; HttpOnly; SameSite=Lax{secure}");

@@ -613,6 +613,8 @@ impl Store {
                 "UPDATE deployments SET status = 'active', finished_at = COALESCE(finished_at, ?), ready_ms = COALESCE(?, ready_ms), error = NULL WHERE id = ?",
                 params![now, ready_ms, to],
             )?;
+            // Its "live" step with it: a reader never sees it active without the step.
+            c.execute("INSERT INTO deploy_steps (deployment, step, at) VALUES (?, 'live', ?) ON CONFLICT (deployment, step) DO NOTHING", params![to, now])?;
             // In the same transaction: nobody sees the new deployment active without its hash
             // (it would read as "needs a deploy").
             if let Some(h) = vars_hash {
@@ -1118,15 +1120,25 @@ impl Store {
         )?)
     }
 
-    pub fn add_run(&self, service: &str, env: &str, deployment: &str, status: RunStatus) -> Result<CronRun> {
+    /// A run, `running`, or `skipped` when one is still going (any of them, not just the newest:
+    /// skipped rows come between), decided in one transaction. A `running` row older than
+    /// `timeout_ms` is one a stopped node left: its run is over whatever the row says.
+    pub fn start_run(&self, service: &str, env: &str, deployment: &str, timeout_ms: i64) -> Result<CronRun> {
         let id = new_id("run");
         let now = self.now()?;
-        let finished = (status != RunStatus::Running).then_some(now);
-        self.db.execute(
-            "INSERT INTO runs (id, service, env, deployment, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
-            params![id, service, env, deployment, status.as_str(), now, finished],
-        )?;
-        Ok(CronRun { id, deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished })
+        self.db.write(|c| {
+            let going = c
+                .query_row("SELECT 1 FROM runs WHERE service = ? AND env = ? AND status = 'running' AND started_at > ? LIMIT 1", params![service, env, now - timeout_ms], |_| Ok(()))
+                .optional()?
+                .is_some();
+            let status = if going { RunStatus::Skipped } else { RunStatus::Running };
+            let finished = going.then_some(now);
+            c.execute(
+                "INSERT INTO runs (id, service, env, deployment, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
+                params![id, service, env, deployment, status.as_str(), now, finished],
+            )?;
+            Ok(CronRun { id: id.clone(), deployment: deployment.into(), status, exit_code: None, started_at: now, finished_at: finished })
+        })
     }
 
     pub fn finish_run(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {

@@ -506,9 +506,12 @@ struct ShellQuery {
 
 /// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
 async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<ShellQuery>, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    let slot = apps.shell_slot(&id, &env)?;
     let target = apps.shell_target(&id, &env, q.instance.as_deref()).await?;
     let (cols, rows) = (q.cols.unwrap_or(80).clamp(10, 1000), q.rows.unwrap_or(24).clamp(2, 500));
-    Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, cols, rows)).into_response())
+    // Keys and resizes are small: nothing near axum's 64 MiB default is held for a peer.
+    let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
+    Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, slot, cols, rows)).into_response())
 }
 
 #[derive(Deserialize)]

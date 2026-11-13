@@ -24,8 +24,11 @@
 //! - `BatchGetBuilds` is polled until the build is done, its CloudWatch log followed into the
 //!   build's log; `job.timeout` is the build's timeout (and a local deadline), a cancel is
 //!   `StopBuild`.
-//! - [`Builder::remove_image`] is ECR `BatchDeleteImage` of the deployment's tag; the repository
-//!   and its `buildcache` tag stay.
+//! - The image a deployment records is the pushed tag's digest (`<repo>@sha256:…`, from
+//!   `DescribeImages`): Fargate pulls on every start, and a tag pushed again (the repository is
+//!   mutable for its `buildcache` tag) never changes what a deployment runs.
+//! - [`Builder::remove_image`] is ECR `BatchDeleteImage` of the deployment's digest; the
+//!   repository and its `buildcache` tag stay.
 
 use super::aws::{Bucket, FleetConfig};
 use super::{BuildJob, Builder};
@@ -287,7 +290,17 @@ impl CodeBuild {
                     self.log_page(g, s, token.clone(), log).await;
                 }
                 if b.build_status() == Some(&StatusType::Succeeded) {
-                    return Ok(format!("{repo_uri}:{tag}"));
+                    let repo = repo_uri.split_once('/').map_or(repo_uri.as_str(), |(_, r)| r);
+                    let found = self
+                        .ecr
+                        .describe_images()
+                        .repository_name(repo)
+                        .image_ids(aws_sdk_ecr::types::ImageIdentifier::builder().image_tag(tag).build())
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("reading the pushed image's digest: {}", aws_sdk_ecr::error::DisplayErrorContext(e)))?;
+                    let digest = found.image_details().first().and_then(|d| d.image_digest()).filter(|d| d.starts_with("sha256:")).context("ECR has no digest for the pushed image")?;
+                    return Ok(format!("{repo_uri}@{digest}"));
                 }
                 bail!("the build failed (CodeBuild: {})", failure(&b));
             }
@@ -352,12 +365,12 @@ impl Builder for CodeBuild {
     /// The deployment's tag goes; the image's layers go with ECR's own cleanup once no tag
     /// holds them.
     async fn remove_image(&self, image: &str) {
-        let Some((uri, tag)) = image.rsplit_once(':').filter(|(u, t)| !t.contains('/') && u.contains('/')) else { return };
+        let Some((uri, digest)) = image.split_once('@').filter(|(u, d)| d.starts_with("sha256:") && u.contains('/')) else { return };
         let Some((_, repo)) = uri.split_once('/') else { return };
-        if !repo.starts_with(&format!("{}/", self.cfg.ecr_repo)) || tag == CACHE_TAG {
+        if !repo.starts_with(&format!("{}/", self.cfg.ecr_repo)) {
             return;
         }
-        if let Err(e) = self.ecr.batch_delete_image().repository_name(repo).image_ids(aws_sdk_ecr::types::ImageIdentifier::builder().image_tag(tag).build()).send().await {
+        if let Err(e) = self.ecr.batch_delete_image().repository_name(repo).image_ids(aws_sdk_ecr::types::ImageIdentifier::builder().image_digest(digest).build()).send().await {
             warn!(image, error = %aws_sdk_ecr::error::DisplayErrorContext(e), "apps: BatchDeleteImage");
         }
     }

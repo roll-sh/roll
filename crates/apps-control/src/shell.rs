@@ -10,6 +10,7 @@ use crate::{Apps, Error, Result};
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Where a shell goes: the instance, and the lease that keeps a web service from going back to
@@ -41,8 +42,22 @@ impl Apps {
             .ok_or_else(|| Error::Conflict("no instance of this worker is running".into()))
     }
 
-    /// Copy between the WebSocket and the shell until either closes.
-    pub async fn bridge_shell(self: Arc<Self>, socket: WebSocket, target: Target, cols: u16, rows: u16) {
+    /// A place for one more shell in an environment (its HTTP sessions and WebSocket shells
+    /// together at most [`MAX_SESSIONS`]), held until the shell ends.
+    pub fn shell_slot(&self, service: &str, env: &str) -> Result<Slot> {
+        let open = self.sessions.lock().values().filter(|s| s.service == service && s.env == env).count();
+        let count = self.ws_shells.lock().entry(crate::env_key(service, env)).or_default().clone();
+        let n = count.fetch_add(1, Ordering::SeqCst) + 1;
+        let slot = Slot(count);
+        if open + n > MAX_SESSIONS {
+            return Err(Error::Conflict(format!("{MAX_SESSIONS} shells are open in {env}: close one first")));
+        }
+        Ok(slot)
+    }
+
+    /// Copy between the WebSocket and the shell until either closes or nothing crosses it for
+    /// [`IDLE`].
+    pub async fn bridge_shell(self: Arc<Self>, socket: WebSocket, target: Target, slot: Slot, cols: u16, rows: u16) {
         let shell = match self.deps.runtime.shell(&target.instance, cols, rows).await {
             Ok(s) => s,
             Err(e) => {
@@ -53,12 +68,14 @@ impl Apps {
         };
         let (mut ws_tx, mut ws_rx) = socket.split();
         let (mut out, mut inp) = tokio::io::split(shell.io);
+        let used = parking_lot::Mutex::new(std::time::Instant::now());
         let screen = async {
             let mut buf = vec![0u8; 16 << 10];
             loop {
                 match out.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        *used.lock() = std::time::Instant::now();
                         if ws_tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
                             break;
                         }
@@ -70,6 +87,7 @@ impl Apps {
         let (runtime, id) = (self.deps.runtime.clone(), shell.id.clone());
         let keys = async {
             while let Some(Ok(m)) = ws_rx.next().await {
+                *used.lock() = std::time::Instant::now();
                 match m {
                     Message::Binary(b) => {
                         if inp.write_all(&b).await.is_err() {
@@ -90,11 +108,20 @@ impl Apps {
                 }
             }
         };
+        let idle = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                if used.lock().elapsed() > IDLE {
+                    break;
+                }
+            }
+        };
         tokio::select! {
             _ = screen => {}
             _ = keys => {}
+            _ = idle => {}
         }
-        drop(target);
+        drop((target, slot));
     }
 }
 
@@ -106,6 +133,15 @@ const SCROLLBACK: usize = 256 << 10;
 const MAX_SESSIONS: usize = 8;
 /// A session nobody reads and nobody types in for this long is closed.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A WebSocket shell's place in its environment's [`MAX_SESSIONS`], given back when dropped.
+pub struct Slot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// An open shell (`POST …/shell/sessions`): its keys, its screen (scrollback and what comes),
 /// and what keeps its instance up.
@@ -130,7 +166,8 @@ impl Session {
 impl Apps {
     pub async fn open_session(self: &Arc<Self>, service: &str, env: &str, instance: Option<&str>, cols: u16, rows: u16) -> Result<String> {
         let open = self.sessions.lock().values().filter(|s| s.service == service && s.env == env).count();
-        if open >= MAX_SESSIONS {
+        let ws = self.ws_shells.lock().get(&crate::env_key(service, env)).map_or(0, |c| c.load(Ordering::SeqCst));
+        if open + ws >= MAX_SESSIONS {
             return Err(Error::Conflict(format!("{MAX_SESSIONS} shells are open in {env}: close one first")));
         }
         let target = self.shell_target(service, env, instance).await?;
@@ -149,7 +186,16 @@ impl Apps {
             closed: tokio_util::sync::CancellationToken::new(),
             _target: target,
         });
-        self.sessions.lock().insert(id.clone(), s.clone());
+        {
+            // Counted again as it goes in: two opens may have passed the check above together.
+            let mut sessions = self.sessions.lock();
+            let open = sessions.values().filter(|x| x.service == service && x.env == env).count();
+            let ws = self.ws_shells.lock().get(&crate::env_key(service, env)).map_or(0, |c| c.load(Ordering::SeqCst));
+            if open + ws >= MAX_SESSIONS {
+                return Err(Error::Conflict(format!("{MAX_SESSIONS} shells are open in {env}: close one first")));
+            }
+            sessions.insert(id.clone(), s.clone());
+        }
         let (mut out, mut inp) = tokio::io::split(shell.io);
         let (this, sid, sess) = (self.clone(), id.clone(), s.clone());
         tokio::spawn(async move {

@@ -124,9 +124,13 @@ every deployment is immutable with instant rollback.
   so no value is in a layer, the image's history or the build cache's keys; BuildKit masks them
   in the build log. Each stage declares `ARG ROLL_BUILD_ENV`, a hash of the values, so a changed
   value rebuilds what read it and an unchanged set keeps the cache (`ROLL_DEPLOYMENT` and `PORT`
-  stay out). A tree's own Dockerfile gets them as secrets and as build arguments (`ARG NAME`),
-  values always through the docker CLI's environment, never argv. Names the CLI reads itself
-  (`DOCKER_*`, `BUILDKIT_*`, `PATH`, proxies) aren't passed, and the log says so. In CodeBuild
+  stay out). On Docker each value is a secret read from a 0600 file, and the `docker` CLI runs
+  with a cleared environment (how to reach the daemon, nothing else), so no variable steers a
+  process of roll's (`LD_PRELOAD`, `BASH_ENV`, `DOCKER_HOST`). A tree's own Dockerfile also gets
+  the build arguments its `ARG` lines declare, minus names that steer a process
+  (`runtime::steers_a_process`), each set for that one `docker` command and never on argv. Docker
+  records an `ARG`'s value in the image's history where a `RUN` uses it, so a secret belongs in
+  `RUN --mount=type=secret,id=NAME,env=NAME`, which every variable is too. In CodeBuild
   the values are in a Secrets Manager secret of the build's own
   (`roll-apps/builds/<service>-<deployment>-<random>`, a JSON object), and each variable is an
   environment override of type `SECRETS_MANAGER` naming `<secret>:<NAME>`: no value is in the
@@ -612,11 +616,12 @@ A review on 2026-11-13 of feature/roll-secrets (069e03378), feature/roll-mcp (40
 feature/roll-previews (6f108fb71) and feature/roll-search (877bf261e) against apps found these.
 Ours are done or in `## Next`; theirs (each thread has been told):
 
-- **roll-mcp**: every apps route is classified, notifications too (a webhook's creation is
-  `reveal`: its secret comes back once). The tools' fields match. Left: the "previews only"
-  template allows the literal environment `preview`, not previews' `pv-<id>`; `apps_events.after`
-  is a string where apps takes an integer; its sinks sign with plain `x-roll-signature`, where
-  roll code and apps send `X-Roll-Signature-256` with `X-Roll-Delivery`. mcp's new `roll-net`
+- **roll-mcp** (899310491): every apps route is classified, notifications too (a webhook's
+  creation is `reveal`: its secret comes back once; a job's logs are `reveal`: its output can be
+  the variables). The tools' fields match, `apps_events.after` is an integer, and its sinks sign
+  as roll code and apps do. Ours on merge: register an environment resolver for `"apps"` in
+  rolld/src/access.rs (`Resolvers::environments`) answering `Some("preview")` for an ephemeral
+  environment, so the "previews only" preset reaches `pv-<id>` and not a hand-named one. mcp's new `roll-net`
   is the SSRF guard everyone should share: apps' `net.rs` and `model::private_ip` move onto it
   once #19 is on main (the ranges and `no_proxy` already match).
 - **roll-previews** drives apps over HTTP (`RollApps`): names, limits, tokens, the bypass hash,
@@ -642,17 +647,16 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Security follow-ups** from the review (the high ones are fixed: build variables never in a
-   process's environment, registry logins bound to their registry, the TXT proof on a shared
-   CNAME target, domain caps and the edge's turns, crashed instances stopped, the lease fence
-   required, `x-roll-*` stripped from answers, jobs capped and canceled with their environment,
-   gapless event numbers, the notifier's cursor compared-and-swapped with claimed deliveries): the
-   idle reaper racing a request (a non-pickable `Stopping` phase), the access cache overwritten by
-   a cold read (a generation), cron's overlap guard in one write, an Idempotency-Key reused with
-   another body, the landing cursor moving past a failed `on_landing`, CodeBuild images by digest
-   in an immutable repository, roll-fetch's env file 0600, `//host` in the access redirect, the
-   WebSocket shell's caps (sessions, idle timeout, message size), and an own Dockerfile's `ARG`
-   values in image history (say so; point at `RUN --mount=type=secret`).
+1. **Security follow-ups** left from the 2026-11-13 review (done since: the idle reaper takes an
+   instance out of rotation before stopping it, the access cache keeps no stale read, cron's
+   overlap guard is one write and ignores rows a stopped node left, a reused Idempotency-Key
+   with another body is a 409, a landing whose deploys didn't queue is retried (its deploys keyed
+   by the landing), CodeBuild images are recorded by digest, `//host` can't leave the access
+   redirect, WebSocket shells count against the environment's 8 with a 1 MiB frame cap and a
+   10-minute idle close): sweeping build secrets and `<prefix>env/` objects a crash left;
+   roll-fetch's env file mode (0644; check what reads it in previews' containers first); a disk
+   quota on an instance's writable layer and volume; `host.docker.internal` reaching every host
+   listener (only the linked resources' ports).
 2. **Health checks while running** (Render probes every few seconds, Fly's `checks`): an instance
    whose `health_path` stops answering is taken out of rotation, replaced, and counted as a crash
    (crash-loop notifications follow).

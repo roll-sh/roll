@@ -414,6 +414,8 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
         ids.push(d["id"].as_str().unwrap().to_string());
     }
     assert_eq!(ids[0], ids[1]);
+    let req = Request::post(format!("{base}/deploys")).header("content-type", "application/json").header("idempotency-key", "pv-7@c3c3").body(Body::from(r#"{"revision": "d4d4d4d4d4d4"}"#)).unwrap();
+    assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::CONFLICT, "the same key on another request");
     let d = settled(&w, &id, "pr-7", &ids[0]).await;
     assert_eq!((d["status"].as_str(), d["revision"].as_str()), (Some("active"), Some("c3c3c3c3c3c3")));
     assert!(w.fake.instances(&id).iter().any(|(_, dep, st)| *dep == d["id"] && *st == FakeState::Running), "min_instances 1 keeps one up");

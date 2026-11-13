@@ -97,7 +97,7 @@ of stored logs and says so with `X-Roll-Search-Truncated: 1`.
 
 `POST …/deploys` takes an `Idempotency-Key` header (1–200 printable ASCII): a retry with the same
 key in the same environment, within a day, answers the deployment the first call queued instead of
-queuing another.
+queuing another. The same key with another `revision` or `message` is a 409.
 
 Statuses: 400 a bad body, name, env or query; 404 no such service, environment, deployment or
 domain; 409 a name or hostname that's taken, a rollback to a deployment with no image, a redeploy of an environment with nothing deployed, a cancel
