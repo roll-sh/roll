@@ -106,6 +106,7 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
+        .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
@@ -301,6 +302,8 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(d.call(&secrets, Method::GET, &at("development", "secrets"), None).await.0, StatusCode::OK);
     assert_eq!(d.call(&secrets, Method::GET, &at("production", "secrets"), None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(&secrets, Method::GET, &at("development", "values"), None).await.0, StatusCode::FORBIDDEN);
+    // A route that filters per environment itself (health) lets it in: its answer leaves out the rest.
+    assert_eq!(d.call(&secrets, Method::GET, &format!("/v1/secrets/projects/{}/health", project.id), None).await.0, StatusCode::OK);
 
     // Rotated: the old secret is dead at once, the new one has the same rules.
     let (s, rotated) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), None).await;

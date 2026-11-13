@@ -73,6 +73,9 @@ pub struct Row {
     /// The path parameter naming indices of the resource (search's `{index}`): rules can grant
     /// some indices of it (`{"id": "cl_1", "index": "logs-*"}`).
     pub index: Option<&'static str>,
+    /// The product answers only what the caller's grant reaches per environment and path (secrets'
+    /// health and leak scan): rules limited to some environments or paths match it too.
+    pub filters_itself: bool,
     /// Other resources whose credentials the request hands to this one (apps' links put a
     /// database's address and password in a service's variables): it also needs `reveal` on each.
     pub lends: Option<Lend>,
@@ -140,7 +143,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -176,6 +179,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn filters_itself(mut self) -> Row {
+        self.filters_itself = true;
         self
     }
     const fn lends(mut self, l: Lend) -> Row {
@@ -944,10 +951,10 @@ static ROWS: &[Row] = &[
         .copies_from(CopyFrom::Query("from")),
     // Findings across every environment (expired, missing, exposed, weak, …), names only: read on
     // the project. Secrets keeps only what the caller may read (weak ones: may reveal).
-    row("GET", "/v1/secrets/projects/{project}/health", "secrets", R, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/health", "secrets", R, one(&["project"], "project")).filters_itself(),
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
-    row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),

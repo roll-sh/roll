@@ -243,6 +243,10 @@ pub struct Resource {
     pub path: Option<String>,
     /// The indices of it the request names (search's `{index}`: an index expression).
     pub index: Option<String>,
+    /// The product answers only what the caller's grant reaches in each environment and path (it
+    /// asks [`crate::Grant::allows`] per finding): a rule limited to some environments or paths
+    /// matches it too, and the answer leaves out the rest.
+    pub filters_itself: bool,
 }
 
 impl Resource {
@@ -308,7 +312,7 @@ impl Rule {
                     Resources::All => true,
                     Resources::Some(sel) => sel.iter().any(|s| s.matches(r)),
                 };
-                resource && self.environment_matches(r.environment.as_deref()) && self.path_matches(r.path.as_deref())
+                resource && (r.filters_itself || (self.environment_matches(r.environment.as_deref()) && self.path_matches(r.path.as_deref())))
             }
             Target::List { .. } => true,
             Target::Create { project, environment, .. } => {
