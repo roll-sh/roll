@@ -812,7 +812,9 @@ type Settings = {
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
     `Code::blockers`, from the project's rule, never the change's). A required review is a
     person's: its author's acceptance doesn't count (as with approvals), and a scoped or OAuth
-    token (an agent's) can't give one (403).
+    token (an agent's) can't give one (403). Automations see it too: the `preview` trigger's
+    `preview.environment.visual_review.state` field, and the built-in "Tell me when a visual change
+    waits for a review" template (a notice linking to the preview, or a Slack step instead).
     The same session checks what a screen reader can't name (images without alt text, form
     fields without a label, buttons and links with no name) and whether the document has a
     language and a title (`page_a11y`, counts and the first one's markup, bounded; "**Accessibility:**
@@ -941,6 +943,7 @@ Ranked by what a person notices first. Done so far:
 - stable screenshots: animations stopped and `github.hide` selectors blanked before each capture;
 - where a page changed, as a diff image (`?diff=base|previous`, the sheet's Diff);
 - a speed budget per project (`github.budget`, the `roll/speed` status);
+- visual reviews in automations (the `preview` trigger's field, a built-in template);
 - a look at the sheet and the change page from screenshots of a live preview (the screenshot's
   modes spaced apart, roll's baseline tagged in the list);
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
@@ -980,23 +983,20 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Visual reviews in automations and chat ops**: the `preview` trigger's fields stop at its state
-   and URL; with `preview.environment.visual_review` in the catalogue, "post to Slack when a
-   visual change waits for a review" is a template.
-2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+4. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

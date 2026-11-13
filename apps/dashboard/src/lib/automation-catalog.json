@@ -1167,13 +1167,28 @@
             "repo",
             "change",
             "preview.state",
-            "preview.url"
+            "preview.url",
+            "preview.environment.state",
+            "preview.environment.visual_review.state"
           ],
           "kind": "preview",
           "sample": {
             "change": "chg_0123456789abcd",
             "preview": {
               "created_at": 1762000000000,
+              "environment": {
+                "dashboard_url": "https://roll.sh/dashboard/projects/prj_0123456789ab/previews?preview=pv_0123456789ab",
+                "id": "pv_0123456789ab",
+                "slug": "pr12-shop",
+                "state": "ready",
+                "visual_review": {
+                  "branch": "main",
+                  "by": null,
+                  "percent": 8.0,
+                  "required": false,
+                  "state": "changed"
+                }
+              },
               "error": null,
               "state": "running",
               "url": "https://chg-12.preview.roll.sh"
