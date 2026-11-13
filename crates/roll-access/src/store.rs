@@ -154,6 +154,9 @@ pub struct TempRule {
     pub rule: roll_auth::scope::Rule,
     /// Unix ms.
     pub until: i64,
+    /// The approval that allowed it (it can be taken back by this id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<String>,
 }
 
 impl Grant {
@@ -638,7 +641,7 @@ impl Store {
 
     /// Allow `rule` on a grant: for good (`until: None`, added to its rules unless they hold it), or
     /// until a time (its temporary rules, the lapsed ones dropped).
-    pub fn remember(&self, id: &str, rule: &roll_auth::scope::Rule, until: Option<i64>) -> Result<Grant> {
+    pub fn remember(&self, id: &str, rule: &roll_auth::scope::Rule, until: Option<i64>, approval: &str) -> Result<Grant> {
         let now = code_sql::now_ms();
         self.db.write(|c| {
             let row: Option<(String, Option<String>, Option<i64>)> =
@@ -658,10 +661,30 @@ impl Store {
                 Some(until) => {
                     let mut temp: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
                     temp.retain(|t| t.until > now && t.rule != *rule);
-                    temp.push(TempRule { rule: rule.clone(), until });
+                    temp.push(TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()) });
                     c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&temp).unwrap_or_default(), id])?;
                 }
             }
+            Ok(())
+        })?;
+        self.get(id)
+    }
+
+    /// Take back what an approval allowed a grant for a while (before it lapses), and the
+    /// approval itself if its request hasn't used it (the rule may have run it instead).
+    pub fn forget(&self, id: &str, approval: &str) -> Result<Grant> {
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            let temp: Option<Option<String>> = c.query_row("SELECT temp_rules FROM grants WHERE id = ?", [id], |r| r.get(0)).optional()?;
+            let Some(temp) = temp else { return Err(Error::NotFound(format!("no token {id}"))) };
+            let mut temp: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            let before = temp.len();
+            temp.retain(|t| t.until > now && t.approval.as_deref() != Some(approval));
+            if temp.len() == before {
+                return Err(Error::NotFound(format!("{approval} allows this token nothing now")));
+            }
+            c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&temp).unwrap_or_default(), id])?;
+            c.execute("UPDATE approvals SET state = 'expired' WHERE id = ? AND grant_id = ? AND state = 'approved'", params![approval, id])?;
             Ok(())
         })?;
         self.get(id)
@@ -906,6 +929,26 @@ impl Store {
         sql.push_str(" ORDER BY at DESC, id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
         Ok(self.db.read(|c| c.query(&sql, args.as_slice(), audit_row))?)
+    }
+
+    /// What a grant's requests that ran since `since` were about, by product, action and resource
+    /// (most used first; at most 5,000 kinds): allowed ones, and ones that ran on an approval (a
+    /// pending one is the gate's 403).
+    pub fn used(&self, grant: &str, since: i64) -> Result<Vec<crate::tighten::Used>> {
+        let rows = self.db.read(|c| {
+            c.query(
+                "SELECT product, action, resource, COUNT(*), MAX(at) FROM audit WHERE grant_id = ? AND at >= ? AND (decision = 'allow' OR (decision = 'ask' AND approval IS NOT NULL AND status <> 403)) AND product IS NOT NULL AND action IS NOT NULL GROUP BY product, action, resource ORDER BY COUNT(*) DESC LIMIT 5000",
+                params![grant, since],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?)),
+            )
+        })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(product, action, resource, count, last_at)| {
+                let action = serde_json::from_value(Value::String(action)).ok()?;
+                Some(crate::tighten::Used { product, action, resource, count, last_at })
+            })
+            .collect())
     }
 
     /// Each grant's requests in the last day, by decision: `grant id → (allowed, denied, asked)`.

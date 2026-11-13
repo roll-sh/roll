@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { accessApi, describeRule, productName, RISKY, statusOf, type Approval, type AuditEvent, type Grant } from "@/lib/access-api";
+import { accessApi, describeRule, productName, RISKY, statusOf, type Approval, type AuditEvent, type Grant, type Tightened } from "@/lib/access-api";
 import { loadInventory, resourcesByProduct } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
-import { Connecting, ErrorNote, Panel } from "../ui";
+import { btn, Connecting, ErrorNote, Panel, primary } from "../ui";
 import { GrantRow } from "./overview";
 import { AccessShell, relative } from "./shell";
 import { usePoll } from "./use-access";
@@ -63,7 +63,8 @@ function Token({ id }: { id: string }) {
                 <p className="text-[12px] text-subtle">{g.ask_otherwise ? "Anything else waits for your approval." : "Anything else is refused."}</p>
               </div>
             </Panel>
-            {statusOf(g) === "active" && <Temporary g={g} projectName={projectName} resourceName={resourceName} />}
+            {statusOf(g) === "active" && <Temporary g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
+            {statusOf(g) === "active" && <Tighten g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             <Approvals list={approvals ?? []} />
             <Requests id={id} events={events} />
           </>
@@ -73,20 +74,139 @@ function Token({ id }: { id: string }) {
   );
 }
 
+/**
+ * "Tighten to what it used": its rules narrowed to the actions and resources its allowed requests
+ * used lately (the server never proposes anything wider), applied in one click.
+ */
+function Tighten({
+  g,
+  refresh,
+  projectName,
+  resourceName,
+}: {
+  g: Grant;
+  refresh: () => Promise<void>;
+  projectName: (id: string) => string;
+  resourceName: (p: string, id: string) => string;
+}) {
+  const [t, setT] = useState<Tightened | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (f: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const look = () => run(async () => setT(await accessApi.tighten(g.id)));
+  const apply = () =>
+    run(async () => {
+      if (!t) return;
+      await accessApi.update(g.id, { rules: t.rules });
+      setT(null);
+      await refresh();
+    });
+  return (
+    <Panel title="Tighten to what it used">
+      <div className="space-y-3 p-5 text-[13px]">
+        {!t ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="min-w-0 flex-1 text-muted">Narrow its rules to the actions and resources its requests used in the last 30 days.</p>
+            <button onClick={look} disabled={busy} className={btn}>
+              {busy ? <span className="shimmer">Reading its requests…</span> : "See what it used"}
+            </button>
+          </div>
+        ) : !t.narrower ? (
+          <p className="text-muted">
+            {t.used.length === 0 ? "It made no allowed requests in the last 30 days: revoke it if nothing needs it." : "It used everything its rules allow: there's nothing to narrow."}
+          </p>
+        ) : (
+          <>
+            <p className="text-[12px] text-subtle">
+              From {t.used.reduce((n, u) => n + u.count, 0)} requests over {t.days} days, it would only be able to:
+            </p>
+            <div className="space-y-1">
+              {t.rules.map((r, i) => (
+                <p key={i} className="text-muted">
+                  {describeRule(r, projectName, resourceName)}
+                </p>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={apply} disabled={busy} className={primary}>
+                {busy ? <span className="shimmer">Applying…</span> : "Apply these rules"}
+              </button>
+              <button onClick={() => setT(null)} disabled={busy} className={btn}>
+                Keep its rules
+              </button>
+            </div>
+          </>
+        )}
+        <ErrorNote error={error} />
+      </div>
+    </Panel>
+  );
+}
+
 /** What remembered approvals allow it for now, until when. */
-function Temporary({ g, projectName, resourceName }: { g: Grant; projectName: (id: string) => string; resourceName: (p: string, id: string) => string }) {
+function Temporary({
+  g,
+  refresh,
+  projectName,
+  resourceName,
+}: {
+  g: Grant;
+  refresh: () => Promise<void>;
+  projectName: (id: string) => string;
+  resourceName: (p: string, id: string) => string;
+}) {
+  const [error, setError] = useState<string | null>(null);
   const live = (g.temporary ?? []).filter((t) => t.until > Date.now());
   if (live.length === 0) return null;
+  const takeBack = async (approval: string) => {
+    setError(null);
+    try {
+      await accessApi.forget(g.id, approval);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
   return (
     <Panel title="Allowed for a while">
       <ul className="divide-y divide-line">
         {live.map((t, i) => (
-          <li key={i} className="flex flex-wrap items-center gap-3 px-5 py-2.5 text-[12px]">
+          <li key={t.approval ?? i} className="flex flex-wrap items-center gap-3 px-5 py-2.5 text-[12px]">
             <span className="min-w-0 flex-1 text-muted">{describeRule(t.rule, projectName, resourceName)}</span>
-            <span className="shrink-0 text-subtle">until {relative(t.until)}</span>
+            <span className="shrink-0 text-subtle">
+              until {relative(t.until)}
+              {t.approval && (
+                <>
+                  {" · "}
+                  <Link href={`/dashboard/access/approvals?id=${encodeURIComponent(t.approval)}`} className="hover:text-fg hover:underline">
+                    approved here
+                  </Link>
+                </>
+              )}
+            </span>
+            {t.approval && (
+              <button onClick={() => takeBack(t.approval!)} className={btn}>
+                Take back
+              </button>
+            )}
           </li>
         ))}
       </ul>
+      {error && (
+        <div className="px-5 pb-3">
+          <ErrorNote error={error} />
+        </div>
+      )}
     </Panel>
   );
 }

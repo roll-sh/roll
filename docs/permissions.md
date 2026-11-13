@@ -140,6 +140,16 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
+- A route whose product filters its answer per environment and path itself, asking the caller's
+  `Grant` for each finding (secrets' `GET …/health` and `POST …/leaks`), is matched by rules limited
+  to some environments or paths too (`Row::filters_itself`): a token for staging gets staging's
+  findings, never production's, rather than a 403.
+- Linking another resource to an apps service (`PUT …/services/{id}/links/{kind}/{ref}`, or
+  `links` in a new service's body) puts its address and password in the service's variables, where
+  the service's code reads them: it also needs `reveal` on each linked resource (a `postgres` link
+  on that Postgres project, `redis` on that database, `bucket`, `stream`, `queue`, `nosql` likewise;
+  a kind roll doesn't know is refused). When that decides, the approval is about the linked
+  resource, so remembering it allows revealing that one.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
   `admin`, as in secrets itself.
 - Secrets' imports (`PUT …/environments/{env}/imports`, `[{project?, environment, path}]`) are a
@@ -250,7 +260,8 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
   lookups, `more_like_this`, lookup runtime fields, `indexed_shape`, templates after rendering, and
   the bodies of reindex, ES|QL, SQL and the other query-bearing APIs) and a body's `_index` values
   stay within `{index}` (search's `control.rs`, `per_index_routes`; feature/roll-search 5db7c2602
-  and fae055c31). A document an ingest pipeline moves to another index isn't re-checked there yet.
+  and fae055c31), and a document an ingest pipeline moves (`_index`, `reroute`) is checked again
+  as a write at the index it lands in (ea6be2f0f).
 - An approval about some indices names them (`cl_1/logs-a`), and remembering it allows those
   indices only.
 
@@ -383,6 +394,10 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
   operator's token policy applies.
 - A while never becomes for good: a token makes tokens covered by its own rules only, never by
   what it's allowed for now.
+- Each rule for a while names the approval that allowed it. The operator takes it back before it
+  lapses from the token's page or `roll token take-back <id> <approval>`
+  (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
+  the approval when its request hasn't used it (the rule may have run that request instead).
 
 ### Approvals in chat
 
@@ -476,6 +491,23 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
+### Tighten to what it used
+
+A token's page (or `roll token tighten <id> [--apply]`) proposes its rules narrowed to what its
+requests used in the last 30 days, allowed ones and ones that ran on an approval
+(`GET /v1/access/tokens/{id}/tighten?days=`, `roll_access::tighten`), as AWS's access analyzer
+writes a policy from activity:
+
+- Each proposed rule is within the rule it came from: the same product (one rule per product a `*`
+  rule was used for), environments, paths and effects (`ask` stays `ask`), only the actions used,
+  and the resources used, by id, when the rule named every resource or ids (at most 20).
+- A rule placed by project keeps its project: a resource can leave the project, and its id would
+  still match. An action used without a resource (a list, the product as a whole) keeps the rule's
+  resources. What a person allowed for a while is never made permanent.
+- The server checks the proposal is covered by the token's rules, else proposes them unchanged;
+  a token that made no allowed requests is proposed unchanged (revoke it instead).
+- Applying it is a `PATCH` of `rules`.
+
 ## Leaked tokens
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
@@ -547,6 +579,8 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
+| `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
