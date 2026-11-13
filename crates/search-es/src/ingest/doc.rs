@@ -10,6 +10,8 @@ pub const METADATA: &[&str] = &["_index", "_id", "_routing", "_version", "_versi
 
 #[derive(Clone, Debug, Default)]
 pub struct IngestDoc {
+    /// Who wrote the document (`set_security_user`); `None` for internal writes.
+    pub user: Option<std::sync::Arc<crate::xpack::security::Principal>>,
     pub source: Map,
     pub meta: Map,
     pub ingest: Map,

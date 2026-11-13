@@ -69,6 +69,8 @@ pub struct WriteArgs {
     pub internal: bool,
     /// Bulk `list_executed_pipelines`.
     pub list_executed_pipelines: bool,
+    /// Who writes (a client's write): the `set_security_user` processor records it.
+    pub principal: Option<std::sync::Arc<crate::xpack::security::Principal>>,
 }
 
 /// The outcome of one write.

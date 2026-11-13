@@ -205,6 +205,7 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
         require_alias: ctx.bool_param("require_alias", false)?,
         require_data_stream: ctx.bool_param("require_data_stream", false)?,
         list_executed_pipelines: ctx.bool_param("list_executed_pipelines", false)?,
+        principal: Some(std::sync::Arc::new(crate::xpack::security::principal(ctx).clone())),
         ..Default::default()
     };
     let default_source = FetchSource::from_params(ctx.query("_source"), ctx.query("_source_includes"), ctx.query("_source_excludes"))?;

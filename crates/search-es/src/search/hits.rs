@@ -466,6 +466,8 @@ pub struct FetchOpts {
     /// `_id` shows even under `stored_fields: _none_`: Elasticsearch's script fields and
     /// highlight phases load it (OpenSearch's don't).
     pub keep_id: bool,
+    /// The reader's field level security: hidden fields stay out of `_source` and `fields`.
+    pub security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
 
 /// Whether `_source` is returned under these options.
@@ -531,11 +533,13 @@ pub fn render_doc_stored(
         }
     }
     let fs = wants_source(o);
+    let fls = o.security.as_ref().zip(idx).and_then(|(s, i)| s.fields(crate::xpack::security::dls::READ, &i.name));
     // The stored bytes, as they are or filtered straight from the text, when nothing else
-    // reads or changes them (`SourceView` would only filter them): no `fields`, vectors or
-    // forced synthetic source.
+    // reads or changes them (`SourceView` would only filter them): no `fields`, vectors,
+    // forced synthetic source or field level security.
     let filter = fs.filter();
     let raw_source = if o.raw_source
+        && fls.is_none()
         && fs.fetch
         && o.fields.is_empty()
         && !table.has_vectors
@@ -576,8 +580,18 @@ pub fn render_doc_stored(
             (None, Some(f), Some(Value::Obj(sm))) => Value::Obj(f.apply(sm)),
             (None, _, _) => owned(&mut source),
         };
+        let v = match &fls {
+            Some(f) => f.filter_source(v),
+            None => v,
+        };
         m.insert("_source".into(), v);
     }
+    // `fields` and stored fields read through field level security too: hidden fields have
+    // no values. (`_source` has been filtered above; the source `fields` reads from is not.)
+    let source = match (&fls, source) {
+        (Some(f), Some(v)) => Some(f.filter_source(v)),
+        (_, s) => s,
+    };
     let mut fields = Map::new();
     if let Some(Some(sf)) = &o.stored_fields {
         for (k, v) in crate::fetch::stored_fields(table, stored, sf) {
@@ -629,6 +643,10 @@ pub fn render_doc_stored(
         // The fetched fields come in field-name order into the hit's `fields` hash map.
         fetched.sort_keys();
         fields.extend(fetched);
+        if let Some(f) = &fls {
+            fields = f.filter_fields(fields);
+            ignored = f.filter_fields(ignored);
+        }
         crate::ingest::doc::java_hash_order(&mut fields, false);
         if !fields.is_empty() {
             m.insert("fields".into(), Value::Obj(std::mem::take(&mut fields)));
@@ -637,6 +655,9 @@ pub fn render_doc_stored(
             m.insert("ignored_field_values".into(), Value::Obj(crate::json::java_hash_map(ignored, 16)));
         }
         return Ok(None);
+    }
+    if let Some(f) = &fls {
+        fields = f.filter_fields(fields);
     }
     if !fields.is_empty() {
         crate::ingest::doc::java_hash_order(&mut fields, false);

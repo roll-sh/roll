@@ -61,7 +61,7 @@ pub fn validate_query(ctx: &Ctx) -> EsResult<Reply> {
         }
         seen.push(t.idx.name.clone());
         let searcher = t.searcher()?;
-        let table = t.engine.table();
+        let table = t.table();
         let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
         let r = match &req.source.query {
             Some(q) => qctx.to_query(q),

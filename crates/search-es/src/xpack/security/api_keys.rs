@@ -49,8 +49,8 @@ pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
     Ok(Principal {
         username: k.get("username").map(Value::to_es_string).unwrap_or_default(),
         roles: Vec::new(),
-        full_name: Value::Null,
-        email: Value::Null,
+        full_name: k.get("owner_full_name").cloned().unwrap_or(Value::Null),
+        email: k.get("owner_email").cloned().unwrap_or(Value::Null),
         metadata: k.get("owner_metadata").cloned().unwrap_or_else(Value::object),
         realm_name: "_es_api_key",
         realm_type: "_es_api_key",
@@ -151,6 +151,8 @@ async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Repl
         doc.insert("access".into(), a);
     }
     doc.insert("owner_metadata".into(), owner.metadata.clone());
+    doc.insert("owner_full_name".into(), owner.full_name.clone());
+    doc.insert("owner_email".into(), owner.email.clone());
     doc.insert("hash".into(), super::hash_secret(&secret).into());
     let now = ctx.now_ms;
     let key_id = id.clone();

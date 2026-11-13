@@ -372,6 +372,7 @@ pub fn lookup_by_query(ctx: &crate::search::query::QueryCtx, l: &crate::query::t
         now_ms: ctx.now_ms,
         fused: None,
         rank_only: false,
+        security: None,
     };
     let out = crate::search::execute(ctx.cluster, &req)?;
     let total = out.total.map(|(t, _)| t as i64).unwrap_or(0);

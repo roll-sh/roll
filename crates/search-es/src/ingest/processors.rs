@@ -151,6 +151,8 @@ pub enum Kind {
     RegisteredDomain { field: String, target: String, ignore_missing: bool },
     /// `enrich`: a lookup in a loaded enrich index (`crate::xpack::enrich`).
     Enrich(Box<crate::xpack::enrich::Processor>),
+    /// `set_security_user`: the writing user's properties into `field`.
+    SetSecurityUser { field: String, properties: Vec<String> },
     /// Accepted but needs data or licenses roll does not have (geoip, user_agent, …).
     Unsupported(String),
     /// `geo_grid`: a grid cell id to its geometry (and hierarchy).
@@ -589,6 +591,21 @@ impl Kind {
                 }))
             }
             "registered_domain" => Kind::RegisteredDomain { field: field()?, target: s(cfg, "target_field").unwrap_or_default(), ignore_missing: b(cfg, "ignore_missing", true) },
+            "set_security_user" => {
+                let f = field()?;
+                let properties = match cfg.get("properties") {
+                    None => crate::xpack::security::INGEST_USER_PROPERTIES.iter().map(|p| p.to_string()).collect(),
+                    Some(Value::Arr(a)) => {
+                        let names: Vec<String> = a.iter().map(Value::to_es_string).collect();
+                        if let Some(bad) = names.iter().find(|n| !crate::xpack::security::INGEST_USER_PROPERTIES.contains(&n.as_str())) {
+                            return Err(config_error(ptype, tag, "properties", &format!("Property value [{bad}] is in valid")));
+                        }
+                        names
+                    }
+                    Some(v) => return Err(config_error(ptype, tag, "properties", &format!("property isn't a list, but of type [{}]", java_type(v)))),
+                };
+                Kind::SetSecurityUser { field: f, properties }
+            }
             other => Kind::Unsupported(other.to_string()),
         })
     }
@@ -1234,6 +1251,20 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
             if let Some(sd) = info.subdomain {
                 d.set(&format!("{prefix}subdomain"), Value::Str(sd))?;
             }
+        }
+        Kind::SetSecurityUser { field, properties } => {
+            let Some(user) = d.user.clone() else {
+                return Err(EsError::illegal_state("There is no authenticated user - the [set_security_user] processor requires an authenticated user"));
+            };
+            // Merged into an object already there (`SetSecurityUserProcessor`).
+            let mut obj = match d.get_opt(field) {
+                Some(Value::Obj(m)) => m.clone(),
+                _ => Map::new(),
+            };
+            for (k, v) in crate::xpack::security::ingest_user(cluster, &user, properties) {
+                obj.insert(k, v);
+            }
+            d.set(field, Value::Obj(crate::json::java_hash_map(obj, 16)))?;
         }
         Kind::Unsupported(t) => {
             return Err(EsError::illegal_argument(format!("processor [{t}] is not available in roll search")));

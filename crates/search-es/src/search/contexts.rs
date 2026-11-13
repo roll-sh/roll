@@ -476,7 +476,7 @@ pub fn open_pit(ctx: &Ctx) -> EsResult<Reply> {
         let mut kept = Vec::with_capacity(targets.len());
         for t in targets {
             let searcher = t.searcher()?;
-            let table = t.engine.table();
+            let table = t.table();
             let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
             let q = qctx.to_filter(f).map_err(|e| super::query::shard_exception(&t.idx, e))?;
             if searcher.count(&q).map_err(crate::engine::convert::index_error)? > 0 {

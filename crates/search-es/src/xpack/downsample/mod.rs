@@ -68,6 +68,13 @@ pub async fn downsample(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let interval_ms = crate::units::TimeValue::parse(&interval, "createRounding")
         .map_err(|e| EsError::x_content_parse_bare("Failed to build [downsample/action/config] after last required field arrived").caused_by(e))?
         .as_millis();
+    // `TransportDownsampleAction`: a source the caller reads under document or field level
+    // security can't be downsampled (the result would reveal what is hidden).
+    if let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx)
+        && sec.restricts(&crate::xpack::security::privileges::action_of(ctx.api.name()).1, &source)
+    {
+        return Err(EsError::new(500, "exception", format!("Rollup forbidden for index [{source}] with document level or field level security settings.")));
+    }
     let method = match body.get("sampling_method").map(Value::to_es_string).as_deref() {
         None | Some("aggregate") => Method::Aggregate,
         Some("last_value") => Method::LastValue,

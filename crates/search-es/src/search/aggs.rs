@@ -519,6 +519,7 @@ pub struct Lookup<'a> {
     alias_filter: Option<crate::query::Query>,
     parent_fields: Arc<Vec<crate::search_source::FieldAndFormat>>,
     rescore: Option<Arc<Vec<super::PreparedRescore>>>,
+    security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
 
 impl<'a> Lookup<'a> {
@@ -548,6 +549,7 @@ impl<'a> Lookup<'a> {
             alias_filter: t.alias_filter.clone(),
             parent_fields: Arc::new(Vec::new()),
             rescore: None,
+            security: t.security.clone(),
         }
     }
 }
@@ -851,6 +853,7 @@ impl FieldLookup for Lookup<'_> {
             parent_fields: self.parent_fields.clone(),
             rescore: self.rescore.clone(),
             id_fielddata: super::id_fielddata::enabled(self.st),
+            security: self.security.clone(),
         }))
     }
 
@@ -1164,6 +1167,7 @@ struct Fetcher {
     rescore: Option<Arc<Vec<super::PreparedRescore>>>,
     /// [`super::id_fielddata::enabled`] when the search started.
     id_fielddata: bool,
+    security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
 
 /// The hidden key a rendered `top_hits` hit carries to the coordinator, which adds what needs
@@ -1228,6 +1232,7 @@ impl search_aggs::TopHitsFetcher for Fetcher {
             script_fields_only: get("script_fields").and_then(Value::as_object).is_some_and(|m| !m.is_empty()),
             raw_source: false,
             keep_id: false,
+            security: self.security.clone(),
         };
         let ie = |e| fetch_err(crate::engine::convert::index_error(e));
         let mut marker = Map::new();

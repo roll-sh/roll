@@ -812,6 +812,7 @@ async fn run_write_counted(
     // Enrich processors read in-memory tables of the enrich indices.
     crate::xpack::enrich::warm(cluster).await;
     let mut d = IngestDoc::new(src, meta_of(&target, args, id), now_ms);
+    d.user = args.principal.clone();
     d.count_stats = true;
     let doc_id = args.id.clone().unwrap_or_else(|| "null".to_string());
     let index_of = |d: &IngestDoc| match d.meta.get("_index") {
@@ -971,6 +972,7 @@ pub fn simulate(ctx: &Ctx) -> EsResult<Reply> {
             }
         }
         let mut d = IngestDoc::new(src, meta, ctx.now_ms);
+        d.user = Some(std::sync::Arc::new(crate::xpack::security::principal(ctx).clone()));
         if verbose {
             d.trace = Some(Vec::new());
             // The verbose result is the processor list whatever the outcome.

@@ -59,6 +59,8 @@ pub struct QueryCtx<'a> {
     pub unmapped: RefCell<Option<String>>,
     /// `percolate` queries met (matched slots, the percolated documents' index).
     pub percolate: RefCell<Vec<Arc<super::percolate::Percolated>>>,
+    /// The reader's document and field level security (inner hits fetch through it).
+    pub security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
 
 /// An `inner_hits` request found in the query tree.
@@ -160,6 +162,7 @@ impl<'a> QueryCtx<'a> {
             strict_unmapped: std::cell::Cell::new(false),
             unmapped: RefCell::new(None),
             percolate: RefCell::new(Vec::new()),
+            security: None,
         }
     }
 

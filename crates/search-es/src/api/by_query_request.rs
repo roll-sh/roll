@@ -212,6 +212,7 @@ fn scroll_search(ctx: &Ctx, source: SearchSource) -> EsResult<SearchRequest> {
         force_synthetic_source: false,
         fused: None,
         rank_only: false,
+        security: crate::xpack::security::dls::ReadSecurity::of(ctx),
         now_ms: ctx.now_ms,
     })
 }

@@ -440,6 +440,25 @@ impl FieldTable {
         }
     }
 
+    /// The table a reader under field level security sees (`FieldSubsetReader`): the fields
+    /// `visible` refuses are unmapped, and so are aliases to them and their internal
+    /// sub-fields (`title._index_prefix` follows `title`). Engine field numbers are kept.
+    pub fn filtered(&self, visible: impl Fn(&str) -> bool) -> FieldTable {
+        let shown = |k: &str| visible(k.split("._").next().unwrap_or(k));
+        FieldTable {
+            schema: self.schema.clone(),
+            fields: self.fields.iter().filter(|(k, _)| shown(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+            by_number: self.by_number.clone(),
+            aliases: self.aliases.iter().filter(|(a, t)| shown(a) && shown(t)).map(|(a, t)| (a.clone(), t.clone())).collect(),
+            objects: self.objects.clone(),
+            mapping: self.mapping.clone(),
+            analysis: self.analysis.clone(),
+            key: self.key,
+            has_vectors: self.has_vectors,
+            copy_sources: self.copy_sources.clone(),
+        }
+    }
+
     /// `KeyedFlattenedFieldType`: `root.key` of a `flattened` field `root` (the longest
     /// mapped flattened prefix), as a field over its `._keyed` terms.
     pub fn keyed(&self, path: &str) -> Option<Arc<FieldInfo>> {

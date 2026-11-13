@@ -168,6 +168,7 @@ pub fn scan(
         force_synthetic_source: false,
         fused: None,
         rank_only: false,
+        security: crate::xpack::security::dls::ReadSecurity::of(ctx),
         now_ms: ctx.now_ms,
     };
     let targets = crate::search::shard_targets(cluster, &st, &req)?;
@@ -215,7 +216,7 @@ fn scan_shard(
     }
     t.shard.before_search(crate::engine::IndexEngine::refresh_interval(&t.idx))?;
     let searcher = t.shard.searcher();
-    let table = t.engine.table();
+    let table = t.table();
     let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, ctx.now_ms);
     use crate::search::query::arc;
     let mut q = match query {

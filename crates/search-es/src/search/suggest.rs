@@ -377,7 +377,7 @@ fn term_suggest(targets: &[Target], text: &str, t: &Map) -> EsResult<Value> {
     let opts = spell_opts(t)?;
     let mut entries: Vec<(String, u32, u32, Vec<(String, f32, u32)>)> = Vec::new();
     for tg in targets {
-        let table = tg.engine.table();
+        let table = tg.table();
         let Some(fi) = table.get(field) else { continue };
         let analyzer = match t.get("analyzer").and_then(Value::as_str) {
             Some(a) => table.analysis.analyzer(a),
@@ -434,7 +434,7 @@ fn completion_suggest(targets: &[Target], prefix: &str, c: &Map, opts: &super::h
     // Each target's searcher and field table, kept for the fetch of the merged options.
     let mut readers: Vec<Option<(search_index::Searcher, std::sync::Arc<crate::engine::fields::FieldTable>)>> = vec![None; targets.len()];
     for (ti, tg) in targets.iter().enumerate() {
-        let table = tg.engine.table();
+        let table = tg.table();
         // `CompletionSuggestionBuilder.build` on each shard: an unmapped field fails too.
         let Some(fi) = table.get(field).filter(|fi| fi.kind == Kind::Completion) else {
             if !failed.iter().any(|f| f.0 == ti) {
@@ -787,7 +787,7 @@ fn phrase_suggest(cluster: &crate::Cluster, targets: &[Target], text: &str, p: &
         None => None,
     };
     for tg in targets {
-        let table = tg.engine.table();
+        let table = tg.table();
         let Some(fi) = table.get(&spec.field) else { continue };
         let analyzer = match &spec.analyzer {
             Some(a) => Some(table.analysis.analyzer(a).ok_or_else(|| EsError::illegal_argument(format!("Analyzer [{a}] doesn't exists")))?),

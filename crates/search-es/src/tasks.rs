@@ -668,6 +668,7 @@ mod tests {
             now_ms: 0,
             fused: None,
             rank_only: false,
+            security: None,
         }
     }
 

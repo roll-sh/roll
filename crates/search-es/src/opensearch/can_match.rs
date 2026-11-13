@@ -62,7 +62,7 @@ pub fn filter(ctx: &crate::rest::Ctx, req: &SearchRequest, targets: Vec<Target>)
         let mut failures = Vec::new();
         for (i, t) in targets.iter().enumerate() {
             let Ok(searcher) = t.searcher() else { continue };
-            let table = t.engine.table();
+            let table = t.table();
             let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms);
             qctx.runtime_mappings = req.source.runtime_mappings.clone();
             if let Err(e) = crate::search::sort::build(&qctx, &req.source.sort[..1]) {
@@ -80,7 +80,7 @@ pub fn filter(ctx: &crate::rest::Ctx, req: &SearchRequest, targets: Vec<Target>)
             keep.push(true);
             continue;
         };
-        let table = t.engine.table();
+        let table = t.table();
         let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms);
         qctx.runtime_mappings = req.source.runtime_mappings.clone();
         let alias_none = t.alias_filter.as_ref().is_some_and(|f| matches!(rewrite(&qctx, f, es), Rewritten::None));
@@ -305,6 +305,7 @@ mod tests {
             now_ms: 0,
             fused: None,
             rank_only: false,
+            security: None,
         }
     }
 

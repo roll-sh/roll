@@ -30,6 +30,26 @@ pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Val
     })
 }
 
+/// [`call`] as the client that sent `ctx`'s request (its `Authorization` header): the call is
+/// authorized, and reads under document and field level security, as that client.
+pub fn call_as<'a>(ctx: &crate::rest::Ctx<'_>, cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Value>) -> Call<'a> {
+    let mut req = EsRequest::new(method, uri);
+    if let Some(b) = body {
+        req.body = bytes::Bytes::from(b.to_json());
+        req.headers.push(("Content-Type".into(), "application/json".into()));
+    }
+    if ctx.request.header(crate::xpack::security::AUTHENTICATED_HEADER).is_none()
+        && let Some(a) = ctx.request.header("authorization")
+    {
+        req.headers.push(("Authorization".into(), a.to_string()));
+    }
+    Box::pin(async move {
+        let resp = crate::rest::handle(cluster, req).await;
+        let v = if resp.body.is_empty() { Value::Null } else { crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null) };
+        if resp.status < 300 { Ok(v) } else { Err(error_from_body(resp.status, &v)) }
+    })
+}
+
 /// Sends an NDJSON body (`_bulk`).
 pub fn call_ndjson<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: String) -> Call<'a> {
     let mut req = EsRequest::new(method, uri);

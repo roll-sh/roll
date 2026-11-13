@@ -27,6 +27,7 @@
 
 pub mod actions;
 pub mod api_keys;
+pub mod dls;
 pub mod privileges;
 pub mod query;
 pub mod tokens;
@@ -821,6 +822,53 @@ pub fn check_alias_privileges(ctx: &Ctx, indices: &[String], alias: &str) -> EsR
         return Err(EsError::security(403, format!("action [{ACTION}] is unauthorized for {}, this action is granted by the index privileges [{by}]", who(p))));
     }
     Ok(())
+}
+
+/// The properties `set_security_user` records.
+pub const INGEST_USER_PROPERTIES: &[&str] = &["username", "roles", "full_name", "email", "metadata", "api_key", "realm", "authentication_type"];
+
+/// The writing user as `set_security_user` records it, limited to `properties`: absent values
+/// (no roles, no full name, empty metadata) are left out; an API key's user is its owner, with
+/// the owner's realm and the key's name, id and metadata.
+pub fn ingest_user(cluster: &Cluster, p: &Principal, properties: &[String]) -> crate::json::Map {
+    let st = cluster.state();
+    let key = match &p.kind {
+        AuthKind::ApiKey(a) => st.metadata.xpack.get(api_keys::KEYS, &a.id).cloned().map(|k| (a.clone(), k)),
+        _ => None,
+    };
+    let mut out = crate::json::Map::new();
+    for prop in properties {
+        let v = match prop.as_str() {
+            "username" => Some(Value::from(p.username.clone())),
+            "roles" => (!p.roles.is_empty()).then(|| Value::Arr(p.roles.iter().map(Value::from).collect())),
+            "full_name" => (!p.full_name.is_null()).then(|| p.full_name.clone()),
+            "email" => (!p.email.is_null()).then(|| p.email.clone()),
+            "metadata" => p.metadata.as_object().filter(|m| !m.is_empty()).map(|_| p.metadata.clone()),
+            "api_key" => key.as_ref().map(|(a, k)| {
+                let mut m = crate::json::Map::new();
+                m.insert("name".into(), a.name.clone());
+                m.insert("id".into(), Value::from(a.id.clone()));
+                if let Some(md) = k.get("metadata").filter(|v| v.as_object().is_some_and(|m| !m.is_empty())) {
+                    m.insert("metadata".into(), md.clone());
+                }
+                Value::Obj(crate::json::java_hash_map(m, 16))
+            }),
+            "realm" => Some(match &key {
+                Some((_, k)) => obj! { "name" => k.get("realm").cloned().unwrap_or(Value::Null), "type" => k.get("realm_type").cloned().unwrap_or(Value::Null) },
+                None => obj! { "name" => p.realm_name, "type" => p.realm_type },
+            }),
+            "authentication_type" => Some(Value::from(match p.kind {
+                AuthKind::Realm => "REALM",
+                AuthKind::ApiKey(_) => "API_KEY",
+                AuthKind::Token | AuthKind::ServiceAccount { .. } => "TOKEN",
+            })),
+            _ => None,
+        };
+        if let Some(v) = v {
+            out.insert(prop.clone(), v);
+        }
+    }
+    out
 }
 
 /// Who a 403 names: the user and its roles, or the API key.

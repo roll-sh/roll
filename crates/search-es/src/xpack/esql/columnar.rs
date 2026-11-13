@@ -190,6 +190,7 @@ pub(super) fn plan(
         now_ms,
         fused: None,
         rank_only: false,
+        security: None,
     };
     let targets = crate::search::shard_targets(cluster, &st, &req).ok()?;
     let mut by_index: Vec<(String, Arc<Vec<ColSpec>>)> = Vec::new();
@@ -202,7 +203,7 @@ pub(super) fn plan(
                 if mode.is_some_and(|m| m.is_strict_columnar()) {
                     return None;
                 }
-                let table = t.engine.table();
+                let table = t.table();
                 let stored_source = crate::engine::synthetic::source_mode(&t.idx) == crate::engine::synthetic::SourceMode::Stored;
                 let mut specs = Vec::with_capacity(cols.len());
                 for (i, name) in fields.iter().enumerate() {
@@ -493,7 +494,7 @@ fn prepare(cluster: &Cluster, targets: Vec<(Target, Arc<Vec<ColSpec>>)>, query: 
             continue;
         }
         let searcher = t.searcher().ok()?;
-        let table = t.engine.table();
+        let table = t.table();
         let q = {
             let qctx = crate::search::query::QueryCtx::new(cluster, &st, &t.idx, &table, &searcher, now_ms);
             let src = crate::search_source::SearchSource { query: parsed.clone(), ..Default::default() };
@@ -566,7 +567,7 @@ impl Fetched {
         if self.cols.is_empty() {
             return Ok(0);
         }
-        let table = t.engine.table();
+        let table = t.table();
         let mut loaded = 0;
         let (mut out, mut ignored) = (crate::json::Map::new(), crate::json::Map::new());
         for (row, &d) in rows.iter_mut().zip(docs) {

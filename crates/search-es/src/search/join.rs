@@ -256,6 +256,7 @@ pub fn inner_hits(qctx: &QueryCtx, t: &Target, r: &ShardResult, doc: u32, def: &
         script_fields_only: spec.script_fields.as_ref().and_then(Value::as_object).is_some_and(|m| !m.is_empty()),
         raw_source: false,
         keep_id: false,
+        security: qctx.security.clone(),
     };
     let highlight = match &spec.highlight {
         Some(Value::Obj(hl)) => Some(super::highlight::Spec::parse(hl)?),

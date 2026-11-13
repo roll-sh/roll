@@ -69,6 +69,7 @@ pub fn write_args(ctx: &Ctx) -> EsResult<WriteArgs> {
         dynamic_template_params: None,
         internal: false,
         list_executed_pipelines: false,
+        principal: Some(std::sync::Arc::new(crate::xpack::security::principal(ctx).clone())),
     })
 }
 
@@ -563,6 +564,13 @@ pub fn get_one(ctx: &Ctx, idx: &Arc<IndexMeta>, id: &str, args: &GetArgs) -> EsR
         None => c.get_missing.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     };
     let Some(doc) = doc else { return Ok(None) };
+    // Document level security: a document the reader may not see is not found.
+    if let Some(sec) = crate::xpack::security::dls::ReadSecurity::of(ctx)
+        && let Some(q) = sec.documents(ctx.cluster, crate::xpack::security::dls::READ, &idx.name)?
+        && !crate::search::matches_doc(ctx.cluster, &st, idx, &engine, shard, id, &q)?
+    {
+        return Ok(None);
+    }
     if let Some(v) = args.version {
         // `VersionType.isVersionConflictForReads`: every version type wants the exact version.
         let _ = args.version_type;
@@ -609,11 +617,18 @@ pub fn render_get(ctx: &Ctx, index: &str, id: &str, got: Option<&GotDoc>, args: 
     let engine = ctx.cluster.engine.index(ctx.cluster, &st, &g.index)?;
     let table = engine.table();
     let view = crate::fetch::SourceView { idx: &g.index, table: &table, force_synthetic: args.force_synthetic, search: false };
+    let fls = crate::xpack::security::dls::ReadSecurity::of(ctx).and_then(|s| s.fields(crate::xpack::security::dls::READ, &g.index.name));
     if let Some(src) = crate::fetch::render_source_view(&d.fields, &fs, &view)? {
-        m.insert("_source".into(), src);
+        m.insert("_source".into(), match &fls {
+            Some(f) => f.filter_source(src),
+            None => src,
+        });
     }
     if let Some(sf) = &args.stored_fields {
-        let fields = crate::fetch::stored_fields(&table, &d.fields, sf);
+        let mut fields = crate::fetch::stored_fields(&table, &d.fields, sf);
+        if let Some(f) = &fls {
+            fields = f.filter_fields(fields);
+        }
         if !fields.is_empty() {
             m.insert("fields".into(), Value::Obj(fields));
         }
@@ -683,7 +698,11 @@ pub fn get_source(ctx: &Ctx, head: bool) -> EsResult<Reply> {
     let engine = ctx.cluster.engine.index(ctx.cluster, &st, &g.index)?;
     let table = engine.table();
     let view = crate::fetch::SourceView { idx: &g.index, table: &table, force_synthetic: args.force_synthetic, search: false };
-    match crate::fetch::render_source_view(&g.doc.fields, &FetchSource { fetch: true, ..fs }, &view)? {
+    let fls = crate::xpack::security::dls::ReadSecurity::of(ctx).and_then(|s| s.fields(crate::xpack::security::dls::READ, &g.index.name));
+    match crate::fetch::render_source_view(&g.doc.fields, &FetchSource { fetch: true, ..fs }, &view)?.map(|v| match &fls {
+        Some(f) => f.filter_source(v),
+        None => v,
+    }) {
         Some(v) => {
             if head {
                 return Ok(Reply::Empty(200));

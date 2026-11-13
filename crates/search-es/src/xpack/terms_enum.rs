@@ -205,12 +205,13 @@ fn enumerate(cluster: &crate::cluster::Cluster, targets: &str, field: &str, pref
         now_ms: 0,
         fused: None,
         rank_only: false,
+        security: None,
     };
     let shards = crate::search::shard_targets(cluster, &st, &req)?;
     drop(st);
     let mut out: Vec<(Vec<u8>, String)> = Vec::new();
     for t in shards {
-        let Ok(dict) = dict_of(&t.engine.table(), field) else { return Ok(None) };
+        let Ok(dict) = dict_of(&t.table(), field) else { return Ok(None) };
         let Some(dict) = dict else { continue };
         let after = after.map(|a| match dict.kind {
             TermKind::Raw => a.as_bytes().to_vec(),
@@ -318,7 +319,10 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let started = std::time::Instant::now();
     let timeout_ms = body.get("timeout").and_then(|t| crate::units::TimeValue::parse(&t.to_es_string(), "timeout").ok()).map(|t| t.as_millis()).unwrap_or(1000);
-    if let Some(terms) = enumerate(ctx.cluster, &targets, &field, &prefix, ci, after.as_deref(), size as usize)? {
+    // A reader under document or field level security sees only its documents' terms of the
+    // fields it may read: the search below runs as that reader, never the terms dictionary.
+    let restricted = crate::xpack::security::dls::ReadSecurity::of(ctx).is_some();
+    if !restricted && let Some(terms) = enumerate(ctx.cluster, &targets, &field, &prefix, ci, after.as_deref(), size as usize)? {
         let complete = (started.elapsed().as_millis() as i64) < timeout_ms;
         return Reply::ok(obj! { "_shards" => shards(total_shards), "terms" => Value::Arr(terms.into_iter().map(Value::from).collect()), "complete" => complete });
     }
@@ -332,7 +336,8 @@ pub async fn terms_enum(ctx: &Ctx<'_>) -> EsResult<Reply> {
         m.insert("include".into(), prefix_regex(&prefix, ci).into());
     }
     let q = obj! { "size" => 0, "aggs" => obj! { "t" => obj! { "terms" => terms_agg } } };
-    let r = internal::call(ctx.cluster, "POST", &format!("/{}/_search?ignore_unavailable=true", enc(&targets)), Some(&q)).await?;
+    let uri = format!("/{}/_search?ignore_unavailable=true", enc(&targets));
+    let r = if restricted { internal::call_as(ctx, ctx.cluster, "POST", &uri, Some(&q)).await? } else { internal::call(ctx.cluster, "POST", &uri, Some(&q)).await? };
     let mut terms: Vec<Value> = r
         .pointer(&["aggregations", "t", "buckets"])
         .and_then(Value::as_array)
