@@ -247,5 +247,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
 7. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`); measure it once
-   main's cache exists. `search-store`'s `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once`
-   failed once on the loaded host (it passes alone): find what it races on.
+   main's cache exists. (`search-store`'s mass-recovery WAL test flaked on a loaded host: a replay
+   counted itself in the shared replay cache only after listing, so one could finish and empty it
+   while the others listed; it now counts first. 12 of 40 runs on one CPU failed before, 0 of 40
+   after.)
