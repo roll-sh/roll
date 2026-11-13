@@ -95,12 +95,19 @@ fn invalid_token(access: &Access) -> Response {
 pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap) -> Target {
     let param = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let product = row.product.to_string();
-    // Storage acts in the account a request names; bucket names repeat across accounts, so a
-    // request naming one is about the product as a whole.
-    if row.product == "storage"
-        && (headers.contains_key("x-roll-account") || query.is_some_and(|q| url::form_urlencoded::parse(q.as_bytes()).any(|(k, _)| k == "account")))
-    {
-        return Target::Product { product };
+    // Storage acts in the account a request names. Bucket names repeat across accounts, so a
+    // bucket there is `<account>/<bucket>` (a rule names it so); anything else in another account
+    // (lists, keys, roles) is about the product as a whole.
+    if let Some(account) = storage_account(row, query, headers) {
+        return match row.target {
+            Tgt::Param(names, kind) => {
+                let bucket = names.iter().filter_map(|n| param(n)).collect::<Vec<_>>().join("/");
+                Target::One(access.resource(row.product, kind, &format!("{account}/{bucket}")))
+            }
+            // Its buckets, filtered to the ones the token has there.
+            Tgt::List { .. } => Target::List { product },
+            _ => Target::Product { product },
+        };
     }
     match row.target {
         Tgt::Param(names, kind) => {
@@ -129,6 +136,15 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
         }
         Tgt::Product | Tgt::AnyGrant => Target::Product { product },
     }
+}
+
+/// The storage account a request names (`X-Roll-Account`, else `?account=`), if any.
+fn storage_account(row: &Row, query: Option<&str>, headers: &axum::http::HeaderMap) -> Option<String> {
+    if row.product != "storage" {
+        return None;
+    }
+    let from_query = || query.and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.into_owned()));
+    headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).or_else(from_query).filter(|a| !a.is_empty())
 }
 
 pub(crate) fn describe(t: &Target) -> Option<String> {
@@ -161,6 +177,8 @@ struct Ctx {
     route: String,
     /// What a request that isn't an MCP call did, for the log (a push's ref updates).
     args: Option<Value>,
+    /// A list's items are named under this (a named storage account's buckets: `<account>/<name>`).
+    list_prefix: Option<String>,
 }
 
 impl Ctx {
@@ -200,6 +218,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         blocking(move || a.store.by_secret(&token)).await
     };
     let grant = match lookup {
+        // Unused longer than the operator's policy allows: it stops (making it again is a person's
+        // choice, not an agent's).
+        Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
         Ok(Some(g)) => g,
         Ok(None) => return invalid_token(&access),
         Err(e) => return e.into_response(),
@@ -209,7 +230,16 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
     let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
-    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None };
+    // A grant's request limit: an MCP message counts once (not the route its tool calls), a hop
+    // counts where it was decided. Over it, nothing is written: a flood stays cheap.
+    let mut limit = None;
+    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && req.extensions().get::<McpCall>().is_none()) {
+        match access.limiter.check(&grant.id, rate, Instant::now()) {
+            crate::rate::Verdict::Over { retry_after } => return rate_limited(rate, retry_after),
+            crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
+        }
+    }
+    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None };
     if !decided_before {
         let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
         tokio::task::spawn_blocking(move || a.store.touch(&id, ip.as_deref()));
@@ -240,7 +270,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if found.params.is_some() {
         ctx.route = row.route.to_string();
     }
-    let scope = Arc::new(ctx.grant.rules.clone());
+    let scope = Arc::new(ctx.grant.effective_rules(code_sql::now_ms()));
     let (mut parts, body) = req.into_parts();
     let params: Vec<(String, String)> = match found.params {
         Some(p) => p,
@@ -260,6 +290,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             Err(e) => return Error::Internal(e.to_string()).into_response(),
         }
     };
+    ctx.list_prefix = storage_account(row, original.query(), &parts.headers);
     // The body, when the action depends on it.
     let mut buffered: Option<bytes::Bytes> = None;
     let mut body = Some(body);
@@ -388,10 +419,36 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     } else {
         resp
     };
+    let mut resp = resp;
+    if let Some((rate, remaining, reset)) = limit {
+        limit_headers(resp.headers_mut(), rate, remaining, reset);
+    }
     if !decided_before {
         ctx.audit(Some(row), Some(action), resource, if approval_used.is_some() { "ask" } else { "allow" }, approval_used.as_deref(), resp.status());
     }
     resp
+}
+
+/// Over a grant's limit: 429, when to come back (`Retry-After`, whole seconds), and the limit
+/// (`RateLimit-*`, the IETF draft's fields, as Stripe and GitHub send theirs).
+fn rate_limited(rate: u32, retry_after: std::time::Duration) -> Response {
+    let secs = retry_after.as_secs_f64().ceil().max(1.0) as u64;
+    let mut r = deny(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limited",
+        format!("this token may make {rate} requests a minute: try again in {secs} s"),
+        json!({ "retry_after": secs, "limit": rate }),
+    );
+    let h = r.headers_mut();
+    h.insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    limit_headers(h, rate, 0, retry_after);
+    r
+}
+
+fn limit_headers(h: &mut axum::http::HeaderMap, rate: u32, remaining: u32, reset: std::time::Duration) {
+    h.insert("ratelimit-limit", HeaderValue::from(rate));
+    h.insert("ratelimit-remaining", HeaderValue::from(remaining));
+    h.insert("ratelimit-reset", HeaderValue::from(reset.as_secs_f64().ceil() as u64));
 }
 
 /// The decision on everything a request needs: the weakest outcome, and the action it's for
@@ -592,11 +649,13 @@ async fn post_process(
         }
     }
     if filter_list && let Tgt::List { items, id_field, kind } = row.target {
-        let (a, s, product) = (ctx.access.clone(), scope.clone(), row.product);
+        let (a, s, product, prefix) = (ctx.access.clone(), scope.clone(), row.product, ctx.list_prefix.clone());
         let kind = kind.unwrap_or(product);
         v = tokio::task::spawn_blocking(move || {
             let keep = |item: &Value| {
                 let Some(id) = item.get(id_field).and_then(Value::as_str) else { return false };
+                let named = prefix.as_ref().map(|p| format!("{p}/{id}"));
+                let id = named.as_deref().unwrap_or(id);
                 let r = if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) };
                 s.outcome(&Target::One(r), action) == Outcome::Allow
             };

@@ -41,6 +41,12 @@ approves it, the request then running as sent) and one evaluator shared by the A
 | OAuth refresh token | `rlf_` | rotates on every use; 30 days since its last use |
 | product credentials | `rlc_`, `rla_`, keys… | roll code owner tokens, storage IAM, stream and tasks keys: unchanged, checked by their product |
 
+Each grant secret is its prefix, 34 random characters of lowercase base32 and a 6-character
+checksum (CRC-32 of the rest), 44 characters in all. Scanners use the checksum, as GitHub's tokens
+carry one, to tell a real roll token from look-alike text without asking roll
+(`roll_access::checksum_ok`, `find_secrets`). Secrets made before checksums still work; they just
+aren't recognised by scanners.
+
 A scoped token and an OAuth connection are both a **grant**: one row with the rules, expiry, IP
 allowlist, name and who made it. An OAuth connection is a grant whose secrets are the rotating
 access and refresh tokens. Revoking the grant revokes them all at once.
@@ -69,6 +75,7 @@ type Grant = {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: { id: string; name: string; uri?: string }; // OAuth only
+  rate_per_minute?: number; // 1–100,000 requests a minute, per node; absent: no limit
 };
 
 type Rule = {
@@ -191,8 +198,14 @@ counts as not allowed here: an answer is never held for a person.
 ### Storage accounts
 
 Storage acts in the account a request names (`X-Roll-Account` or `?account=`), and bucket names
-repeat across accounts. A request naming an account is about storage as a whole: only a rule for
-every storage resource covers it.
+repeat across accounts:
+
+- A bucket in a named account is `<account>/<bucket>`, so a rule
+  `{product: "storage", resources: [{id: "acme/logs"}]}` reaches `logs` in account `acme` only.
+  A plain bucket name (`{id: "logs"}`) means the default account's bucket.
+- A named account's bucket list is filtered to the `<account>/<bucket>` ids a token has there.
+- Anything else in a named account (keys, roles, IAM) is about storage as a whole: only a rule for
+  every storage resource covers it.
 
 ### Presets
 
@@ -294,6 +307,21 @@ type Approval = {
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
+### Remembered approvals
+
+Approving can also allow what's asked again, as Claude Code's and Cursor's "allow for this
+session" or "always" do (`POST …/approve {remember: "1h" | "8h" | "1d" | "always"}`, the approvals
+page's "Once ▾", `roll mcp approve --remember 1h`):
+
+- It allows the request's action on its one resource (`{product, resources: [{id}], actions:
+  {<action>: "allow"}}`); nothing broader. A request about the product as a whole or about
+  something new ("new in a project") can only be approved once.
+- For a while, the rule is the grant's `temporary`: it lapses by itself, and decisions read the
+  grant's rules plus the live temporary ones. For good, it's added to the grant's `rules`, and the
+  operator's token policy applies.
+- A while never becomes for good: a token makes tokens covered by its own rules only, never by
+  what it's allowed for now.
+
 ### Approvals in chat
 
 Approvals can also go to a Slack or Discord channel, through roll code's chat ops
@@ -343,20 +371,84 @@ type AuditEvent = {
 - The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
 
+### Audit sinks
+
+The operator can stream the log to a SIEM (Datadog, Splunk, a Lambda): the audit page's "Stream to
+a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url, from_start?}`
+(`roll-access/src/sinks.rs`).
+
+- A sink is a public HTTPS URL (roll-net's guard, no redirects, 10 s, the answer read to 64 KiB).
+  It gets new rows in order, in batches of up to 200: `{sink, source: "access", events:
+  AuditEvent[]}`, signed as roll secrets' sinks and roll's webhooks are, so one receiver takes all
+  of them: `X-Roll-Sink: <id>`, `X-Roll-Timestamp: <unix seconds>`, `X-Roll-Signature:
+  sha256=<hex HMAC-SHA256 of "{timestamp}.{body}">`.
+- The signing secret (`whsec_…`) is shown once and kept sealed with `ROLL_SECRET_KEY`, bound to
+  its sink; without the key, streaming is off. `ROLL_ACCESS_SINK_ALLOW_PRIVATE` allows plain http
+  on a private address (local development only).
+- Each sink keeps a cursor (the last row's time and id). Every node sweeps every 10 seconds, sending batches until a
+  sink has no full one waiting (up to 5,000 rows a sink a sweep); a claim in the store keeps a
+  batch to one node, and only rows 30 seconds old go (a row is written
+  just after its request, so a cursor never passes one still being written). A failed batch is
+  sent again 5 minutes later, or at once with "Retry now" (`POST …/sinks/{id}/retry`). Rows the
+  log prunes before a sink catches up are gone. At most 10 sinks.
+
 ## Managing grants
 
 - The operator manages grants. A grant may too when it has `admin` on product `access`, and then
   only grants it covers entirely, before and after a change: rules within its own, an expiry no
-  later than its own, and (when it has an IP allowlist) addresses within its own. It can never make
-  a token more powerful than it is, one that outlives it, or one usable from elsewhere, and never
+  later than its own, (when it has an IP allowlist) addresses within its own, and (when it has a
+  rate limit) a limit no higher than its own. It can never make a token more powerful than it is,
+  one that outlives it, one usable from elsewhere or one that may make more requests, and never
   changes its own addresses.
 - A grant reviews and comments in roll code only as itself (`token:<name>`): the gate drops
   `X-Roll-User` and sets `X-Roll-Agent`.
 - The operator's policy (`/v1/access/policy`, `roll token policy`) caps every grant's lifetime
   (`max_days`) and can require that every grant expires; a grant made or changed after must fit,
   OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs).
+  `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
+  made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
+  most every 10 seconds, so a change reaches every node within that.
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
+
+## Leaked tokens
+
+A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
+it's found, as GitHub does for its own tokens:
+
+- **In roll code.** Everything that lands, in any repository, is read after it lands. The scanner
+  reads the store's durable land log, never inside the lander, with a cursor of its own and one
+  node at a time (`code-control/src/leaks.rs`). It reads every changeset a landing added, and the
+  changed files up to 1 MiB each. A file that mentions a token prefix goes to roll-access, which
+  matches checksums and revokes each live token.
+- **From GitHub.** `POST /v1/access/leaks/github` takes reports from GitHub's secret scanning
+  partner program: tokens found in public repositories, gists and issues. Each report is signed
+  with one of GitHub's ECDSA P-256 keys (`Github-Public-Key-Identifier` and
+  `Github-Public-Key-Signature`, checked against
+  `api.github.com/meta/public_keys/secret_scanning`, cached for an hour and refetched for an
+  unknown key at most once a minute). roll revokes the live tokens and answers each with its
+  `token_hash` and `true_positive` or `false_positive`. An unsigned or wrongly signed report
+  changes nothing.
+- A revoked token answers 401 on its next request. The grant keeps `revoked_why` ("found in
+  acme/site .env at 1a2b…", shown in the dashboard), and the audit log gets a row (`source:
+  "leak"`, `decision: "revoke"`).
+
+## Rate limits
+
+A grant may have `rate_per_minute` (the builder's "Requests a minute", `roll token create --rate`,
+the consent screen), like Stripe's and GitHub's per-key limits. It protects roll from a runaway
+agent loop; it isn't billing.
+
+- A GCRA per grant (`roll-access/src/rate.rs`): a full minute's worth may come at once, then one
+  request every `60 s / rate`. Counted in memory on each node, so a fleet of N nodes allows up to
+  N times the rate.
+- An MCP message counts once, not again for the route its tool calls; a hop to an owner counts
+  where it was decided.
+- Allowed answers carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds).
+  Over the limit the answer is `429` `{code: "rate_limited", retry_after, limit}` with
+  `Retry-After`, before anything is looked up or written: no audit row, no `last_used_at`, so a
+  flood stays cheap. Over MCP the `/v1/mcp` request itself answers that `429` (the MCP SDKs raise it
+  with its body, so the agent sees when to retry).
 
 ## Storage
 
@@ -384,17 +476,22 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}` |
-| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?}` → 201 `{grant, token}`; `token` is shown this once |
+| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
-| `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?}`: narrow or widen (within the caller's own) |
+| `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | `?state=pending` |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
-| `POST /v1/access/approvals/{id}/approve` | operator | |
+| `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry}`: roll's rules for every grant |
+| `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |
+| `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
+| `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
+| `POST /v1/access/audit/sinks/{id}/retry` | operator | a failed sink's batch at the next sweep → 204 |
+| `DELETE /v1/access/audit/sinks/{id}` | operator | stop streaming → 204 |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days}`: roll's rules for every grant |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |
@@ -423,7 +520,7 @@ this list:
 | `/v1/code/agents/shares/{id}`, `/v1/code/names` | public pages |
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
-| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify` | the operator decides |
+| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
 
 Rows match a route by its shape, not its parameters' names (`…/secrets/{key}/value` finds the row
 written `…/secrets/{name}/value`), so renaming a parameter can never change an action. To check a

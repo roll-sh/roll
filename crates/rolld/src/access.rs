@@ -97,6 +97,99 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
     Ok(access)
 }
 
+/// Audit sinks (roll_access::sinks): delivered through roll-net's private-address guard, without
+/// redirects, in 10 seconds, reading at most 64 KiB of the answer; each sink's secret sealed with
+/// `ROLL_SECRET_KEY`. Every node sweeps; a claim in the store keeps a batch to one of them.
+/// `ROLL_ACCESS_SINK_ALLOW_PRIVATE` lets a sink be plain http on a private address (local
+/// development only).
+pub fn sinks(access: &Arc<Access>) {
+    let Some(key) = std::env::var("ROLL_SECRET_KEY").ok().filter(|k| !k.trim().is_empty()) else {
+        tracing::info!("audit sinks are off: they need ROLL_SECRET_KEY");
+        return;
+    };
+    let sealer = match code_review::secret::Sealer::new(&key) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "audit sinks are off");
+            return;
+        }
+    };
+    let allow_private = std::env::var("ROLL_ACCESS_SINK_ALLOW_PRIVATE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+    let mut b = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).no_proxy();
+    if !allow_private {
+        b = b.dns_resolver(roll_net::PublicOnly);
+    }
+    let Ok(client) = b.build() else { return };
+    let _ = access.sinks.set(Arc::new(SinkPost { client, sealer, allow_private }));
+    let a = access.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            if let Err(e) = a.sweep_sinks().await {
+                tracing::warn!(error = %e, "sweeping audit sinks");
+            }
+        }
+    });
+}
+
+struct SinkPost {
+    client: reqwest::Client,
+    sealer: code_review::secret::Sealer,
+    allow_private: bool,
+}
+
+/// What a sink's secret is sealed to: it opens only as that sink's.
+fn sink_aad(id: &str) -> String {
+    format!("roll-access:sink:{id}")
+}
+
+impl roll_access::sinks::SinkTransport for SinkPost {
+    fn check(&self, url: &str) -> Result<(), String> {
+        let u = reqwest::Url::parse(url).map_err(|_| "the sink isn't a URL".to_string())?;
+        let ok_scheme = u.scheme() == "https" || (self.allow_private && u.scheme() == "http");
+        if !ok_scheme || u.host_str().is_none_or(str::is_empty) {
+            return Err("a sink is an https URL".into());
+        }
+        if !self.allow_private && roll_net::literal_private_host(&u) {
+            return Err("a sink is on a public address".into());
+        }
+        Ok(())
+    }
+
+    fn seal(&self, id: &str, secret: &str) -> Result<String, String> {
+        Ok(self.sealer.seal(&sink_aad(id), secret))
+    }
+
+    fn open(&self, id: &str, sealed: &str) -> Result<String, String> {
+        self.sealer.open(&sink_aad(id), sealed).map_err(|e| e.to_string())
+    }
+
+    fn post(&self, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let client = self.client.clone();
+        let check = self.check(&url);
+        Box::pin(async move {
+            check?;
+            let host = reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            let mut req = client.post(&url).body(body);
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            // Errors without the URL: its path or query may hold a token of the receiver's.
+            let mut resp = req.send().await.map_err(|e| format!("{host}: {}", e.without_url()))?;
+            let status = resp.status();
+            let mut read = 0;
+            while read < 64 << 10 {
+                match resp.chunk().await {
+                    Ok(Some(c)) => read += c.len(),
+                    _ => break,
+                }
+            }
+            if status.is_success() { Ok(()) } else { Err(format!("{host} answered {status}")) }
+        })
+    }
+}
+
 /// Approvals in chat: roll code's chat ops post and edit the cards, and send presses back to
 /// roll-access (docs/permissions.md, "Approvals in chat").
 pub fn chat(access: &Arc<Access>, code: &Arc<code_control::Code>) {
@@ -106,6 +199,22 @@ pub fn chat(access: &Arc<Access>, code: &Arc<code_control::Code>) {
     code.on_access_decision(Arc::new(move |d: code_control::chatops::access::AccessDecision| {
         let a = a.clone();
         Box::pin(async move { a.decide_from_chat(d.approval, d.approve, d.by, d.install).await })
+    }));
+}
+
+/// Leaked tokens: roll code reads what lands for roll grant secrets, and each live one is
+/// revoked (docs/permissions.md, "Leaked tokens").
+pub fn leaks(access: &Arc<Access>, code: &Arc<code_control::Code>) {
+    let a = access.clone();
+    code.on_leaked_secrets(Arc::new(move |text: String, at: String| {
+        let found = roll_access::find_secrets(&text);
+        if found.is_empty() {
+            return 0;
+        }
+        a.revoke_leaked(&found, &at).map(|g| g.len()).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "revoking leaked tokens");
+            0
+        })
     }));
 }
 

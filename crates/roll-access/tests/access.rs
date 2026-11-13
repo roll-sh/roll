@@ -62,12 +62,18 @@ fn postgres() -> Router {
         .route("/v1/open", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/internal/tasks", axum::routing::any(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/git/{owner}/{repo}/git-receive-pack", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        .route("/v1/storage/buckets/{name}", get(|| async { axum::Json(json!({ "name": "logs" })) }))
+        .route("/v1/storage/buckets", get(|| async { axum::Json(json!([{ "name": "logs" }, { "name": "media" }])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
 }
 
 impl Daemon {
     fn new(wait_ms: u64) -> Daemon {
+        Daemon::with(wait_ms, |_| {})
+    }
+
+    fn with(wait_ms: u64, configure: impl FnOnce(&mut Config)) -> Daemon {
         let dir = tempfile::tempdir().unwrap();
         let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let workspace = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
@@ -76,7 +82,8 @@ impl Daemon {
         resolvers.by_kind.insert("default-branch", Arc::new(DefaultBranch));
         resolvers.workspace = Some(Arc::new(WorkspaceResolver(workspace.clone())));
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
-        let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
+        let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
+        configure(&mut config);
         let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, resolvers).unwrap();
         let public = roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") };
         let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![public]);
@@ -195,8 +202,29 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(ids(&list), Vec::<&str>::new());
 
     // An address outside the allowlist (an in-process request has none) is refused.
+    // A bucket in another storage account is `<account>/<bucket>`: a rule for one doesn't reach
+    // the same name in the default account or in a third.
+    let (bucket, _) = d.token(json!([{ "product": "storage", "resources": [{ "id": "acme/logs" }], "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.send(&bucket, Method::GET, "/v1/storage/buckets/logs", None, &[("x-roll-account", "acme")]).await.0, StatusCode::OK);
+    assert_eq!(d.send(&bucket, Method::GET, "/v1/storage/buckets/logs", None, &[("x-roll-account", "other")]).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&bucket, Method::GET, "/v1/storage/buckets/logs", None).await.0, StatusCode::FORBIDDEN);
+    let (s, list) = d.send(&bucket, Method::GET, "/v1/storage/buckets", None, &[("x-roll-account", "acme")]).await;
+    assert_eq!((s, list), (StatusCode::OK, json!([{ "name": "logs" }])), "the account's list, filtered to its bucket");
+
     let (fenced, _) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ip_allow": ["10.0.0.0/8"] })).await;
     assert_eq!(d.call(&fenced, Method::GET, "/v1/projects", None).await.1["code"], "ip_not_allowed");
+
+    // A token limited to 2 requests a minute: told how many are left, then 429 with when to retry.
+    let (slow, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "rate_per_minute": 2 })).await;
+    let get = || async {
+        let req = Request::get("/v1/projects").header("authorization", format!("Bearer {slow}")).body(Body::empty()).unwrap();
+        let resp = d.router.clone().oneshot(req).await.unwrap();
+        let h = |n: &str| resp.headers().get(n).map(|v| v.to_str().unwrap().to_string());
+        (resp.status(), h("ratelimit-remaining"), h("retry-after"))
+    };
+    assert_eq!(get().await, (StatusCode::OK, Some("1".into()), None));
+    assert_eq!(get().await, (StatusCode::OK, Some("0".into()), None));
+    assert_eq!(get().await, (StatusCode::TOO_MANY_REQUESTS, Some("0".into()), Some("30".into())));
 
     // Secrets are per project and environment: a rule for the project's development environment
     // reaches those and only those, names but not values.
@@ -384,6 +412,12 @@ async fn a_token_never_makes_a_stronger_one() {
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({}))).await.0, StatusCode::OK);
     assert_eq!(make(json!([{ "product": "postgres", "resources": "*", "actions": { "write": "allow" } }]), Some(end)).await.0, StatusCode::FORBIDDEN);
     assert_eq!(make(read.clone(), None).await.0, StatusCode::FORBIDDEN, "outlives its maker");
+    // A limited maker makes only tokens limited as tightly.
+    let (limited, _) = d.token(json!([{ "product": "access", "resources": "*", "actions": { "admin": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "rate_per_minute": 60 })).await;
+    let child = |rate: Value| d.call(&limited, Method::POST, "/v1/access/tokens", Some(json!({ "name": "child", "rules": read, "rate_per_minute": rate })));
+    assert_eq!(child(Value::Null).await.0, StatusCode::FORBIDDEN, "unlimited from a limited maker");
+    assert_eq!(child(json!(61)).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(child(json!(60)).await.0, StatusCode::CREATED);
     assert_eq!(make(read, Some(end - 1000)).await.0, StatusCode::CREATED);
 
     let project = d.workspace.create("app", "", None).unwrap();
@@ -489,6 +523,7 @@ async fn oauth_connects_an_mcp_client() {
     let redirect = "http://127.0.0.1:43111/callback";
     let (s, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "Claude Code", "redirect_uris": [redirect] }))).await;
     assert_eq!(s, StatusCode::CREATED, "{client}");
+    assert!(client.as_object().unwrap().values().all(|v| !v.is_null()), "RFC 7591: unset fields are left out: {client}");
     let client_id = client["client_id"].as_str().unwrap();
     let bad = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "redirect_uris": ["http://evil.example/cb"] }))).await;
     assert_eq!(bad.1["error"], "invalid_redirect_uri");
@@ -530,4 +565,202 @@ async fn oauth_connects_an_mcp_client() {
     d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{grant}"), None).await;
     let (s, _) = d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+/// A delivery: its headers and body.
+type Sent = (Vec<(String, String)>, Vec<u8>);
+
+/// Records what a sink would be sent; fails while `fail` is set.
+#[derive(Default)]
+struct FakeSink {
+    sent: std::sync::Mutex<Vec<Sent>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+impl roll_access::sinks::SinkTransport for FakeSink {
+    fn check(&self, url: &str) -> Result<(), String> {
+        if url.starts_with("https://") { Ok(()) } else { Err("a sink is an https URL".into()) }
+    }
+    fn seal(&self, id: &str, secret: &str) -> Result<String, String> {
+        Ok(format!("{id}|{secret}"))
+    }
+    fn open(&self, id: &str, sealed: &str) -> Result<String, String> {
+        sealed.strip_prefix(&format!("{id}|")).map(str::to_string).ok_or_else(|| "sealed for another sink".into())
+    }
+    fn post(&self, _url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let failing = self.fail.load(std::sync::atomic::Ordering::SeqCst);
+        if !failing {
+            self.sent.lock().unwrap().push((headers, body));
+        }
+        Box::pin(async move { if failing { Err("siem.example answered 503".to_string()) } else { Ok(()) } })
+    }
+}
+
+/// The audit log streams to a SIEM: only the operator adds a sink; rows arrive in order, signed
+/// with the secret shown once, each once; a failed batch is kept for later.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audit_log_streams_to_a_sink() {
+    let d = Daemon::new(50);
+    let fake = Arc::new(FakeSink::default());
+    let _ = d.access.sinks.set(fake.clone());
+    let (token, _) = d.token(json!([{ "product": "access", "resources": "*", "actions": { "admin": "allow", "read": "allow" } }]), json!({})).await;
+    let new = json!({ "url": "https://siem.example/roll", "from_start": true });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/audit/sinks", Some(new.clone())).await.0, StatusCode::FORBIDDEN, "a token never moves the log");
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/audit/sinks", Some(json!({ "url": "http://siem.example" }))).await.0, StatusCode::BAD_REQUEST);
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/audit/sinks", Some(new)).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    let (id, secret) = (made["sink"]["id"].as_str().unwrap().to_string(), made["secret"].as_str().unwrap().to_string());
+    assert!(!d.call(OPERATOR, Method::GET, "/v1/access/audit/sinks", None).await.1.to_string().contains(&secret), "the secret is shown once");
+
+    // Rows old enough to have settled (a row is written just after its request).
+    let old = code_sql::now_ms() - 60_000;
+    let row = |n: i64| roll_access::store::AuditEvent {
+        id: format!("aud_{n:03}"),
+        at: old + n,
+        grant_id: None,
+        grant_name: None,
+        source: "api".into(),
+        tool: None,
+        method: "GET".into(),
+        route: "/v1/projects".into(),
+        product: Some("postgres".into()),
+        action: Some("read".into()),
+        resource: None,
+        decision: "allow".into(),
+        approval: None,
+        status: 200,
+        args: None,
+        ip: None,
+        duration_ms: 1,
+    };
+    for n in 0..3 {
+        d.access.store.audit(&row(n));
+    }
+    fake.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 1));
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/audit/sinks", None).await;
+    assert_eq!((list[0]["status"].as_str(), list[0]["error"].as_str()), (Some("error"), Some("siem.example answered 503")));
+    // Kept for later: once the retry is due, the same rows go.
+    fake.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 0), "not before its retry");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/audit/sinks/{id}/retry"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (1, 0));
+    let (headers, body) = fake.sent.lock().unwrap()[0].clone();
+    let h = |n: &str| headers.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap();
+    assert_eq!(h("x-roll-sink"), id);
+    assert_eq!(h("x-roll-signature"), roll_access::sinks::signature(&secret, h("x-roll-timestamp").parse().unwrap(), &body));
+    let sent: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(ids(&sent["events"]), vec!["aud_000", "aud_001", "aud_002"]);
+    // Nothing twice; the next rows next time.
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 0));
+    d.access.store.audit(&row(3));
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (1, 0));
+    let sent: Value = serde_json::from_slice(&fake.sent.lock().unwrap()[1].1).unwrap();
+    assert_eq!(ids(&sent["events"]), vec!["aud_003"]);
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await.0, StatusCode::NO_CONTENT);
+}
+
+/// A leaked token (docs/permissions.md, "Leaked tokens") is revoked as soon as roll finds it: it
+/// stops on its next request, says where it was found, and the audit log has it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leaked_token_is_revoked() {
+    let d = Daemon::new(50);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert!(roll_access::checksum_ok(&token), "new tokens carry a checksum");
+    let found = roll_access::find_secrets(&format!("ROLL_TOKEN={token}\n"));
+    let revoked = d.access.revoke_leaked(&found, "acme/site .env at 1a2b3c4d5e6f").unwrap();
+    assert_eq!(revoked.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), vec![id.as_str()]);
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["revoked_why"], "found in acme/site .env at 1a2b3c4d5e6f");
+    let (_, log) = d.call(OPERATOR, Method::GET, &format!("/v1/access/audit?grant={id}"), None).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["source"] == "leak" && e["decision"] == "revoke"), "{log}");
+    assert!(d.access.revoke_leaked(&found, "again").unwrap().is_empty(), "once");
+}
+
+/// GitHub's secret scanning partner program reports roll tokens it finds in public code: a report
+/// signed with one of GitHub's published keys revokes each live token and answers which were real;
+/// an unsigned or wrongly signed one changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn github_reports_of_leaked_tokens_revoke_them() {
+    use base64::Engine as _;
+    use ring::signature::KeyPair as _;
+    // GitHub's key list, served locally: one P-256 key as SubjectPublicKeyInfo PEM.
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+    let pair = ring::signature::EcdsaKeyPair::from_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+    let mut spki = vec![0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00];
+    spki.extend_from_slice(pair.public_key().as_ref());
+    let pem = format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----", base64::engine::general_purpose::STANDARD.encode(&spki));
+    let keys = json!({ "public_keys": [{ "key_identifier": "k1", "key": pem, "is_current": true }] });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/keys", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, Router::new().route("/keys", get(move || async move { axum::Json(keys) }))).await.unwrap() });
+
+    let d = Daemon::with(50, |c| c.github_keys_url = url);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let report = json!([
+        { "token": token, "type": "roll_token", "url": "https://github.com/someone/thing/blob/main/.env", "source": "content" },
+        { "token": format!("rlt_{}", "a".repeat(40)), "type": "roll_token", "url": "https://github.com/x/y", "source": "content" }
+    ])
+    .to_string();
+    let post = |sig: String| {
+        let req = Request::post("/v1/access/leaks/github")
+            .header("content-type", "application/json")
+            .header("github-public-key-identifier", "k1")
+            .header("github-public-key-signature", sig)
+            .body(Body::from(report.clone()))
+            .unwrap();
+        d.router.clone().oneshot(req)
+    };
+    let forged = base64::engine::general_purpose::STANDARD.encode(pair.sign(&rng, b"something else").unwrap().as_ref());
+    assert_eq!(post(forged).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::OK, "a forged report revokes nothing");
+
+    let sig = base64::engine::general_purpose::STANDARD.encode(pair.sign(&rng, report.as_bytes()).unwrap().as_ref());
+    let resp = post(sig).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let answer: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let labels: Vec<&str> = answer.as_array().unwrap().iter().map(|a| a["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, vec!["true_positive", "false_positive"], "{answer}");
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["revoked_why"], "found in https://github.com/someone/thing/blob/main/.env (GitHub secret scanning)");
+}
+
+/// Approving can also allow what's asked again (docs/permissions.md, "Remembered approvals"): the
+/// same action on the same resource for a while or for good. Another resource still asks, and a
+/// while never becomes for good through a token the token makes.
+#[tokio::test(flavor = "multi_thread")]
+async fn approvals_can_be_remembered() {
+    let d = Daemon::new(50);
+    let rules = json!([
+        { "product": "postgres", "resources": "*", "actions": { "delete": "ask" } },
+        { "product": "access", "resources": "*", "actions": { "admin": "allow" } }
+    ]);
+    let (token, id) = d.token(rules, json!({})).await;
+    let ask = |project: &'static str| {
+        let (d, token) = (&d, token.clone());
+        async move { d.call(&token, Method::DELETE, &format!("/v1/projects/{project}"), None).await }
+    };
+    let apr = ask("pa").await.1["approval"].as_str().unwrap().to_string();
+    let approve = |apr: String, remember: Value| {
+        let d = &d;
+        async move { d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": remember }))).await }
+    };
+    assert_eq!(approve(apr.clone(), json!("forever")).await.0, StatusCode::BAD_REQUEST, "nothing is decided");
+    assert_eq!(approve(apr.clone(), json!("1h")).await.0, StatusCode::OK);
+    assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.0, StatusCode::OK);
+    // For an hour: the same request runs without asking; another project still asks.
+    assert_eq!(ask("pa").await.0, StatusCode::OK);
+    assert_eq!(ask("pb").await.1["code"], "approval_pending");
+    // A while never becomes for good through a token it makes.
+    let child = json!({ "name": "child", "rules": [{ "product": "postgres", "resources": [{ "id": "pa" }], "actions": { "delete": "allow" } }] });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child)).await.0, StatusCode::FORBIDDEN);
+    // Always: a rule of the token.
+    let apr = ask("pc").await.1["approval"].as_str().unwrap().to_string();
+    assert_eq!(approve(apr, json!("always")).await.0, StatusCode::OK);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
+    assert_eq!(ask("pc").await.0, StatusCode::OK);
 }

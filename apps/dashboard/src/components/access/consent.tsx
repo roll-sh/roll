@@ -8,6 +8,7 @@ import {
   EXPIRIES,
   parseAuthorize,
   presetFor,
+  parseRate,
   presetRules,
   type AuthorizeRequest,
   type Catalog,
@@ -61,6 +62,8 @@ function Ask({ req }: { req: AuthorizeRequest }) {
   const [rules, setRules] = useState<Rule[]>([]);
   const [name, setName] = useState("");
   const [expiry, setExpiry] = useState(2);
+  const [rateText, setRateText] = useState("");
+  const rate = parseRate(rateText);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -117,6 +120,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
         name: name.trim() || client.name,
         rules,
         expires_at: ms === null ? null : Date.now() + ms,
+        rate_per_minute: rate.rate,
       });
       window.location.assign(redirect);
     } catch (e) {
@@ -166,6 +170,11 @@ function Ask({ req }: { req: AuthorizeRequest }) {
             ))}
           </select>
         </label>
+        <label className="block space-y-1.5">
+          <span className="block text-[12px] text-subtle">Requests a minute (optional)</span>
+          <input value={rateText} onChange={(e) => setRateText(e.target.value)} inputMode="numeric" placeholder="No limit" className={`${input} w-full font-mono text-[12px]`} />
+          {rate.problem && <span className="block text-[11px] text-danger">{rate.problem}</span>}
+        </label>
       </section>
 
       <div className="space-y-1">
@@ -181,7 +190,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
       </div>
       <ErrorNote error={error} />
       <div className="flex gap-3">
-        <button onClick={allow} disabled={busy || rules.length === 0} className={primary}>
+        <button onClick={allow} disabled={busy || rules.length === 0 || Boolean(rate.problem)} className={primary}>
           {busy ? <span className="shimmer">Connecting…</span> : `Allow ${client.name}`}
         </button>
         <button onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))} disabled={busy} className={btn}>

@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, productName, type Approval, type ChatTarget } from "@/lib/access-api";
+import { accessApi, productName, REMEMBER, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -68,12 +68,13 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
   const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
   const [reason, setReason] = useState("");
   const [denying, setDenying] = useState(false);
+  const [remember, setRemember] = useState<Remember>("once");
   const [error, setError] = useState<string | null>(null);
   const decide = async (approve: boolean) => {
     setBusy(approve ? "approve" : "deny");
     setError(null);
     try {
-      if (approve) await accessApi.approve(a.id);
+      if (approve) await accessApi.approve(a.id, remember);
       else await accessApi.deny(a.id, reason.trim() || undefined);
       await refresh();
     } catch (e) {
@@ -103,6 +104,21 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
+          {rememberable(a) && (
+            <select
+              value={remember}
+              onChange={(e) => setRemember(e.target.value as Remember)}
+              className={input}
+              aria-label="How long this approval also allows the same action on this resource"
+              title={`Also allow ${a.action} on ${a.resource} without asking`}
+            >
+              {REMEMBER.map((r) => (
+                <option key={r.value} value={r.value}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          )}
           <button onClick={() => decide(true)} disabled={busy !== null} className={destructive ? danger : primary}>
             {busy === "approve" ? <span className="shimmer">Approving…</span> : "Approve"}
           </button>

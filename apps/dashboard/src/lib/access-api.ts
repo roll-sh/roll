@@ -45,6 +45,10 @@ export interface Grant {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: OAuthClient;
+  /** Requests a minute it may make (per node); absent: no limit. */
+  rate_per_minute?: number;
+  /** Why roll revoked it (a leaked secret: "found in acme/site .env at …"). */
+  revoked_why?: string;
   /** Its requests over the last day (in the list). */
   activity?: { allowed: number; denied: number; asked: number };
 }
@@ -54,7 +58,22 @@ export interface NewGrant {
   rules: Rule[];
   expires_at?: number | null;
   ip_allow?: string[];
+  rate_per_minute?: number | null;
 }
+
+/** How long an approval also allows the same action on the same resource. */
+export type Remember = "once" | "1h" | "8h" | "1d" | "always";
+
+export const REMEMBER: { value: Remember; label: string }[] = [
+  { value: "once", label: "Once" },
+  { value: "1h", label: "For an hour" },
+  { value: "8h", label: "For 8 hours" },
+  { value: "1d", label: "For a day" },
+  { value: "always", label: "Always" },
+];
+
+/** Whether an approval is about one resource, so approving it can be remembered. */
+export const rememberable = (a: Pick<Approval, "resource">) => Boolean(a.resource && !a.resource.startsWith("new in "));
 
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "used";
 
@@ -123,6 +142,8 @@ export type Me = { kind: "operator"; locked: boolean } | { kind: "token" | "oaut
 export interface Policy {
   max_days?: number | null;
   require_expiry?: boolean;
+  /** Tokens unused this many days stop working. */
+  max_idle_days?: number | null;
 }
 
 export interface Consent {
@@ -136,6 +157,7 @@ export interface Consent {
   rules: Rule[];
   expires_at?: number | null;
   ip_allow?: string[];
+  rate_per_minute?: number | null;
 }
 
 const token = (id: string) => `/v1/access/tokens/${encodeURIComponent(id)}`;
@@ -155,6 +177,19 @@ function query(q: object): string {
   for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") p.set(k, String(v));
   const s = p.toString();
   return s ? `?${s}` : "";
+}
+
+/** Where the audit log streams to (a SIEM): signed batches of new rows, in order. */
+export interface AuditSink {
+  id: string;
+  url: string;
+  status: "new" | "ok" | "error";
+  error: string | null;
+  /** When the last row it was sent happened. */
+  cursor_at: number;
+  delivered_at: number | null;
+  created_at: number;
+  created_by: string;
 }
 
 /** Where approvals are posted, and the chat user ids (Slack `U…`) the operator lets decide there. */
@@ -183,7 +218,8 @@ export const accessApi = {
       { method, path, ...opts },
     ),
   approvals: (state?: ApprovalState) => call<Approval[]>("GET", `/v1/access/approvals${query({ state })}`),
-  approve: (id: string) => call<Approval>("POST", `${approval(id)}/approve`),
+  /** `remember`: also allow the same action on the same resource for a while, or always. */
+  approve: (id: string, remember?: Remember) => call<Approval>("POST", `${approval(id)}/approve`, remember && remember !== "once" ? { remember } : {}),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
   /** The log as JSON lines (one event per line), for a download. */
@@ -193,6 +229,10 @@ export const accessApi = {
     return res.blob();
   },
   /** The operator's rules for every token: at most `max_days`, and whether every token expires. */
+  sinks: () => call<AuditSink[]>("GET", "/v1/access/audit/sinks"),
+  addSink: (url: string, from_start = false) => call<{ sink: AuditSink; secret: string }>("POST", "/v1/access/audit/sinks", { url, from_start }),
+  retrySink: (id: string) => call<null>("POST", `/v1/access/audit/sinks/${encodeURIComponent(id)}/retry`),
+  removeSink: (id: string) => call<null>("DELETE", `/v1/access/audit/sinks/${encodeURIComponent(id)}`),
   policy: () => call<Policy>("GET", "/v1/access/policy"),
   setPolicy: (p: Policy) => call<Policy>("PUT", "/v1/access/policy", p),
   /** Where approvals are posted (Slack through roll code's chat ops), or `{chat: null}`. */
@@ -286,6 +326,18 @@ export const EXPIRIES: { label: string; ms: number | null }[] = [
 ];
 
 /** Checked CIDR-ish entries (`10.0.0.0/8`, `203.0.113.4`, `2001:db8::/32`); the API checks for real. */
+/** The most requests a minute a token may be allowed (roll-access's `MAX_RATE`). */
+export const MAX_RATE = 100_000;
+
+/** A typed requests-a-minute limit: empty is none. */
+export function parseRate(text: string): { rate: number | null; problem?: string } {
+  const t = text.trim();
+  if (!t) return { rate: null };
+  const n = Number(t);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_RATE) return { rate: null, problem: `Requests a minute is a whole number from 1 to ${MAX_RATE.toLocaleString("en")}` };
+  return { rate: n };
+}
+
 export function ipProblems(list: string[]): string[] {
   const ok = (s: string) => /^[0-9a-fA-F:.]+(\/\d{1,3})?$/.test(s) && (s.includes(".") || s.includes(":"));
   return list.filter((s) => !ok(s)).map((s) => `${s} isn't an address or CIDR`);

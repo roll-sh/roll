@@ -157,6 +157,9 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/oauth/authorize", "the consent screen is the operator's"),
     ("/v1/access/notify", "where approvals go is the operator's choice"),
     ("/v1/access/policy", "the rules for every token are the operator's"),
+    ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
+    ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
+    ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
 ];
 
 pub fn rows() -> &'static [Row] {
@@ -505,6 +508,20 @@ fn cql_action(b: &Value) -> Action {
 /// ships (`deploy`); deleting a thread `delete`; and a shell, writing files, rolling back, raising a
 /// thread's runtime or interaction mode, answering an agent's approval (it would approve itself),
 /// endpoints, the gateway, projects and the machine's settings are `admin`. Unknown types too.
+/// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
+/// a Slack or Discord one answers none, so `write`.
+fn apps_notification_action(b: &Value) -> Action {
+    match b["kind"].as_str() {
+        Some("slack" | "discord") => Action::Write,
+        _ => Action::Reveal,
+    }
+}
+
+/// A new apps service: `deploy` unless its source is an upload (which deploys only with `roll up`).
+fn apps_create_action(b: &Value) -> Action {
+    if b["source"]["kind"] == "upload" { Action::Write } else { Action::Deploy }
+}
+
 fn agent_command_action(b: &Value) -> Action {
     let kind = b.get("type").and_then(Value::as_str).unwrap_or("");
     let raises = b.get("runtime_mode").is_some_and(|m| !m.is_null()) || b.get("interaction_mode").is_some_and(|m| !m.is_null());
@@ -802,6 +819,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/health", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
+    // How long a project keeps old values (history_days): purging is the project admin's.
+    row("PATCH", "/v1/secrets/projects/{project}", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("PUT", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -815,15 +834,20 @@ static ROWS: &[Row] = &[
     // What hands out more than the request itself: secrets' own tokens, syncs (they push values
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
     row("*", "/v1/secrets/projects/{project}/tokens", "secrets", ADMIN, one(&["project"], "project")),
-    row("GET", "/v1/secrets/projects/{project}/tokens", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/tokens/", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")),
-    row("GET", "/v1/secrets/projects/{project}/audit/sinks", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),
+    // Identities mint tokens, as `tokens` does: seeing or changing them is the project admin's.
+    row("*", "/v1/secrets/projects/{project}/identities", "secrets", ADMIN, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/identities/", "secrets", ADMIN, one(&["project"], "project")),
+    // Renewing a lease extends a credential whoever could read it holds.
+    row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
+    // Exporting an environment's folder shares it with another project.
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -832,8 +856,22 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // ── apps (feature/roll-apps, docs/apps/http-api.md) ──
     row("GET", "/v1/apps/services", "apps", R, list("id")),
-    row("POST", "/v1/apps/services", "apps", W, Tgt::Product),
-    row("POST", "/v1/apps/projects/{project}/services", "apps", W, Tgt::Create { project: Some("project"), place: None, id_field: "id" }),
+    // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
+    row("POST", "/v1/apps/services", "apps", Act::Body(apps_create_action), Tgt::Product).env(EnvFrom::Fixed("production")),
+    row("POST", "/v1/apps/projects/{project}/services", "apps", Act::Body(apps_create_action), Tgt::Create { project: Some("project"), place: None, id_field: "id" })
+        .env(EnvFrom::Fixed("production")),
+    row("GET", "/v1/apps/events", "apps", R, Tgt::Product),
+    // A project's notifications: the URL is stored sealed and never answered; a webhook's signing
+    // secret comes back once, so making one is reveal (Slack and Discord ones are write).
+    row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
+    // A private registry's login (never answered back), and unlinking a database: settings.
+    row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
@@ -860,6 +898,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/projects/{project}/", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/", "previews", R, one(&["project"], "project")),
+    // A project's CI bypass secret for private previews: made (and shown once) is reveal.
+    row("POST", "/v1/previews/projects/{project}/bypass", "previews", REVEAL, one(&["project"], "project")),
+    row("GET", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/{id}", "previews", R, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("DELETE", "/v1/previews/{id}", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/{id}/", "previews", M, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -1037,6 +1079,10 @@ mod tests {
             let f = by_path("GET", &route.replace('{', "x").replace('}', "")).unwrap();
             assert_eq!(f.row.action("GET", &[], None), Action::Reveal, "{route}");
         }
+        assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
+        assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
+        assert_eq!(apps_notification_action(&serde_json::json!({ "url": "https://example.com/h" })), Action::Reveal);
+        assert_eq!(apps_notification_action(&serde_json::json!({ "kind": "slack", "url": "https://hooks.slack.com/x" })), Action::Write);
         let dep = find("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "x").unwrap();
         assert_eq!(dep.row.action("POST", &[("env".into(), "production".into())], None), Action::Deploy);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
@@ -1076,6 +1122,10 @@ mod tests {
         assert_eq!(git_push(b"00", Some("main")), Push::More);
         assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
+        assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
+        // Secrets' identities mint tokens; renewing a lease extends a credential.
+        assert_eq!(action("GET", "/v1/secrets/projects/{p}/identities", "x"), Some(Action::Admin));
+        assert_eq!(action("POST", "/v1/secrets/projects/{p}/leases/{l}/renew", "x"), Some(Action::Reveal));
         let f = find("POST", "/git/{*path}", "/git/acme/site.git/git-receive-pack").unwrap();
         assert_eq!(f.row.route, "/git/{owner}/{repo}/git-receive-pack");
         let mut routes: Vec<_> = ROWS.iter().map(|r| (r.method, r.route)).collect();

@@ -284,6 +284,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     operator's; `rolld/tests/auth.rs` fails otherwise. A new product adds its name to
     `scope::PRODUCTS`, its rows, and a resolver in `rolld/src/access.rs` when its ids aren't in the
     path (or take names).
+  - Grant secrets carry a checksum (`roll_access::checksum_ok`); a leaked one is revoked, never
+    just reported (`Access::revoke_leaked`: roll code's landings, GitHub's secret scanning).
   - Grants are looked up on every request; never cache them. Read-only must be enforced by the
     product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
   - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called

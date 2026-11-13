@@ -114,7 +114,8 @@
 //! [`Cluster::dispatch`] runs a request where it belongs. Remote requests go to the owner's
 //! URL with the original path and query, method and headers (minus hop-by-hop ones; `Host` is
 //! kept), streaming bodies both ways (git pushes, server-sent events), signed, with
-//! `x-roll-code-hop` and `x-roll-code-client`. Bodies with a known length up to
+//! `x-roll-code-hop`, `x-roll-code-client` and, when the request has a [`Decided`] extension (the
+//! access decision a node made for a grant), `x-roll-code-decided`. Bodies with a known length up to
 //! `forward_buffer` (4 MiB) are buffered so the forward can be retried once, after routing
 //! again, on a connection error or on an Unavailable answer (a 503 carrying
 //! `x-roll-code-unavailable`, from [`unavailable`]); bigger or unsized bodies stream with one
@@ -123,7 +124,7 @@
 //! request (`GET`, `HEAD`, `OPTIONS`) with a buffered body whose connection breaks before an
 //! answer is sent again. The receiving side runs
 //! [`accept_forwarded`]: requests carrying `x-roll-code-*` headers must verify (else 401), and
-//! get a [`Forwarded`] extension with the sender, hop count and client address.
+//! get a [`Forwarded`] extension with the sender, hop count, client address and decision.
 //!
 //! # Blocking
 //!

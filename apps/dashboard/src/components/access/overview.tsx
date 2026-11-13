@@ -208,7 +208,9 @@ function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
             {g.id} · used {relative(g.last_used_at)}
             {g.last_used_ip ? ` from ${g.last_used_ip}` : ""} · {g.expires_at === null ? "never expires" : `expires ${relative(g.expires_at)}`}
             {g.ip_allow.length > 0 ? ` · only ${g.ip_allow.join(", ")}` : ""}
+            {g.rate_per_minute ? ` · ${g.rate_per_minute.toLocaleString("en")}/min` : ""}
           </p>
+          {g.revoked_why && <p className="mt-0.5 text-[12px] text-danger">Revoked by roll: its secret was {g.revoked_why}.</p>}
           {g.activity && g.activity.allowed + g.activity.denied + g.activity.asked > 0 && (
             <p className="mt-0.5 font-mono text-[11px] text-subtle">
               last day: {g.activity.allowed} allowed
@@ -367,6 +369,7 @@ function TryIt({ grant }: { grant: string }) {
 function PolicyPanel() {
   const [p, setP] = useState<Policy | null>(null);
   const [days, setDays] = useState("");
+  const [idle, setIdle] = useState("");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     accessApi
@@ -374,6 +377,7 @@ function PolicyPanel() {
       .then((v) => {
         setP(v);
         setDays(v.max_days ? String(v.max_days) : "");
+        setIdle(v.max_idle_days ? String(v.max_idle_days) : "");
       })
       .catch(() => setP(null));
   }, []);
@@ -405,6 +409,19 @@ function PolicyPanel() {
       <label className="flex items-center gap-1.5">
         <input type="checkbox" checked={Boolean(p.require_expiry)} onChange={(e) => void save({ ...p, require_expiry: e.target.checked })} />
         must expire
+      </label>
+      <label className="flex items-center gap-1.5">
+        stops after
+        <input
+          value={idle}
+          onChange={(e) => setIdle(e.target.value.replace(/\D/g, ""))}
+          onBlur={() => void save({ ...p, max_idle_days: idle ? Number(idle) : null })}
+          placeholder="∞"
+          inputMode="numeric"
+          className={`${input} w-16 text-center font-mono text-[12px]`}
+          aria-label="Days unused before a token stops"
+        />
+        days unused
       </label>
       <ErrorNote error={error} />
     </div>

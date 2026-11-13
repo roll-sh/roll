@@ -33,6 +33,8 @@ pub fn public_router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/register", post(register))
         .route("/v1/access/oauth/token", post(token))
         .route("/v1/access/oauth/revoke", post(revoke))
+        // GitHub's secret scanning reports: their signature is the credential.
+        .route("/v1/access/leaks/github", post(crate::leaks::github))
         .with_state(access)
 }
 
@@ -135,20 +137,20 @@ async fn register(State(a): S, body: axum::body::Bytes) -> Response {
         Ok(Err(e)) => return e.into_response(),
         Err(e) => return Error::Internal(e.to_string()).into_response(),
     };
-    (
-        StatusCode::CREATED,
-        Json(json!({
-            "client_id": client.id,
-            "client_name": client.name,
-            "client_uri": client.uri,
-            "redirect_uris": client.redirect_uris,
-            "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
-            "client_id_issued_at": client.created_at / 1000,
-        })),
-    )
-        .into_response()
+    let mut out = json!({
+        "client_id": client.id,
+        "client_name": client.name,
+        "redirect_uris": client.redirect_uris,
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "client_id_issued_at": client.created_at / 1000,
+    });
+    // RFC 7591: a field the client didn't set is left out, never null (clients' schemas refuse it).
+    if let Some(uri) = client.uri {
+        out["client_uri"] = Value::String(uri);
+    }
+    (StatusCode::CREATED, Json(out)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -170,6 +172,9 @@ pub struct Consent {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub ip_allow: Vec<String>,
+    /// Requests a minute the connection may make.
+    #[serde(default)]
+    pub rate_per_minute: Option<u32>,
 }
 
 /// The consent screen's answer, from the signed-in operator: a code for the client, in the
@@ -197,7 +202,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
     a.check_policy(c.expires_at)?;
-    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, ip_allow: c.ip_allow.clone() };
+    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute };
     let (a2, cl, uri, ch, res) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)));
     let code = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, "operator", &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;

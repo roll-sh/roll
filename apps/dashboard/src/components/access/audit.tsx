@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { accessApi, productName, type AuditEvent, type AuditFilter } from "@/lib/access-api";
 import { btn, Connecting, EmptyPanel, ErrorNote, input } from "../ui";
 import { AccessShell, relative } from "./shell";
+import { Sinks } from "./sinks";
 
 const PAGE = 100;
 
@@ -52,6 +53,7 @@ export function Audit({ grant }: { grant?: string }) {
   return (
     <AccessShell tab="audit">
       <div className="space-y-4">
+        <Sinks />
         <div className="flex flex-wrap gap-2">
           <input value={filter.grant ?? ""} onChange={set("grant")} placeholder="Token (tok_…)" className={`${input} w-44 font-mono text-[12px]`} />
           <input value={filter.product ?? ""} onChange={set("product")} placeholder="Product" className={`${input} w-32`} />

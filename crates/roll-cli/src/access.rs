@@ -30,7 +30,8 @@ pub enum Token {
     Whoami,
     /// The products, actions and presets the builder offers.
     Presets,
-    /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`; nothing to show them.
+    /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
+    /// `--max-idle-days 60` (`0` for no idle limit); nothing to show them.
     Policy {
         #[arg(long)]
         max_days: Option<u32>,
@@ -38,6 +39,9 @@ pub enum Token {
         require_expiry: Option<bool>,
         #[arg(long, conflicts_with = "max_days")]
         no_limit: bool,
+        /// Tokens unused this many days stop working (0: no limit).
+        #[arg(long)]
+        max_idle_days: Option<u32>,
     },
 }
 
@@ -53,6 +57,9 @@ pub struct Create {
     /// Addresses it may be used from (CIDRs), repeatable.
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Vec<String>,
+    /// Requests a minute it may make (per node; over it, 429 with Retry-After).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    rate: Option<u32>,
 }
 
 /// What a token may do, as flags (`create` and `edit`).
@@ -102,6 +109,24 @@ pub struct Edit {
     /// New addresses it may be used from (replaces the list; `--ip none` clears it).
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Option<Vec<String>>,
+    /// Requests a minute it may make (`none` takes the limit off).
+    #[arg(long)]
+    rate: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum SinkCmd {
+    /// Stream new audit rows to an https URL (signed batches; the secret is shown once).
+    Add {
+        url: String,
+        /// Send every row the log still has, not just new ones.
+        #[arg(long)]
+        from_start: bool,
+    },
+    /// Send a failed sink's batch now rather than after its wait.
+    Retry { id: String },
+    /// Stop streaming to a sink.
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -120,7 +145,12 @@ pub enum Mcp {
         all: bool,
     },
     /// Approve a request: it runs.
-    Approve { id: String },
+    Approve {
+        id: String,
+        /// Also allow the same action on the same resource without asking: 1h, 8h, 1d or always.
+        #[arg(long, value_parser = ["1h", "8h", "1d", "always"])]
+        remember: Option<String>,
+    },
     /// Deny a request.
     Deny {
         id: String,
@@ -140,6 +170,11 @@ pub enum Mcp {
         approver: Vec<String>,
         #[arg(long, conflicts_with_all = ["install", "channel"])]
         off: bool,
+    },
+    /// Where the audit log streams to (a SIEM): list them, or add, retry or remove one.
+    Sinks {
+        #[command(subcommand)]
+        what: Option<SinkCmd>,
     },
     /// Every request made with a token and every MCP tool call, newest first.
     Audit {
@@ -265,7 +300,8 @@ fn print_grant(g: &Value) {
         None => "never expires".into(),
     };
     let ip = g["ip_allow"].as_array().filter(|a| !a.is_empty()).map(|a| format!(", from {}", a.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default();
-    println!("  {expires}{ip}; last used {}", when(&g["last_used_at"]));
+    let rate = g["rate_per_minute"].as_u64().map(|r| format!(", {r} requests a minute")).unwrap_or_default();
+    println!("  {expires}{ip}{rate}; last used {}", when(&g["last_used_at"]));
 }
 
 /// A unix-ms time as a UTC date.
@@ -287,7 +323,7 @@ pub fn date(ms: i64) -> String {
 pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
-            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow });
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate });
             let made = api.post("/v1/access/tokens", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
@@ -351,8 +387,15 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 let ips: Vec<&String> = ips.iter().filter(|i| i.as_str() != "none").collect();
                 patch.insert("ip_allow".into(), json!(ips));
             }
+            if let Some(r) = &e.rate {
+                let rate = match r.as_str() {
+                    "none" => Value::Null,
+                    n => json!(n.parse::<u32>().map_err(|_| anyhow::anyhow!("--rate is a number of requests a minute, or none"))?),
+                };
+                patch.insert("rate_per_minute".into(), rate);
+            }
             if patch.is_empty() {
-                bail!("nothing to change: --name, --expires, --ip, or new rules (--preset, --allow, --ask)");
+                bail!("nothing to change: --name, --expires, --ip, --rate, or new rules (--preset, --allow, --ask)");
             }
             let g = api.call(reqwest::Method::PATCH, &format!("/v1/access/tokens/{}", e.id), Some(Value::Object(patch))).await?;
             if json_out {
@@ -371,9 +414,12 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 print_grant(&me["grant"]);
             }
         }
-        Token::Policy { max_days, require_expiry, no_limit } => {
+        Token::Policy { max_days, require_expiry, no_limit, max_idle_days } => {
             let mut p = api.get("/v1/access/policy").await?;
-            if max_days.is_some() || require_expiry.is_some() || no_limit {
+            if let Some(d) = max_idle_days {
+                p["max_idle_days"] = if d == 0 { Value::Null } else { json!(d) };
+            }
+            if max_days.is_some() || require_expiry.is_some() || no_limit || max_idle_days.is_some() {
                 if let Some(d) = max_days {
                     p["max_days"] = json!(d);
                 }
@@ -390,7 +436,8 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
             } else {
                 let days = p["max_days"].as_u64().map_or_else(|| "no limit".to_string(), |d| format!("at most {d} days"));
                 let must = if p["require_expiry"].as_bool() == Some(true) { ", and must expire" } else { "" };
-                println!("tokens live {days}{must}");
+                let idle = p["max_idle_days"].as_u64().map(|d| format!("; unused for {d} days, they stop")).unwrap_or_default();
+                println!("tokens live {days}{must}{idle}");
             }
         }
         Token::Presets => {
@@ -474,13 +521,38 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
                 print_approval(a);
             }
         }
-        Mcp::Approve { id } => {
-            let a = api.post(&format!("/v1/access/approvals/{id}/approve"), json!({})).await?;
+        Mcp::Approve { id, remember } => {
+            let body = remember.map_or_else(|| json!({}), |r| json!({ "remember": r }));
+            let a = api.post(&format!("/v1/access/approvals/{id}/approve"), body).await?;
             if json_out { println!("{}", serde_json::to_string_pretty(&a)?) } else { println!("approved: {}", s(&a["summary"])) }
         }
         Mcp::Deny { id, reason } => {
             let a = api.post(&format!("/v1/access/approvals/{id}/deny"), json!({ "reason": reason })).await?;
             if json_out { println!("{}", serde_json::to_string_pretty(&a)?) } else { println!("denied: {}", s(&a["summary"])) }
+        }
+        Mcp::Sinks { what } => {
+            let out = match what {
+                Some(SinkCmd::Add { url, from_start }) => api.post("/v1/access/audit/sinks", json!({ "url": url, "from_start": from_start })).await?,
+                Some(SinkCmd::Retry { id }) => api.post(&format!("/v1/access/audit/sinks/{id}/retry"), json!({})).await?,
+                Some(SinkCmd::Rm { id }) => api.call(reqwest::Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await?,
+                None => api.get("/v1/access/audit/sinks").await?,
+            };
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if let Some(secret) = out["secret"].as_str() {
+                println!("streaming the audit log to {} as {}", s(&out["sink"]["url"]), s(&out["sink"]["id"]));
+                println!("signing secret (shown once): {secret}");
+            } else if let Some(list) = out.as_array() {
+                if list.is_empty() {
+                    println!("the audit log isn't streamed anywhere (roll mcp sinks add https://…)");
+                }
+                for k in list {
+                    let err = k["error"].as_str().map(|e| format!(" ({e})")).unwrap_or_default();
+                    println!("{}  {:<6} {}  sent {}{err}", s(&k["id"]), s(&k["status"]), s(&k["url"]), when(&k["delivered_at"]));
+                }
+            } else {
+                println!("done");
+            }
         }
         Mcp::Notify { install, channel, approver, off } => {
             let v = match (install, channel, off) {

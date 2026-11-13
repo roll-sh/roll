@@ -469,15 +469,21 @@ async fn run() -> anyhow::Result<()> {
     code_secrets.set(secrets.clone(), workspace.clone());
     router = router.merge(roll_secrets::router(secrets));
     products_api.set(router.clone());
+    // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
+    access::sinks(&access);
     // Approvals can be posted to a Slack channel through roll code's chat ops.
     if let Some(c) = &code {
         access::chat(&access, &c.code);
+        // Tokens that land in a repo are revoked.
+        access::leaks(&access, &c.code);
     }
     // roll's MCP server: each tool call is a request through the gated API.
     let mut mcp_products: Vec<String> = Product::ALL.into_iter().filter(|p| on.on(*p)).map(|p| p.name().to_string()).collect();
     if on.on(Product::Code) {
         mcp_products.push("agents".into());
     }
+    // roll secrets is always on (no ROLL_PRODUCTS switch): its tools always show.
+    mcp_products.push("secrets".into());
     let tool_sets: Vec<std::sync::Arc<dyn roll_mcp::ToolSet>> = match &code {
         Some(_) => vec![std::sync::Arc::new(access::CodeTools)],
         None => Vec::new(),

@@ -190,7 +190,7 @@ impl Hooks {
     fn new(allow_private: bool) -> Hooks {
         let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync");
         if !allow_private {
-            b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
+            b = b.dns_resolver(roll_net::PublicOnly).no_proxy();
         }
         Hooks { client: b.build().expect("an HTTP client"), allow_private }
     }
@@ -201,7 +201,7 @@ impl Hooks {
         if !scheme_ok || raw.len() > 2048 || u.host_str().is_none() {
             return Err(bad("url is a public https:// URL"));
         }
-        if !self.allow_private && code_control::review::apps::literal_private_host(&u) {
+        if !self.allow_private && roll_net::literal_private_host(&u) {
             return Err(bad(format!("{} is a private address", u.host_str().unwrap_or_default())));
         }
         Ok(u)

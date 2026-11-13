@@ -251,6 +251,10 @@ previews are listed once those products are on.
 | `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
 | `apps_restart` | Restart an environment's instances. | `POST /v1/apps/services/{service}/environments/{env}/restart` |
+| `apps_redeploy` | Deploy what's running again with the current settings and variables. | `POST /v1/apps/services/{service}/environments/{env}/redeploy` |
+| `apps_run_job` | Run a one-off command in an environment's image with its variables. | `POST /v1/apps/services/{service}/environments/{env}/jobs` |
+| `apps_job_logs` | A job's output. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}/logs` |
+| `apps_events` | What happened to services, in order after a cursor. | `GET /v1/apps/events` |
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
@@ -260,10 +264,14 @@ previews are listed once those products are on.
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_remove_domain` | Remove a domain. | `DELETE /v1/apps/services/{service}/environments/{env}/domains/{host}` |
 | `previews_list` | Preview environments. | `GET /v1/previews` |
-| `previews_get` | A preview with its branched resources. | `GET /v1/previews/{id}` |
+| `previews_get` | A preview with its branched resources and its schema changes. | `GET /v1/previews/{id}` |
 | `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
 | `previews_logs` | A preview's deploy and service logs. | `GET /v1/previews/{id}/logs` |
+| `previews_reset` | Branch a preview's resources again from their parents. | `POST /v1/previews/{id}/reset` |
+| `previews_sleep` | Stop a preview's services until it's woken. | `POST /v1/previews/{id}/sleep` |
+| `previews_wake` | Start a sleeping preview's services again. | `POST /v1/previews/{id}/wake` |
+| `previews_usage` | What a project's previews used and cost this month. | `GET /v1/previews/projects/{project}/usage` |
 | `previews_delete` | Tear a preview down with its branches. | `DELETE /v1/previews/{id}` |
 | `code_…`, `agents_…` | roll code's tools (docs/code/mcp.md), under product names | as there |
 
@@ -271,22 +279,36 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **The official MCP SDK against a live daemon.** Run the TypeScript SDK's Streamable HTTP client
-   (and its OAuth provider) against rolld: initialize, list, call, an approval, a refresh.
-   Fix what a real client trips on, and keep the script.
+1. **Third security review** (in progress): an independent review of everything since the second
+   one (rate limits, audit sinks, leaked tokens and the GitHub endpoint, remembered approvals, the
+   idle limit, storage accounts, the signed hop decision) and of users' own tokens. Fix what it finds.
 2. **As the sibling branches merge** (secrets #20, apps #21, search #22, previews #23): rerun
-   `examples/classify` on their routers, and wire their lookups in `rolld/src/access.rs`:
-   - previews' `Store::environment_of` (a Postgres branch's environment comes from `{branch}`);
+   `extract-routes.py` and `examples/classify` on their routers (every route at their heads has a
+   row today), and wire their lookups in `rolld/src/access.rs`:
+   - previews' `Store::environment_of` (done on their side, in wip/previews-on-secrets-mcp);
    - search's `resolve_id` (async: through the runtime handle);
    - apps' services to their projects;
-   - secrets' `Grant` swap and `roll_auth::Grants` for its syncs.
-3. **Users' own tokens (with accounts, #18):** a signed-in user who isn't an admin makes tokens for
-   what they can reach (their roll code owner, agents and workspace projects), and their grants
-   act as them, not as the operator. `integrate/mcp-accounts` has both branches merged and green.
-4. **Per-token rate limits:** requests per minute per grant (Stripe and GitHub have them), with
-   `429` and `Retry-After`. Set in the builder.
-5. **Audit sinks:** stream the audit log to a webhook (signed, through roll code's delivery queue)
-   for a SIEM, and keep a longer retention for that.
+   - secrets' `Grant` swap, `roll_auth::Grants` for its syncs, and its ephemeral environments as
+     "preview";
+   - secrets' audit sinks and access's (same wire contract already): one delivery module;
+   - the products' `Product` entries in rolld, so their MCP tools appear.
+3. **Users' own tokens** (built: branch `feature/mcp-user-tokens`, on top of
+   `integrate/mcp-accounts`): its PR opens once #18 and #19 are on main; until then keep it merged.
+4. **Expiring tokens:** show tokens that expire within a week, and post them to the approvals
+   channel, as GitHub mails before a token expires.
+5. **MCP tools send `Idempotency-Key`** where a route honours it (apps' deploys), so a retried
+   call never deploys twice.
 6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-7. **Finer resources:** storage buckets in another account, apps' deploys by id.
+7. **Finer resources:** apps' deploys by id (once #21 is on main).
+
+Done lately: an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
+one action on one resource, a while never made permanent through a child token); leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
+secrets, roll code's landings scanned from the land log, GitHub's secret scanning partner
+endpoint); audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in
+signed batches, the same contract as roll secrets' sinks, checked live against a receiver that
+verifies signatures); per-token rate limits (docs/permissions.md, "Rate limits": GCRA per grant per node,
+`429` with `Retry-After` and `RateLimit-*`, an MCP message counted once, never above the maker's);
+the official TypeScript (`@modelcontextprotocol/sdk` 1.32.2, OAuth included) and
+Python (`mcp` 2.3.0) SDKs drive a live rolld end to end; the only thing they tripped on,
+registration answering `"client_uri": null`, is fixed.
