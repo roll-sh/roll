@@ -292,12 +292,12 @@ export const ACTION_HELP: Record<Action, string> = {
 };
 
 /** "Postgres · read, write, delete (ask) · in project prj_x · development". */
-export function describeRule(r: Rule, projectName: (id: string) => string = (id) => id): string {
+export function describeRule(r: Rule, projectName: (id: string) => string = (id) => id, resourceName: (product: string, id: string) => string = (_, id) => id): string {
   const actions = ACTIONS.filter((a) => r.actions[a]).map((a) => (r.actions[a] === "ask" ? `${a} (ask)` : a));
   const where =
     r.resources === "*"
       ? "all resources"
-      : r.resources.map((s) => ("project" in s ? `project ${projectName(s.project)}` : s.id)).join(", ");
+      : r.resources.map((s) => ("project" in s ? `project ${projectName(s.project)}` : resourceName(r.product, s.id))).join(", ");
   const parts = [productName(r.product), actions.join(", ") || "nothing", where];
   if (r.environments?.length) parts.push(r.environments.join(", "));
   if (r.paths?.length) parts.push(r.paths.join(", "));
@@ -476,9 +476,14 @@ export interface Draft {
   matrix: Record<string, Partial<Record<Action, Effect>>>;
   project: string | null;
   environments: string[];
+  /** Product → only these resources (its ids), instead of the project or every resource. */
+  ids: Record<string, string[]>;
 }
 
-export const emptyDraft = (): Draft => ({ matrix: {}, project: null, environments: [] });
+export const emptyDraft = (): Draft => ({ matrix: {}, project: null, environments: [], ids: {} });
+
+const onlyIds = (r: Rule): string[] | null =>
+  r.resources !== "*" && r.resources.length > 0 && r.resources.every((s) => "id" in s) ? r.resources.map((s) => ("id" in s ? s.id : "")) : null;
 
 /**
  * The matrix for some rules, when they fit it (every rule on all resources or the same one
@@ -487,16 +492,27 @@ export const emptyDraft = (): Draft => ({ matrix: {}, project: null, environment
  */
 export function draftOf(rules: Rule[]): Draft | null {
   const d = emptyDraft();
-  const key = (r: Rule) => JSON.stringify([r.resources, r.environments ?? [], r.paths ?? []]);
   if (rules.length === 0) return d;
-  if (new Set(rules.map(key)).size !== 1 || rules[0].paths?.length) return null;
-  const res = rules[0].resources;
-  if (res !== "*") {
+  // Every rule shares the environments and has no paths; a product's rule may name its own
+  // resources (ids); the others share one place (everything, or one project).
+  const envs = (r: Rule) => JSON.stringify(r.environments ?? []);
+  if (new Set(rules.map(envs)).size !== 1 || rules.some((r) => r.paths?.length)) return null;
+  d.environments = rules[0].environments ?? [];
+  const placed = rules.filter((r) => onlyIds(r) === null);
+  if (new Set(placed.map((r) => JSON.stringify(r.resources))).size > 1) return null;
+  const res = placed[0]?.resources;
+  if (res && res !== "*") {
     if (res.length !== 1 || !("project" in res[0])) return null;
     d.project = res[0].project;
   }
-  d.environments = rules[0].environments ?? [];
-  for (const r of rules) d.matrix[r.product] = { ...d.matrix[r.product], ...r.actions };
+  for (const r of rules) {
+    const ids = onlyIds(r);
+    if (ids) {
+      if (r.product === "*" || d.ids[r.product] || rules.some((o) => o !== r && o.product === r.product)) return null;
+      d.ids[r.product] = ids;
+    }
+    d.matrix[r.product] = { ...d.matrix[r.product], ...r.actions };
+  }
   return d;
 }
 
@@ -505,7 +521,9 @@ export function rulesOf(d: Draft): Rule[] {
   return Object.entries(d.matrix)
     .filter(([, a]) => Object.values(a).some(Boolean))
     .map(([product, actions]) => {
-      const r: Rule = { product, resources: d.project ? [{ project: d.project }] : "*", actions: Object.fromEntries(Object.entries(actions).filter(([, e]) => e)) };
+      const ids = product !== "*" ? d.ids[product] : undefined;
+      const resources: Rule["resources"] = ids?.length ? ids.map((id) => ({ id })) : d.project ? [{ project: d.project }] : "*";
+      const r: Rule = { product, resources, actions: Object.fromEntries(Object.entries(actions).filter(([, e]) => e)) };
       if (d.environments.length) r.environments = d.environments;
       return r;
     });
