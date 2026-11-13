@@ -1388,6 +1388,14 @@ async fn a_workload_gets_a_token_for_minutes() {
     let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/tokens?kind=workload", None).await;
     assert_eq!(ids(&list), vec![g.id.as_str()]);
 
+    // It makes no tokens, even short ones within its rules.
+    let maker = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "ci: maker", "rules": [{ "product": "access", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }] })).unwrap();
+    let access_scope = serde_json::from_value::<roll_auth::scope::Scope>(json!([{ "product": "access", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }])).unwrap();
+    let (_, maker_secret) = d.access.mint_workload(maker, &access_scope, 15, None).await.unwrap();
+    let child = json!({ "name": "child", "rules": [{ "product": "access", "resources": "*", "actions": { "read": "allow" } }], "expires_at": code_sql::now_ms() + 5 * 60_000 });
+    let (s, e) = d.call(&maker_secret, Method::POST, "/v1/access/tokens", Some(child)).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::FORBIDDEN, Some("a workload token can't make or change tokens")), "{e}");
+
     // Fixed: never given longer, rotated or grown.
     let edit = d.call(OPERATOR, Method::PATCH, &format!("/v1/access/tokens/{}", g.id), Some(json!({ "expires_at": null }))).await;
     assert_eq!(edit.0, StatusCode::CONFLICT, "{}", edit.1);
