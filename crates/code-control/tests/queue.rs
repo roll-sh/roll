@@ -557,9 +557,9 @@ impl code_control::SecretEnv for FakeSecrets {
     async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
         anyhow::bail!("not in this test")
     }
-    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String)>> {
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
         let hit = candidates.iter().position(|c| c == "sk_live_51Hx9Q2").filter(|_| repo == "acme/api");
-        Ok(hit.map(|i| (i, "STRIPE_KEY".into(), "production".into())).into_iter().collect())
+        Ok(hit.map(|i| (i, "STRIPE_KEY".into(), "production".into(), "/".into())).into_iter().collect())
     }
 }
 
@@ -584,7 +584,7 @@ async fn a_change_that_adds_a_secrets_value_is_blocked_until_it_is_removed() {
     b.ok("POST", &format!("{P}/land"), Some(json!({ "message": "old", "files": { "src/pay.js": { "content": "// payments\nconst key = 'sk_live_51Hx9Q2';\n" }, "README.md": { "content": "# api\n" } } }))).await;
     b.code.set_secret_env(Arc::new(FakeSecrets));
     let scan = b.ok("GET", &format!("{P}/leaks"), None).await;
-    assert_eq!((scan["files"].as_u64(), &scan["found"]), (Some(2), &json!([{ "key": "STRIPE_KEY", "environment": "production", "path": "src/pay.js", "line": 2 }])));
+    assert_eq!((scan["files"].as_u64(), &scan["found"]), (Some(2), &json!([{ "key": "STRIPE_KEY", "environment": "production", "folder": "/", "path": "src/pay.js", "line": 2 }])));
     assert!(!scan.to_string().contains("sk_live"));
     // Removed since: gone from the head, still in history, so it's still out.
     let fixed = b.ok("POST", &format!("{P}/land"), Some(json!({ "message": "use the env", "files": { "src/pay.js": { "content": "const key = process.env.STRIPE_KEY;\n" } } }))).await;

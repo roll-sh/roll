@@ -27,6 +27,7 @@ export function CodeLeaks() {
 }
 
 function RepoScan({ repo }: { repo: string }) {
+  const { go } = useSecrets();
   const [scan, setScan] = useState<LeakScan | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,8 +71,7 @@ function RepoScan({ repo }: { repo: string }) {
           {found.map((f) => (
             <li key={`${f.key}:${f.environment}:${f.path}:${f.line}`} className="flex flex-wrap items-center gap-x-2 text-[12px]">
               <FileWarning className="size-3.5 text-danger" />
-              <span className="font-mono">{f.key}</span>
-              <span className="text-subtle">({f.environment})</span>
+              <SecretLink k={f.key} env={f.environment} folder={f.folder} go={go} />
               <span className="text-subtle">in</span>
               <Link href={`${blobHref(repo, scan.head as string, f.path)}#L${f.line}`} className="font-mono text-accent hover:underline">
                 {f.path}:{f.line}
@@ -85,8 +85,7 @@ function RepoScan({ repo }: { repo: string }) {
           {inHistory.map((h) => (
             <li key={`${h.key}:${h.environment}:${h.changeset}:${h.path}`} className="flex flex-wrap items-center gap-x-2 text-[12px]">
               <History className="size-3.5 text-danger" />
-              <span className="font-mono">{h.key}</span>
-              <span className="text-subtle">({h.environment})</span>
+              <SecretLink k={h.key} env={h.environment} folder={h.folder} go={go} />
               <span className="text-subtle">added in</span>
               <Link href={changesetHref(repo, h.changeset)} className="font-mono text-accent hover:underline">
                 {h.changeset}
@@ -98,5 +97,14 @@ function RepoScan({ repo }: { repo: string }) {
       )}
       {scan && scan.skipped.length > 0 && <p className="mt-1 text-[11px] text-subtle">Not read: {scan.skipped.slice(0, 5).join(", ")}{scan.skipped.length > 5 ? ` and ${scan.skipped.length - 5} more` : ""}</p>}
     </div>
+  );
+}
+
+/** The secret a finding is about, opened in its environment (where it's rotated or set anew). */
+function SecretLink({ k, env, folder, go }: { k: string; env: string; folder: string; go: ReturnType<typeof useSecrets>["go"] }) {
+  return (
+    <button className="font-mono hover:text-accent hover:underline" onClick={() => go({ env, path: folder, key: k })} title={`Open ${k} in ${env}${folder === "/" ? "" : `:${folder}`}: rotate it or set a new value`}>
+      {k} <span className="text-subtle">({env})</span>
+    </button>
   );
 }

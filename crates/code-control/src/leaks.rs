@@ -38,6 +38,8 @@ pub const SCAN_HISTORY_MAX: usize = 1000;
 pub struct Found {
     pub key: String,
     pub environment: String,
+    /// The secret's folder in its environment.
+    pub folder: String,
     pub path: String,
     /// 1-based.
     pub line: usize,
@@ -66,6 +68,7 @@ pub struct LeakScan {
 pub struct InHistory {
     pub key: String,
     pub environment: String,
+    pub folder: String,
     pub changeset: String,
     pub path: String,
 }
@@ -89,7 +92,7 @@ impl Code {
         }
         let found = match self.added_candidates(r, mb.as_ref(), &head).await {
             Ok(candidates) if candidates.is_empty() => Ok(Vec::new()),
-            Ok(candidates) => secrets.leaks(&r.full_name(), candidates).await.map(|l| l.into_iter().map(|(_, key, env)| (key, env)).collect()),
+            Ok(candidates) => secrets.leaks(&r.full_name(), candidates).await.map(|l| l.into_iter().map(|(_, key, env, _)| (key, env)).collect()),
             Err(e) => Err(e.into()),
         };
         match found {
@@ -175,9 +178,9 @@ impl Code {
             }
         }
         for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
-            for (i, key, environment) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
+            for (i, key, environment, folder) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
                 for (path, line) in places.get(b * SCAN_BATCH + i).into_iter().flatten() {
-                    scan.found.push(Found { key: key.clone(), environment: environment.clone(), path: path.clone(), line: *line });
+                    scan.found.push(Found { key: key.clone(), environment: environment.clone(), folder: folder.clone(), path: path.clone(), line: *line });
                 }
             }
         }
@@ -229,9 +232,9 @@ impl Code {
             }
         }
         for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
-            for (i, key, environment) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
+            for (i, key, environment, folder) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
                 for (changeset, path) in places.get(b * SCAN_BATCH + i).into_iter().flatten() {
-                    scan.history.push(InHistory { key: key.clone(), environment: environment.clone(), changeset: changeset.clone(), path: path.clone() });
+                    scan.history.push(InHistory { key: key.clone(), environment: environment.clone(), folder: folder.clone(), changeset: changeset.clone(), path: path.clone() });
                 }
             }
         }

@@ -844,14 +844,15 @@ export interface Blame {
 export interface LeakScan {
   head: string | null;
   files: number;
-  found: { key: string; environment: string; path: string; line: number }[];
+  /** `folder` is the secret's folder in its environment; `path` the file's. */
+  found: { key: string; environment: string; folder: string; path: string; line: number }[];
   /** Files not read, and why. */
   skipped: string[];
   /** The scan stopped at its limit. */
   truncated: boolean;
   /** Commits read with `history`, and the ones that added a value (newest first). */
   commits: number;
-  history: { key: string; environment: string; changeset: string; path: string }[];
+  history: { key: string; environment: string; folder: string; changeset: string; path: string }[];
 }
 
 // ── webhooks and commit statuses ──

@@ -44,8 +44,8 @@ pub trait SecretEnv: Send + Sync {
     /// The same for workspace project `project` (an id or a name), which must have one of
     /// `owner`'s repos on its canvas (sandboxes).
     async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>>;
-    /// (candidate index, key, environment) for every secret, in any environment of the projects
-    /// that have repo `owner/name` on their canvas, whose value is one of `candidates` (matched by
-    /// fingerprint; values never come back). Empty for a repo on no project's canvas.
-    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String)>>;
+    /// (candidate index, key, environment, folder) for every secret, in any environment of the
+    /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
+    /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>>;
 }

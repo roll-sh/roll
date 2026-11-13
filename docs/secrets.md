@@ -460,9 +460,9 @@ the change`. The blocker names keys and environments, never the value or the lin
   `GET /v1/code/repos/{owner}/{name}/leaks` (the repo's managers; in the Secrets surface, Access,
   "Values in code") reads the default branch's head tree with the same candidates and limits
   (text files up to 1 MiB, lines up to 4 KiB, 20,000 files and 200,000 candidates, then
-  `truncated`) and answers each match as `{key, environment, path, line}`, never the value. With
+  `truncated`) and answers each match as `{key, environment, folder, path, line}`, never the value. With
   `?history=N` (at most 1,000) it also reads what each of the last N first-parent commits added
-  and lists the commits that added a value, `{key, environment, changeset, path}`: a value removed
+  and lists the commits that added a value, `{key, environment, folder, changeset, path}`: a value removed
   since is still in the history anyone with the repo can read, so it's out and needs rotating.
 - **What it tells.** A blocker says a value is a secret's, so a writer of the repo could confirm a
   guess at a value they may not reveal by pushing it. That's accepted: they confirm a guess they
@@ -1010,7 +1010,9 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **Rotate from a finding**: a value found in code (or in history) gets "Rotate" beside it when its
-   secret is a managed link, and "Set a new value" otherwise, so a leak is handled where it's seen.
+4. **Typed keys**: a required key gets a type (`url`, `int`, `port`, `bool`, `json`, `email`) and an
+   optional pattern, checked on every write, import, promote and request (a value that doesn't
+   fit is refused, by key, never echoing the value), shown in the grid and the CLI's `ls`, so a
+   malformed value never reaches an app. In progress.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.
