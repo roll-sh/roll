@@ -754,7 +754,10 @@ VAULT_ADDR=https://vault.example VAULT_TOKEN=hvs…  roll secrets import --from 
 INFISICAL_TOKEN=…  roll secrets import --from infisical --source <workspace id>/prod/api -e production
 ```
 
-Doppler's own `DOPPLER_*` keys are left out; numbers and booleans come in as their text. Hosts
+`--map dev=development,stg=staging,prd=production` does a whole project: each `<source>/<name>` (a
+Doppler config, a Vault path, an Infisical environment) into its roll environment, one change
+each, reported per environment. The dashboard's import dialog shows these commands, since a browser
+can't call the other manager's API. Doppler's own `DOPPLER_*` keys are left out; numbers and booleans come in as their text. Hosts
 come from the managers' own settings (`DOPPLER_API_HOST`, `VAULT_ADDR`, `INFISICAL_API_URL`).
 
 ```
@@ -1519,11 +1522,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Import a whole project at once**: `--map dev=development,stg=staging,prd=production` with
-   `--from` imports each source (Doppler config, Vault path, Infisical environment) into its roll
-   environment, one change each, and reports each.
-2. **The import dialog shows the `--from` commands**: a browser can't call another manager's API,
-   so the dashboard's import says how from the terminal.
 
 Waiting on other pull requests:
 

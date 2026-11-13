@@ -165,9 +165,13 @@ pub enum Secrets {
         #[arg(long, conflicts_with = "file", requires = "source")]
         from: Option<String>,
         /// What to read there: doppler `project/config`, vault `mount/path` (KV v2), infisical
-        /// `workspace-id/environment[/path]`.
+        /// `workspace-id/environment[/path]`. With `--map`, the part before the mapped name.
         #[arg(long)]
         source: Option<String>,
+        /// Several environments at once: `dev=development,prd=production` reads `<source>/dev`
+        /// into development, and so on (one change each).
+        #[arg(long, value_delimiter = ',', requires = "from")]
+        map: Vec<String>,
         /// Replace keys that exist (default: only add new ones).
         #[arg(long)]
         overwrite: bool,
@@ -905,7 +909,22 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, from, source, overwrite, request } => {
+        Secrets::Import { file, from, source, map, overwrite, request } => {
+            if let (Some(from), false) = (&from, map.is_empty()) {
+                let base = source.as_deref().unwrap_or_default().trim_end_matches('/');
+                for pair in &map {
+                    let (src, dst) = pair.split_once('=').with_context(|| format!("{pair}: --map is source=environment"))?;
+                    let values = import_from(from, &format!("{base}/{src}")).await.with_context(|| format!("reading {base}/{src}"))?;
+                    let body = import_body(&serde_json::to_string(&values)?, &c.at.path, overwrite, request)?;
+                    let v = c.call(Method::POST, &format!("{}/import", c.env(dst)), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {dst}"))?;
+                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
+                    match v.get("request").filter(|r| r.is_object()) {
+                        Some(r) => println!("{src} → {dst}: change request {} ({} values)", s(&r["id"]), values.len()),
+                        None => println!("{src} → {dst}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
+                    }
+                }
+                return Ok(());
+            }
             let text = match (file.as_deref(), from) {
                 (_, Some(from)) => serde_json::to_string(&import_from(&from, source.as_deref().unwrap_or_default()).await?)?,
                 (Some("-"), None) => {
