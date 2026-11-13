@@ -386,6 +386,14 @@ A link is `{kind, ref, field, mode, options}`:
   (a service that scales to zero refuses them). Only
   the lease's metadata is stored, never the credential.
 
+**Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
+standard environments that neither link it nor have its usual keys at `/`, and those keys: the
+provider's usual fields (a credential of the app's own, managed, wherever the product issues one:
+a Postgres role, a bucket key, a Kafka user; never the shared password) under their usual names
+(`DATABASE_URL`, `AWS_*`, `KAFKA_*`), prefixed with the resource's name when the canvas has two of a
+kind. The overview offers each as one click to link it in all of them (a protected environment gets
+a change request). Only roll can: it knows the canvas.
+
 Which fields and modes each kind offers is in `GET …/links` (the catalogue of the project's
 resources and their fields). The providers rolld registers are listed in `crates/rolld/src/secrets.rs`
 and in the table below.
@@ -572,6 +580,25 @@ infisical export --env=prod --format=json > prod.json   &&  roll secrets import 
 doppler secrets download --no-file --format json > prod.json  &&  roll secrets import prod.json -e production
 vercel env pull .env.production --environment=production  &&  roll secrets import .env.production -e production
 ```
+
+### Backup and restore
+
+`roll secrets keygen` makes an X25519 key pair (the secret key in a 0600 file, the public key
+printed); `roll secrets backup --to <public key> --out shop.backup` writes the whole project:
+every environment (with its base, labels, expiry, trust, protection, approvals and age limit), its
+folders, its own keys with their values, comments, tags and links, its imports and the project's
+required keys. The archive is sealed to that key (`roll-seal-v1`, associated data
+`roll-secrets-backup:<project>`), so the file is safe at rest anywhere and only the key's holder
+opens it; `POST …/backup {recipient}` (admin, audited `project.backup`) is the call. Linked keys
+carry their link and no value: a restore issues its own credentials. Personal values, history,
+leases, tokens and identities aren't in it.
+
+`roll secrets restore shop.backup --key roll-secrets-backup.key` opens it on the CLI's machine and
+loads it into the selected project, which must have no secrets yet (`POST …/restore` with the
+opened archive; admin, audited `project.restore`), on this server or another. Values are written
+before any environment is protected, so a restore isn't a change request; what can't be restored
+(a link to a resource that project doesn't have, an import of another project's folder) comes back
+as a warning, by name. Disaster recovery, and moving a project between roll servers.
 
 ### Sharing a value once
 
@@ -964,6 +991,9 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
+| `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin) |
+| `POST /restore` | `Archive` (an opened backup) | `{environments, secrets, warnings}` (admin; an empty project) |
+| `GET /suggestions` | | `Suggestion[]`: canvas resources linked nowhere yet, with their usual keys and where they'd go |
 | `GET /shared` | | `Import[]`: the folders other projects share with this one |
 | `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
@@ -1157,8 +1187,10 @@ Done and in PR #20:
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
   Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
-  identities pinned to client addresses;
-- the dashboard's Secrets surface;
+  identities pinned to client addresses; encrypted project backup and restore;
+- the dashboard's Secrets surface, with the deployment key's source and a rotation's progress,
+  suggested links for the canvas's resources, and one key set in several environments from the
+  overview (one change each, a request where protected);
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1179,8 +1211,14 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Backup and restore in the dashboard**: Environments offers a backup sealed to a public key
+   pasted there (the secret key never touches the browser), and restoring stays in the CLI, which
+   holds the key.
+3. **A change's activity in one place**: the audit log, change requests and syncs' pushes as one
+   per-environment timeline in the environment view, filterable by key, so "who changed what, and
+   where did it go" is one page.
+4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+5. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

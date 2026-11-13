@@ -67,6 +67,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let projects = ws.clone();
     let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
@@ -103,4 +104,16 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let refused = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--", "true"], None).await;
     assert_ne!(refused.code, Some(0));
     assert!(refused.stderr.contains("BROKEN: NOPE doesn't exist"), "{}", refused.stderr);
+
+    // A backup sealed to a key only this machine holds restores into another project.
+    let keys = tempfile::tempdir().unwrap();
+    let (key, file) = (keys.path().join("backup.key"), keys.path().join("shop.backup"));
+    let (key, file) = (key.to_str().unwrap(), file.to_str().unwrap());
+    let public = ok(&api, &[], &["secrets", "keygen", "--out", key], None).await;
+    ok(&api, &[], &["secrets", "-p", "shop", "backup", "--to", public.trim(), "--out", file], None).await;
+    assert!(!std::fs::read_to_string(file).unwrap().contains("s3cret"), "sealed at rest");
+    projects.create("copy", "", None).unwrap();
+    ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
+    let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
+    assert_eq!(restored.trim(), "db.internal s3cret");
 }

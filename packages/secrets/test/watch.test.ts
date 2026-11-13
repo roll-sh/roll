@@ -11,7 +11,7 @@ const until = async (ok: () => boolean) => {
 
 test("watch follows the digest, keeps values that don't resolve, renews leases and stops", async () => {
   let digest = "d1";
-  let served: Values = { values: { A: "1" }, problems: [], leases: ["lse_1"], dynamic: ["PW"] };
+  let served: Values = { values: { A: "1" }, problems: [], leases: ["lse_1"], dynamic: ["PW"], linked: [] };
   const calls: string[] = [];
   const fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const u = new URL(String(url));
@@ -35,11 +35,11 @@ test("watch follows the digest, keeps values that don't resolve, renews leases a
   await until(() => calls.includes("POST /v1/secrets/projects/prj_1/leases/lse_1/renew"));
 
   // A change that doesn't resolve keeps the values; the next change goes through.
-  served = { values: {}, problems: [{ key: "B", problem: "${X} doesn't exist" }], leases: [], dynamic: [] };
+  served = { values: {}, problems: [{ key: "B", problem: "${X} doesn't exist" }], leases: [], dynamic: [], linked: [] };
   digest = "d2";
   await until(() => errors.length === 1);
   assert.equal(seen.length, 1);
-  served = { values: { A: "2" }, problems: [], leases: [], dynamic: [] };
+  served = { values: { A: "2" }, problems: [], leases: [], dynamic: [], linked: [] };
   digest = "d3";
   await until(() => seen.length === 2);
   assert.deepEqual(seen[1].values, { A: "2" });

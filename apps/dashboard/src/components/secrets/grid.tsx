@@ -1,12 +1,14 @@
-import { Folder, Search } from "lucide-react";
+import { Folder, PenLine, Search } from "lucide-react";
+import { Suggestions } from "./suggestions";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
-import type { Cell, GridRow } from "@/lib/secrets-api";
+import { needsApproval, type Cell, type GridRow } from "@/lib/secrets-api";
+import { misfit } from "@/lib/secrets-required";
 import { countStatus, filterRows, folderName, type StatusFilter } from "@/lib/secrets-grid";
 import { Segmented } from "../agents/ui/toggle-group";
 import { FolderCrumbs } from "./folders";
 import { secretsHref, useSecrets } from "./secrets-page";
-import { ago, CommentMark, ErrorNote, LinkChip, PersonalMark, RefMark, SourceMark, Teach, useLoad } from "./ui";
+import { ago, button, Chip, CommentMark, ErrorNote, errorText, field, ghost, LinkChip, PersonalMark, primary, RefMark, SourceMark, Teach, useLoad } from "./ui";
 
 /**
  * The overview: every key in the folder as a row, the standard environments as columns in order.
@@ -60,6 +62,7 @@ export function OverviewGrid() {
       </div>
 
       <ErrorNote error={grid.error} className="m-3" />
+      {path === "/" && <Suggestions onLinked={grid.reload} />}
 
       {grid.data && rows.length === 0 ? (
         <Teach
@@ -92,7 +95,7 @@ export function OverviewGrid() {
             </thead>
             <tbody>
               {shown.map((r) => (
-                <Row key={r.key} row={r} cols={cols} onOpen={(env) => go({ env, path: path === "/" ? undefined : path, key: r.key })} />
+                <Row key={r.key} row={r} cols={cols} path={path} names={names} onSet={grid.reload} onOpen={(env) => go({ env, path: path === "/" ? undefined : path, key: r.key })} />
               ))}
             </tbody>
           </table>
@@ -113,14 +116,26 @@ function groups(row: GridRow, cols: string[]): Map<string, string> {
   return out;
 }
 
-function Row({ row, cols, onOpen }: { row: GridRow; cols: string[]; onOpen: (env: string) => void }) {
+function Row({ row, cols, path, names, onOpen, onSet }: { row: GridRow; cols: string[]; path: string; names: Map<string, string>; onOpen: (env: string) => void; onSet: () => void }) {
   const letters = row.status === "different" ? groups(row, cols) : null;
   const missingIn = cols.filter((c) => !row.cells[c]);
+  const [setting, setSetting] = useState(false);
   return (
+    <>
     <tr className="group/row">
       <td className="sticky left-0 z-[1] border-t border-line bg-canvas py-1.5 pr-3 pl-2 font-mono text-[12px] group-hover/row:bg-[color-mix(in_oklab,var(--canvas),var(--fg)_3%)]">
-        <span className="block truncate" title={row.key}>
-          {row.key}
+        <span className="flex items-center gap-1">
+          <span className="min-w-0 truncate" title={row.key}>
+            {row.key}
+          </span>
+          <button
+            onClick={() => setSetting((s) => !s)}
+            aria-label={`Set ${row.key} in several environments`}
+            title="Set in several environments"
+            className="ml-auto shrink-0 rounded p-0.5 text-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100"
+          >
+            <PenLine className="size-3.5" />
+          </button>
         </span>
       </td>
       {cols.map((c) => (
@@ -142,6 +157,104 @@ function Row({ row, cols, onOpen }: { row: GridRow; cols: string[]; onOpen: (env
         )}
       </td>
     </tr>
+    {setting && (
+      <tr>
+        <td colSpan={cols.length + 2} className="border-t border-line bg-panel/60 p-0">
+          <SetAcross
+            keyName={row.key}
+            path={path}
+            cols={cols}
+            names={names}
+            initial={missingIn.length ? missingIn : cols}
+            onDone={() => {
+              setSetting(false);
+              onSet();
+            }}
+            onCancel={() => setSetting(false)}
+          />
+        </td>
+      </tr>
+    )}
+    </>
+  );
+}
+
+/** One key's value written to several environments: one change each (a request where protected). */
+function SetAcross({ keyName, path, cols, names, initial, onDone, onCancel }: { keyName: string; path: string; cols: string[]; names: Map<string, string>; initial: string[]; onDone: () => void; onCancel: () => void }) {
+  const { api, required } = useSecrets();
+  const [value, setValue] = useState("");
+  const [picked, setPicked] = useState<Set<string>>(new Set(initial));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [requested, setRequested] = useState<string[]>([]);
+  const unfit = misfit(required.find((r) => r.key === keyName && r.path === path), value);
+  const submit = async () => {
+    if (busy || picked.size === 0 || unfit) return;
+    setBusy(true);
+    setError(null);
+    const asked: string[] = [];
+    try {
+      for (const env of cols.filter((c) => picked.has(c))) {
+        try {
+          await api.set(env, keyName, { value }, path);
+        } catch (e) {
+          if (!needsApproval(e)) throw e;
+          await api.openRequest(env, { path, message: `set ${keyName}`, ops: [{ op: "set", key: keyName, value }] });
+          asked.push(names.get(env) ?? env);
+        }
+      }
+      setValue("");
+      if (asked.length) setRequested(asked);
+      else onDone();
+    } catch (e) {
+      setError(errorText(e));
+    }
+    setBusy(false);
+  };
+  return (
+    <form
+      className="rise flex flex-wrap items-end gap-2 px-3 py-2.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+      onKeyDown={(e) => e.key === "Escape" && onCancel()}
+    >
+      <label className="min-w-56 flex-1">
+        <span className="mb-1 block text-[11px] text-subtle">
+          New value of <span className="font-mono text-fg">{keyName}</span>
+        </span>
+        <input autoFocus value={value} onChange={(e) => setValue(e.target.value)} spellCheck={false} autoComplete="off" className={`${field} font-mono`} aria-invalid={!!unfit} />
+        {unfit && value && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
+      </label>
+      <div>
+        <span className="mb-1 block text-[11px] text-subtle">In</span>
+        <div className="flex flex-wrap gap-1">
+          {cols.map((c) => (
+            <Chip key={c} on={picked.has(c)} onClick={() => setPicked((p) => { const n = new Set(p); if (n.has(c)) n.delete(c); else n.add(c); return n; })}>
+              {names.get(c) ?? c}
+            </Chip>
+          ))}
+        </div>
+      </div>
+      <span className="flex gap-1">
+        <button type="button" className={ghost} onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="submit" className={primary} disabled={busy || picked.size === 0 || !!unfit}>
+          {busy ? "Setting…" : `Set in ${picked.size}`}
+        </button>
+      </span>
+      <ErrorNote error={error} onDismiss={() => setError(null)} className="w-full" />
+      {requested.length > 0 && (
+        <p className="w-full text-[11.5px] text-muted" role="status">
+          {requested.join(", ")} {requested.length === 1 ? "is" : "are"} protected: a change request is waiting there.{" "}
+          <button type="button" className={`${button} ml-1`} onClick={onDone}>
+            Done
+          </button>
+        </p>
+      )}
+    </form>
   );
 }
 

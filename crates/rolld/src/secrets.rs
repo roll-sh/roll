@@ -265,6 +265,10 @@ impl LinkProvider for Postgres {
         ];
         F
     }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        // A role of the app's own, never the project's password.
+        &[("role_url", Mode::Managed)]
+    }
     fn name(&self, r#ref: &str) -> Option<String> {
         self.0.call(Method::GET, &format!("/v1/projects/{}", enc(r#ref)), None).ok()?["name"].as_str().map(Into::into)
     }
@@ -372,6 +376,9 @@ impl LinkProvider for Redis {
         ];
         F
     }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        &[("url", Mode::Live)]
+    }
     fn name(&self, r#ref: &str) -> Option<String> {
         self.0.call(Method::GET, &format!("/v1/redis/databases/{}", enc(r#ref)), None).ok()?["name"].as_str().map(Into::into)
     }
@@ -408,6 +415,9 @@ impl LinkProvider for Stream {
             issued("properties", "Client properties", true, "KAFKA_PROPERTIES", "key"),
         ];
         F
+    }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        &[("bootstrap", Mode::Live), ("username", Mode::Managed), ("password", Mode::Managed)]
     }
     fn name(&self, r#ref: &str) -> Option<String> {
         self.0.call(Method::GET, &format!("/v1/streams/{}", enc(r#ref)), None).ok()?["name"].as_str().map(Into::into)
@@ -450,6 +460,9 @@ impl LinkProvider for Bucket {
         ];
         F
     }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        &[("bucket", Mode::Live), ("endpoint", Mode::Live), ("region", Mode::Live), ("access_key_id", Mode::Managed), ("secret_access_key", Mode::Managed)]
+    }
     fn read(&self, r#ref: &str, field: &str, _: &Link) -> roll_secrets::Result<Value> {
         if field == "bucket" {
             return Ok(Value::new(r#ref));
@@ -487,6 +500,9 @@ impl LinkProvider for Nosql {
             live("alternator", "Alternator (DynamoDB) endpoint", false, "DYNAMODB_ENDPOINT"),
         ];
         F
+    }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        &[("cql", Mode::Live), ("username", Mode::Live), ("password", Mode::Live)]
     }
     fn name(&self, r#ref: &str) -> Option<String> {
         self.0.call(Method::GET, &format!("/v1/nosql/databases/{}", enc(r#ref)), None).ok()?["name"].as_str().map(Into::into)
@@ -526,6 +542,9 @@ impl LinkProvider for Search {
             issued("api_key", "API key (Authorization: ApiKey …)", true, "ELASTICSEARCH_API_KEY", "key"),
         ];
         F
+    }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        &[("url", Mode::Live), ("api_key", Mode::Managed)]
     }
     fn name(&self, r#ref: &str) -> Option<String> {
         self.0.call(Method::GET, &format!("/v1/search/clusters/{}", enc(r#ref)), None).ok()?["name"].as_str().map(Into::into)

@@ -52,6 +52,8 @@ export type Import = { project?: string; environment: string; path: string };
 /** A project this folder is shared with. */
 export type Export = { project: string; created_at: number; created_by: string };
 export type Link = { kind: string; ref: string; field: string; mode: LinkMode; options?: Record<string, unknown> };
+/** A canvas resource linked nowhere yet, its usual keys, and the environments they'd go to (`GET …/suggestions`). */
+export type Suggestion = { kind: string; ref: string; name: string | null; links: { key: string; field: string; mode: LinkMode }[]; environments: string[] };
 /** `project` on an import: another project that shares the folder. */
 export type Source = { kind: "own" } | { kind: "import"; environment: string; path: string; project?: string } | { kind: "base"; environment: string };
 export type Secret = {

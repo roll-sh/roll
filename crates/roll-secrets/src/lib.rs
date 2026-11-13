@@ -13,6 +13,7 @@
 pub mod access;
 pub mod api;
 mod audit;
+pub mod backup;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
@@ -31,6 +32,7 @@ mod requests;
 mod required;
 mod shares;
 pub mod sinks;
+pub mod suggestions;
 mod sweep;
 pub mod syncs;
 mod tokens;

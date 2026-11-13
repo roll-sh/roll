@@ -99,6 +99,11 @@ pub struct Issued {
 pub trait LinkProvider: Send + Sync {
     fn kind(&self) -> &str;
     fn fields(&self) -> &[Field];
+    /// The fields a project usually links for one of these resources, and how (a credential of
+    /// its own, managed, wherever the product issues one): what `…/suggestions` offers.
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        &[]
+    }
     /// A resource's display name, if the product knows it.
     fn name(&self, r#ref: &str) -> Option<String> {
         let _ = r#ref;

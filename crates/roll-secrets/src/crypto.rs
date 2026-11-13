@@ -36,6 +36,13 @@ impl serde::Serialize for Value {
     }
 }
 
+/// Straight into a `Value` (a restored archive's values): redacted and zeroized from the start.
+impl<'de> serde::Deserialize<'de> for Value {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d).map(Value::new)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
     #[error("ROLL_SECRET_KEY must be at least 32 characters")]
@@ -224,6 +231,14 @@ pub fn open_sealed(secret: &[u8; 32], context: &str, b: &Sealed) -> Result<Zeroi
     let mut okm = Zeroizing::new([0u8; 32]);
     hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_ref()).expand(b"roll-seal-v1", okm.as_mut()).expect("32 bytes");
     cipher(okm.as_ref()).decrypt(Nonce::from_slice(&nonce), Payload { msg: &ct, aad: context.as_bytes() }).map(Zeroizing::new).map_err(|_| bad())
+}
+
+/// A fresh X25519 key pair: the secret key (zeroized on drop) and its public key, base64url.
+pub fn keypair() -> (Zeroizing<[u8; 32]>, String) {
+    let mut secret = Zeroizing::new([0u8; 32]);
+    getrandom::fill(secret.as_mut()).expect("system randomness");
+    let public = public_key(&secret);
+    (secret, public)
 }
 
 /// The public key of an X25519 secret key, base64url (tests and in-process consumers).
