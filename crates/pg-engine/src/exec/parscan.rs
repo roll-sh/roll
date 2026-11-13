@@ -701,7 +701,7 @@ impl Iterator for IndexChunk {
                     let mut keys: Vec<&[u8]> = ents.iter().map(|(_, d)| &d[..]).collect();
                     keys.sort_unstable();
                     keys.dedup();
-                    match store.get_versions(&keys, *ts) {
+                    match dense_rows(store, &keys, *ts).transpose().unwrap_or_else(|| store.get_versions(&keys, *ts)) {
                         Err(e) => {
                             self.done = true;
                             self.buf.push_back(Err(e));
@@ -724,6 +724,43 @@ impl Iterator for IndexChunk {
             self.buf.extend(err);
         }
     }
+}
+
+/// `Store::get_versions` of ascending `keys` of one integer key column close together (an
+/// index's entries in its table's order: a primary key's over a bulk load, `scan::dense_keys`),
+/// read as the range they span, a batch of rows at a time by reference, instead of a lookup
+/// each. None: not such keys.
+fn dense_rows(store: &crate::storage::Store, keys: &[&[u8]], ts: u64) -> Result<Option<Vec<Option<(u64, Option<bytes::Bytes>)>>>> {
+    if !super::scan::dense_keys(keys.len(), |i| keys[i], false) {
+        return Ok(None);
+    }
+    let end = crate::storage::keys::prefix_end(keys[keys.len() - 1]);
+    let mut it = store.scan(keys[0], &end, ts);
+    let mut out = Vec::with_capacity(keys.len());
+    let mut want = keys.iter().peekable();
+    let mut b = RowBatch::default();
+    while want.peek().is_some() {
+        b.clear();
+        it.fill_batch(&mut b, keys.len() - out.len())?;
+        if b.is_empty() {
+            break;
+        }
+        for i in 0..b.len() {
+            let k = b.get(i).0;
+            while want.next_if(|w| **w < k).is_some() {
+                out.push(None);
+            }
+            if want.next_if(|w| **w == k).is_some() {
+                // (The version's time isn't read: only the row.)
+                out.push(Some((ts, Some(b.value_bytes(i)))));
+            }
+            if want.peek().is_none() {
+                break;
+            }
+        }
+    }
+    out.resize(keys.len(), None);
+    Ok(Some(out))
 }
 
 impl Decode {

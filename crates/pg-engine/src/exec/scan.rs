@@ -2835,7 +2835,7 @@ fn entry_prefix(erb: &crate::storage::batch::RowBatch, i: usize) -> &[u8] {
 /// `fetch_dense`'s keys (`n` of them, `key(i)`): ascending keys of one integer key column
 /// of one table, mostly the rows between the first and the last; enough of them that a range
 /// read costs no more than their lookups (as stored, a batch at a time: `raw`, fewer).
-fn dense_keys<'a>(n: usize, key: impl Fn(usize) -> &'a [u8], raw: bool) -> bool {
+pub(super) fn dense_keys<'a>(n: usize, key: impl Fn(usize) -> &'a [u8], raw: bool) -> bool {
     let id = |k: &[u8]| -> Option<i64> {
         let mut pos = 8;
         match crate::storage::keys::decode_index_value(k, &mut pos, &crate::types::DataType::Int8, false)? {
