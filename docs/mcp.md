@@ -404,17 +404,19 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+1. **Audit log export:** CSV from the dashboard's audit page and `roll mcp audit --csv` (GitHub's and
+   Cloudflare's audit logs both export), the same filters, bounded (in progress).
+2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
    (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
    project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
-2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+4. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Done lately: `roll token list --product/--resource` and `--workloads`; a workload token makes no
@@ -427,9 +429,11 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); completions named as such in
-the audit log (`completion/complete:<tool>`); a connection's tool names worked out once per request;
-every open sibling's head passes the route check with #25 (apps-next's rollback to the last deploy,
+revoked as leaked, about to expire; only their own, never a secret); what an agent sees, on the
+token page (`GET /v1/access/tokens/{id}/tools`: the tools and prompts a token is offered and what
+the list costs an agent's context); completions named as such in the audit log
+(`completion/complete:<tool>`); a connection's tool names worked out once per request; every open
+sibling's head passes the route check with #25 (apps-next's rollback to the last deploy,
 previews-next's share revoke, search's index refresh and settings reviewed: 178 in all);
 `secrets_list_aws_users` (secrets #40); `apps_set_environment` takes who gets in (maintenance,
 allowed addresses, a rate limit, firewall rules; apps-next #26); routes a prefix row decides are

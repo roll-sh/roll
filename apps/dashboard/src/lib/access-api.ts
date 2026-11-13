@@ -42,6 +42,14 @@ export interface OAuthClient {
   last_used_at: number | null;
 }
 
+/** A token's MCP offer: its tools, its prompts and what the list costs an agent's context. */
+export interface AgentSees {
+  tools: { name: string; title: string; product: string; read_only: boolean; destructive: boolean }[];
+  prompts: { name: string; title: string; description: string }[];
+  context_tokens?: number;
+  live: boolean;
+}
+
 export interface Grant {
   id: string;
   name: string;
@@ -312,6 +320,8 @@ export const accessApi = {
   checkup: () => call<Checkup[]>("GET", "/v1/access/checkup"),
   /** The networks it's been used from (/24s and /48s), newest first. */
   networks: (id: string) => call<{ network: string; first_at: number; last_at: number }[]>("GET", `${token(id)}/networks`),
+  /** What an agent connected with this token is offered over MCP (`tools/list`, `prompts/list`). */
+  agentSees: (id: string) => call<AgentSees>("GET", `${token(id)}/tools`),
   /** Take back what an approval allowed it for a while (and the approval, if unused). */
   forget: (id: string, approval: string) => call<Grant>("DELETE", `${token(id)}/temporary/${encodeURIComponent(approval)}`),
   /** Its rules narrowed to what its allowed requests used in the last `days` (never wider): a proposal. */

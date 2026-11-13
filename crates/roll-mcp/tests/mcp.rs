@@ -264,3 +264,22 @@ async fn a_screenshot_is_an_image_the_agent_sees() {
     let shot = d.tool(OPERATOR, "previews_screenshot", json!({ "id": "pv_1" })).await;
     assert_eq!((shot["isError"].as_bool(), shot["content"][1]["type"].as_str(), shot["content"][1]["mimeType"].as_str()), (Some(false), Some("image"), Some("image/png")), "{shot}");
 }
+
+/// A token's page shows what an agent connected with it is offered: its tools (as `tools/list`
+/// would list them) and what they cost an agent's context, read as the caller.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tokens_page_shows_what_an_agent_sees() {
+    let d = Daemon::new();
+    let (_, _, made) = d
+        .http(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "reader", "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] })))
+        .await;
+    let (id, token) = (made["grant"]["id"].as_str().unwrap().to_string(), made["token"].as_str().unwrap().to_string());
+    let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}/tools"), None).await;
+    assert_eq!(s, StatusCode::OK, "{seen}");
+    let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(tools.contains(&"postgres_query") && !tools.contains(&"postgres_execute"), "{tools:?}");
+    assert!(seen["context_tokens"].as_u64().unwrap() > 0);
+    // Asked as the caller: a token that may not read tokens learns nothing.
+    assert_eq!(d.http(&token, Method::GET, &format!("/v1/access/tokens/{id}/tools"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.http(OPERATOR, Method::GET, "/v1/access/tokens/tok_nope/tools", None).await.0, StatusCode::NOT_FOUND);
+}
