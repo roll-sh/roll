@@ -48,6 +48,13 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       <p className="font-mono text-[11px] text-subtle tabular-nums">
         {money(env.sleeping_usd_month)}/mo asleep · {money(env.active_usd_hour)}/h active
       </p>
+      {env.visual_change && (
+        <p className="text-[12px] text-muted">
+          {env.visual_change.percent > 0
+            ? `The page changed ${Math.max(env.visual_change.percent, 0.1).toFixed(1)}% since ${env.visual_change.since.replace(/^cs_/, "").slice(0, 10)}.`
+            : `The page looks the same as at ${env.visual_change.since.replace(/^cs_/, "").slice(0, 10)}.`}
+        </p>
+      )}
       {env.expires_at != null && (
         <p className="text-[12px] text-muted">
           It goes {new Date(env.expires_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}; keep it from Previews.

@@ -229,7 +229,7 @@ export function PreviewSheet({
               </>
             )}
 
-            {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} /> : null}
+            {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} /> : null}
 
             <Label>Cost</Label>
             <div className="grid grid-cols-3 gap-2">
@@ -443,12 +443,14 @@ function useVisible() {
 }
 
 /** The first service's page as the preview's last push left it. */
-function Screenshot({ id, at }: { id: string; at: number }) {
+function Screenshot({ id, at, change }: { id: string; at: number; change?: { since: string; percent: number } | null }) {
   const [src, setSrc] = useState<string | null>(null);
+  // Before: the screenshot at the head before, to compare.
+  const [before, setBefore] = useState(false);
   useEffect(() => {
     let url: string | null = null;
     let live = true;
-    screenshotUrl(id).then(
+    screenshotUrl(id, before).then(
       (u) => {
         url = u;
         if (live) setSrc(u);
@@ -460,11 +462,24 @@ function Screenshot({ id, at }: { id: string; at: number }) {
       live = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [id, at]);
+  }, [id, at, before]);
   if (!src) return null;
+  const since = change?.since.replace(/^cs_/, "").slice(0, 10);
   return (
     <>
-      <Label>Screenshot</Label>
+      <Label>
+        <span>Screenshot</span>
+        {change && (
+          <button type="button" onClick={() => setBefore((b) => !b)} aria-pressed={before} className="text-muted hover:text-fg" title={`The page at ${since}, the head before`}>
+            {before ? "After" : "Before"}
+          </button>
+        )}
+      </Label>
+      {change && (
+        <p className="mb-1.5 text-[11.5px] text-subtle">
+          {before ? `At ${since}, before this push.` : change.percent > 0 ? `Changed ${Math.max(change.percent, 0.1).toFixed(1)}% since ${since}.` : `Looks the same as at ${since}.`}
+        </p>
+      )}
       <a href={src} target="_blank" rel="noreferrer" title="Open it full size">
         <img src={src} alt="The first service's page" className="max-h-56 w-full rounded-lg border border-line-2 object-cover object-top" />
       </a>

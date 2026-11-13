@@ -234,12 +234,14 @@ async fn put_vars(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Res
 }
 
 /// The preview's screenshot (a PNG), taken once per head when the project's rules ask.
-async fn screenshot(AxState(e): S, Path(id): Path<String>) -> crate::Result<Response> {
+/// `?previous=1`: the one before it, at an earlier head (to compare).
+async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
     check_id(&id)?;
-    let shot = blocking(e, move |e| e.store.screenshot(&id)).await?;
-    match shot.filter(|(_, png)| !png.is_empty()) {
-        Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
-        None => Err(Error::NotFound("the preview has no screenshot".into())),
+    let previous = q.get("previous").is_some_and(|v| v == "1" || v == "true");
+    let png = blocking(e, move |e| if previous { e.store.previous_screenshot(&id) } else { Ok(e.store.screenshot(&id)?.map(|(_, png)| png)) }).await?;
+    match png.filter(|png| !png.is_empty()) {
+        Some(png) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
+        None => Err(Error::NotFound(if previous { "the preview has no earlier screenshot" } else { "the preview has no screenshot" }.into())),
     }
 }
 

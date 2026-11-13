@@ -736,6 +736,11 @@ type Settings = {
     default) runs in the service container's own network namespace, so it reaches exactly what
     the service does and nothing on the host, within 1 GiB, one CPU and 90 s, and the PNG (at
     most 2 MiB) is kept with the preview. It's on the preview sheet and at `GET …/screenshot`.
+    The one it replaces, at the head before, is kept too (`GET …/screenshot?previous=1`, the
+    sheet's Before/After), with how much changed: the share of pixels whose colour moved more than
+    a little (anti-aliasing isn't a change), the page's added height counting as changed
+    (`visual_change` on the preview and the change; "The page changed 12.3% since `abc123`" in the
+    pull request comment), as Percy and Chromatic show visual changes for review.
     For a `public` preview the pull request comment shows it through a signed link
     (`/v1/previews/{id}/screenshot.png?exp=…&sig=…`: HMAC-SHA256 of the preview and the expiry,
     30 days after the screenshot, under a key the previews store makes once; a public route,
@@ -838,6 +843,8 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- a visual change per push (the screenshot against the one before, Before/After on the sheet,
+  the share of pixels changed in the pull request comment);
 - per-branch project variables (`env_for`);
 - roll apps live in `scripts/preview-apps.sh` (2026-11-13, load 46: a change's `pv-` environment
   built at its commit and live in 39 s, its first request 47 ms, the branch's Redis seen, a
@@ -875,14 +882,10 @@ Ranked by what a person notices first. Done so far:
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **A visual change per push**: the screenshot at each head compared with the previous head's,
-   and the share of pixels that changed in the pull request comment ("the page changed 12%",
-   with both images), as Percy and Chromatic do for visual review, from screenshots roll already
-   takes.
-4. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
+3. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
    feedback for that page. That needs a read path the preview's origin can use without a
    credential (a signed, expiring list per page), which is why it waits.
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

@@ -350,6 +350,8 @@ export interface PreviewEnvironment {
   expires_at?: number;
   /** Earlier pushes still reachable (newest first). */
   earlier?: { service: string; head: string; url: string }[];
+  /** How much the first service's page changed since the screenshot at an earlier head. */
+  visual_change?: { since: string; percent: number };
 }
 
 export interface Change {

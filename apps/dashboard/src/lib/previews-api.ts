@@ -77,6 +77,8 @@ export interface Preview {
   kept_until?: number | null;
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
   goes_at?: number | null;
+  /** How much the page changed since the screenshot at an earlier head (`since`). */
+  visual_change?: { since: string; percent: number } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -187,8 +189,9 @@ function query(params: Record<string, string | number | undefined>) {
 
 /** The preview's screenshot as an object URL (the operator's headers, which an <img> can't send);
  * revoke it when done. */
-export async function screenshotUrl(id: string): Promise<string> {
-  const res = await fetch(`${ROLL_API}${one(id)}/screenshot`, { headers: apiHeaders(), cache: "no-store" });
+/** The preview's screenshot as an object URL; `previous`: the one at the head before. */
+export async function screenshotUrl(id: string, previous = false): Promise<string> {
+  const res = await fetch(`${ROLL_API}${one(id)}/screenshot${previous ? "?previous=1" : ""}`, { headers: apiHeaders(), cache: "no-store" });
   onApiStatus(res.status);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
   return URL.createObjectURL(await res.blob());

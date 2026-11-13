@@ -368,8 +368,10 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        if !db.has_column("screenshots", "tried")? {
-            db.add_column("screenshots", "tried", "TEXT")?;
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER")] {
+            if !db.has_column("screenshots", col)? {
+                db.add_column("screenshots", col, ty)?;
+            }
         }
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
@@ -932,15 +934,42 @@ impl Store {
 
     pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8]) -> Result<()> {
         use base64::Engine as _;
-        let (b64, now) = (base64::engine::general_purpose::STANDARD.encode(png), self.now_ms()?);
+        let b64e = base64::engine::general_purpose::STANDARD;
+        let (b64, now) = (b64e.encode(png), self.now_ms()?);
+        // The one it replaces, at another head, is kept as "before", with how much changed.
+        let before: Option<(String, String)> = self.db.read(|c| c.query_row("SELECT head, png FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        let before = before.filter(|(h, p)| h != head && !p.is_empty());
+        let change_bp = before.as_ref().and_then(|(_, p)| b64e.decode(p).ok()).and_then(|old| crate::visual::changed(&old, png)).map(|f| (f * 10_000.0).round() as i64);
         self.db.write(|c| {
-            c.execute(
-                "INSERT INTO screenshots (preview_id, head, png, at, tried) VALUES (?, ?, ?, ?, ?) \
-                 ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried",
-                params![id, head, b64, now, head],
-            )?;
+            match &before {
+                Some((prev_head, prev_png)) => c.execute(
+                    "INSERT INTO screenshots (preview_id, head, png, at, tried, prev_head, prev_png, change_bp) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, \
+                     prev_head = excluded.prev_head, prev_png = excluded.prev_png, change_bp = excluded.change_bp",
+                    params![id, head, b64, now, head, prev_head, prev_png, change_bp],
+                )?,
+                // A first one, or the same head again: what came before stays.
+                None => c.execute(
+                    "INSERT INTO screenshots (preview_id, head, png, at, tried) VALUES (?, ?, ?, ?, ?) \
+                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried",
+                    params![id, head, b64, now, head],
+                )?,
+            };
             Ok::<_, Error>(())
         })
+    }
+
+    /// How much the page changed since the screenshot before (its head, in basis points).
+    pub fn visual_change(&self, id: &str) -> Result<Option<(String, i64)>> {
+        let row: Option<(Option<String>, Option<i64>)> = self.db.read(|c| c.query_row("SELECT prev_head, change_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(row.and_then(|(h, bp)| Some((h?, bp?))))
+    }
+
+    /// The screenshot before the latest (another head's), for comparing.
+    pub fn previous_screenshot(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row("SELECT prev_png FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
     }
 
     /// A screenshot was tried at `head` and not taken: not tried again there, and the last one
@@ -1180,6 +1209,7 @@ impl Store {
         let kept_until = self.kept_until(&r.id)?;
         let goes_at = self.goes_at(&r.id)?;
         let screenshot_at = self.screenshot_at(&r.id)?;
+        let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0 });
         let screenshot_link = self.screenshot_link(&r.id)?;
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
@@ -1221,6 +1251,7 @@ impl Store {
             goes_at,
             earlier,
             screenshot_at,
+            visual_change,
             screenshot_link,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
@@ -1278,6 +1309,27 @@ mod tests {
     /// The pull request comment's screenshot link opens that screenshot of a public preview
     /// until it expires; a link anyone changed (another preview, a later expiry, a guessed
     /// signature), an older screenshot's link, or a preview gone private doesn't.
+    #[test]
+    fn a_new_heads_screenshot_keeps_the_one_before_and_how_much_changed() {
+        let png = |dark: u32| {
+            let img = image::RgbaImage::from_fn(10, 10, |x, _| if x < dark { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) });
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        let (_dir, store) = store();
+        let (row, _) = store.create(&new("chg_visual")).unwrap();
+        let id = row.id.as_str();
+        store.set_screenshot(id, "cs_1", &png(0)).unwrap();
+        assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
+        store.set_screenshot(id, "cs_2", &png(3)).unwrap();
+        assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)), "30% of pixels");
+        assert_eq!(store.previous_screenshot(id).unwrap(), Some(png(0)));
+        // Taken again at the same head: what came before stays.
+        store.set_screenshot(id, "cs_2", &png(3)).unwrap();
+        assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
+    }
+
     #[test]
     fn a_screenshot_link_is_signed_and_expires() {
         let (_dir, store) = store();

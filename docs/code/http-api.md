@@ -151,7 +151,8 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */,
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
-                          earlier?: [{service, head, url}] /* earlier pushes still reachable on the same data, newest first */} /* roll previews (docs/previews.md) */}
+                          earlier?: [{service, head, url}] /* earlier pushes still reachable on the same data, newest first */,
+                          visual_change?: {since, percent} /* how much the first service's page changed since the screenshot at an earlier head */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",
            base, head, revision, work_item: string | null, branch: string | null /* git branch it was pushed as */,

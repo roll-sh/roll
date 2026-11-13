@@ -302,6 +302,17 @@ pub struct PreviewEnvironment {
     /// Earlier pushes still reachable (newest first): the service, the changeset it runs, its URL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<PreviewEarlier>,
+    /// How much the first service's page changed since the screenshot at an earlier head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_change: Option<PreviewVisualChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewVisualChange {
+    /// The head of the screenshot before.
+    pub since: String,
+    /// The share of pixels that changed, in percent.
+    pub percent: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

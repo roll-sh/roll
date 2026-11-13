@@ -22,6 +22,7 @@ pub mod runtime;
 pub mod schema;
 pub mod settings;
 pub mod store;
+pub mod visual;
 
 pub use engine::Engine;
 pub use settings::Settings;
@@ -207,6 +208,9 @@ pub struct Preview {
     pub earlier: Vec<Pinned>,
     /// When its screenshot was taken (`GET …/screenshot`), if it has one.
     pub screenshot_at: Option<i64>,
+    /// How much the page changed since the screenshot at an earlier head (`GET
+    /// …/screenshot?previous=1` is that one).
+    pub visual_change: Option<VisualChange>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -242,6 +246,15 @@ pub struct Service {
     pub memory_mb: i64,
     /// `url` with the access token, when one is needed.
     pub share_url: Option<String>,
+}
+
+/// How much a preview's page changed between the screenshots of two heads.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VisualChange {
+    /// The head of the screenshot before.
+    pub since: String,
+    /// The share of pixels that changed, in percent (two decimals).
+    pub percent: f64,
 }
 
 /// An earlier push of a change's service, still reachable at a URL of its own (on the preview's

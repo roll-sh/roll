@@ -288,6 +288,16 @@ fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static
     }
 }
 
+/// The comment's line on how much the page changed since the screenshot at an earlier head.
+fn visual_line(v: &crate::model::PreviewVisualChange) -> String {
+    let since: String = v.since.strip_prefix("cs_").unwrap_or(&v.since).chars().filter(|c| c.is_ascii_alphanumeric()).take(10).collect();
+    if v.percent <= 0.0 {
+        format!("The page looks the same as at `{since}`.\n\n")
+    } else {
+        format!("The page changed {:.1}% since `{since}` (its share of pixels).\n\n", v.percent.max(0.1))
+    }
+}
+
 /// The comment's links to earlier pushes (before and after, on the same data).
 fn earlier_line(earlier: &[crate::model::PreviewEarlier]) -> Option<String> {
     let links: Vec<String> = earlier
@@ -353,6 +363,9 @@ fn preview_comment(c: &Change) -> String {
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
             ));
+            if let Some(line) = e.visual_change.as_ref().map(visual_line) {
+                out.push_str(&line);
+            }
             if let Some(line) = earlier_line(&e.earlier) {
                 out.push_str(&line);
             }
@@ -410,6 +423,7 @@ mod preview_tests {
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
+            visual_change: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -426,5 +440,8 @@ mod preview_tests {
         let earlier = |url: &str| crate::model::PreviewEarlier { service: "web".into(), head: "cs_1a2b3c4d5e6f".into(), url: url.into() };
         assert_eq!(earlier_line(&[earlier("https://web-1a2b3c4d5e-pr7-shop.preview.roll.site")]).as_deref(), Some("\nEarlier pushes, on the same data: [web at `1a2b3c4d5e`](https://web-1a2b3c4d5e-pr7-shop.preview.roll.site).\n"));
         assert_eq!(earlier_line(&[earlier("javascript:alert(1)"), earlier("https://x/a)b")]), None, "only plain links");
+        let v = |percent: f64| crate::model::PreviewVisualChange { since: "cs_1a2b3c4d5e6f".into(), percent };
+        assert_eq!(visual_line(&v(12.34)), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels).\n\n");
+        assert_eq!(visual_line(&v(0.0)), "The page looks the same as at `1a2b3c4d5e`.\n\n");
     }
 }
