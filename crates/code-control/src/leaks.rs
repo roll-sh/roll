@@ -3,11 +3,17 @@
 //! since its merge base are cut into candidate tokens, roll secrets matches them by fingerprint
 //! ([`crate::SecretEnv::leaks`]), and the answer is cached per (repo, head) with the merge base it
 //! was found from, as review facts are. Blockers name keys and environments, never a value or a line.
+//!
+//! A scan ([`Code::scan_leaks`], `GET …/repos/{owner}/{name}/leaks`, for the repo's managers)
+//! checks the default branch's whole head tree the same way, for values that landed before the
+//! repo was on a project's canvas or before the secret was set, and says where: path and line,
+//! never the value.
 
 use crate::model::{Blocker, Change, ChangeState, RepoRow};
 use crate::{Code, Result};
-use code_store::{ChangesetId, Mode};
-use std::collections::{BTreeMap, HashSet};
+use code_store::{ChangesetId, EntryKind, Mode};
+use serde::Serialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// The most candidate tokens checked per change.
@@ -16,6 +22,37 @@ const MAX_CANDIDATES: usize = 20_000;
 const MAX_LINE: usize = 4096;
 /// Files larger than this (bytes, either side) aren't diffed.
 const MAX_FILE: u64 = 1 << 20;
+
+/// The most files a scan reads, the most candidates it checks, and how many go to roll secrets at
+/// once.
+const SCAN_FILES: usize = 20_000;
+const SCAN_CANDIDATES: usize = 200_000;
+const SCAN_BATCH: usize = 20_000;
+/// Places reported per value.
+const SCAN_PLACES: usize = 5;
+
+/// Where a secret's value sits in the default branch.
+#[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Found {
+    pub key: String,
+    pub environment: String,
+    pub path: String,
+    /// 1-based.
+    pub line: usize,
+}
+
+/// A scan of the default branch's head for secrets' values.
+#[derive(Debug, Default, Serialize)]
+pub struct LeakScan {
+    /// The changeset scanned (none if nothing has landed).
+    pub head: Option<String>,
+    pub files: usize,
+    pub found: Vec<Found>,
+    /// Files not read, and why (over 1 MiB).
+    pub skipped: Vec<String>,
+    /// The scan stopped at its file or candidate limit: what's past it wasn't checked.
+    pub truncated: bool,
+}
 
 /// (key, environment) of every secret whose value a change adds.
 pub(crate) type Leaks = Arc<Vec<(String, String)>>;
@@ -36,7 +73,7 @@ impl Code {
         }
         let found = match self.added_candidates(r, mb.as_ref(), &head).await {
             Ok(candidates) if candidates.is_empty() => Ok(Vec::new()),
-            Ok(candidates) => secrets.leaks(&r.full_name(), candidates).await,
+            Ok(candidates) => secrets.leaks(&r.full_name(), candidates).await.map(|l| l.into_iter().map(|(_, key, env)| (key, env)).collect()),
             Err(e) => Err(e.into()),
         };
         match found {
@@ -65,6 +102,72 @@ impl Code {
             .into_iter()
             .map(|(key, envs)| Blocker::new("secret_leak", format!("adds the value of {key} ({}): rotate it and remove it from the change", envs.join(", "))))
             .collect()
+    }
+
+    /// Scan the default branch's head (see the module doc). Text files up to 1 MiB, lines up to
+    /// 4 KiB, the same candidates as a change; nothing about a value comes back but where it is.
+    pub async fn scan_leaks(&self, r: &RepoRow) -> Result<LeakScan> {
+        let secrets = self.secret_env.get().cloned().ok_or_else(|| crate::Error::Invalid("roll secrets isn't on this server".into()))?;
+        let Some(head) = self.head(r)? else { return Ok(LeakScan::default()) };
+        let mut scan = LeakScan { head: Some(head.to_string()), ..Default::default() };
+        let mut files = Vec::new();
+        let mut dirs = vec![String::new()];
+        'walk: while let Some(d) = dirs.pop() {
+            for e in self.store.list_tree(&r.id, &head, &d)?.unwrap_or_default() {
+                match e.kind {
+                    EntryKind::Dir => dirs.push(e.path),
+                    EntryKind::File if files.len() >= SCAN_FILES => {
+                        scan.truncated = true;
+                        break 'walk;
+                    }
+                    EntryKind::File => files.push(e),
+                    _ => {}
+                }
+            }
+        }
+        // Each candidate once, with the first few places it's at.
+        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut places: Vec<Vec<(String, usize)>> = Vec::new();
+        let mut cands: Vec<String> = Vec::new();
+        'files: for f in &files {
+            if f.size.unwrap_or(u64::MAX) > MAX_FILE {
+                scan.skipped.push(format!("{}: over 1 MiB", f.path));
+                continue;
+            }
+            let Some(data) = self.store.get_blob(&r.id, &f.oid).await? else { continue };
+            if data.contains(&0) {
+                continue;
+            }
+            scan.files += 1;
+            for (n, line) in String::from_utf8_lossy(&data).lines().enumerate().filter(|(_, l)| l.len() <= MAX_LINE) {
+                let mut found = HashSet::new();
+                candidates(line, &mut found);
+                for c in found {
+                    let i = *index.entry(c.clone()).or_insert_with(|| {
+                        cands.push(c);
+                        places.push(Vec::new());
+                        cands.len() - 1
+                    });
+                    if places[i].len() < SCAN_PLACES {
+                        places[i].push((f.path.clone(), n + 1));
+                    }
+                }
+                if cands.len() >= SCAN_CANDIDATES {
+                    scan.truncated = true;
+                    break 'files;
+                }
+            }
+        }
+        for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
+            for (i, key, environment) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
+                for (path, line) in places.get(b * SCAN_BATCH + i).into_iter().flatten() {
+                    scan.found.push(Found { key: key.clone(), environment: environment.clone(), path: path.clone(), line: *line });
+                }
+            }
+        }
+        scan.found.sort();
+        scan.found.dedup();
+        Ok(scan)
     }
 
     /// The candidate tokens of the lines `head` adds since `mb`, bounded by [`MAX_CANDIDATES`].

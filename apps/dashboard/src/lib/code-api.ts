@@ -838,6 +838,19 @@ export interface Blame {
   ranges: BlameRange[];
 }
 
+// ── leaked secrets ──
+
+/** Where roll secrets' values sit in the default branch's head (`GET …/leaks`): never the values. */
+export interface LeakScan {
+  head: string | null;
+  files: number;
+  found: { key: string; environment: string; path: string; line: number }[];
+  /** Files not read, and why. */
+  skipped: string[];
+  /** The scan stopped at its limit. */
+  truncated: boolean;
+}
+
 // ── webhooks and commit statuses ──
 
 export const WEBHOOK_EVENTS = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push"] as const;
@@ -1352,6 +1365,7 @@ export function createCodeApi(
     release: (id: string, agent?: string) => call<WorkItem>("POST", `${wk(id)}/release`, { agent }),
     complete: (id: string, agent?: string) => call<WorkItem>("POST", `${wk(id)}/complete`, { agent }),
 
+    scanLeaks: (repo: string) => call<LeakScan>("GET", `${rp(repo)}/leaks`),
     webhooks: (repo: string) => call<Webhook[]>("GET", `${rp(repo)}/webhooks`),
     createWebhook: (repo: string, input: WebhookInput & { url: string }) =>
       call<{ webhook: Webhook; ping: string; secret?: string }>("POST", `${rp(repo)}/webhooks`, input),

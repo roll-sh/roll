@@ -1,6 +1,7 @@
 import { Check, Copy, KeyRound, Plus, Send } from "lucide-react";
 import { useState } from "react";
 import { ACTIONS, type Action, type NewToken } from "@/lib/secrets-api";
+import { CodeLeaks } from "./code-leaks";
 import { Identities } from "./identities";
 import { ShareDialog, type ShareSource } from "./share-dialog";
 import { useSecrets } from "./secrets-page";
@@ -22,6 +23,7 @@ export function AccessView() {
       <Identities />
       <Leases />
       <Shares />
+      <CodeLeaks />
     </div>
   );
 }
