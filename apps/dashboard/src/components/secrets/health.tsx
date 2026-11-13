@@ -21,7 +21,10 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
 export function HealthView() {
   const { api, project, standard, reloadEnvs } = useSecrets();
   const [code, setCode] = useState(false);
-  const found = useLoad(() => api.health(code), [api, code]);
+  const base = useLoad(() => api.health(), [api]);
+  // The code check apart: refused (it needs code read on every repository), the rest still shows.
+  const coded = useLoad(() => (code ? api.health(true) : Promise.resolve(null)), [api, code]);
+  const found = { data: coded.data ?? base.data, error: base.error, loading: code && coded.loading, reload: () => (base.reload(), code && coded.reload()) };
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fix = async (f: Finding, body: SetSecret, what: string) => {
@@ -45,7 +48,7 @@ export function HealthView() {
           <FileSearch className="size-3.5" /> {code ? (found.loading ? "Checking the code…" : "Code checked") : "Check the code"}
         </button>
       </div>
-      <ErrorNote error={error} onDismiss={() => setError(null)} />
+      <ErrorNote error={error ?? coded.error} onDismiss={() => setError(null)} />
       {note && (
         <p className="fade-in flex items-center gap-2 text-[12px] text-muted" role="status">
           <CircleCheck className="size-3.5 text-ok" /> {note}

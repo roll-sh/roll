@@ -414,7 +414,8 @@ repository that can't be searched here (the index not ready, roll code off) make
 nothing at all rather than guess. Whether a name appears in a repository says something about its contents,
 so the check is only for a caller who may read every repository on the canvas (`Grants::reads_code`:
 with roll-access, the caller's Grant for `code` read on that repository; until then, the operator):
-anyone else gets a 403 naming the repository. In the
+anyone else gets a 403 that doesn't name it (that would tell a caller who can't see the canvas
+the repository is there). In the
 dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
 made in the browser) and an expired or expiring key's new date, each one change, or a change
 request where the environment is protected. The Health tab and the sidebar's Secrets entry carry

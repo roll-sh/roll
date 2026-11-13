@@ -200,8 +200,9 @@ impl Secrets {
             let repos: Vec<String> = self.workspace.get(project).map(|p| p.resources.into_iter().filter(|r| r.kind == roll_workspace::Kind::Repo).map(|r| r.r#ref).collect()).unwrap_or_default();
             // Whether a name appears in a repository says something about its contents: only for
             // a caller who may read every one of them.
-            if let Some(r) = repos.iter().find(|r| !caller.grants.reads_code(project, r)) {
-                return Err(crate::Error::Forbidden(format!("checking the code needs read on every repository on the canvas, and {r} isn't yours to read")));
+            // Never naming it: that would tell a caller who can't see the canvas that it's there.
+            if repos.iter().any(|r| !caller.grants.reads_code(project, r)) {
+                return Err(crate::Error::Forbidden("checking the code needs read on every repository on this project's canvas, and you can't read one of them".into()));
             }
             let keys: Vec<String> = have.iter().map(|(_, _, k)| k.clone()).collect::<BTreeSet<_>>().into_iter().take(CODE_KEYS_MAX).collect();
             // Every repository answers, or nothing is said: an unsearchable one might read them all.
