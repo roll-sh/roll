@@ -252,7 +252,11 @@ impl Runtime for Fake {
         // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run).
         let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| c.trim().parse::<i32>().ok());
         if let Some(code) = exit.or_else(|| var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok())) {
-            log.line("job ran");
+            // A job's task says which it is.
+            log.line(match var(&spec, "ROLL_TASK_INDEX") {
+                Some(i) => format!("job ran as task {i} of {}", var(&spec, "ROLL_TASK_COUNT").unwrap_or("?")),
+                None => "job ran".to_string(),
+            });
             let mut m = self.instances.lock();
             let i = m.get_mut(name).expect("exists");
             i.state = FakeState::Stopped;

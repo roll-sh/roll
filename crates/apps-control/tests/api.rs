@@ -1175,6 +1175,15 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert!(log.as_array().unwrap().iter().any(|l| l["text"] == "$ exit 3"), "{log}");
     let (_, ok) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0"}))).await;
     assert_eq!(ended(ok["id"].as_str().unwrap().to_string()).await["status"], "succeeded");
+    // In tasks (Cloud Run Jobs'): each container told which it is, the job done when all are.
+    assert_eq!(call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0", "tasks": 101}))).await.0, StatusCode::BAD_REQUEST);
+    let (_, t) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0", "tasks": 3}))).await;
+    let t = ended(t["id"].as_str().unwrap().to_string()).await;
+    assert_eq!((t["status"].as_str(), t["tasks"].as_u64()), (Some("succeeded"), Some(3)), "{t}");
+    let (_, log) = call(&w.api, "GET", &format!("{base}/jobs/{}/logs", t["id"].as_str().unwrap()), None).await;
+    for i in 0..3 {
+        assert!(log.as_array().unwrap().iter().any(|l| l["text"] == format!("job ran as task {i} of 3")), "task {i}: {log}");
+    }
     // One that doesn't end by itself is canceled, and its container goes.
     let (_, long) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "sleep 3600"}))).await;
     let lid = long["id"].as_str().unwrap().to_string();
@@ -1183,7 +1192,7 @@ async fn a_one_off_job_runs_the_live_image_to_its_exit_and_can_be_canceled() {
     assert_eq!(ended(lid.clone()).await["status"], "canceled");
     assert_eq!(call(&w.api, "POST", &format!("{base}/jobs/{lid}/cancel"), None).await.0, StatusCode::CONFLICT);
     assert_eq!(w.fake.instances(&id).len(), instances, "no job's container is left");
-    assert_eq!(call(&w.api, "GET", &format!("{base}/jobs"), None).await.1.as_array().unwrap().len(), 3);
+    assert_eq!(call(&w.api, "GET", &format!("{base}/jobs"), None).await.1.as_array().unwrap().len(), 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

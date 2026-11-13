@@ -298,6 +298,10 @@ pub enum AppsCmd {
         /// The job's limit, in seconds (default 3600).
         #[arg(long)]
         timeout: Option<u64>,
+        /// Run it in this many containers, each with `ROLL_TASK_INDEX` (0…) and
+        /// `ROLL_TASK_COUNT`; done when all are (1–100, ten at a time).
+        #[arg(long)]
+        tasks: Option<u32>,
         #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -1835,10 +1839,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let port = svc["run"]["port"].as_u64().unwrap_or(8080) as u16;
             return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port)).await;
         }
-        AppsCmd::Run { target, timeout, command } => {
+        AppsCmd::Run { target, timeout, tasks, command } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
-            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout })).await?;
+            let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks })).await?;
             if !json_out {
                 let id = s(&job["id"]);
                 follow(api, &format!("{base}/{}/logs?follow=1", enc(&id))).await?;

@@ -1276,6 +1276,8 @@ pub struct Job {
     pub id: String,
     pub deployment: String,
     pub command: String,
+    /// Containers it runs, each with `ROLL_TASK_INDEX` and `ROLL_TASK_COUNT` (Cloud Run Jobs').
+    pub tasks: u32,
     pub status: RunStatus,
     pub exit_code: Option<i32>,
     pub started_at: i64,

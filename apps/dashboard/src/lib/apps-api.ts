@@ -445,6 +445,8 @@ export interface Job {
   id: string;
   deployment: string;
   command: string;
+  /** Containers it ran, each with ROLL_TASK_INDEX and ROLL_TASK_COUNT. */
+  tasks?: number;
   status: RunStatus;
   exit_code: number | null;
   started_at: number;
@@ -549,7 +551,7 @@ export const appsApi = {
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),
   runNow: (id: string, e: string) => call<CronRun>("POST", `${env(id, e)}/runs`),
   jobs: (id: string, e: string) => call<Job[]>("GET", `${env(id, e)}/jobs`),
-  startJob: (id: string, e: string, body: { command: string; timeout_s?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
+  startJob: (id: string, e: string, body: { command: string; timeout_s?: number; tasks?: number }) => call<Job>("POST", `${env(id, e)}/jobs`, body),
   job: (id: string, e: string, j: string) => call<Job>("GET", `${env(id, e)}/jobs/${encodeURIComponent(j)}`),
   cancelJob: (id: string, e: string, j: string) => call<Job>("POST", `${env(id, e)}/jobs/${encodeURIComponent(j)}/cancel`),
 

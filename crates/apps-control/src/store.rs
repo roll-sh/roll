@@ -556,6 +556,7 @@ impl Store {
         db.add_column("environments", "maintenance", "TEXT")?;
         db.add_column("environments", "allow_ips", "TEXT")?;
         db.add_column("environments", "rate_limit", "TEXT")?;
+        db.add_column("jobs", "tasks", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -1416,14 +1417,14 @@ impl Store {
 
     // ── jobs ──
 
-    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str) -> Result<Job> {
+    pub fn add_job(&self, service: &str, env: &str, deployment: &str, command: &str, tasks: u32) -> Result<Job> {
         let id = new_id("job");
         let now = self.now()?;
         self.db.execute(
-            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL)",
-            params![id, service, env, deployment, command, now],
+            "INSERT INTO jobs (id, service, env, deployment, command, status, exit_code, started_at, finished_at, tasks) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, NULL, ?)",
+            params![id, service, env, deployment, command, now, tasks as i64],
         )?;
-        Ok(Job { id, deployment: deployment.into(), command: command.into(), status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
+        Ok(Job { id, deployment: deployment.into(), command: command.into(), tasks, status: RunStatus::Running, exit_code: None, started_at: now, finished_at: None })
     }
 
     pub fn finish_job(&self, id: &str, status: RunStatus, exit_code: Option<i32>) -> Result<()> {
@@ -1746,7 +1747,7 @@ fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
     Ok(NotifyTarget { id: r.get(0)?, project: r.get(1)?, kind: r.get(2)?, host: r.get(3)?, events: serde_json::from_str(&events).unwrap_or_default(), created_at: r.get(5)? })
 }
 
-const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at";
+const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at, tasks";
 
 fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
     Ok(Job {
@@ -1757,6 +1758,7 @@ fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
         exit_code: r.get::<_, Option<i64>>(4)?.map(|c| c as i32),
         started_at: r.get(5)?,
         finished_at: r.get(6)?,
+        tasks: r.get::<_, i64>(7)? as u32,
     })
 }
 

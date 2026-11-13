@@ -150,7 +150,10 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
                       onClick={() => setSelected(j.id)}
                       className={`w-full px-5 py-3 text-left transition-colors duration-150 hover:bg-panel-2 ${j.id === selected ? "bg-panel-2" : ""}`}
                     >
-                      <span className="block truncate font-mono text-[12px]">{j.command}</span>
+                      <span className="block truncate font-mono text-[12px]">
+                        {j.command}
+                        {(j.tasks ?? 1) > 1 && <span className="text-muted"> × {j.tasks}</span>}
+                      </span>
                       <span className="mt-1 flex items-center justify-between gap-2">
                         <JobBadge job={j} />
                         <span className="font-mono text-[11px] text-subtle">{clock(j.started_at, true)}</span>

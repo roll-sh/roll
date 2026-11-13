@@ -1659,7 +1659,7 @@ impl EnvLive {
 
     /// One cron run: a fresh instance of the active deployment, to its exit or `timeout`.
     pub async fn run_once(self: &Arc<Self>, timeout: Duration) -> anyhow::Result<(String, Option<i32>, bool)> {
-        let e = self.run_to_exit(None, timeout, None, tokio_util::sync::CancellationToken::new(), |_| {}).await?;
+        let e = self.run_to_exit(None, &[], timeout, None, tokio_util::sync::CancellationToken::new(), |_| {}).await?;
         Ok((e.deployment, e.code, e.timed_out))
     }
 
@@ -1670,6 +1670,7 @@ impl EnvLive {
     pub async fn run_to_exit(
         self: &Arc<Self>,
         command: Option<&str>,
+        vars: &[(String, String)],
         timeout: Duration,
         log: Option<LogSink>,
         cancel: tokio_util::sync::CancellationToken,
@@ -1683,6 +1684,7 @@ impl EnvLive {
             tpl.spec.volume = None;
             tpl.spec.aliases.clear();
         }
+        tpl.spec.vars.extend(vars.iter().cloned());
         let inst = self.make(&tpl).await?;
         made(&inst.name);
         let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
