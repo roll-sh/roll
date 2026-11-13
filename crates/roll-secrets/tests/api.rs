@@ -847,6 +847,9 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
     let (_, mine) = api.req(Method::GET, "/health", None, t["token"].as_str()).await;
     assert!(mine.as_array().unwrap().iter().all(|f| f["environment"] == "staging") && !mine.as_array().unwrap().is_empty(), "{mine}");
+    // Across projects: this one, with its findings.
+    let all = api.ok(Method::GET, "/v1/secrets/findings", None).await;
+    assert_eq!((all.as_array().map(Vec::len), all[0]["project"].as_str(), all[0]["findings"].as_array().map(Vec::len)), (Some(1), Some(api.project.as_str()), Some(6)));
 }
 
 #[tokio::test]

@@ -407,7 +407,8 @@ decrypted. Only what the caller may read is listed, and `weak` only where it may
 dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
 made in the browser) and an expired or expiring key's new date, each one change, or a change
 request where the environment is protected. The Health tab and the sidebar's Secrets entry carry
-the count of findings to fix now (expired, missing, exposed).
+the count of findings to fix now (expired, missing, exposed), and Home lists them across every
+project (`GET /v1/secrets/findings`, `roll secrets health --all`).
 
 Health, `POST …/leaks` and `GET /v1/secrets/search` filter each finding by the caller's own access,
 so roll-access lets a token limited to some environments or folders call them (they're marked
@@ -1229,6 +1230,7 @@ isn't in the workspace is 404.
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
+| `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
@@ -1288,6 +1290,7 @@ type Grid = { path: string; environments: string[]; rows: { key: string; cells: 
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
@@ -1401,8 +1404,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Health across projects**: Home lists every project's serious findings, and `roll secrets
-   health --all` does in the terminal, filtered like `find` to what the caller may read.
 
 Waiting on other pull requests:
 

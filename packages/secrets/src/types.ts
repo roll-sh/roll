@@ -235,6 +235,8 @@ export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; res
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
 export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread"; environment: string; path: string; key: string; detail: string };
+/** One project's findings (`GET /v1/secrets/findings`). */
+export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };

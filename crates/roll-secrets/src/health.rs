@@ -43,7 +43,41 @@ pub struct Finding {
     pub detail: String,
 }
 
+/// One project's findings, for health across projects.
+#[derive(Debug, Serialize)]
+pub struct ProjectFindings {
+    pub project: String,
+    pub project_name: String,
+    pub findings: Vec<Finding>,
+}
+
 impl Secrets {
+    /// Every project's findings the caller may read (`GET /v1/secrets/findings`), projects with
+    /// none left out: what Home and `roll secrets health --all` show.
+    pub fn all_health(&self, caller: &Caller) -> Result<Vec<ProjectFindings>> {
+        let projects: Vec<String> = match caller.grants.project() {
+            Some(p) => vec![p.to_string()],
+            None => self.db.read(|c| c.query("SELECT project_id FROM projects ORDER BY project_id", (), |r| r.get(0)))?,
+        };
+        let mut out = vec![];
+        for project in projects {
+            if !caller.allows(Action::Read, &Scope::project(&project)) {
+                continue;
+            }
+            let findings = match self.project_health(&project, caller) {
+                Ok(f) => f,
+                // A project gone from the workspace, or one the caller can't read after all.
+                Err(_) => continue,
+            };
+            if findings.is_empty() {
+                continue;
+            }
+            let project_name = self.workspace.get(&project).map(|p| p.name).unwrap_or_else(|_| project.clone());
+            out.push(ProjectFindings { project, project_name, findings });
+        }
+        Ok(out)
+    }
+
     /// Every finding in the project's standard environments the caller may read, worst first.
     pub fn project_health(&self, project: &str, caller: &Caller) -> Result<Vec<Finding>> {
         caller.need(Action::Read, &Scope::project(project))?;

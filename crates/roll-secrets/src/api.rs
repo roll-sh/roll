@@ -80,6 +80,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
         .route(&format!("{P}/health"), get(project_health))
+        .route("/v1/secrets/findings", get(all_health))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
         .route(&format!("{P}/required"), get(required).put(set_required))
@@ -806,6 +807,10 @@ struct Scan {
 async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let Scan { candidates } = body(&b)?;
     Ok(ok(blocking(s, move |s| s.scan(&project, &candidates, &c)).await?))
+}
+
+async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.all_health(&c)).await?))
 }
 
 async fn project_health(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
