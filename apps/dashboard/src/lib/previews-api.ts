@@ -101,6 +101,8 @@ export interface Preview {
   last_active_at: number;
   expires_at: number | null;
   created_by: string;
+  /** roll keeps it to compare the project's changes with (`github.baseline`). */
+  baseline?: boolean;
   created_at: number;
   updated_at: number;
 }

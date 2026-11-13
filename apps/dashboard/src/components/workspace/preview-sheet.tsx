@@ -620,32 +620,34 @@ function Screenshot({
     <>
       <Label>
         <span>Screenshot</span>
-        {hasPhone && (
-          <button type="button" onClick={() => setPhone((p) => !p)} aria-pressed={phone} className="ml-auto text-muted hover:text-fg">
-            {phone ? "Desktop" : "Phone"}
-          </button>
-        )}
-        {baseChange && (
-          <button type="button" onClick={() => setMain((m) => !m)} aria-pressed={main} className="text-muted hover:text-fg" title={`The page on ${baseChange.branch}`}>
-            {main ? "This change" : baseChange.branch}
-          </button>
-        )}
-        {(baseChange || change) && (
-          <button
-            type="button"
-            onClick={() => setDiff((d) => !d)}
-            aria-pressed={diff}
-            className="text-muted hover:text-fg"
-            title={baseChange ? `What differs from ${baseChange.branch}, marked` : "What changed since the push before, marked"}
-          >
-            {diff ? "Page" : "Diff"}
-          </button>
-        )}
-        {change && (
-          <button type="button" onClick={() => setBefore((b) => !b)} aria-pressed={before} className="text-muted hover:text-fg" title={`The page at ${since}, the head before`}>
-            {before ? "After" : "Before"}
-          </button>
-        )}
+        <span className="ml-auto flex items-center gap-3">
+          {hasPhone && (
+            <button type="button" onClick={() => setPhone((p) => !p)} aria-pressed={phone} className="text-muted hover:text-fg">
+              {phone ? "Desktop" : "Phone"}
+            </button>
+          )}
+          {baseChange && (
+            <button type="button" onClick={() => setMain((m) => !m)} aria-pressed={main} className="text-muted hover:text-fg" title={`The page on ${baseChange.branch}`}>
+              {main ? "This change" : baseChange.branch}
+            </button>
+          )}
+          {(baseChange || change) && (
+            <button
+              type="button"
+              onClick={() => setDiff((d) => !d)}
+              aria-pressed={diff}
+              className="text-muted hover:text-fg"
+              title={baseChange ? `What differs from ${baseChange.branch}, marked` : "What changed since the push before, marked"}
+            >
+              {diff ? "Page" : "Diff"}
+            </button>
+          )}
+          {change && (
+            <button type="button" onClick={() => setBefore((b) => !b)} aria-pressed={before} className="text-muted hover:text-fg" title={`The page at ${since}, the head before`}>
+              {before ? "After" : "Before"}
+            </button>
+          )}
+        </span>
       </Label>
       {pages.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1" role="group" aria-label="Page">

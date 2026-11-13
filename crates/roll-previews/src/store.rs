@@ -1570,6 +1570,7 @@ impl Store {
         let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0, phone_percent });
         let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
         let pages = self.page_checks(&r.id)?;
+        let baseline = r.is_baseline();
         let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange { branch: b.branch, percent: b.change_bp as f64 / 100.0, phone_percent: b.phone_bp.map(|p| p as f64 / 100.0), head: b.head });
         let visual_review = self.visual_review(&r, base_change.as_ref(), &pages)?;
         let page_speed = self.page_speed(&r.id)?;
@@ -1628,6 +1629,7 @@ impl Store {
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,
+            baseline,
             created_by: r.created_by,
             created_at: r.created_at,
             updated_at: r.updated_at,

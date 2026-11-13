@@ -199,6 +199,11 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
           <StateDot state={p.state} />
           <span className="min-w-0 truncate font-medium text-soft">{p.title}</span>
           {what && <span className="shrink-0 font-mono text-[11px] text-muted">{what}</span>}
+          {p.baseline && (
+            <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title="roll keeps it to compare the project's changes with">
+              baseline
+            </span>
+          )}
           <span className="min-w-0 truncate font-mono text-[11px] text-subtle max-sm:hidden">{p.repo}</span>
           <span className="ml-auto shrink-0 text-[11px] text-subtle" title={new Date(p.last_active_at).toLocaleString()}>
             {p.state === "ready" || p.state === "sleeping" ? `${STATE_LABEL[p.state]} · ${since(p.last_active_at)}` : STATE_LABEL[p.state]}

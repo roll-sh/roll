@@ -237,6 +237,8 @@ pub struct Preview {
     pub last_active_at: i64,
     pub expires_at: Option<i64>,
     pub created_by: String,
+    /// roll keeps it to compare changes with (`github.baseline`).
+    pub baseline: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
