@@ -918,9 +918,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("{file}:{line}  {key} ({env}{})", if path == "/" { String::new() } else { format!(" {path}") });
             }
             if !hits.is_empty() {
-                bail!("{} in {} file(s): move it out of the code (roll run puts it in the environment)", if hits.len() == 1 { "a value of this project".to_string() } else { format!("{} values of this project", hits.len()) }, hits.iter().map(|h| &h.0).collect::<std::collections::BTreeSet<_>>().len());
+                let files = hits.iter().map(|h| &h.0).collect::<std::collections::BTreeSet<_>>().len();
+                let (what, it) = if hits.len() == 1 { ("a value of this project".to_string(), "it") } else { (format!("{} values of this project", hits.len()), "them") };
+                bail!("{what} in {files} {}: move {it} out of the code (roll run puts values in the environment)", if files == 1 { "file" } else { "files" });
             }
-            eprintln!("No values of this project in {} file(s)", files.len());
+            eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
         }
         Secrets::Export { format, name, namespace } => {
             let mut url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
