@@ -291,11 +291,13 @@ Ranked; the top item is in progress. A watchdog reads this list.
    - secrets' `Grant` swap, `roll_auth::Grants` for its syncs, and its ephemeral environments as
      "preview";
    - secrets' audit sinks and access's (same wire contract already): one delivery module;
-   - the products' `Product` entries in rolld, so their MCP tools appear.
+   - the products' `Product` entries in rolld, so their MCP tools appear;
+   - apps' and secrets' environment resolvers (`Resolvers::environments`: a preview's own
+     environment is "preview"), which they register once #19 is on main.
 3. **Users' own tokens** (built: branch `feature/mcp-user-tokens`, on top of
    `integrate/mcp-accounts`): its PR opens once #18 and #19 are on main; until then keep it merged.
-4. **Expiring tokens:** show tokens that expire within a week, and post them to the approvals
-   channel, as GitHub mails before a token expires.
+4. **Expiring tokens in chat:** the token list names tokens that expire within a week (done); also
+   post them to the approvals channel once a day, as GitHub mails before a token expires.
 5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 6. **Finer resources:** apps' deploys by id (once #21 is on main).
