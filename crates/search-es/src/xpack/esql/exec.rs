@@ -87,6 +87,8 @@ pub struct Resources {
     enrich: HashMap<String, (std::sync::Arc<crate::xpack::enrich::Table>, Vec<Col>)>,
     /// By `range` policy: the mapping type of its match field (`integer_range`, ...).
     enrich_ranges: HashMap<String, String>,
+    /// The source's time series dimensions (`TS` groups by them per series).
+    dimensions: std::sync::OnceLock<std::collections::HashSet<String>>,
     /// By index: its columns and every row.
     lookup: HashMap<String, Table>,
     /// The source fields Elasticsearch would resolve (`needed_columns`) and every source field:
@@ -790,6 +792,15 @@ impl Compiler<'_> {
                     a.filter = Some(cond.clone());
                 }
                 (c, t)
+            }
+            // A `TS` grouping key read per time series (`ts_rewrite`): a dimension's last value,
+            // anything else its values in time order; text groups as keyword.
+            ExprKind::Call(name, args) if name == "$ts_by" => {
+                let dimension = matches!(&args[0].kind, ExprKind::Col(c) if self.src.res.dimensions.get().is_some_and(|d| d.contains(c)));
+                let f = if dimension { "$last" } else { "$values" };
+                let call = Expr { kind: ExprKind::Call(f.into(), args.clone()), start: e.start, end: e.end };
+                let (c, t) = self.compile(&call)?;
+                (c, if t == DataType::Text { DataType::Keyword } else { t })
             }
             ExprKind::Call(name, args) if name == super::fulltext::RUNTIME => {
                 let (c, t) = self.compile(&args[0])?;
@@ -2025,9 +2036,19 @@ impl Grouper {
         if self.keys.is_empty() && self.groups.is_empty() {
             self.group_of(&[]);
         }
+        let windowed = self.windowed_rates();
         let mut rows = Vec::with_capacity(self.groups.len());
-        for Group { key, accs, .. } in &self.groups {
-            let results: Vec<V> = self.specs.iter().zip(accs).map(|(s, a)| a.finish(&s.func, value::agg_type(&s.func, s.arg_ty), &s.extra)).collect();
+        for (g, Group { key, accs, .. }) in self.groups.iter().enumerate() {
+            let results: Vec<V> = self
+                .specs
+                .iter()
+                .zip(accs)
+                .enumerate()
+                .map(|(i, (s, a))| match windowed.get(&(g, i)) {
+                    Some(v) => v.clone(),
+                    None => a.finish(&s.func, value::agg_type(&s.func, s.arg_ty), &s.extra),
+                })
+                .collect();
             let mut row = Vec::new();
             for (c, _, n) in &self.outputs {
                 if self.keys.iter().any(|(_, _, kn)| kn == n) {
@@ -2039,6 +2060,160 @@ impl Grouper {
             rows.push(row);
         }
         Ok(Table { cols, rows })
+    }
+}
+
+impl Grouper {
+    /// `rate` and `increase` per time series and time bucket (a `TS` query's first `STATS`,
+    /// grouped by `_tsid` and a date bucket), as Elasticsearch computes them: each bucket's
+    /// boundary values are interpolated with the series' samples in the adjacent buckets, or
+    /// extrapolated PromQL-style where there is none. By (group, aggregation).
+    fn windowed_rates(&self) -> HashMap<(usize, usize), V> {
+        let mut out = HashMap::new();
+        let rates: Vec<usize> = (0..self.specs.len()).filter(|i| matches!(self.specs[*i].func.as_str(), "$rate" | "$increase")).collect();
+        if rates.is_empty() || self.keys.first().is_none_or(|(_, _, n)| n != "_tsid") {
+            return out;
+        }
+        let Some((bk, unit)) = self.keys.iter().enumerate().find_map(|(i, (c, _, _))| match c {
+            CE::Bucket(_, BucketSpan::Date(u)) => Some((i, u.clone())),
+            _ => None,
+        }) else {
+            return out;
+        };
+        let start_of = |g: &Group| g.key.get(bk).and_then(V::as_i64);
+        let mut by_key: HashMap<(GroupKey, i64), usize> = HashMap::new();
+        for (g, grp) in self.groups.iter().enumerate() {
+            if let Some(t) = start_of(grp) {
+                by_key.insert((GroupKey::of(&grp.key[0]), t), g);
+            }
+        }
+        let mut ends: HashMap<i64, i64> = HashMap::new();
+        let mut end_of = |t: i64| *ends.entry(t).or_insert_with(|| bucket_end(&unit, t));
+        let mut next = vec![usize::MAX; self.groups.len()];
+        let mut prev = vec![usize::MAX; self.groups.len()];
+        for (g, grp) in self.groups.iter().enumerate() {
+            if let Some(t) = start_of(grp)
+                && let Some(&n) = by_key.get(&(GroupKey::of(&grp.key[0]), end_of(t)))
+            {
+                next[g] = n;
+                prev[n] = g;
+            }
+        }
+        for &i in &rates {
+            let over_time = self.specs[i].func == "$rate";
+            let states: Vec<Option<RateState>> = self.groups.iter().map(|grp| RateState::of(&grp.accs[i])).collect();
+            for (g, grp) in self.groups.iter().enumerate() {
+                let Some(t) = start_of(grp) else { continue };
+                let v = states[g].as_ref().and_then(|st| {
+                    let side = |o: usize| if o == usize::MAX { None } else { states[o].as_ref() };
+                    st.windowed(side(prev[g]), side(next[g]), t as f64 / 1000.0, end_of(t) as f64 / 1000.0, over_time)
+                });
+                out.insert((g, i), v.map_or(V::Null, V::Double));
+            }
+        }
+        out
+    }
+}
+
+/// The exclusive end of the date bucket of `unit` that starts at `start`: the smallest later
+/// instant that truncates elsewhere.
+fn bucket_end(unit: &str, start: i64) -> i64 {
+    let same = |w: i64| value::date_trunc(unit, start + w) == Some(start);
+    let mut hi = 1i64;
+    while same(hi) && hi < (1 << 50) {
+        hi *= 2;
+    }
+    let mut lo = hi / 2;
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if same(mid) { lo = mid } else { hi = mid }
+    }
+    start + hi
+}
+
+/// One series' counter samples in one time bucket, reduced as Elasticsearch's rate
+/// aggregators keep them (times in seconds; `resets`: what the drops lost).
+struct RateState {
+    samples: usize,
+    first: (f64, f64),
+    last: (f64, f64),
+    resets: f64,
+}
+
+impl RateState {
+    fn of(acc: &Acc) -> Option<RateState> {
+        let Acc::Points(points) = acc else { return None };
+        let mut p: Vec<(i64, f64)> = points.iter().filter_map(|(t, v)| Some((*t, v.as_f64()?))).collect();
+        if p.is_empty() {
+            return None;
+        }
+        p.sort_by_key(|(t, _)| *t);
+        let resets = p.windows(2).filter(|w| w[0].1 > w[1].1).map(|w| w[0].1).sum();
+        let sec = |(t, v): (i64, f64)| (t as f64 / 1000.0, v);
+        Some(RateState { samples: p.len(), first: sec(p[0]), last: sec(p[p.len() - 1]), resets })
+    }
+
+    /// PromQL's extrapolation to a bucket boundary: all the way when the gap is within 110% of
+    /// the average sample spacing, else half that spacing; a counter never goes below zero.
+    fn extrapolate(&self, start: f64, end: f64, lower: bool) -> f64 {
+        let (t0, v0) = self.first;
+        let (t1, v1) = (self.last.0, self.last.1 + self.resets);
+        let span = t1 - t0;
+        let average = span / self.samples as f64;
+        let slope = (v1 - v0) / span;
+        let gap = |g: f64| if g > average * 1.1 { average / 2.0 } else { g };
+        if lower {
+            if t0 - start > 0.0 { (v0 - gap(t0 - start) * slope).max(0.0) } else { v0 }
+        } else if end - t1 > 0.0 {
+            v1 + gap(end - t1) * slope
+        } else {
+            v1
+        }
+    }
+
+    /// The counter increase from `lower`'s last sample to `upper`'s first (a drop is a reset).
+    fn delta(lower: &RateState, upper: &RateState) -> f64 {
+        let (a, b) = (lower.last.1, upper.first.1);
+        if b >= a { b - a } else { b }
+    }
+
+    /// The value at a boundary between `lower`'s last sample and `upper`'s first.
+    fn interpolate(lower: &RateState, upper: &RateState, at: f64, lower_boundary: bool) -> f64 {
+        let (t0, v0) = lower.last;
+        let slope = Self::delta(lower, upper) / (upper.first.0 - t0);
+        let base = if !lower_boundary || upper.first.1 >= v0 { v0 } else { 0.0 };
+        base + slope * (at - t0)
+    }
+
+    fn windowed(&self, prev: Option<&RateState>, next: Option<&RateState>, start: f64, end: f64, over_time: bool) -> Option<f64> {
+        let (mut from, mut to) = (start, end);
+        let first = match prev {
+            Some(p) => Self::interpolate(p, self, start, true),
+            None if self.samples == 1 => {
+                from = self.first.0;
+                self.first.1
+            }
+            None => self.extrapolate(start, end, true),
+        };
+        let last = match next {
+            Some(n) => Self::interpolate(self, n, end, false) + self.resets,
+            None if self.samples == 1 => {
+                to = self.last.0;
+                self.last.1 + self.resets
+            }
+            None => self.extrapolate(start, end, false),
+        };
+        if to == from {
+            // One sample right at the bucket's start, after a non-empty bucket: that bucket
+            // already counted the increase.
+            return match (self.samples, prev) {
+                (1, Some(p)) if over_time => Some(Self::delta(p, self) / (from - p.last.0)),
+                (1, Some(_)) => Some(0.0),
+                _ => None,
+            };
+        }
+        let increase = last - first;
+        Some(if over_time { increase / (to - from) } else { increase })
     }
 }
 
@@ -2330,6 +2505,8 @@ struct Source {
     unsupported: HashMap<String, String>,
     /// Fields that are `flattened` in some target index.
     flattened: Vec<String>,
+    /// Time series dimensions (in some target index).
+    dimensions: std::collections::HashSet<String>,
     /// The same, with the indices mapping each as `flattened` (`None`: every index). Below such
     /// a field, in those indices, there is no column: its keys read as null.
     flattened_in: Vec<(String, Option<Vec<String>>)>,
@@ -2362,7 +2539,7 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     if caps.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty()) {
         // Patterns that match nothing are an empty result with no columns.
         if sources.iter().all(|s| s.contains('*')) {
-            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new() });
+            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default() });
         }
         return Err(verification_plain(&format!("Unknown index [{index}]")));
     }
@@ -2502,7 +2679,11 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
         _ => Vec::new(),
     };
     let flattened = flattened_in.iter().map(|(k, _)| k.clone()).collect();
-    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in })
+    let dimensions = match caps.get("fields") {
+        Some(Value::Obj(f)) => f.iter().filter(|(_, c)| c.as_object().is_some_and(|m| m.values().any(|t| t.get("time_series_dimension").and_then(Value::as_bool) == Some(true)))).map(|(k, _)| k.clone()).collect(),
+        _ => Default::default(),
+    };
+    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions })
 }
 
 fn verification_plain(msg: &str) -> EsError {
@@ -3435,8 +3616,14 @@ fn ts_rewrite(text: &str, cmds: &mut Vec<Cmd>) -> EsResult<()> {
             }
         }
     }
+    // Series group by `_tsid` and time bucket; the other keys are read per series.
     let mut inner_by = vec![super::parser::Named { name: "_tsid".into(), expr: col("_tsid", at) }];
-    inner_by.extend(by.iter().cloned());
+    for n in &by {
+        match &n.expr.kind {
+            ExprKind::Call(f, _) if matches!(f.as_str(), "bucket" | "bin" | "tbucket") => inner_by.push(n.clone()),
+            _ => inner_aggs.push(super::parser::Named { name: n.name.clone(), expr: call("$ts_by", vec![n.expr.clone(), col("@timestamp", n.expr.start)], &n.expr) }),
+        }
+    }
     let outer_by: Vec<super::parser::Named> = by.iter().map(|n| super::parser::Named { name: n.name.clone(), expr: col(&n.name, n.expr.start) }).collect();
     cmds[si] = Cmd::Stats { aggs: inner_aggs, by: inner_by };
     cmds.insert(si + 1, Cmd::Stats { aggs: outer_aggs, by: outer_by });
@@ -3697,6 +3884,7 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
             stats.original_types = source.original_types.clone();
             let _ = src.res.unions.set(source.unions.clone());
             let _ = src.res.unsupported.set(source.unsupported.clone());
+            let _ = src.res.dimensions.set(source.dimensions.clone());
             stats.fields = source.fields.iter().filter(|f| source.needed.as_ref().is_none_or(|n| n.contains(*f))).cloned().collect();
             let _ = src.res.suggest.set((source.needed.clone(), source.cols.iter().map(|c| c.name.clone()).collect()));
             let (pipe, out_cols) = build_pipeline(&src, prefix, source.cols.clone())?;

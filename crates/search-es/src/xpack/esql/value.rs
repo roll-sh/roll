@@ -1188,6 +1188,8 @@ pub const AGGS: &[&str] = &[
     "variance", "present", "absent", "sample",
     // Time series accumulators `TS` rewrites to (the timestamp travels as the weight).
     "$first", "$last", "$rate", "$irate", "$increase", "$delta", "$idelta", "$deriv",
+    // A `TS` grouping key: a series' distinct values in time order.
+    "$values",
 ];
 
 /// An aggregation's accumulated state.
@@ -1220,7 +1222,7 @@ impl Acc {
         match name {
             "count" => Acc::Count(0),
             "$amd_sum" | "$amd_min" | "$amd_max" | "$amd_count" | "$amd_avg" => Acc::Amd { part: [None; 4] },
-            "$first" | "$last" | "$rate" | "$irate" | "$increase" | "$delta" | "$idelta" | "$deriv" => Acc::Points(Vec::new()),
+            "$first" | "$last" | "$rate" | "$irate" | "$increase" | "$delta" | "$idelta" | "$deriv" | "$values" => Acc::Points(Vec::new()),
             "count_distinct" => Acc::Distinct { hll: Box::new(Hll::new(precision_from_threshold(DEFAULT_DISTINCT_THRESHOLD))), ty: DataType::Null },
             "sum" => Acc::Sum { int: 0, float: 0.0, comp: 0.0, any: false, overflow: false },
             "avg" => Acc::Avg { int: 0, float: 0.0, comp: 0.0, n: 0 },
@@ -1518,6 +1520,19 @@ fn time_series_value(name: &str, points: &[(i64, V)]) -> V {
     match name {
         "$first" => p.first().map_or(V::Null, |(_, v)| (*v).clone()),
         "$last" => p.last().map_or(V::Null, |(_, v)| (*v).clone()),
+        "$values" => {
+            let mut out: Vec<V> = Vec::new();
+            for x in p.iter().flat_map(|(_, v)| v.values()) {
+                if !out.iter().any(|o| super::exec::GroupKey::of(o) == super::exec::GroupKey::of(x)) {
+                    out.push(x.clone());
+                }
+            }
+            match out.len() {
+                0 => V::Null,
+                1 => out.pop().expect("one"),
+                _ => V::Multi(out),
+            }
+        }
         _ => {
             let xs: Vec<(i64, f64)> = p.iter().filter_map(|(t, v)| Some((*t, num(v)?))).collect();
             if xs.len() < 2 {

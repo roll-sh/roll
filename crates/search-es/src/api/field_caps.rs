@@ -191,7 +191,9 @@ fn index_fields(idx: &IndexMeta, runtime_request: &Map) -> Vec<(String, Cap)> {
                     }
                 }
                 if mode == IndexMode::TimeSeries {
-                    c.dimension = f.bool_param("time_series_dimension", &ctx);
+                    // A flattened field is a dimension when some of its keys are
+                    // (`FlattenedFieldMapper.isDimension`).
+                    c.dimension = f.bool_param("time_series_dimension", &ctx) || f.raw("time_series_dimensions").and_then(Value::as_array).is_some_and(|a| !a.is_empty());
                     c.metric = f.raw("time_series_metric").and_then(Value::as_str).map(str::to_string);
                 }
                 c
