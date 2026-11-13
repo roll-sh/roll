@@ -230,6 +230,13 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = user;
         Box::pin(async { Ok(None) })
     }
+    /// [`Sessions::person`] for callers off the request path (a product's background work checking
+    /// a stored grant): blocking, never cached. `None` by default: an implementation that can't
+    /// say keeps a person's grants dead there.
+    fn person_now(&self, user: &str) -> Result<Option<SignedIn>, String> {
+        let _ = user;
+        Ok(None)
+    }
     /// Mail a person about something of theirs (a token of theirs used from a new network,
     /// revoked as leaked, or about to expire). Nothing when they're disabled or gone, or mail is
     /// off. `text` holds no secret.

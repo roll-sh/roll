@@ -845,6 +845,10 @@ impl roll_auth::Sessions for Resolver {
         Box::pin(async move { tokio::task::spawn_blocking(move || accounts.person(&user).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())? })
     }
 
+    fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
+        self.0.person(user).map_err(|e| e.to_string())
+    }
+
     fn tell<'a>(&'a self, user: &'a str, subject: &'a str, text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {
         let (accounts, id) = (self.0.clone(), user.to_string());
         Box::pin(async move {

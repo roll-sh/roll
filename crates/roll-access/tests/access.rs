@@ -63,6 +63,9 @@ impl roll_auth::Sessions for People {
         let p = self.0.lock().unwrap().get(user).cloned();
         Box::pin(async move { Ok(p) })
     }
+    fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
+        Ok(self.0.lock().unwrap().get(user).cloned())
+    }
     fn tell<'a>(&'a self, user: &'a str, subject: &'a str, _text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {
         self.1.lock().unwrap().push(format!("{user}: {subject}"));
         Box::pin(async { Ok(()) })
@@ -836,9 +839,13 @@ async fn a_users_token_acts_as_them() {
     assert_eq!(hop("/v1/projects").await.1["code"], "operator_only");
     assert_eq!(hop("/v1/workspace/projects").await.0, StatusCode::OK);
 
-    // Her account turned off: the token stops on its next request.
+    // Her account turned off: the token stops on its next request, and for a product's own
+    // background work (a sync it made looks its grant up), at once too.
+    use roll_auth::Grants as _;
+    assert!(d.access.grant(&id).is_some());
     d.people.remove("usr_alice");
     assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert!(d.access.grant(&id).is_none());
 
     // An admin's token is theirs too: the operator's reach while they're an admin, their own once
     // they aren't, nothing once they're gone.
