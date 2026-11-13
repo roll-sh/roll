@@ -124,6 +124,9 @@ done
 T1=$(now_ms)
 P=$(api GET "/v1/previews/$PV")
 echo "$P" | python3 -m json.tool > "$HOME_DIR/preview.json"
+# What CI outside GitHub does: wait for the change's preview, take the URL it prints.
+WAITED=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview wait --change "$CHG" --timeout 60)
+[ "$WAITED" = "$(echo "$P" | jq_ "d['url']")" ] || { echo "roll preview wait printed $WAITED"; exit 1; }
 HOST=$(echo "$P" | jq_ "d['services'][0]['url'].split('//')[1].split(':')[0]")
 QUERY=$(echo "$P" | jq_ "d['services'][0]['share_url'].split('/?')[1]")
 JAR="$HOME_DIR/cookies"

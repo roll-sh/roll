@@ -31,6 +31,26 @@ pub enum Preview {
         /// A change id (`chg_…`).
         #[arg(long)]
         change: Option<String>,
+        /// Then wait until it's ready (as `roll preview wait`).
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: give up after this many seconds (exit 1).
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
+    /// Wait until a preview is ready, then print its first service's URL (or --service's), for a
+    /// CI step to test against: exit 1 if it fails, is deleted or isn't ready within --timeout.
+    /// `--change chg_…` waits for that change's preview, which may not exist yet.
+    Wait {
+        /// A preview id (`pv_…`), or nothing with --change.
+        #[arg(required_unless_present = "change")]
+        preview: Option<String>,
+        #[arg(long, conflicts_with = "preview")]
+        change: Option<String>,
+        #[arg(long, short)]
+        service: Option<String>,
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
     },
     /// Delete a preview: its services, its secrets environment and its data branches.
     #[command(alias = "delete")]
@@ -160,6 +180,51 @@ fn print_preview(p: &Value) {
     }
 }
 
+/// `roll preview wait`: poll the preview until it's ready (or sleeping: ready and idle), print
+/// the URL; a failed or deleted preview, or the timeout, is an error (exit 1).
+async fn wait(api: &Api, as_json: bool, preview: Option<String>, change: Option<String>, service: Option<String>, timeout: u64) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    let mut told = String::new();
+    loop {
+        let found = match (&preview, &change) {
+            (Some(id), _) => Some(api.get(&format!("/v1/previews/{id}")).await?),
+            (None, Some(chg)) => api.get("/v1/previews").await?.as_array().into_iter().flatten().find(|p| p["change"].as_str() == Some(chg.as_str())).cloned(),
+            (None, None) => bail!("say which preview, or --change"),
+        };
+        if let Some(p) = &found {
+            let state = p["state"].as_str().unwrap_or_default();
+            if state != told && !as_json {
+                eprintln!("{}: {state}", s(&p["id"]));
+                told = state.to_string();
+            }
+            match state {
+                "ready" | "sleeping" => {
+                    let url = match &service {
+                        Some(name) => p["services"].as_array().into_iter().flatten().find(|x| x["name"] == name.as_str()).and_then(|x| x["url"].as_str()),
+                        None => p["url"].as_str(),
+                    };
+                    if as_json {
+                        println!("{}", serde_json::to_string_pretty(p)?);
+                    } else {
+                        println!("{}", url.unwrap_or(""));
+                    }
+                    return Ok(());
+                }
+                "failed" => bail!("the preview failed: {}", s(&p["error"])),
+                "deleting" => bail!("the preview is being deleted"),
+                _ => {}
+            }
+            if p["desired"] == "deleted" {
+                bail!("the preview is being deleted");
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("not ready after {timeout}s{}", found.map(|p| format!(" (it's {})", s(&p["state"]))).unwrap_or_else(|| " (no preview yet)".into()));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
 /// `a.b=v` into `{"a": {"b": v}}`; `v` as JSON when it parses, else a string.
 fn patch(sets: &[String]) -> anyhow::Result<Value> {
     let mut root = Map::new();
@@ -208,15 +273,20 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             v
         }
-        Preview::Create { project, repo, branch, change } => {
+        Preview::Create { project, repo, branch, change, wait: then_wait, timeout } => {
             let body = json!({ "project": project_id(api, &project).await?, "repo": repo, "branch": branch, "change": change });
             let v = api.post("/v1/previews", body).await?;
+            if then_wait {
+                let id = v["id"].as_str().unwrap_or_default().to_string();
+                return wait(api, as_json, Some(id), None, None, timeout).await;
+            }
             if !as_json {
                 print_preview(&v);
                 return Ok(());
             }
             v
         }
+        Preview::Wait { preview, change, service, timeout } => return wait(api, as_json, preview, change, service, timeout).await,
         Preview::Rm { preview } => {
             let v = api.call(reqwest::Method::DELETE, &format!("/v1/previews/{preview}"), None).await?;
             if !as_json {

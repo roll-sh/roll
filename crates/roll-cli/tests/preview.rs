@@ -86,6 +86,13 @@ fn settings_create_list_and_remove_a_branch_preview() {
     let (ok, _, err) = s.roll(&["create", "--project", "shop", "--repo", "acme/nope", "--branch", "main"]);
     assert!(!ok && err.contains("isn't in project"), "{err}");
 
+    // CI waits for it: not ready in time (the reconciler doesn't run here) is a failure that
+    // says where it got to; so is a preview being deleted.
+    let (ok, _, err) = s.roll(&["wait", &id, "--timeout", "0"]);
+    assert!(!ok && err.contains("not ready after 0s (it's creating)"), "{err}");
+
     s.ok(&["rm", &id]);
     assert_eq!(s.json(&["show", &id])["desired"], "deleted");
+    let (ok, _, err) = s.roll(&["wait", &id]);
+    assert!(!ok && err.contains("being deleted"), "{err}");
 }

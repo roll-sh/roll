@@ -588,7 +588,11 @@ type Settings = {
 - **Dashboard**: a Previews tab on each project, with the list, status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|logs|activity|settings|usage`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|settings|usage|bypass|wait`.
+  For CI outside GitHub, `roll preview wait --change chg_…` (or `create … --wait`) blocks until
+  the preview is ready and prints its URL (`--service` for another), exiting 1 if it fails, is
+  deleted or isn't ready within `--timeout` (600 s): the next step tests that URL with the
+  bypass secret.
 
 Every one of them plays the mark states: `deploying` while creating or updating, `success` when
 ready, `error` on failure, and `sleep` for a sleeping preview.
@@ -643,6 +647,7 @@ Ranked by what a person notices first. Done so far:
   stay in it, its bytes are roll search's `own_bytes`, it's gone after landing and the parent
   stays);
 - unresolved secrets named in the preview's activity;
+- `roll preview wait` for CI outside GitHub (and `create --wait`);
 - a third adversarial review and its fixes (no bypass for forks, rotation restarts nothing the
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
