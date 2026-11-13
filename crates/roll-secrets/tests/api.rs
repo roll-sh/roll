@@ -842,6 +842,11 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
         ]
     );
     assert_eq!(found[3]["detail"], "also in staging");
+    // It filters itself (roll-access lets environment-limited tokens in on that): a token for
+    // staging hears only of staging.
+    let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
+    let (_, mine) = api.req(Method::GET, "/health", None, t["token"].as_str()).await;
+    assert!(mine.as_array().unwrap().iter().all(|f| f["environment"] == "staging") && !mine.as_array().unwrap().is_empty(), "{mine}");
 }
 
 #[tokio::test]
