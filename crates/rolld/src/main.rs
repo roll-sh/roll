@@ -494,7 +494,7 @@ async fn run() -> anyhow::Result<()> {
     let router = on
         .info_route(cluster.node_id().to_string())
         .merge(on.off_routes())
-        .merge(roll_access::oauth::public_router(access))
+        .merge(roll_access::oauth::public_router(access.clone()))
         .merge(auth.gate("api", router));
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {
@@ -608,6 +608,11 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(s) = &streams {
         s.broker.sync_all().await;
+    }
+    // Audit rows still queued are written before the process goes (a rolling restart keeps them).
+    let a = access.clone();
+    if !tokio::task::spawn_blocking(move || a.store.flush_audit(std::time::Duration::from_secs(5))).await.unwrap_or(false) {
+        tracing::warn!("some audit rows weren't written before shutdown");
     }
     info!("shut down");
     Ok(())

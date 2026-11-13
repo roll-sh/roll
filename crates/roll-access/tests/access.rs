@@ -720,6 +720,21 @@ async fn a_leaked_token_is_revoked() {
     let (_, log) = d.call(OPERATOR, Method::GET, &format!("/v1/access/audit?grant={id}"), None).await;
     assert!(log.as_array().unwrap().iter().any(|e| e["source"] == "leak" && e["decision"] == "revoke"), "{log}");
     assert!(d.access.revoke_leaked(&found, "again").unwrap().is_empty(), "once");
+
+    // Another product's secret (apps' deploy hooks) found the same way goes to its revoker.
+    let hook = roll_access::new_secret("rlh_");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let s2 = seen.clone();
+    d.access.on_leaked("rlh_", move |secret, why| {
+        s2.lock().unwrap().push((secret.to_string(), why.to_string()));
+        Some("svc_a's production deploy hook".into())
+    });
+    let found = roll_access::find_secrets(&format!("curl https://api.roll.sh/v1/apps/hooks/svc_a/production/{hook}"));
+    assert_eq!(found, vec![hook.clone()]);
+    assert!(d.access.revoke_leaked(&found, "acme/site deploy.sh").unwrap().is_empty(), "no grant of ours");
+    assert_eq!(seen.lock().unwrap().as_slice(), [(hook, "found in acme/site deploy.sh".to_string())]);
+    let (_, log) = d.call(OPERATOR, Method::GET, "/v1/access/audit?product=apps", None).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["decision"] == "revoke"), "{log}");
 }
 
 /// GitHub's secret scanning partner program reports roll tokens it finds in public code: a report
@@ -930,6 +945,7 @@ async fn a_rule_can_grant_some_indices() {
     assert!(all.contains(&"cl_1".to_string()) && all.contains(&"cl_1/logs-2025".to_string()), "{all:?}");
     assert!(who("resource=cl_1/logs-2025&action=read").await.iter().all(|r| r == "cl_1/logs-2025"));
     assert!(who("resource=cl_%25").await.is_empty(), "a % is a percent sign");
+    assert!(who("resource=CL_1").await.is_empty(), "exact, case and all");
     let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{logs_id}/tighten"), None).await;
     assert_eq!(t["narrower"], true, "{t}");
     assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*,-logs-old" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
@@ -1085,6 +1101,13 @@ async fn the_audit_log_keeps_its_days() {
     d.access.store.prune(90).unwrap();
     let (_, kept) = d.call(OPERATOR, Method::GET, "/v1/access/audit?limit=1000", None).await;
     assert_eq!(kept.as_array().map(Vec::len), Some(3), "only the last 90 days");
+    // A NUL (a path's `%00`) is dropped from what's kept, never the row (Postgres refuses NULs).
+    let mut nul = row(200_000, now);
+    nul.resource = Some("prj_\0x".into());
+    assert!(d.access.store.queue_audit(nul).is_none());
+    assert!(d.access.store.flush_audit(std::time::Duration::from_secs(5)));
+    let (_, kept) = d.call(OPERATOR, Method::GET, "/v1/access/audit?resource=prj_x", None).await;
+    assert_eq!(kept.as_array().map(Vec::len), Some(1), "{kept}");
 }
 
 /// A token used from a network it hasn't been before is news (a leaked token is used from
@@ -1100,6 +1123,7 @@ async fn a_new_network_is_news_until_a_token_roams() {
     assert_eq!(used("198.51.100.9"), Some(("198.51.100.0/24".to_string(), 2)));
     assert_eq!(used("2001:db8:1:2::7"), Some(("2001:db8:1::/48".to_string(), 3)));
     assert_eq!(used("198.51.100.200"), None, "known");
+    assert_eq!(used("::ffff:198.51.100.10"), None, "the same IPv4 network, on a dual-stack listener");
     assert!(used("192.0.2.1").is_some() && used("100.64.0.1").is_some(), "the fourth and the fifth");
     assert_eq!(used("10.9.8.7"), None, "roaming now");
     let (_, list) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}/networks"), None).await;
