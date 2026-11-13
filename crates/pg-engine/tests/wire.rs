@@ -1988,6 +1988,27 @@ fn point_lookups_go_out_as_decoded_ones() {
             }
         }
     }
+    // Rows the open transaction wrote (its update of a row, a key it inserted), and a row
+    // with a value stored out of line (the table's rows then fetched as stored).
+    let same = |c: &mut raw::Raw, v: &str, what: &str| {
+        let mut got = Vec::new();
+        for stmt in ["p00", "l00", "p10", "l10"] {
+            c.bind_with("", stmt, &[v], &[1]);
+            c.execute("", 0);
+            got.push(c.sync_messages());
+        }
+        assert_eq!(got[0], got[1], "{what} ({v})");
+        assert_eq!(got[2], got[3], "{what} ({v}), t first");
+    };
+    c.query("BEGIN; UPDATE pk SET t = 'mine', n = 1 WHERE id = 11; INSERT INTO pk VALUES (6001, 1, 'new', 'v', NULL, 2)");
+    for v in ["11", "6001", "12"] {
+        same(&mut c, v, "in a transaction that wrote");
+    }
+    c.query("ROLLBACK");
+    c.query("UPDATE pk SET t = (SELECT string_agg(md5(g::text), '') FROM generate_series(1, 300) g) WHERE id = 12");
+    for v in ["12", "13", "9", "6001"] {
+        same(&mut c, v, "a value out of line");
+    }
     assert!(pg_engine::exec::scan::POINT_PICKS.load(Relaxed) > before + 60, "point lookups ended at their probe");
     s.engine.shutdown();
 }
