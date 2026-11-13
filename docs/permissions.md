@@ -140,6 +140,12 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
+- Linking another resource to an apps service (`PUT …/services/{id}/links/{kind}/{ref}`, or
+  `links` in a new service's body) puts its address and password in the service's variables, where
+  the service's code reads them: it also needs `reveal` on each linked resource (a `postgres` link
+  on that Postgres project, `redis` on that database, `bucket`, `stream`, `queue`, `nosql` likewise;
+  a kind roll doesn't know is refused). When that decides, the approval is about the linked
+  resource, so remembering it allows revealing that one.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
   `admin`, as in secrets itself.
 - Secrets' imports (`PUT …/environments/{env}/imports`, `[{project?, environment, path}]`) are a
