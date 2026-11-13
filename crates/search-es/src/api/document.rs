@@ -310,8 +310,14 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
     let value = parse_doc(&source)?;
     // Ingest runs before auto ids exist.
     let ingest_args = if auto_id { std::borrow::Cow::Owned(WriteArgs { id: None, ..args.clone() }) } else { std::borrow::Cow::Borrowed(&args) };
+    let requested = target.index.name.clone();
     let (target, value, source) = match crate::ingest::run_for_write(cluster, target, &ingest_args, &id, value, source, ctx.now_ms, Some(&ctx.ingest_nanos)).await? {
         crate::ingest::Outcome::Index(t, v, s, ingested) => {
+            // A pipeline that moved the document (`_index`, `reroute`): the write is authorized
+            // again where it lands.
+            if t.index.name != requested {
+                crate::xpack::security::check_moved_write(ctx, &t.index.name)?;
+            }
             if let Some(ingested) = ingested {
                 let crate::ingest::Ingested { args: changed, executed: ran } = *ingested;
                 let new_id = changed.id.clone().unwrap_or_else(|| id.clone());

@@ -106,7 +106,8 @@ them. A route's request runs as the cluster's owner narrowed to the index names 
 those names), so it reaches no other index: a bulk line's `_index` or an `mget` doc naming
 another index is refused (403), and so is a lookup inside a query (a `terms` lookup, an indexed
 `geo_shape`, `percolate`'s stored document, `more_like_this` documents, a `lookup` runtime
-field): those are read as the caller, as Elasticsearch authorizes them. They answer with Elasticsearch's own status and body, and pass the query string through
+field): those are read as the caller, as Elasticsearch authorizes them. A document an ingest
+pipeline moves (`_index`, `reroute`) is authorized again where it lands. They answer with Elasticsearch's own status and body, and pass the query string through
 (`refresh`, `routing`, `size`, …). A write names exactly one index; a name starting with `_` is
 refused (those are Elasticsearch's own APIs: use the console). Bodies may be up to the cluster's
 `max_body_mb`.
@@ -213,24 +214,19 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    geonames `decay_geo_gauss_script_score` (78 against ES 71). Then: `so`, a full rerun of every
    track with variance, and one allocator policy (rolld's against search-dev's purge governor,
    by a matched benchmark).
-2. **Writes moved by an ingest pipeline are authorized again.** A narrowed principal's write
-   is checked against its target and the body's `_index` before ingest runs; a pipeline that
-   sets `_index` or uses `reroute` can move the document to an index the principal may not
-   write. Elasticsearch authorizes each bulk item at its final index: do the same once pipelines
-   have run (only matters where the owner already has such a pipeline).
-3. **Background jobs on a sleeping cluster.** Transforms (and ISM, watcher) run on the cluster's
+2. **Background jobs on a sleeping cluster.** Transforms (and ISM, watcher) run on the cluster's
    job scheduler, which only runs while the cluster is loaded: a continuous transform's due
    checkpoint waits for the next request to wake it. Decide and build the wake: a per-node
    timer over the catalog's next-due times (written as a job's schedule changes) that loads a
    cluster when a job is due and lets it sleep again, billed as loaded time.
-4. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
+3. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
    leases, MinIO) and roll cloud's fleet test (`rolld/tests/fleet_e2e.rs`, `pnpm test:fleet`:
    three nodes from the fleet image behind HAProxy, DynamoDB leases, every product under load)
    both pass with search: through the edge's `<cluster>.search.…` hostname, 7,116 documents
    written, acknowledged and verified across a SIGKILL, a rolling restart and a scale-out (4 ×
    502, 3 × 503, the longest stall 11.1 s at the SIGKILL). Next there: shorten that stall (the
    lease takeover after a SIGKILL).
-5. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`,
+4. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`,
    ES|QL, watcher, downsampling. `logsdb`'s last 9 are decisions:
    `_ignored_source` returned as Elasticsearch's binary entries (7 tests; it needs a stored field
    per document on the synthetic-source indexing path, so measure it first), `@timestamp`
@@ -241,17 +237,17 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    (`search-index`'s highlighter). KQL is done (34 of 34); check its parse-error wording against the
    reference. In the opensearch dialect, count `auto_date_histogram` from the points tree as
    OpenSearch does (`filter_rewrite`'s replay already picks OpenSearch's rounding).
-6. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
+5. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
    checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
-7. **Metering on the fleet**: a cluster that moves mid-interval is metered once (lists already
+6. **Metering on the fleet**: a cluster that moves mid-interval is metered once (lists already
    read where a cluster is loaded from the catalog). `own_bytes` (what a branch adds over its
    parent) is on `GET /v1/search/clusters/{id}` for previews.
-8. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset);
+7. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset);
    private networking for apps; wire `resolve_id` into roll-access once #19 lands. roll secrets'
    search link provider is built on feature/roll-secrets (`crates/rolld/src/secrets.rs`): it
    issues the cluster's own API keys (`POST /v1/search/clusters/{id}/keys`, dynamic with an
    expiry or managed), never the cluster password, and works once `Kind::Search` is on main.
-9. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`: 1m24s on a cold
+8. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`: 1m24s on a cold
    cache with `search-analysis` too, so that one was dropped; measure it again once main's
    cache exists). The extended workflow (`search.yml`) runs on demand. `search-store`'s
    `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once` failed once on the loaded

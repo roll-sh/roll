@@ -558,6 +558,13 @@ async fn per_index_routes() {
     let source = urlencoding::encode(&lookup("secrets").to_string()).into_owned();
     let r = e.http.post(format!("{}{base}/books/search?source={source}&source_content_type=application/json", e.api)).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 403);
+    // Nor through an ingest pipeline that moves the document (the owner's, made in the console).
+    let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/idx/request", Some(json!({"method": "PUT", "path": "/_ingest/pipeline/move", "body": {"processors": [{"set": {"field": "_index", "value": "secrets"}}]}}))).await;
+    assert_eq!((s, v["status"].as_i64()), (200, Some(200)), "{v}");
+    let (s, v) = e.call(reqwest::Method::PUT, &format!("{base}/books/docs/9?pipeline=move&refresh=true"), Some(json!({"k": "moved"}))).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "{v}");
+    let (s, _) = e.call(reqwest::Method::GET, &format!("{base}/secrets/docs/9"), None).await;
+    assert_eq!(s, 404, "nothing written where the pipeline pointed");
     let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/books/docs/1"), None).await;
     assert_eq!((s, v["_source"]["year"].as_i64()), (200, Some(2018)), "{v}");
     let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/search"), Some(json!({"query": {"term": {"year": 2021}}}))).await;

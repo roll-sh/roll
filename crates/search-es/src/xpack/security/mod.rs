@@ -433,6 +433,18 @@ pub fn check_lookups(ctx: &Ctx, rendered: Option<&Value>) -> EsResult<()> {
     Ok(())
 }
 
+/// A write an ingest pipeline moved to `index` (`_index`, `reroute`): authorized there as an
+/// index write, as Elasticsearch authorizes each bulk item at the index it finally goes to.
+pub fn check_moved_write(ctx: &Ctx, index: &str) -> EsResult<()> {
+    const ACTION: &str = "indices:data/write/index";
+    let Some(p) = ctx.principal.get() else { return Ok(()) };
+    if p.is_superuser() {
+        return Ok(());
+    }
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    if eff.allows_index(ACTION, index) { Ok(()) } else { Err(denied(p, ACTION, Some(&[index.to_string()]))) }
+}
+
 fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
     let Some(p) = ctx.principal.get() else { return Ok(None) };
     if p.is_superuser() {
