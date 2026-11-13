@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use hashbrown::HashMap;
 use std::ops::Bound;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// A relation's key prefix: table and index (`keys::index_prefix`).
 pub(super) const PREFIX: usize = 8;
@@ -130,10 +130,25 @@ fn newest(chain: &[(u64, Option<Bytes>)], ts: u64) -> Option<&(u64, Option<Bytes
 pub(super) struct Hot {
     /// Any range kept (commits skip `apply`'s lookups otherwise).
     pub(super) any: AtomicBool,
+    /// The kept ranges' prefixes as bits (`bit`), written under `ranges`' write lock after
+    /// every change: a read of a prefix whose bit is clear answers from the store without
+    /// `ranges`' lock, which every worker's point read took (a shared line's
+    /// compare-exchange). A reader seeing a bit late only reads the store, which holds every
+    /// version a kept range does for any live snapshot.
+    mask: [AtomicU64; MASK_WORDS],
     ranges: RwLock<HashMap<Prefix, Arc<Mutex<Chains>>>>,
     /// Scans in ranges not kept (negative: refused, counting up to a retry), and how often
     /// each was refused.
     seen: Mutex<HashMap<Prefix, (i32, u32)>>,
+}
+
+const MASK_WORDS: usize = 4;
+
+/// A prefix's word and bit in `Hot::mask`.
+#[inline]
+fn bit(p: &Prefix) -> (usize, u64) {
+    let h = (u64::from_ne_bytes(*p).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize;
+    (h / 64 % MASK_WORDS, 1 << (h % 64))
 }
 
 /// The prefix of a scan of [start, end) that reads one whole relation's range.
@@ -151,12 +166,34 @@ pub(super) fn covering(start: &[u8], end: &[u8]) -> Option<Prefix> {
 }
 
 impl Hot {
+    /// Whether `p`'s range may be kept (its bit set: `mask`).
+    #[inline]
+    fn may_keep(&self, p: &Prefix) -> bool {
+        let (w, b) = bit(p);
+        self.mask[w].load(Ordering::Acquire) & b != 0
+    }
+
+    /// `mask` made again from `ranges` (under its write lock, after a change).
+    fn publish(&self, ranges: &HashMap<Prefix, Arc<Mutex<Chains>>>) {
+        let mut m = [0u64; MASK_WORDS];
+        for p in ranges.keys() {
+            let (w, b) = bit(p);
+            m[w] |= b;
+        }
+        for (a, v) in self.mask.iter().zip(m) {
+            a.store(v, Ordering::Release);
+        }
+    }
+
     /// The rows of [start, end) visible at `ts`, when a kept range holds them.
     pub(super) fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Option<Vec<(Bytes, Bytes)>> {
         if !self.any.load(Ordering::Acquire) {
             return None;
         }
         let p = covering(start, end)?;
+        if !self.may_keep(&p) {
+            return None;
+        }
         let range = self.ranges.read().get(&p)?.clone();
         let mut c = range.lock();
         c.idle = 0;
@@ -187,6 +224,9 @@ impl Hot {
             return None;
         }
         let p: Prefix = key.get(..PREFIX)?.try_into().ok()?;
+        if !self.may_keep(&p) {
+            return None;
+        }
         let ranges = self.ranges.read();
         let mut c = ranges.get(&p)?.lock();
         c.idle = 0;
@@ -256,6 +296,7 @@ impl Hot {
             }
         }
         ranges.insert(p, Arc::new(Mutex::new(c)));
+        self.publish(&ranges);
         self.any.store(true, Ordering::Release);
         Ok(())
     }
@@ -316,6 +357,7 @@ impl Hot {
                 ranges.remove(&p);
                 self.refuse(p);
             }
+            self.publish(&ranges);
             self.any.store(!ranges.is_empty(), Ordering::Release);
         }
     }
@@ -323,7 +365,9 @@ impl Hot {
     /// Drop every kept range (a commit that bypasses `apply`).
     pub(super) fn clear(&self) {
         if self.any.swap(false, Ordering::AcqRel) {
-            self.ranges.write().clear();
+            let mut ranges = self.ranges.write();
+            ranges.clear();
+            self.publish(&ranges);
         }
     }
 }
