@@ -320,9 +320,18 @@ impl Engine {
     /// branch stands for them all. A preview of that branch someone made serves too.
     async fn keep_baseline(&self, project: &roll_workspace::Project, repos: &[String], s: &Settings) -> anyhow::Result<()> {
         let rows: Vec<Row> = self.store.rows(Some(&project.id))?.into_iter().filter(|r| r.desired == Desired::Active).collect();
-        if !(s.github.screenshot && s.github.baseline) {
+        // roll apps' services can't be screenshotted yet: a baseline there would cost and never compare.
+        let on_apps = matches!(self.apps.catalog(&project.id).await, Ok(Some(c)) if !c.is_empty());
+        let why = if !(s.github.screenshot && s.github.baseline) {
+            Some("the project's baseline rule is off")
+        } else if on_apps {
+            Some("its services run on roll apps, whose pages roll can't screenshot yet")
+        } else {
+            None
+        };
+        if let Some(why) = why {
             for r in rows.iter().filter(|r| r.is_baseline()) {
-                self.mark_deleted(&r.id, "the project's baseline rule is off")?;
+                self.mark_deleted(&r.id, why)?;
             }
             return Ok(());
         }

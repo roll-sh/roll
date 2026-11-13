@@ -774,7 +774,8 @@ type Settings = {
     slots (it still counts against `max_usd_month`, and waits once that's spent), and lasts while
     there are change previews, then its TTL. A preview of the repo's default branch someone made
     (`roll preview create --branch main`) serves instead. Deleted, it comes back at the next pass
-    while the rule is on; turning the rule off deletes it. A change is compared at its screenshot;
+    while the rule is on; turning the rule off deletes it. A project whose services run on roll
+    apps gets none (roll can't screenshot those pages yet, so it would cost and never compare). A change is compared at its screenshot;
     one taken before the baseline had any is compared once the baseline's first one comes in, and
     its comment updated. The baseline keeps its screenshots of its last 10 heads, and a change is
     compared with the one where it left the branch (its merge base, as Chromatic compares with an
@@ -1003,25 +1004,30 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **Screenshots of roll apps' services**: `RollApps::screenshot` takes nothing, so a project on
+   roll apps has no screenshots, comparisons or visual reviews. The browser container joins the
+   service's own network (the page's code then reaches only what the service does), so roll apps
+   has to say where an instance runs (its container on this host, or a screenshot of its own on
+   Fargate). Waits for the apps thread (told on 2026-11-13).
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

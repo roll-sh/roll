@@ -168,10 +168,15 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     e.engine.store.update(&base.id, |r| r.last_active_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.row(&base.id).unwrap().desired, Desired::Active);
+    // On roll apps (whose pages can't be screenshotted yet) it goes too, rather than cost for nothing.
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), memory_mb: 512 }]);
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row(&base.id).map_or(true, |r| r.desired == Desired::Deleted));
+    *e.apps.catalog.lock() = None;
     let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "github": { "baseline": false } })).unwrap();
     e.engine.store.put_settings(&e.project, &s).unwrap();
     e.engine.pass().await.unwrap();
-    assert!(e.engine.store.row(&base.id).map_or(true, |r| r.desired == Desired::Deleted));
+    assert!(e.engine.store.rows(Some(&e.project)).unwrap().iter().all(|r| !r.is_baseline() || r.desired == Desired::Deleted), "and with the rule off");
     assert_eq!(e.engine.store.row(&chg.id).unwrap().desired, Desired::Active);
 }
 
