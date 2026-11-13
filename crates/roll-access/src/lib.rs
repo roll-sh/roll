@@ -98,17 +98,21 @@ fn checksum(body: &str) -> String {
     (0..6).rev().map(|i| ALPHABET[((c >> (i * 5)) & 31) as usize] as char).collect()
 }
 
-/// Whether `s` is shaped like a roll grant secret (`rlt_`, `rlo_`, `rlf_`) whose checksum holds:
-/// what scanners look for. Secrets made before checksums don't pass, but still work.
+/// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`) and other
+/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlh_`).
+pub const SECRET_PREFIXES: [&str; 4] = ["rlt_", "rlo_", "rlf_", "rlh_"];
+
+/// Whether `s` is shaped like a roll secret ([`SECRET_PREFIXES`]) whose checksum holds: what
+/// scanners look for. Secrets made before checksums don't pass, but still work.
 pub fn checksum_ok(s: &str) -> bool {
-    let Some(rest) = ["rlt_", "rlo_", "rlf_"].iter().find_map(|p| s.strip_prefix(p)) else { return false };
+    let Some(rest) = SECRET_PREFIXES.iter().find_map(|p| s.strip_prefix(p)) else { return false };
     rest.len() == 40 && rest.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) && checksum(&s[..s.len() - 6]) == s[s.len() - 6..]
 }
 
 /// Every roll grant secret in `text` whose checksum holds (in a pushed file, a paste, a log).
 pub fn find_secrets(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for p in ["rlt_", "rlo_", "rlf_"] {
+    for p in SECRET_PREFIXES {
         let mut from = 0;
         while let Some(i) = text[from..].find(p) {
             let start = from + i;
@@ -324,7 +328,17 @@ pub trait ApprovalChat: Send + Sync + 'static {
 }
 
 type IdFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+type Revoker = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
 type EnvFn = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
+/// A name a person or a client chose, fit for a chat message: letters, digits, spaces and plain
+/// punctuation only, so no platform reads markup in it (Slack's `<!channel>`, Discord's
+/// `[label](url)`), at most 80 characters.
+pub fn plain(name: &str) -> String {
+    let kept: String = name.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '.' | ',' | ':' | '/' | '@' | '\'' | '+' | '#')).take(80).collect();
+    let kept = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    if kept.is_empty() { "(unnamed)".into() } else { kept }
+}
 
 /// A resolver from closures ([`Resolvers::by_fn`], [`Resolvers::environment_fn`]).
 struct Fns {
@@ -349,6 +363,8 @@ pub struct Access {
     pub resolvers: Resolvers,
     /// Approvals in chat, when rolld wires them.
     pub chat: std::sync::OnceLock<Arc<dyn ApprovalChat>>,
+    /// How other products revoke their own leaked secrets, by prefix ([`Access::on_leaked`]).
+    revokers: std::sync::RwLock<Vec<(&'static str, Revoker)>>,
     /// Grants' request limits on this node.
     pub limiter: rate::Limiter,
     /// Delivers audit sinks, when rolld can (it needs `ROLL_SECRET_KEY`).
@@ -370,7 +386,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -396,9 +412,44 @@ impl Access {
     /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
     /// secret scanning): each live grant they open is revoked at once, with why, and logged.
     /// Returns the grants revoked.
+    /// A product's own leaked secrets (apps' deploy hooks, `rlh_`): found wherever roll's are
+    /// (roll code's landings, GitHub's secret scanning), revoked by `revoke`, which says what it
+    /// revoked (`None`: nothing live).
+    pub fn on_leaked(&self, prefix: &'static str, revoke: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static) {
+        self.revokers.write().unwrap_or_else(|e| e.into_inner()).push((prefix, Box::new(revoke)));
+    }
+
     pub fn revoke_leaked(&self, secrets: &[String], found_at: &str) -> Result<Vec<store::Grant>> {
         let mut out = Vec::new();
         for s in secrets.iter().filter(|s| checksum_ok(s)) {
+            // Another product's: its revoker, and the audit log says so.
+            let foreign = self.revokers.read().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| s.starts_with(p)).map(|(_, r)| r(s, &format!("found in {found_at}")));
+            if let Some(revoked) = foreign {
+                if let Some(what) = revoked {
+                    tracing::warn!(what = %what, at = %found_at, "a leaked secret was revoked");
+                    self.store.audit(&store::AuditEvent {
+                        id: new_id("aud"),
+                        at: code_sql::now_ms(),
+                        grant_id: None,
+                        grant_name: None,
+                        source: "leak".into(),
+                        tool: None,
+                        method: "-".into(),
+                        route: "leaked".into(),
+                        product: s.get(..4).and_then(|p| (p == "rlh_").then(|| "apps".to_string())),
+                        action: Some("admin".into()),
+                        resource: Some(format!("{what}, found in {found_at}").chars().take(300).collect()),
+                        decision: "revoke".into(),
+                        approval: None,
+                        status: 200,
+                        args: None,
+                        ip: None,
+                        duration_ms: 0,
+                        client: None,
+                    });
+                }
+                continue;
+            }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
                 tracing::warn!(grant = %g.id, name = %g.name, at = %found_at, "a leaked token was revoked");
                 self.store.audit(&store::AuditEvent {
@@ -454,7 +505,7 @@ impl Access {
             .take(20)
             .map(|g| {
                 let days = (g.expires_at.unwrap_or(now) - now).max(0) / 86_400_000;
-                format!("{} ({})", g.name, if days == 0 { "today".to_string() } else if days == 1 { "tomorrow".to_string() } else { format!("in {days} days") })
+                format!("{} ({})", plain(&g.name), if days == 0 { "today".to_string() } else if days == 1 { "tomorrow".to_string() } else { format!("in {days} days") })
             })
             .collect();
         let count = if soon.len() == 1 { "One roll token expires".to_string() } else { format!("{} roll tokens expire", soon.len()) };
@@ -466,10 +517,11 @@ impl Access {
     /// A token used from a network it hasn't been before, told where approvals go (GitHub and
     /// Google mail a new sign-in's place): a leaked token is used from somewhere new.
     pub fn network_notice(self: &Arc<Self>, name: &str, id: &str, new: &store::NewNetwork) {
+        let name = plain(name);
         let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
         let roams = if new.networks >= store::ROAMING { " It's used from many networks now, so this is the last message like this about it." } else { "" };
         let text = format!(
-            "roll token {name:?} was used from a new network, {} (it's been used from {} now). Not you? Revoke it: {}/dashboard/access/tokens/{id}.{roams}",
+            "roll token \"{name}\" was used from a new network, {} (it's been used from {} now). Not you? Revoke it: {}/dashboard/access/tokens/{id}.{roams}",
             new.network,
             new.networks,
             self.config.web_url.trim_end_matches('/'),

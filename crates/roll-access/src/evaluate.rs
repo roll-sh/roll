@@ -45,7 +45,9 @@ pub struct McpCall {
 /// What a client calls itself, fit for a log line: one line, no control characters, at most 120
 /// characters. A hint, never a proof.
 pub fn client_name(s: &str) -> Option<String> {
-    let clean: String = s.chars().filter(|c| !c.is_control()).take(120).collect();
+    // Format characters too (bidi overrides, zero-width ones): they'd reorder or hide the line.
+    let format = |c: char| matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}');
+    let clean: String = s.chars().filter(|c| !c.is_control() && !format(*c)).take(120).collect();
     let clean = clean.trim();
     (!clean.is_empty()).then(|| clean.to_string())
 }

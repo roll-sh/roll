@@ -8,6 +8,7 @@ use code_sql::{Db, OptionalExtension, params};
 use roll_auth::GrantKind;
 use roll_auth::scope::Scope;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use serde_json::Value;
 
 const SCHEMA: &str = "
@@ -329,6 +330,8 @@ pub struct Store {
     touched: std::sync::Mutex<std::collections::HashMap<String, i64>>,
     /// The audit writer's queue ([`Store::queue_audit`]); its thread ends with the store.
     audit_tx: std::sync::mpsc::SyncSender<AuditEvent>,
+    /// Rows queued and not yet written ([`Store::flush_audit`]).
+    audit_pending: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// A token used from this many networks roams (CI runners, phones): new ones aren't news.
@@ -344,7 +347,8 @@ pub struct NewNetwork {
 
 /// The network an address is in, as a token's uses are told apart: its /24 (IPv4) or /48 (IPv6).
 pub fn network_of(ip: &str) -> Option<String> {
-    match ip.parse::<std::net::IpAddr>().ok()? {
+    // An IPv4 client on a dual-stack listener arrives as `::ffff:a.b.c.d`: it's that IPv4 address.
+    match ip.parse::<std::net::IpAddr>().ok()?.to_canonical() {
         std::net::IpAddr::V4(v) => {
             let o = v.octets();
             Some(format!("{}.{}.{}.0/24", o[0], o[1], o[2]))
@@ -364,13 +368,15 @@ pub fn use_key(id: &str, ip: Option<&str>) -> String {
 /// Audit rows deleted per transaction when pruning.
 const PRUNE_BATCH: i64 = 5_000;
 
-/// Audit rows queued at most (then callers write their own), and written per transaction at most.
-const AUDIT_QUEUE: usize = 16_384;
+/// Audit rows queued at most (then callers write their own), and written per statement at most:
+/// a full queue drains in well under sinks' settling time (`sinks::SETTLE_MS`), so no row lands
+/// behind a sink's cursor.
+const AUDIT_QUEUE: usize = 4_096;
 const AUDIT_BATCH: usize = 512;
 
 /// The audit writer: waits for a row, takes whatever else is queued, writes them together. No
 /// timer: a lone row is written at once, and rows batch by themselves under load.
-fn audit_writer(db: Db, rx: std::sync::mpsc::Receiver<AuditEvent>) {
+fn audit_writer(db: Db, rx: std::sync::mpsc::Receiver<AuditEvent>, pending: Arc<std::sync::atomic::AtomicUsize>) {
     while let Ok(first) = rx.recv() {
         let mut batch = vec![first];
         while batch.len() < AUDIT_BATCH {
@@ -380,42 +386,64 @@ fn audit_writer(db: Db, rx: std::sync::mpsc::Receiver<AuditEvent>) {
             }
         }
         write_audit(&db, &batch);
+        pending.fetch_sub(batch.len(), std::sync::atomic::Ordering::SeqCst);
     }
 }
 
+const AUDIT_FIELDS: &str = "id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms, client";
+
+/// Text as a row may hold it: Postgres refuses a NUL (a path can carry `%00`).
+fn text(s: &str) -> code_sql::Value {
+    code_sql::Value::Text(s.replace('\0', ""))
+}
+
+fn opt(s: &Option<String>) -> code_sql::Value {
+    s.as_deref().map_or(code_sql::Value::Null, text)
+}
+
+fn audit_values(e: &AuditEvent) -> [code_sql::Value; 18] {
+    use code_sql::Value::{Int, Null};
+    [
+        text(&e.id),
+        Int(e.at),
+        opt(&e.grant_id),
+        opt(&e.grant_name),
+        text(&e.source),
+        opt(&e.tool),
+        text(&e.method),
+        text(&e.route),
+        opt(&e.product),
+        opt(&e.action),
+        opt(&e.resource),
+        text(&e.decision),
+        opt(&e.approval),
+        Int(e.status as i64),
+        e.args.as_ref().and_then(|a| serde_json::to_string(a).ok()).map_or(Null, |a| text(&a)),
+        opt(&e.ip),
+        Int(e.duration_ms),
+        opt(&e.client),
+    ]
+}
+
+/// Rows in one statement (a round trip per row held a slow database's queue past sinks'
+/// settling time). A batch that fails is written row by row, so one bad row loses only itself.
 fn write_audit(db: &Db, events: &[AuditEvent]) {
-    let r: std::result::Result<(), code_sql::Error> = db.write_unsynced(|c| {
-        for e in events {
-            let args = e.args.as_ref().and_then(|a| serde_json::to_string(a).ok());
-            c.execute(
-                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms, client) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    e.id,
-                    e.at,
-                    e.grant_id,
-                    e.grant_name,
-                    e.source,
-                    e.tool,
-                    e.method,
-                    e.route,
-                    e.product,
-                    e.action,
-                    e.resource,
-                    e.decision,
-                    e.approval,
-                    e.status as i64,
-                    args,
-                    e.ip,
-                    e.duration_ms,
-                    e.client
-                ],
-            )?;
+    let insert = |rows: &[AuditEvent]| -> std::result::Result<(), code_sql::Error> {
+        let marks = format!("({})", vec!["?"; 18].join(", "));
+        let sql = format!("INSERT INTO audit ({AUDIT_FIELDS}) VALUES {}", vec![marks.as_str(); rows.len()].join(", "));
+        let args: Vec<code_sql::Value> = rows.iter().flat_map(audit_values).collect();
+        db.write_unsynced(|c| {
+            c.execute(&sql, args.as_slice())?;
+            Ok(())
+        })
+    };
+    if insert(events).is_ok() {
+        return;
+    }
+    for e in events {
+        if let Err(err) = insert(std::slice::from_ref(e)) {
+            tracing::warn!(error = %err, id = %e.id, "writing an audit row");
         }
-        Ok(())
-    });
-    if let Err(err) = r {
-        tracing::warn!(error = %err, rows = events.len(), "writing the audit log");
     }
 }
 
@@ -583,9 +611,10 @@ impl Store {
             db.add_column("grants", "ask_otherwise", "INTEGER")?;
         }
         let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
-        let writer = db.clone();
-        std::thread::Builder::new().name("roll-access-audit".into()).spawn(move || audit_writer(writer, rx)).map_err(|e| Error::Internal(e.to_string()))?;
-        Ok(Store { db, touched: Default::default(), audit_tx })
+        let (writer, audit_pending) = (db.clone(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let pending = audit_pending.clone();
+        std::thread::Builder::new().name("roll-access-audit".into()).spawn(move || audit_writer(writer, rx, pending)).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(Store { db, touched: Default::default(), audit_tx, audit_pending })
     }
 
     /// A setting (JSON), by key: `notify` (where approvals are posted).
@@ -884,12 +913,13 @@ impl Store {
         let r = self.db.write_unsynced(|c| {
             c.execute("UPDATE grants SET last_used_at = ?, last_used_ip = ? WHERE id = ?", params![now, ip, id])?;
             let Some(net) = network.as_deref() else { return Ok::<_, code_sql::Error>(None) };
-            let known: i64 = c.query_row("SELECT COUNT(*) FROM grant_networks WHERE grant_id = ?", [id], |r| r.get(0))?;
-            let seen = c.execute("UPDATE grant_networks SET last_at = ? WHERE grant_id = ? AND network = ?", params![now, id, net])? > 0;
-            if seen {
+            // The insert decides what's new: two nodes seeing one new network tell it once.
+            let new = c.execute("INSERT INTO grant_networks (grant_id, network, first_at, last_at) VALUES (?, ?, ?, ?) ON CONFLICT (grant_id, network) DO NOTHING", params![id, net, now, now])? > 0;
+            if !new {
+                c.execute("UPDATE grant_networks SET last_at = ? WHERE grant_id = ? AND network = ?", params![now, id, net])?;
                 return Ok(None);
             }
-            c.execute("INSERT INTO grant_networks (grant_id, network, first_at, last_at) VALUES (?, ?, ?, ?) ON CONFLICT (grant_id, network) DO NOTHING", params![id, net, now, now])?;
+            let known: i64 = c.query_row("SELECT COUNT(*) FROM grant_networks WHERE grant_id = ?", [id], |r| r.get::<_, i64>(0))? - 1;
             // Its first network is where it starts; a token that has roamed isn't news any more.
             Ok((known > 0 && known < ROAMING).then(|| NewNetwork { network: net.to_string(), networks: known + 1 }))
         });
@@ -1054,10 +1084,27 @@ impl Store {
     /// own cost. A full queue hands the row back for the caller to write ([`Store::audit`]):
     /// nothing is dropped.
     pub fn queue_audit(&self, e: AuditEvent) -> Option<AuditEvent> {
+        self.audit_pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.audit_tx.try_send(e) {
             Ok(()) => None,
-            Err(std::sync::mpsc::TrySendError::Full(e) | std::sync::mpsc::TrySendError::Disconnected(e)) => Some(e),
+            Err(std::sync::mpsc::TrySendError::Full(e) | std::sync::mpsc::TrySendError::Disconnected(e)) => {
+                self.audit_pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                Some(e)
+            }
         }
+    }
+
+    /// Wait (at most `max`) for the queued audit rows to be written: at shutdown, so a rolling
+    /// restart keeps them. Whether they all were.
+    pub fn flush_audit(&self, max: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + max;
+        while self.audit_pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
     }
 
     pub fn audit_log(&self, q: &AuditQuery) -> Result<Vec<AuditEvent>> {
@@ -1071,11 +1118,13 @@ impl Store {
             }
         }
         // "Who touched this?": the resource, or what's under it (its indices, its objects).
+        // As a range (`x/` up to `x0`, the character after `/`): exact in both databases (SQLite's
+        // LIKE ignores ASCII case) and on `audit_resource`.
         if let Some(r) = q.resource.as_deref().filter(|r| !r.is_empty()) {
-            let escaped: String = r.chars().flat_map(|c| if matches!(c, '%' | '_' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
-            sql.push_str(" AND (resource = ? OR resource LIKE ? ESCAPE '\\')");
+            sql.push_str(" AND (resource = ? OR (resource >= ? AND resource < ?))");
             args.push(code_sql::Value::Text(r.to_string()));
-            args.push(code_sql::Value::Text(format!("{escaped}/%")));
+            args.push(code_sql::Value::Text(format!("{r}/")));
+            args.push(code_sql::Value::Text(format!("{r}0")));
         }
         sql.push_str(" ORDER BY at DESC, id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
@@ -1144,6 +1193,8 @@ impl Store {
         }
         self.db.write(|c| {
             c.execute("DELETE FROM approvals WHERE expires_at < ?", [now - 24 * 3600 * 1000])?;
+            // A network unused for the log's days is forgotten (used again, it's news again).
+            c.execute("DELETE FROM grant_networks WHERE last_at < ?", [before])?;
             c.execute("DELETE FROM oauth_codes WHERE expires_at < ?", [now])?;
             c.execute("DELETE FROM grant_secrets WHERE expires_at IS NOT NULL AND expires_at < ?", [now])?;
             Ok::<_, Error>(())
