@@ -488,6 +488,11 @@ A link is `{kind, ref, field, mode, options}`:
   every 10 minutes. `Values.dynamic` names the keys that hold one, for a consumer that can't renew
   (a service that scales to zero refuses them). Only
   the lease's metadata is stored, never the credential.
+- **When a secret, an environment or the project goes**, what it issued is revoked first, while
+  the project's key and registries (rotators…) can still reach it. A revocation that fails (the
+  product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
+  retries it; a deleted project keeps its key and registries (`projects.forgotten_at`) until its
+  last lease is revoked, then they go too. Nothing it issued outlives it unrevoked.
 
 **Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
 standard environments that neither link it nor have its usual keys at `/`, and those keys: the
@@ -570,10 +575,13 @@ It's the link kind `outside_database` with fields `username` and `password`, one
 handed out last a new 40-character password and hands it out, so the role in use keeps working
 until its grace period ends; then its password is replaced by one nobody knows. Each role's
 generation is kept with the database and carried in the credential's handle, so a retirement that
-ends after the same role was handed out again does nothing, and a role whose latest handout is
-retired (its grace ended, or the write that issued it failed) is the next one handed out, never the
-one in use. A rotation the server refuses changes nothing: the turn goes back. Rotating twice within
-one grace period cuts the older login's grace short (both roles are then in their newest hands).
+ends after the same role was handed out again does nothing. An issue never takes a busy role: the
+one a stored credential uses, one an unrevoked lease still covers (the previous login in its
+grace), or one another issue or retirement is changing (each holds its role for two minutes at
+most), all worked out in the write that claims it. So two rotations racing (two nodes' sweepers, a
+person and the schedule) can't reset the login in use; rotating again within the grace period is
+a 409 until it ends. A rotation the server refuses changes nothing, and a role whose handout is
+retired (its grace ended, or the write that issued it failed) is free again.
 The two roles serve one credential, so a database is linked in one environment only (409 elsewhere;
 a link provider says so with `exclusive()`): give staging and production a pair of roles each.
 
@@ -609,7 +617,9 @@ are allowed; no path or settings). Passwords go as `#<sha256>` (`ACL SETUSER <ro
 password) whose rules a dynamic login copies: `ACL SETUSER roll_… reset on #… <its commands, keys
 and channels>`; a template with selectors is refused. Ending the lease is `ACL DELUSER`, which also
 closes the user's connections; Redis has no expiry for a user, so a dynamic login lasts until roll
-ends its lease. The server is the tenant's, so its replies are read by a small parser that bounds
+ends its lease. Every change is kept across a restart the way the server keeps its users: `ACL
+SAVE` with an ACL file (a failure fails the change, or a restart would bring back a retired
+password), else `CONFIG REWRITE` where there's a config file. The server is the tenant's, so its replies are read by a small parser that bounds
 nesting, counts and lengths by the bytes present.
 
 ## Consumption
@@ -1659,9 +1669,10 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Redis and MongoDB outside roll** (on #39's registry and guarded connections): rotation and a
-   login per lease for ElastiCache, Upstash and Atlas, as Vault's Redis and MongoDB plugins
-   (`ACL SETUSER` over TLS; MongoDB's `updateUser`/`createUser` with a role).
+1. **MongoDB outside roll** (next to #41's Redis, on #39's registry and guarded connections):
+   rotation and a user per lease for Atlas and self-run servers, as Vault's MongoDB plugin
+   (`updateUser`/`createUser` with a role over TLS; OP_MSG and SCRAM-SHA-256, bounded like #41's
+   reply reader).
 2. **Dynamic GCP and Azure credentials** (Vault's GCP and Azure engines, next to #38's AWS): a
    short-lived service-account token per lease through workload identity federation, and an Entra
    app's client secret per lease, with the same decoy check against confused deputies.
@@ -1694,6 +1705,8 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
+  user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
 - **#39, Postgres and MySQL outside roll** (after #20): two login roles take turns (rotation), or a
   login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
   itself (Postgres gets a SCRAM verifier, never the password).

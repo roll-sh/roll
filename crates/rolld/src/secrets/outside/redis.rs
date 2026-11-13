@@ -121,7 +121,8 @@ fn value(buf: &[u8], p: &mut usize, depth: usize) -> Result<Option<Reply>, Strin
                 if n > room {
                     return Ok(None);
                 }
-                let mut out = Vec::with_capacity(n);
+                // Reserve little up front: a claimed count is only a claim.
+                let mut out = Vec::with_capacity(n.min(64));
                 for _ in 0..n {
                     match value(buf, p, depth + 1)? {
                         Some(v) => out.push(v),
@@ -229,7 +230,24 @@ pub(super) async fn check(c: &mut Conn, roles: &[String], group: Option<&str>) -
 }
 
 pub(super) async fn set_password(c: &mut Conn, role: &str, password: &str) -> Result<(), String> {
-    c.call(&[b"ACL", b"SETUSER", role.as_bytes(), b"resetpass", &hashed(password)]).await.map(|_| ())
+    c.call(&[b"ACL", b"SETUSER", role.as_bytes(), b"resetpass", &hashed(password)]).await?;
+    persist(c).await
+}
+
+/// Keep an ACL change across a restart, as the server keeps its users: `ACL SAVE` with an ACL
+/// file (failing loudly, or a restart would bring back a retired password), else `CONFIG REWRITE`
+/// where there's a config file. A server that keeps neither (or a managed one that manages
+/// persistence itself and refuses both) keeps ACLs in memory only, which is its configuration.
+async fn persist(c: &mut Conn) -> Result<(), String> {
+    let aclfile = match c.call(&[b"CONFIG", b"GET", b"aclfile"]).await {
+        Ok(Reply::Array(kv)) => matches!(kv.get(1), Some(Reply::Bulk(f)) if !f.is_empty()),
+        _ => false,
+    };
+    if aclfile {
+        return c.call(&[b"ACL", b"SAVE"]).await.map(|_| ()).map_err(|e| format!("saving the ACL file: {e}"));
+    }
+    let _ = c.call(&[b"CONFIG", b"REWRITE"]).await;
+    Ok(())
 }
 
 /// The template's rules as `ACL SETUSER` takes them (Redis 7 answers strings of rules, Redis 6
@@ -263,10 +281,12 @@ pub(super) async fn create_login(c: &mut Conn, name: &str, password: &str, group
     let hash = hashed(password);
     let mut args: Vec<&[u8]> = vec![b"ACL", b"SETUSER", name.as_bytes(), b"reset", b"on", &hash];
     args.extend(rules.iter().map(Vec::as_slice));
-    c.call(&args).await.map(|_| ())
+    c.call(&args).await?;
+    persist(c).await
 }
 
 /// `ACL DELUSER` also closes the user's connections; one that's gone already is fine.
 pub(super) async fn drop_login(c: &mut Conn, name: &str) -> Result<(), String> {
-    c.call(&[b"ACL", b"DELUSER", name.as_bytes()]).await.map(|_| ())
+    c.call(&[b"ACL", b"DELUSER", name.as_bytes()]).await?;
+    persist(c).await
 }

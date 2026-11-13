@@ -171,12 +171,13 @@ impl Guarded {
             let client = match tls {
                 Some(tls) => {
                     let (client, conn) = config.connect(tls).await.map_err(|e| connect_error(&host, e))?;
-                    tokio::spawn(conn);
+                    // The connection's task ends with the conversation's timeout, whatever the server does.
+                    tokio::spawn(tokio::time::timeout(TIMEOUT, conn));
                     client
                 }
                 None => {
                     let (client, conn) = config.connect(tokio_postgres::NoTls).await.map_err(|e| connect_error(&host, e))?;
-                    tokio::spawn(conn);
+                    tokio::spawn(tokio::time::timeout(TIMEOUT, conn));
                     client
                 }
             };

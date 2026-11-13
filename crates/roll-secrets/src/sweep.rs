@@ -174,13 +174,40 @@ impl Secrets {
 
     /// Revoke credentials whose secrets are gone (an environment or a project deleted), best
     /// effort: a failure is logged, and the product still holds the credential.
-    pub(crate) fn revoke_managed(&self, creds: Vec<(Link, Json)>) {
+    /// Revoke credentials whose secrets are gone. One that can't be revoked now is left to the
+    /// sweeper, as a lease already due.
+    pub(crate) fn revoke_gone(&self, project: &str, creds: Vec<(Link, Json)>) {
+        let failed = self.revoke_managed(creds);
+        if failed.is_empty() {
+            return;
+        }
+        let kept = self.db.now_ms().map_err(Error::from).and_then(|now| {
+            self.db.write(|c| {
+                for (link, handle) in &failed {
+                    c.execute(
+                        "INSERT INTO leases (id, project_id, env_id, key, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES (?, ?, '', '', 'retired', ?, ?, 'roll:revoke', ?, ?, NULL)",
+                        params![names::new_id("lse", 16), project, crate::json(link), crate::json(handle), now, now],
+                    )?;
+                }
+                Ok::<_, Error>(())
+            })
+        });
+        if let Err(e) = kept {
+            tracing::error!(%project, "keeping credentials to revoke later failed: {e}");
+        }
+    }
+
+    /// Revoke credentials whose secrets are gone; those that couldn't be, with their handles.
+    pub(crate) fn revoke_managed(&self, creds: Vec<(Link, Json)>) -> Vec<(Link, Json)> {
+        let mut failed = vec![];
         for (link, state) in creds {
             let Some(handle) = state.get("handle") else { continue };
             if let Err(e) = self.links.get(&link.kind).and_then(|p| p.revoke(&link.r#ref, handle)) {
                 tracing::warn!(kind = %link.kind, "revoking a deleted secret's credential failed: {e}");
+                failed.push((link, handle.clone()));
             }
         }
+        failed
     }
 
     /// Rotate a managed link's credential (with every secret that shares it), or a live link's
@@ -289,6 +316,10 @@ impl Secrets {
                     tracing::warn!(lease = %id, "revoking an expired lease failed: {e}");
                 }
             }
+        }
+        // Deleted projects whose last credential is revoked now.
+        if let Err(e) = self.sweep_forgotten() {
+            tracing::warn!("cleaning up deleted projects failed: {e}");
         }
         // Expired ephemeral environments.
         let expired: Vec<(String, String)> = self.db.read(|c| {

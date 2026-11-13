@@ -67,8 +67,9 @@ async fn connect(u: &Url, ca: Option<&str>, allow_private: bool) -> Result<Conn,
         .user(Some(u.user.clone()))
         .pass(Some(u.password.clone()))
         .db_name(u.db.clone())
-        // Never reconnect over a socket the server names.
-        .prefer_socket(false);
+        // Never reconnect over a socket the server names, nor take its packet size (up to 1 GiB).
+        .prefer_socket(false)
+        .max_allowed_packet(Some(4 << 20));
     if u.tls {
         let roots = ca.map(|pem| vec![pem.as_bytes().to_vec().into()]).unwrap_or_default();
         opts = opts.ssl_opts(SslOpts::default().with_root_certs(roots).with_danger_tls_hostname_override(Some(u.host.clone())));
@@ -116,11 +117,13 @@ async fn exec(c: &mut Conn, sql: &str) -> Result<(), String> {
 }
 
 pub(super) async fn check(c: &mut Conn, roles: &[String], group: Option<&str>) -> Result<(), String> {
-    let names: Vec<String> = c.query("SELECT user FROM mysql.user WHERE host = '%'").await.map_err(|e| error(&e))?;
-    match roles.iter().map(String::as_str).chain(group).find(|r| !names.iter().any(|n| n == r)) {
-        Some(r) => Err(format!("there's no account '{r}'@'%'")),
-        None => Ok(()),
+    for r in roles.iter().map(String::as_str).chain(group) {
+        let found: Option<String> = c.exec_first("SELECT user FROM mysql.user WHERE host = '%' AND user = ? LIMIT 1", (r,)).await.map_err(|e| error(&e))?;
+        if found.is_none() {
+            return Err(format!("there's no account '{r}'@'%'"));
+        }
     }
+    Ok(())
 }
 
 pub(super) async fn set_password(c: &mut Conn, role: &str, password: &str) -> Result<(), String> {
