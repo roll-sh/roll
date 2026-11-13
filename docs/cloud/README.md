@@ -614,7 +614,9 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
   SNI, a `sync` database), streams (librdkafka, SASL_SSL, `acks=all`, idempotent), storage
   (aws-sdk-s3, path and virtual-host style, multipart uploads), tasks (publish with `dedup_id`,
   pull and ack), queues (lapin over AMQPS with the URL the API gave a vhost, publisher confirms to
-  a quorum queue, a consumer with manual acks).
+  a quorum queue, a consumer with manual acks), search (the Elasticsearch REST API on the
+  cluster's own hostname with its password: documents `PUT` by id, realtime `GET`s, and an
+  `_mget` of every acknowledged document at the end).
 - **The disruptions**: SIGKILL of the node holding the most leases (started again afterwards); a
   rolling restart, each node stopped with SIGTERM (it must exit 0 holding no lease) and healthy
   again before the next; a fourth node joining and leaving. After each, every tenant lease must be
