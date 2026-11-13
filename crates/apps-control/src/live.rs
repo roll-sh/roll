@@ -189,7 +189,12 @@ pub struct Gate {
     pub maintenance: Option<String>,
     /// Only these networks get in (empty: anyone).
     pub allow: Vec<ipnet::IpNet>,
+    /// Each client's requests a minute.
+    pub rate: Option<crate::model::RateLimit>,
 }
+
+/// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
+const MAX_BUCKETS: usize = 100_000;
 
 impl Gate {
     /// Whether `client` (the address the fleet vouches for) gets in. None, with a list: no.
@@ -197,14 +202,18 @@ impl Gate {
         if self.allow.is_empty() {
             return true;
         }
-        let Some(ip) = client.and_then(|c| c.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().ok()) else { return false };
-        // An IPv4 client may come as `::ffff:a.b.c.d`.
-        let ip = match ip {
-            std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, std::net::IpAddr::V4),
-            v4 => v4,
-        };
+        let Some(ip) = client_ip(client) else { return false };
         self.allow.iter().any(|n| n.contains(&ip))
     }
+}
+
+/// A client's address as the fleet gives it, an IPv4 one over IPv6 (`::ffff:a.b.c.d`) as IPv4.
+pub fn client_ip(client: Option<&str>) -> Option<std::net::IpAddr> {
+    let ip = client?.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().ok()?;
+    Some(match ip {
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, std::net::IpAddr::V4),
+        v4 => v4,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +307,8 @@ pub struct EnvLive {
     answering: std::sync::atomic::AtomicBool,
     /// What its public names let through, as last read (None: read it again).
     gate: Mutex<Option<Arc<Gate>>>,
+    /// Each client's tokens and when they were counted (its rate limit; None: no address).
+    buckets: Mutex<HashMap<Option<std::net::IpAddr>, (f64, Instant)>>,
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
@@ -346,6 +357,7 @@ impl EnvLive {
             ticking: std::sync::atomic::AtomicBool::new(false),
             answering: std::sync::atomic::AtomicBool::new(false),
             gate: Mutex::new(None),
+            buckets: Mutex::new(HashMap::new()),
             cpu_samples: Mutex::new(std::collections::VecDeque::new()),
             cpu_need: AtomicU32::new(0),
             last_tick: Mutex::new(None),
@@ -749,6 +761,31 @@ impl EnvLive {
     /// Its settings changed: the next request reads them again.
     pub fn forget_gate(&self) {
         *self.gate.lock() = None;
+        self.buckets.lock().clear();
+    }
+
+    /// One request from `client` under `limit`: let through (a token taken), or how long until
+    /// the next token.
+    pub fn take_token(&self, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
+        let (rate, burst) = (limit.per_minute as f64 / 60.0, limit.burst() as f64);
+        let now = Instant::now();
+        let mut b = self.buckets.lock();
+        if b.len() >= MAX_BUCKETS && !b.contains_key(&client) {
+            // Full ones first: they're the same as no entry.
+            b.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < burst);
+            if b.len() >= MAX_BUCKETS {
+                b.clear();
+            }
+        }
+        let (tokens, at) = b.entry(client).or_insert((burst, now));
+        *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(burst);
+        *at = now;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            Ok(())
+        } else {
+            Err(Duration::from_secs_f64((1.0 - *tokens) / rate))
+        }
     }
 
     /// Private callers ([`crate::runtime::Callers`]), which rolld never sees: a sleeping instance

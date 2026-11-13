@@ -194,6 +194,8 @@ export interface EnvironmentPut {
   maintenance?: boolean | { message?: string | null };
   /** Only these networks get in through its public names; null or [] lets anyone in. */
   allow_ips?: (string | IpRule)[] | null;
+  /** Each client's requests a minute through its public names, with a burst; null: no limit. */
+  rate_limit?: { per_minute: number; burst?: number } | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -261,6 +263,8 @@ export interface Environment extends EnvironmentSummary {
   maintenance?: { message: string | null } | null;
   /** Only these networks get in through its public names (empty: anyone). */
   allow_ips?: IpRule[];
+  /** Each client's requests a minute through its public names (null: no limit). */
+  rate_limit?: { per_minute: number; burst?: number | null } | null;
   created_at: number;
 }
 

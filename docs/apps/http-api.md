@@ -260,6 +260,10 @@ type EnvironmentPut = {
    *  Checked first, on the address the fleet vouches for (no address: 403). null or [] lets
    *  anyone in. The private network is unaffected. */
   allow_ips?: (string | { cidr: string; description?: string | null })[] | null;
+  /** Each client's requests a minute through its public names (deployment URLs too), a token
+   *  bucket per address the fleet vouches for: `burst` at once (default per_minute), then the
+   *  rate; more is a 429 with Retry-After, before anything wakes. 1–100000 each; null: none. */
+  rate_limit?: { per_minute: number; burst?: number } | null;
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
    *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
    *  service's, null goes back to it; checked with the service's settings as one run. */
@@ -284,6 +288,7 @@ type Environment = EnvironmentSummary & {
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
+  rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks

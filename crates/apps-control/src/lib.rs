@@ -768,6 +768,7 @@ impl Apps {
             feedback: r.feedback,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             allow_ips: r.allow_ips.clone(),
+            rate_limit: r.rate_limit,
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
@@ -780,7 +781,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback", "maintenance", "allow_ips"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback", "maintenance", "allow_ips", "rate_limit"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -912,6 +913,20 @@ impl Apps {
             };
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_allow_ips(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(v) = o.get("rate_limit") {
+            let limit = match v {
+                Value::Null => None,
+                v => {
+                    let l: crate::model::RateLimit = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("rate_limit is {{per_minute, burst?}} or null: {e}")))?;
+                    l.check()?;
+                    Some(l)
+                }
+            };
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_rate_limit(&sid, &e, limit.as_ref())).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -1555,7 +1570,7 @@ impl Apps {
         let (sid, e) = (live.service.clone(), live.env.clone());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit });
         live.set_gate(g.clone());
         Ok(g)
     }

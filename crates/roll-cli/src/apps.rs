@@ -510,6 +510,12 @@ pub enum AppsCmd {
         /// Anyone gets in again.
         #[arg(long)]
         allow_any: bool,
+        /// Each client's requests a minute through its public URLs, `N` or `N:BURST`.
+        #[arg(long, value_name = "N[:BURST]", conflicts_with = "no_rate_limit")]
+        rate_limit: Option<String>,
+        /// No limit per client.
+        #[arg(long)]
+        no_rate_limit: bool,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -2162,7 +2168,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2189,6 +2195,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("allow_ips".into(), json!(allow_ip));
             } else if allow_any {
                 body.insert("allow_ips".into(), Value::Null);
+            }
+            if let Some(r) = rate_limit {
+                let (n, burst) = r.split_once(':').map_or((r.as_str(), None), |(n, b)| (n, Some(b)));
+                let n: u32 = n.parse().map_err(|_| anyhow::anyhow!("--rate-limit is N or N:BURST"))?;
+                let mut l = json!({ "per_minute": n });
+                if let Some(b) = burst {
+                    l["burst"] = json!(b.parse::<u32>().map_err(|_| anyhow::anyhow!("--rate-limit is N or N:BURST"))?);
+                }
+                body.insert("rate_limit".into(), l);
+            } else if no_rate_limit {
+                body.insert("rate_limit".into(), Value::Null);
             }
             // A new access token, made here: only its link shows it, once.
             let token = private.then(new_token);

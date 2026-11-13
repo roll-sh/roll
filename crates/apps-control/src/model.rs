@@ -754,6 +754,8 @@ pub struct Environment {
     pub maintenance: Option<Maintenance>,
     /// Only these addresses get in through its public names (empty: anyone).
     pub allow_ips: Vec<IpRule>,
+    /// Each client's requests a minute through its public names (null: no limit).
+    pub rate_limit: Option<RateLimit>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -771,6 +773,33 @@ pub struct IpRule {
     pub cidr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Requests a minute each client may make through an environment's public names, with a burst
+/// over that rate (a token bucket): Vercel's firewall rate limits.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimit {
+    pub per_minute: u32,
+    /// How many may come at once (default: a minute's worth).
+    #[serde(default)]
+    pub burst: Option<u32>,
+}
+
+impl RateLimit {
+    pub fn check(&self) -> Result<()> {
+        if !(1..=100_000).contains(&self.per_minute) {
+            return Err(Error::BadRequest("rate_limit.per_minute is 1–100000".into()));
+        }
+        if self.burst.is_some_and(|b| !(1..=100_000).contains(&b)) {
+            return Err(Error::BadRequest("rate_limit.burst is 1–100000".into()));
+        }
+        Ok(())
+    }
+
+    pub fn burst(&self) -> u32 {
+        self.burst.unwrap_or(self.per_minute)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

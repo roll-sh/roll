@@ -2155,3 +2155,31 @@ async fn a_tunnel_reaches_a_private_services_port() {
     let (_, act) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
     assert!(act.to_string().contains("audit.tunnel.opened"), "{act}");
 }
+
+/// A rate limit lets each client make so many requests (a burst, then its rate) and tells the
+/// rest when to come back, before anything wakes; another client has its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rate_limit_slows_each_client_down() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"rate_limit": {"per_minute": 0}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"rate_limit": {"per_minute": 60, "burst": 2}}))).await;
+    assert_eq!((st, &env["rate_limit"]), (StatusCode::OK, &json!({"per_minute": 60, "burst": 2})), "{env}");
+    let from = |addr: &'static str| {
+        let mut req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(addr.parse::<std::net::SocketAddr>().unwrap()));
+        let public = w.public.clone();
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            (r.status(), r.headers().get("retry-after").map(|v| v.to_str().unwrap().to_string()))
+        }
+    };
+    assert_eq!(from("10.0.0.1:1").await.0, StatusCode::OK);
+    assert_eq!(from("10.0.0.1:2").await.0, StatusCode::OK);
+    assert_eq!(from("10.0.0.1:3").await, (StatusCode::TOO_MANY_REQUESTS, Some("1".into())), "a token a second");
+    assert_eq!(from("10.0.0.2:1").await.0, StatusCode::OK, "another client has its own");
+    call(&w.api, "PUT", &base, Some(json!({"rate_limit": null}))).await;
+    assert_eq!(from("10.0.0.1:4").await.0, StatusCode::OK);
+}

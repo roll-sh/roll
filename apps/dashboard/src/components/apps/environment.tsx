@@ -34,6 +34,9 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const allowText = (env.allow_ips ?? []).map((r) => (r.description ? `${r.cidr} ${r.description}` : r.cidr)).join("\n");
   const [allow, setAllow] = useState(allowText);
   useEffect(() => setAllow(allowText), [allowText]);
+  const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
+  const [rate, setRate] = useState(rateText);
+  useEffect(() => setRate(rateText), [rateText]);
   const { copied, copy } = useCopy();
   const repo = service.source.kind === "repo";
   const busy = runner.busy !== null;
@@ -149,6 +152,31 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               aria-label="Allowed networks, one per line"
               className={`${input} mt-2 w-full font-mono text-[12px]`}
             />
+          </div>
+        )}
+
+        {service.run.type === "web" && service.run.public !== false && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Rate limit</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.rate_limit
+                  ? `Each visitor's address gets ${env.rate_limit.per_minute} requests a minute (${env.rate_limit.burst ?? env.rate_limit.per_minute} at once); more get a 429 that says when to come back.`
+                  : "No limit per visitor."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={rate}
+                onChange={(e) => setRate(e.target.value.replace(/[^0-9]/g, ""))}
+                placeholder="per minute"
+                aria-label="Requests a minute per visitor"
+                className={`${input} w-28 font-mono text-[12px]`}
+              />
+              <button className={btn} disabled={busy || rate === rateText} onClick={() => runner.run("rate", () => appsApi.putEnvironment(service.id, env.name, { rate_limit: rate ? { per_minute: Number(rate) } : null }))}>
+                {rate ? "Save" : "Remove"}
+              </button>
+            </div>
           </div>
         )}
 

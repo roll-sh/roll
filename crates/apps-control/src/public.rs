@@ -410,8 +410,19 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         Ok(g) => g,
         Err(_) => return page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's settings couldn't be read. Try again in a few seconds."),
     };
-    if !gate.admits(roll_cluster::client_addr(&req).as_deref()) {
+    let client = roll_cluster::client_addr(&req);
+    if !gate.admits(client.as_deref()) {
         return page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed.");
+    }
+    // Its rate limit per client, before anything wakes.
+    if let Some(limit) = &gate.rate
+        && let Err(wait) = apps.live(service, env).take_token(crate::live::client_ip(client.as_deref()), limit)
+    {
+        let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", "Too many requests from your address. Try again in a moment.");
+        if let Ok(v) = HeaderValue::from_str(&(wait.as_secs_f64().ceil() as u64).max(1).to_string()) {
+            r.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        return r;
     }
     // A private environment answers only visitors with its token, before anything wakes.
     if let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
