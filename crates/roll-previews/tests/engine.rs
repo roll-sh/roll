@@ -583,6 +583,8 @@ async fn a_variable_removed_during_its_deploy_is_removed_after() {
     assert!(sent(), "the deploy that sent it");
     e.engine.pass().await.unwrap();
     assert!(!sent(), "removed on the next converge");
+}
+
 #[tokio::test]
 async fn a_family_of_branches_gets_its_own_variables() {
     let e = env(json!({ "enabled": true, "env": { "FEATURE": "off" }, "env_for": { "feat/*": { "FEATURE": "branch" } } }));
