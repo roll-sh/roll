@@ -88,6 +88,11 @@ export const REMEMBER: { value: Remember; label: string }[] = [
   { value: "always", label: "Always" },
 ];
 
+/** Where in its resource an approval is (what remembering it keeps to): "production · folder /db". */
+export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): string {
+  return [a.environment, a.scope_path && a.scope_path !== "/" ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
+}
+
 /** Whether an approval is about one resource, so approving it can be remembered. */
 export const rememberable = (a: Pick<Approval, "resource">) => Boolean(a.resource && !a.resource.startsWith("new in "));
 
@@ -267,6 +272,8 @@ export const accessApi = {
   client: (id: string) => call<OAuthClient>("GET", `/v1/access/oauth/clients/${encodeURIComponent(id)}`),
   /** The consent screen's answer: where to send the browser (the client's redirect, with a code). */
   authorize: (c: Consent) => call<{ redirect: string }>("POST", "/v1/access/oauth/authorize", c),
+  /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
+  searchIndices: (cluster: string) => call<{ index: string }[]>("GET", `/v1/search/clusters/${encodeURIComponent(cluster)}/indices`),
 };
 
 // ── pure helpers (tested in access-api.test.ts) ──
