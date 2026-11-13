@@ -461,6 +461,11 @@ async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, shape: &Shape<'_>) 
     let Shape { rules, expires_at, ip_allow, rate, ask_otherwise } = *shape;
     let id = g.id.to_string();
     let maker = blocking(a.clone(), move |a| a.store.get(&id)).await?;
+    // A workload's token is a job's for minutes: what it makes would be a credential nobody set
+    // up, so it makes and changes none.
+    if maker.kind == "workload" {
+        return Err(Error::Forbidden("a workload token can't make or change tokens".into()));
+    }
     // Its own rules, not what it's allowed for a while: a while never becomes for good.
     if !maker.rules.covers(rules) {
         return Err(Error::Forbidden("a token can only make tokens it covers: every rule must be within one of its own".into()));

@@ -589,7 +589,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   stay out of the token list (`?kind=workload` lists the latest 500), the checkup, the expiry
   digest, new-network notices and the tokens' caps (10,000 live of their own, 1,000 per owner), and go a day after
   they end. One is fixed: never edited, rotated or grown by a remembered approval (`409`), only
-  revoked or left to end; a token it makes ends no later than it does. Their requests are audited as any token's, and each mint is a row.
+  revoked or left to end. It makes and changes no tokens (`403`): what it made would be a
+  credential nobody set up. Their requests are audited as any token's, and each mint is a row.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
 ### Tighten to what it used
