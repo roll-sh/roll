@@ -937,10 +937,11 @@ pub enum LinkKind {
     Stream,
     Queue,
     Nosql,
+    Search,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 6] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql];
+    pub const ALL: [LinkKind; 7] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -950,6 +951,7 @@ impl LinkKind {
             LinkKind::Stream => "stream",
             LinkKind::Queue => "queue",
             LinkKind::Nosql => "nosql",
+            LinkKind::Search => "search",
         }
     }
 

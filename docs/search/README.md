@@ -211,21 +211,17 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall is 11.1 s at the
-   SIGKILL (redis, nosql and tasks ~10 s in the same run): a dead owner's lease expires before
-   another node loads its clusters. Measure where the time goes (lease TTL, detection, load from
-   S3) and cut it, keeping fencing by ownership markers.
-2. **Integration with the stacked branches** once the stacking agent's merge of previews (#21,
-   #23), apps and secrets (#20) lands on this branch: run previews' search brancher against the
-   current branch API (`own_bytes`, branch delete), secrets' search link provider (keys routes),
-   and apps' bindings of a `search` resource end to end (`ELASTICSEARCH_URL`, the cluster's
-   hostname); the fleet test with every product on.
-3. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
+1. **Integration with the stacked branches**: previews (search brancher: branch, find, reset,
+   delete, `own_bytes`, `ELASTICSEARCH_URL`) and apps are on this branch; apps' links now cover
+   search (`ELASTICSEARCH_URL`, or `OPENSEARCH_URL` for the opensearch flavor). Next: run a
+   preview and an app link against a live rolld with search on, and secrets' link provider once
+   #20 stacks; the fleet test with every product on.
+2. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
    both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is): a full
    rerun of every Rally track with variance for all three targets; one allocator policy (rolld's
    against search-dev's purge governor, by a matched benchmark); `terms_enum`'s per-request
    overhead.
-4. **Compatibility gaps** from the extended suites (4,699+ of the 5,541 Elasticsearch passes),
+3. **Compatibility gaps** from the extended suites (4,699+ of the 5,541 Elasticsearch passes),
    largest first: platinum's machine learning (278, a product decision: anomaly detection and
    trained models), rollup (52), security's last 13, watcher (43 of 89), ES|QL's last 5
    (TOP_SNIPPETS, CATEGORIZE, approximation, `unsigned_long` past `i64::MAX`). `logsdb`'s last 9 are
@@ -233,11 +229,15 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    last 5 (`geo_bounds` on geo_point runtime fields, ip terms tie order, highlighting runtime
    fields); downsample's last one (allocation filtering). In the opensearch dialect, count
    `auto_date_histogram` from the points tree as OpenSearch does.
-5. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
+4. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
    (#18) seeing only the clusters and indices their access allows; checked against Elastic
    Cloud's and OpenSearch Dashboards' consoles.
-6. **Metering on the fleet**: a cluster that moves mid-interval is metered once; job wakes billed
+5. **Metering on the fleet**: a cluster that moves mid-interval is metered once; job wakes billed
    as loaded time are visible in usage.
+6. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+   SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
+   the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
+   load; the TTL is roll cloud's fleet-wide choice.
 7. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`); measure it once
    main's cache exists. `search-store`'s `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once`
    failed once on the loaded host (it passes alone): find what it races on.

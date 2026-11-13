@@ -271,7 +271,7 @@ export interface Deployment {
   steps?: { step: string; at: number }[];
 }
 
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql";
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search";
 
 export interface Link {
   kind: LinkKind;

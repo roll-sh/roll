@@ -444,6 +444,7 @@ async fn run() -> anyhow::Result<()> {
                 code.as_ref().map(|c| c.code.clone()),
                 postgres.as_ref().map(|p| p.control.clone()),
                 redis.as_ref().map(|r| r.control.clone()),
+                search.as_ref().map(|s| s.control.clone()),
             )
             .await?,
         ),

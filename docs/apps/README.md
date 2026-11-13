@@ -485,8 +485,9 @@ every deployment is immutable with instant rollback.
   with its service name as an alias. On the fleet, tasks of one project and environment share a
   security group that admits only itself, and names resolve through Cloud Map (in `## Next`).
 - **roll databases**: a service links to the project's Postgres, Redis, buckets, streams,
-  queues and NoSQL. A link injects the resource's connection variables (`DATABASE_URL`,
-  `REDIS_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`), named with the resource's prefix
+  queues, NoSQL and search clusters. A link injects the resource's connection variables
+  (`DATABASE_URL`, `REDIS_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`, `ELASTICSEARCH_URL`
+  or `OPENSEARCH_URL` by the cluster's flavor, with its credentials), named with the resource's prefix
   when a service links two of a kind (`ORDERS_DATABASE_URL`). Locally the URLs are rewritten for
   the container (`host.docker.internal`); on the fleet they're the public edge names over TLS,
   as previews use, so there's no path from a task into the fleet's network.
@@ -958,7 +959,7 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   writes a bundle's env file 0644 (what reads it in previews' containers decides whether it can
   be 0600). Builds' secrets a stopped node left in Secrets Manager are swept at start (two days
   old); the bucket's `builds/` and `env/` objects wait for the stack's lifecycle rule.
-- Links: Postgres and Redis are wired; buckets, streams, queues and NoSQL answer "not wired yet".
+- Links: Postgres, Redis and search are wired; buckets, streams, queues and NoSQL answer "not wired yet".
 - roll secrets isn't on main yet: `NoSecrets` stands in, and service variables are the env store.
 - Private networking is a Docker network per project and environment; it isn't reachable from
   the host's own roll databases on hosts whose firewall drops container-to-host traffic.

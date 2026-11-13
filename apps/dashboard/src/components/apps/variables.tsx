@@ -14,9 +14,11 @@ const SOURCE_TONE: Record<VariableSource, string> = {
   roll: "border-line text-subtle",
 };
 
-/** Workspace kinds a service can link to, by their link kind. */
-/** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis" };
+/**
+ * Workspace kinds a service can link to, by their link kind: rolld wires Postgres, Redis and
+ * search (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next").
+ */
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", search: "search" };
 
 type Edit = { name: string; value: string };
 

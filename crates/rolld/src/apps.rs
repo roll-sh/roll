@@ -283,6 +283,7 @@ impl Sources for CodeSources {
 struct RollResources {
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    search: Option<Arc<search_control::Control>>,
 }
 
 #[async_trait]
@@ -315,6 +316,21 @@ impl Resources for RollResources {
                     Ok(v)
                 })
                 .await
+            }
+            LinkKind::Search => {
+                let c = self.search.clone().ok_or_else(|| anyhow::anyhow!("roll search isn't on this node"))?;
+                let cluster = c.get(r#ref).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                // The cluster's URL with its credentials, as Elasticsearch and OpenSearch clients
+                // read it (`ELASTICSEARCH_URL`; `OPENSEARCH_URL` for the opensearch flavor).
+                let conn = c.connection(&cluster);
+                let url = conn["url"].as_str().unwrap_or_default();
+                let enc = |s: &str| urlencoding::encode(s).into_owned();
+                let with = match url.split_once("://") {
+                    Some((scheme, rest)) => format!("{scheme}://{}:{}@{rest}", enc(&cluster.name), enc(&cluster.password)),
+                    None => url.to_string(),
+                };
+                let var = if cluster.flavor == "opensearch" { "OPENSEARCH_URL" } else { "ELASTICSEARCH_URL" };
+                Ok(vec![(var.to_string(), with)])
             }
             other => anyhow::bail!("links to {} aren't wired on this node yet", other.as_str()),
         }
@@ -356,6 +372,7 @@ pub async fn start(
     code: Option<Arc<code_control::Code>>,
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    search: Option<Arc<search_control::Control>>,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -416,7 +433,7 @@ pub async fn start(
         builder,
         sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         secrets: Arc::new(NoSecrets),
-        resources: Arc::new(RollResources { postgres, redis }),
+        resources: Arc::new(RollResources { postgres, redis, search }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
         objects,
