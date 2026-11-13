@@ -157,6 +157,25 @@ export interface ServicePatch {
   run?: Reset<Run>;
 }
 
+export interface IpRule {
+  /** Canonical: `203.0.113.7/32`, `10.0.0.0/8`, `2001:db8::/32`. */
+  cidr: string;
+  description?: string;
+}
+
+/** An allow list as typed, one network per line with an optional description after it. */
+export function parseAllowList(text: string): IpRule[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [cidr, ...rest] = l.split(/\s+/);
+      const description = rest.join(" ").replace(/^#\s*/, "");
+      return description ? { cidr, description } : { cidr };
+    });
+}
+
 export interface EnvironmentPut {
   branch?: string | null;
   ephemeral?: boolean;
@@ -169,6 +188,8 @@ export interface EnvironmentPut {
   follow_tag?: boolean;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
+  /** Only these networks get in through its public names; null or [] lets anyone in. */
+  allow_ips?: (string | IpRule)[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -234,6 +255,8 @@ export interface Environment extends EnvironmentSummary {
   waiting_for_ci?: string | null;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
+  /** Only these networks get in through its public names (empty: anyone). */
+  allow_ips?: IpRule[];
   created_at: number;
 }
 

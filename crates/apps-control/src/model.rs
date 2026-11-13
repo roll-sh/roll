@@ -728,6 +728,8 @@ pub struct Environment {
     /// In maintenance (Render's maintenance mode): its public names answer a 503 page with the
     /// message, and nothing wakes. Null: serving.
     pub maintenance: Option<Maintenance>,
+    /// Only these addresses get in through its public names (empty: anyone).
+    pub allow_ips: Vec<IpRule>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -736,6 +738,15 @@ pub struct Environment {
     /// The push waiting for its checks, if one is.
     pub waiting_for_ci: Option<String>,
     pub created_at: i64,
+}
+
+/// An address range let into a public service (Render's IP allow list).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IpRule {
+    /// A network (`203.0.113.0/24`, `2001:db8::/32`), kept in its canonical form.
+    pub cidr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1018,6 +1029,32 @@ pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
         return Err(Error::BadRequest(format!("{h} is under {d}, which roll manages")));
     }
     Ok(h)
+}
+
+/// One allow-list entry as given: a network or bare address (a string, or `{cidr,
+/// description?}`), kept canonical (`10.1.2.3/8` is `10.0.0.0/8`).
+pub fn ip_rule(v: &serde_json::Value) -> Result<IpRule> {
+    let (cidr, description) = match v {
+        serde_json::Value::String(c) => (c.as_str(), None),
+        serde_json::Value::Object(o) => {
+            if let Some(k) = o.keys().find(|k| !["cidr", "description"].contains(&k.as_str())) {
+                return Err(Error::BadRequest(format!("allow_ips: {k} isn't a field")));
+            }
+            let d = match o.get("description") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(d)) if d.chars().count() <= 200 => Some(d.trim().to_string()).filter(|d| !d.is_empty()),
+                Some(_) => return Err(Error::BadRequest("allow_ips: a description is at most 200 characters".into())),
+            };
+            (o.get("cidr").and_then(serde_json::Value::as_str).unwrap_or(""), d)
+        }
+        _ => return Err(Error::BadRequest("allow_ips holds networks".into())),
+    };
+    let c = cidr.trim();
+    let net = c
+        .parse::<ipnet::IpNet>()
+        .or_else(|_| c.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+        .map_err(|_| Error::BadRequest(format!("allow_ips: {c:?} isn't a network (a.b.c.d/n, an IPv6 /n, or an address)")))?;
+    Ok(IpRule { cidr: net.trunc().to_string(), description })
 }
 
 /// Where a custom domain's TXT challenge goes: `_roll-challenge.<host>`, a wildcard's on the

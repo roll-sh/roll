@@ -2036,3 +2036,31 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     assert_eq!(v["DB_PASSWORD"], "s3cret");
 }
 
+
+/// An allow list lets only its networks in through an environment's public names (from the
+/// address the fleet vouches for), before anything wakes; no address, no entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_allow_list_lets_only_its_networks_in() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "admin", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"allow_ips": ["203.0.113.7", {"cidr": "10.1.2.3/8", "description": "office"}]}))).await;
+    assert_eq!((st, &env["allow_ips"]), (StatusCode::OK, &json!([{"cidr": "203.0.113.7/32"}, {"cidr": "10.0.0.0/8", "description": "office"}])), "{env}");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"allow_ips": ["10.0.0.0/33"]}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"allow_ips": vec!["10.0.0.1"; 101]}))).await.0, StatusCode::BAD_REQUEST);
+    let from = |addr: Option<&str>| {
+        let mut req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
+        if let Some(a) = addr {
+            req.extensions_mut().insert(axum::extract::ConnectInfo(a.parse::<std::net::SocketAddr>().unwrap()));
+        }
+        let public = w.public.clone();
+        async move { public.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(from(Some("10.9.9.9:5000")).await, StatusCode::OK);
+    assert_eq!(from(Some("[::ffff:10.0.0.5]:5000")).await, StatusCode::OK, "an IPv4 client over IPv6");
+    assert_eq!(from(Some("198.51.100.1:5000")).await, StatusCode::FORBIDDEN);
+    assert_eq!(from(None).await, StatusCode::FORBIDDEN, "no address: no entry");
+    call(&w.api, "PUT", &base, Some(json!({"allow_ips": null}))).await;
+    assert_eq!(from(Some("198.51.100.1:5000")).await, StatusCode::OK);
+}

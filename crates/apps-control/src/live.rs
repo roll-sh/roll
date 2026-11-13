@@ -179,6 +179,32 @@ impl Served {
     }
 }
 
+/// What an environment's public names let through, kept with its live state on the owner so a
+/// request reads no row for it.
+#[derive(Debug, Default)]
+pub struct Gate {
+    /// In maintenance, with this message (empty: roll's words).
+    pub maintenance: Option<String>,
+    /// Only these networks get in (empty: anyone).
+    pub allow: Vec<ipnet::IpNet>,
+}
+
+impl Gate {
+    /// Whether `client` (the address the fleet vouches for) gets in. None, with a list: no.
+    pub fn admits(&self, client: Option<&str>) -> bool {
+        if self.allow.is_empty() {
+            return true;
+        }
+        let Some(ip) = client.and_then(|c| c.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().ok()) else { return false };
+        // An IPv4 client may come as `::ffff:a.b.c.d`.
+        let ip = match ip {
+            std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, std::net::IpAddr::V4),
+            v4 => v4,
+        };
+        self.allow.iter().any(|n| n.contains(&ip))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveConfig {
     pub wake_timeout: Duration,
@@ -265,8 +291,8 @@ pub struct EnvLive {
     pub ticking: std::sync::atomic::AtomicBool,
     /// A private caller's wake is under way (the next look waits for it).
     answering: std::sync::atomic::AtomicBool,
-    /// Its maintenance message as last read (outer None: not read yet).
-    maintenance: Mutex<Option<Option<String>>>,
+    /// What its public names let through, as last read (None: read it again).
+    gate: Mutex<Option<Arc<Gate>>>,
     last_tick: Mutex<Option<Instant>>,
     last_health: Mutex<Option<Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -308,7 +334,7 @@ impl EnvLive {
             over_since: Mutex::new(None),
             ticking: std::sync::atomic::AtomicBool::new(false),
             answering: std::sync::atomic::AtomicBool::new(false),
-            maintenance: Mutex::new(None),
+            gate: Mutex::new(None),
             last_tick: Mutex::new(None),
             last_health: Mutex::new(None),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
@@ -698,13 +724,17 @@ impl EnvLive {
         Ok(l)
     }
 
-    /// Its maintenance message, when known (`Some(None)`: serving).
-    pub fn maintenance(&self) -> Option<Option<String>> {
-        self.maintenance.lock().clone()
+    pub fn gate(&self) -> Option<Arc<Gate>> {
+        self.gate.lock().clone()
     }
 
-    pub fn set_maintenance(&self, m: Option<String>) {
-        *self.maintenance.lock() = Some(m);
+    pub fn set_gate(&self, g: Arc<Gate>) {
+        *self.gate.lock() = Some(g);
+    }
+
+    /// Its settings changed: the next request reads them again.
+    pub fn forget_gate(&self) {
+        *self.gate.lock() = None;
     }
 
     /// Private callers ([`crate::runtime::Callers`]), which rolld never sees: a sleeping instance

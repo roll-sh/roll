@@ -483,6 +483,13 @@ pub enum AppsCmd {
         /// End maintenance.
         #[arg(long)]
         serve: bool,
+        /// Only this network gets in through its public URLs (`a.b.c.d/n`, an IPv6 `/n`, an
+        /// address). Repeatable; the list replaces the one it has.
+        #[arg(long = "allow-ip", value_name = "CIDR", conflicts_with = "allow_any")]
+        allow_ip: Vec<String>,
+        /// Anyone gets in again.
+        #[arg(long)]
+        allow_any: bool,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -2068,7 +2075,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2090,6 +2097,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("maintenance".into(), json!({ "message": Some(note).filter(|n| !n.is_empty()) }));
             } else if serve {
                 body.insert("maintenance".into(), json!(false));
+            }
+            if !allow_ip.is_empty() {
+                body.insert("allow_ips".into(), json!(allow_ip));
+            } else if allow_any {
+                body.insert("allow_ips".into(), Value::Null);
             }
             // A new access token, made here: only its link shows it, once.
             let token = private.then(new_token);

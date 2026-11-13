@@ -35,6 +35,7 @@ hyper = { workspace = true, features = ["server", "client", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio", "server"] }
 parking_lot.workspace = true
 percent-encoding.workspace = true
+ipnet.workspace = true
 pg-storage.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 roll-cluster.workspace = true

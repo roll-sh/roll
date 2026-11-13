@@ -373,6 +373,14 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     // Came in through roll: the private environment's access cookie (checked just below).
     let cookie = format!("roll_access_{env}=");
     let via_link = env.starts_with("pv-") && req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).any(|v| v.split(';').any(|c| c.trim().starts_with(&cookie)));
+    // Its allow list first (deployment URLs too: they're public), before anything wakes.
+    let gate = match apps.gate(&apps.live(service, env)).await {
+        Ok(g) => g,
+        Err(_) => return page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's settings couldn't be read. Try again in a few seconds."),
+    };
+    if !gate.admits(roll_cluster::client_addr(&req).as_deref()) {
+        return page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed.");
+    }
     // A private environment answers only visitors with its token, before anything wakes.
     if let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         return turned_away;
@@ -405,9 +413,9 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     // In maintenance: roll's page, nothing woken. A deployment's own URL still answers (a fix
     // can be tried before maintenance ends).
     if deployment.is_none()
-        && let Some(m) = apps.maintenance(&live).await
+        && let Some(m) = &gate.maintenance
     {
-        return maintenance_page(&m);
+        return maintenance_page(m);
     }
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
     // gave them (never passed to the app), or a new one while a canary runs.

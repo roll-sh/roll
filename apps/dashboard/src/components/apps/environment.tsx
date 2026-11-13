@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { appsApi, parseAllowList, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { CPU, MEMORY, mb, SureButton, type Runner } from "./shared";
@@ -31,6 +31,9 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [notice, setNotice] = useState(env.maintenance?.message ?? "");
+  const allowText = (env.allow_ips ?? []).map((r) => (r.description ? `${r.cidr} ${r.description}` : r.cidr)).join("\n");
+  const [allow, setAllow] = useState(allowText);
+  useEffect(() => setAllow(allowText), [allowText]);
   const { copied, copy } = useCopy();
   const repo = service.source.kind === "repo";
   const busy = runner.busy !== null;
@@ -119,6 +122,33 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             >
               {env.maintenance ? "End maintenance" : "Start maintenance"}
             </button>
+          </div>
+        )}
+
+        {service.run.type === "web" && service.run.public !== false && (
+          <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium">Allowed networks</p>
+                <p className="mt-1 text-[12px] text-muted">
+                  {env.allow_ips?.length
+                    ? `Only ${env.allow_ips.length === 1 ? "this network gets" : `these ${env.allow_ips.length} networks get`} in through its public URLs; everyone else gets a 403. The private network is unaffected.`
+                    : "Anyone with its URL gets in. List networks to let only them in."}
+                </p>
+              </div>
+              <button className={btn} disabled={busy || allow === allowText} onClick={() => runner.run("allow", () => appsApi.putEnvironment(service.id, env.name, { allow_ips: parseAllowList(allow) }))}>
+                Save
+              </button>
+            </div>
+            <textarea
+              value={allow}
+              onChange={(e) => setAllow(e.target.value)}
+              rows={Math.min(6, Math.max(2, allow.split("\n").length))}
+              placeholder={"203.0.113.0/24 office\n2001:db8::/32"}
+              spellCheck={false}
+              aria-label="Allowed networks, one per line"
+              className={`${input} mt-2 w-full font-mono text-[12px]`}
+            />
           </div>
         )}
 

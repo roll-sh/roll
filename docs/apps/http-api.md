@@ -248,6 +248,11 @@ type EnvironmentPut = {
    *  answer roll's 503 page (Retry-After 30) with the message, waking nothing; a deployment's own
    *  URL still answers. `false` or null serves again. */
   maintenance?: boolean | { message?: string | null } | null;
+  /** Only these networks get in through its public names (deployment URLs too): at most 100,
+   *  each `"a.b.c.d/n"`, an IPv6 `/n`, an address, or `{cidr, description?}`; kept canonical.
+   *  Checked first, on the address the fleet vouches for (no address: 403). null or [] lets
+   *  anyone in. The private network is unaffected. */
+  allow_ips?: (string | { cidr: string; description?: string | null })[] | null;
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
    *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
    *  service's, null goes back to it; checked with the service's settings as one run. */
@@ -271,6 +276,7 @@ type Environment = EnvironmentSummary & {
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
+  allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
