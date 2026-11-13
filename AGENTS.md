@@ -282,7 +282,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     second resource inside one request). Don't build a second permission system.
   - Every route rolld serves needs a row in `roll-access/src/catalog.rs` (one action on one
     product, how to find its resource, which answer fields are credentials) or a reason to stay the
-    operator's; `rolld/tests/auth.rs` fails otherwise. A new product adds its name to
+    operator's; `rolld/tests/auth.rs` fails otherwise. A route a prefix row decides (no row of its
+    own) takes the prefix's action by method whatever it answers, so it's either given its own row
+    (a GET that answers a credential is reveal) or listed in `roll-access/src/prefix-reviewed.txt`
+    once looked at; the same test fails otherwise. A new product adds its name to
     `scope::PRODUCTS`, its rows, and a resolver in `rolld/src/access.rs` when its ids aren't in the
     path (or take names).
   - Grant secrets carry a checksum (`roll_access::checksum_ok`); a leaked one is revoked, never
