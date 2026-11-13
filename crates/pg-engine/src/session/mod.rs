@@ -4118,14 +4118,23 @@ fn plain_query(n: &NodeEnum) -> bool {
 
 /// The command tag of a finished query.
 fn query_tag(plan: &Plan, stmt: &Node, nrows: usize, processed: u64) -> String {
+    // (Its word and count put together without the formatting machinery: a tag per statement.)
+    let tag = |word: &str, n: u64| {
+        let mut b = itoa::Buffer::new();
+        let n = b.format(n);
+        let mut s = String::with_capacity(word.len() + n.len());
+        s.push_str(word);
+        s.push_str(n);
+        s
+    };
     match inner(stmt) {
-        Some(NodeEnum::InsertStmt(_)) => format!("INSERT 0 {processed}"),
-        Some(NodeEnum::UpdateStmt(_)) => format!("UPDATE {processed}"),
-        Some(NodeEnum::DeleteStmt(_)) => format!("DELETE {processed}"),
-        Some(NodeEnum::MergeStmt(_)) => format!("MERGE {processed}"),
+        Some(NodeEnum::InsertStmt(_)) => tag("INSERT 0 ", processed),
+        Some(NodeEnum::UpdateStmt(_)) => tag("UPDATE ", processed),
+        Some(NodeEnum::DeleteStmt(_)) => tag("DELETE ", processed),
+        Some(NodeEnum::MergeStmt(_)) => tag("MERGE ", processed),
         _ => {
             let _ = plan;
-            format!("SELECT {nrows}")
+            tag("SELECT ", nrows as u64)
         }
     }
 }
