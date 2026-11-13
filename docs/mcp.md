@@ -182,6 +182,12 @@ only text that walks the agent through roll's tools: it calls nothing, each tool
 decided by the gate, and a connection is offered only the prompts whose tools it has. Arguments are
 one line of printable text, at most 200 characters.
 
+A prompt's `project`, `service` and `env` complete as the person types (`completion/complete`): the
+values come from the list tool the connection would call (`workspace_list_projects`,
+`apps_list_services`, `apps_list_environments` for the `service` already given), through the gate
+with the caller's token, so a suggestion is only what it may read, and each is an audited read.
+Nothing completes for a prompt the connection isn't offered.
+
 | Prompt | Arguments | What it does | Tools |
 | --- | --- | --- | --- |
 | `what_can_i_do` | | What this connection may do, in words, and which rule would allow what's missing. | `access_whoami` |
@@ -363,11 +369,10 @@ Ranked; the top item is in progress. A watchdog reads this list. Unblocked work 
 waits on a sibling PR reaching main is last.
 
 1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
-   lands after #20, #25 and #30): kept merged both ways. Waits on secrets' fixes from the tenth
-   review: an admin's token reaching operator projects, a workload's scope taken from its
-   identity, project metadata filtered per environment. The canvas check costs nothing measurable
-   (`gate_latency`, release, pinned, A/B twice: a token's one-resource request 83–115 µs p50 with
-   it, 105–116 µs without).
+   lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
+   (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
+   project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
+   twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
 2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
 3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
@@ -386,19 +391,20 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); MCP prompts (roll's workflows
-as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health,
-debugging a failing service; offered only with their tools); the integration branch on Postgres 18
-(roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads
-their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`);
-the tenth review (access with secrets): a person's stored grant dead for products' background work
-once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes,
-`Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables
-(`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes
-classified, built with #25 (apps-next #26, previews-next #28 and search #29 pass rolld's route
-test); a preview's share link is reveal (`previews_share`); search's index mapping, settings,
-refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own tokens for its
-caller through the token route's own function) and tokens listed by what they were made for
+revoked as leaked, about to expire; only their own, never a secret); prompts' arguments complete
+from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's
+workflows as slash commands: what this connection may do, checking a diff for secrets, fixing
+secrets health, debugging a failing service; offered only with their tools); the integration branch
+on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token
+over MCP reads their own secrets project, the operator's answers 404, disabled it stops;
+`users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for
+products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their
+own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a
+deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open
+sibling's routes classified, built with #25 (apps-next #26, previews-next #28 and search #29 pass
+rolld's route test); a preview's share link is reveal (`previews_share`); search's index mapping,
+settings, refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own tokens
+for its caller through the token route's own function) and tokens listed by what they were made for
 (`?product=&resource=`), for secrets retiring `rlst_`; taking an apps web service off the internet
 or putting it on (`run.public`) is deploy; a token's rate is the fleet's (each node enforces its
 share, the rate over the live nodes), not N times it; a worker's scaling stream needs read on it; a
