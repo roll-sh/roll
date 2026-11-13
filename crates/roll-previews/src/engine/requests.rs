@@ -5,6 +5,11 @@ use super::*;
 impl Engine {
     // ── what the API asks for ──
 
+    /// The ids of `owner`'s workspace projects (a signed-in person's).
+    pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.workspace.list(roll_workspace::Scope::Owner(owner))?.into_iter().map(|p| p.id).collect())
+    }
+
     /// A workspace project, or a 404.
     pub fn workspace_project(&self, id: &str) -> Result<roll_workspace::Project> {
         Ok(self.workspace.get(roll_workspace::Scope::All, id)?)

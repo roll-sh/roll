@@ -6727,6 +6727,7 @@ dependencies = [
  "hyper 1.12.0",
  "hyper-util",
  "parking_lot",
+ "roll-auth",
  "roll-cluster",
  "roll-workspace",
  "serde",
@@ -6735,6 +6736,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
 ]
 
