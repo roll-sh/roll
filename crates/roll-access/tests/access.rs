@@ -901,6 +901,22 @@ async fn approvals_can_be_remembered() {
     assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
     assert_eq!(ask("pc").await.0, StatusCode::OK);
 
+    // "Ask for anything else": what the rules don't allow asks instead of being refused, and an
+    // approval remembered for good grows the token. The operator's routes stay shut.
+    let (asks, asks_id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
+    let (_, pending) = d.call(&asks, Method::DELETE, "/v1/projects/pd", None).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    assert_eq!(approve(apr, json!("always")).await.0, StatusCode::OK);
+    assert_eq!(d.call(&asks, Method::DELETE, "/v1/projects/pd", None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&asks, Method::GET, "/v1/unclassified", None).await.1["code"], "operator_only");
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{asks_id}"), None).await;
+    assert_eq!(g["rules"].as_array().map(Vec::len), Some(2), "{g}");
+    // Only a token that asks may make one that asks.
+    let child = |ask: bool| json!({ "name": "child", "rules": [{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }], "ask_otherwise": ask });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child(false))).await.0, StatusCode::CREATED);
+    let (s, e) = d.call(&token, Method::POST, "/v1/access/tokens", Some(child(true))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+
     // Copying another environment's variables is reading them: it needs reveal there too.
     let (dev, _) = d.token(json!([{ "product": "apps", "resources": "*", "environments": ["dev", "dev2"], "actions": { "write": "allow", "reveal": "allow" } }]), json!({})).await;
     let put = |from: Value| {

@@ -64,6 +64,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
   const [name, setName] = useState("");
   const [expiry, setExpiry] = useState(2);
   const [rateText, setRateText] = useState("");
+  const [askOtherwise, setAskOtherwise] = useState(false);
   const rate = parseRate(rateText);
   const [busy, setBusy] = useState(false);
 
@@ -122,6 +123,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
         rules,
         expires_at: ms === null ? null : Date.now() + ms,
         rate_per_minute: rate.rate,
+        ask_otherwise: askOtherwise,
       });
       window.location.assign(redirect);
     } catch (e) {
@@ -175,6 +177,13 @@ function Ask({ req }: { req: AuthorizeRequest }) {
           <span className="block text-[12px] text-subtle">Requests a minute (optional)</span>
           <input value={rateText} onChange={(e) => setRateText(e.target.value)} inputMode="numeric" placeholder="No limit" className={`${input} w-full font-mono text-[12px]`} />
           {rate.problem && <span className="block text-[11px] text-danger">{rate.problem}</span>}
+        </label>
+        <label className="flex items-start gap-2 text-[13px] sm:col-span-2">
+          <input type="checkbox" checked={askOtherwise} onChange={(e) => setAskOtherwise(e.target.checked)} className="mt-0.5" />
+          <span>
+            Ask me for anything else
+            <span className="block text-[12px] text-muted">What these rules don't allow waits for your approval instead of being refused.</span>
+          </span>
         </label>
       </section>
 

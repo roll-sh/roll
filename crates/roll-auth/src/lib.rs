@@ -126,6 +126,8 @@ pub struct Grant {
     /// A signed-in user's own token (`usr_…`): it acts as that user (docs/permissions.md, "Users'
     /// own tokens"), never as more. `None`: the operator's (or an admin's from before).
     pub user: Option<Arc<str>>,
+    /// What `scope` doesn't allow asks a person instead of being refused.
+    pub ask_otherwise: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

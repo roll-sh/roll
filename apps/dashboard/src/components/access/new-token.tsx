@@ -16,6 +16,7 @@ export function NewToken() {
   const [expiry, setExpiry] = useState(1);
   const [ips, setIps] = useState("");
   const [rateText, setRateText] = useState("");
+  const [askOtherwise, setAskOtherwise] = useState(false);
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState<{ grant: Grant; token: string } | null>(null);
 
@@ -46,7 +47,7 @@ export function NewToken() {
     setError(null);
     try {
       const ms = EXPIRIES[expiry].ms;
-      setMade(await accessApi.create({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, ip_allow: ipList, rate_per_minute: rate.rate }));
+      setMade(await accessApi.create({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, ip_allow: ipList, rate_per_minute: rate.rate, ask_otherwise: askOtherwise }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -72,6 +73,16 @@ export function NewToken() {
             <Panel title="What it may do">
               <div className="p-5">
                 <Builder catalog={catalog} rules={rules} onChange={(r) => setRules(r)} />
+                <label className="mt-4 flex items-start gap-2 text-[13px]">
+                  <input type="checkbox" checked={askOtherwise} onChange={(e) => setAskOtherwise(e.target.checked)} className="mt-0.5" />
+                  <span>
+                    Ask me for anything else
+                    <span className="block text-[12px] text-muted">
+                      What these rules don't allow waits for your approval instead of being refused. Approve once, for a while, or always,
+                      and the token grows as you go.
+                    </span>
+                  </span>
+                </label>
               </div>
             </Panel>
             <Panel title="Name, lifetime and network">

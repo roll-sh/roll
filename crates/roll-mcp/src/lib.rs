@@ -196,7 +196,8 @@ impl Ctx {
         let reached = !self.as_user || product == "access" || roll_access::USER_REACH.contains(&product);
         on && reached && match &self.principal {
             Principal::Operator => true,
-            Principal::Grant(g) => actions.iter().any(|a| g.scope.may(product, *a)),
+            // A token that asks for anything else may use any tool (some of them by asking).
+            Principal::Grant(g) => g.ask_otherwise || actions.iter().any(|a| g.scope.may(product, *a)),
         }
     }
 
