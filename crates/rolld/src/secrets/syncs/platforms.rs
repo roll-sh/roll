@@ -31,6 +31,7 @@ pub(super) struct Http {
     netlify: String,
     fly: String,
     railway: String,
+    heroku: String,
 }
 
 impl Http {
@@ -38,6 +39,7 @@ impl Http {
         let mut h = Http::with_bases("https://api.vercel.com", "https://api.cloudflare.com", None, "https://api.render.com", "https://api.netlify.com");
         h.fly = "https://api.fly.io/graphql".into();
         h.railway = "https://backboard.railway.com/graphql/v2".into();
+        h.heroku = "https://api.heroku.com".into();
         h
     }
 
@@ -49,7 +51,7 @@ impl Http {
             .user_agent("roll-secrets-sync")
             .build()
             .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2") }
+        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into() }
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -361,7 +363,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new() };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -451,6 +453,71 @@ impl SyncTarget for Render {
                 if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
                     return Err(Error::Link(format!("{what}: deleting {name}: {status}")));
                 }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── heroku ──
+
+/// A Heroku app's config vars: one `PATCH` sets the changed ones and removes the rest (`null`).
+pub(super) struct Heroku(pub(super) Http);
+
+impl Heroku {
+    /// (app, token_key)
+    fn target(&self, t: &Json) -> Result<(String, String)> {
+        let [app, token_key] = target("heroku", t, [("app", true), ("token_key", true)])?;
+        let app = app.unwrap_or_default();
+        if !ident(&app, 64, "-") || app.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(bad("app is a Heroku app's name or id"));
+        }
+        Ok((app, key_field("heroku", "token_key", token_key)?))
+    }
+}
+
+impl SyncTarget for Heroku {
+    fn kind(&self) -> &str {
+        "heroku"
+    }
+    fn label(&self) -> &str {
+        "Heroku config vars"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "app", label: "App name", required: true, placeholder: "shop-web" },
+            SyncField { name: "token_key", label: "Key holding an API key", required: true, placeholder: "HEROKU_API_KEY" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (app, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        let mut vars = serde_json::Map::new();
+        for name in p.changed {
+            if let Some(v) = p.values.get(name) {
+                vars.insert(name.clone(), json!(v.expose()));
+            }
+        }
+        for name in p.removed {
+            vars.insert(name.clone(), Json::Null);
+        }
+        if vars.is_empty() {
+            return Ok(());
+        }
+        let what = format!("heroku {app}");
+        let req = self.0.client.patch(format!("{}/apps/{app}/config-vars", self.0.heroku)).bearer_auth(token).header("accept", "application/vnd.heroku+json; version=3").json(&Json::Object(vars));
+        block_on(async {
+            // Heroku's `id` (`unauthorized`, `not_found`), never the answer, which echoes the vars.
+            let (status, v) = self.0.send(req, &what).await?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("{what}: {status} {}", v["id"].as_str().unwrap_or_default())));
             }
             Ok(())
         })
@@ -750,7 +817,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new() };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -1127,6 +1194,14 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn heroku_sets_changed_and_removes_gone_config_vars_in_one_patch() {
+        let (base, seen) = mock().await;
+        push(Arc::new(Heroku(http(&base))), json!({ "app": "shop-web", "token_key": "HEROKU_API_KEY" }), &[("HEROKU_API_KEY", "hk")]).await.unwrap();
+        let (method, path, body) = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!((method.as_str(), path.as_str(), body), ("PATCH", "/apps/shop-web/config-vars", json!({ "NEW": "v-123", "OLD": null })));
     }
 
     #[tokio::test(flavor = "multi_thread")]

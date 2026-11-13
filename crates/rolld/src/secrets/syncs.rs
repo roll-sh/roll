@@ -38,6 +38,7 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::Netlify(http.clone())));
     s.register(Arc::new(platforms::Fly(http.clone())));
     s.register(Arc::new(platforms::Railway(http.clone())));
+    s.register(Arc::new(platforms::Heroku(http.clone())));
     s.register(Arc::new(platforms::SecretsManager(http.clone())));
     s.register(Arc::new(platforms::Ssm(http)));
     s.register(Arc::new(platforms::Kubernetes { allow_private }));

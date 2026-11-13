@@ -800,7 +800,7 @@ open it.
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
 they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
-Railway, Cloudflare Workers, AWS Parameter Store and Secrets Manager, a Kubernetes Secret, an endpoint
+Railway, Heroku, Cloudflare Workers, AWS Parameter Store and Secrets Manager, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -912,7 +912,7 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
   leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
 
-### `render`, `netlify`, `fly` and `railway`
+### `render`, `netlify`, `fly`, `railway` and `heroku`
 
 - **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
   environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
@@ -930,6 +930,9 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   variables in one environment (the environment's shared variables without `service`), through its
   public GraphQL API (`variableCollectionUpsert`, `variableDelete`). The token is a project token
   (`Project-Access-Token`) by default, or an account token with `token_kind: "account"`.
+- **`heroku`**, `{app, token_key}`: a Heroku app's config vars, in one `PATCH /apps/{app}/config-vars`
+  per push (changed names with their values, removed ones as `null`). A failure names Heroku's error
+  `id`, never the answer, which echoes the vars.
 
 Like Vercel's, they use the platforms' fixed API hosts, and a GraphQL answer's `errors` fail the
 push by code, never with a value.
@@ -1409,7 +1412,7 @@ Done and in PR #20:
   outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
-- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
+- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Heroku, Cloudflare Workers, AWS
   Parameter Store and Secrets Manager, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
   identities pinned to client addresses; encrypted project backup and restore;
@@ -1433,11 +1436,9 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Heroku sync**: an app's config vars, set and removed in one `PATCH …/config-vars` with the
-   project's Heroku token.
-2. **Google Secret Manager sync**: one secret per key (or one JSON secret), a service account's key
+1. **Google Secret Manager sync**: one secret per key (or one JSON secret), a service account's key
    held as a roll secret, signed into an OAuth token in rolld (no SDK).
-3. **Azure Key Vault sync**: one Key Vault secret per key, an app registration's client secret held
+2. **Azure Key Vault sync**: one Key Vault secret per key, an app registration's client secret held
    as a roll secret.
 
 Waiting on other pull requests:
