@@ -166,6 +166,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   copy from each in-project source: `write` on the importing folder plus `reveal` on every folder
   imported. Importing another project's folder is `admin` on the importing folder (that project's
   admin must export it too). Secrets also needs `admin` to change a protected environment's imports.
+- An apps deploy hook (`POST`/`DELETE …/environments/{env}/hook`) is a credential that deploys
+  outside roll's tokens (its URL is the secret): making, rotating or removing one is `admin`, as an
+  API key is.
 - Sending a project's data out of roll with a signing secret shown once is `reveal`: an apps
   webhook notification target, and an apps log drain (every service's output, POSTed signed).
 - Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT

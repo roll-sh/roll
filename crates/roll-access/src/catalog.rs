@@ -1080,6 +1080,11 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("*", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A deploy hook is a credential that deploys, outside roll's tokens (no expiry, rules or
+    // audit here; its URL is the secret, shown once): making, rotating or removing one is admin,
+    // as an API key is. The hook's own URL isn't behind the gate.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/hook", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/hook", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     // Waking starts compute someone pays for (and a private environment's, only its holders
     // could start): write, as waking a queues vhost is.
     row("POST", "/v1/apps/services/{id}/environments/{env}/wake", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
