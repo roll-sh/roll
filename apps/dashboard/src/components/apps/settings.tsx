@@ -5,6 +5,7 @@ import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, primary } from "../ui";
 import { EnvironmentPanel } from "./environment";
 import { NotificationsPanel } from "./notifications";
+import { SpendPanel } from "./spend";
 import type { Runner } from "./shared";
 
 const CPU = [0.25, 0.5, 1, 2, 4, 8];
@@ -332,6 +333,8 @@ export function SettingsTab({
       {env && <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />}
 
       <NotificationsPanel project={service.project} projectName={projectName} runner={runner} />
+
+      <SpendPanel project={service.project} projectName={projectName} runner={runner} />
 
       <Panel title="Danger zone">
         <div className="p-5">

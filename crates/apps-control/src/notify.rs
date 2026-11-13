@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 3] = ["deploy.failed", "crash_loop", "deploy.active"];
-const DEFAULT_EVENTS: [&str; 2] = ["deploy.failed", "crash_loop"];
+pub const EVENTS: [&str; 5] = ["deploy.failed", "crash_loop", "deploy.active", "spend.alert", "spend.limit"];
+const DEFAULT_EVENTS: [&str; 4] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit"];
 /// Targets per project.
 const MAX_TARGETS: usize = 20;
 /// After the first try: the waits before the next ones.
@@ -150,9 +150,15 @@ impl Apps {
         let Some(last) = events.last().map(|e| e.seq) else { return };
         let mut queued = Vec::new();
         for e in &events {
-            let sid = e.service.clone();
-            let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
-            let p = svc.project.clone();
+            // A project's own events (spend) name it; a service's are its project's.
+            let p = match e.data["project"].as_str().filter(|_| e.service.is_empty()) {
+                Some(p) => p.to_string(),
+                None => {
+                    let sid = e.service.clone();
+                    let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
+                    svc.project
+                }
+            };
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
                 if t.events.contains(&e.kind) {
                     queued.push((t.id.clone(), e.seq, e.kind.clone()));
@@ -215,6 +221,14 @@ impl Apps {
         match e.kind.as_str() {
             "deploy.failed" => (format!("{what}: deploy failed"), format!("The deploy{rev} failed: {}. The live deployment keeps serving.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "deploy.active" => (format!("{what}: deployed"), format!("A new deployment{rev} is live.")),
+            "spend.alert" | "spend.limit" => {
+                let (project, usd, limit) = (e.data["project_name"].as_str().unwrap_or("a project"), e.data["usd"].as_f64().unwrap_or(0.0), e.data["limit_usd"].as_f64().unwrap_or(0.0));
+                if e.kind == "spend.alert" {
+                    (format!("{project}: spend alert"), format!("${usd:.2} this month, past the ${limit:.2} alert."))
+                } else {
+                    (format!("{project}: spending limit reached"), format!("${usd:.2} this month reached the ${limit:.2} limit: its services are stopped until the limit is raised or the month ends."))
+                }
+            }
             "crash_loop" => (format!("{what}: crashing"), format!("{} crashes in 10 minutes; the last because {}.", e.data["crashes"], e.data["last_error"].as_str().unwrap_or("it exited"))),
             other => (format!("{what}: {other}"), String::new()),
         }

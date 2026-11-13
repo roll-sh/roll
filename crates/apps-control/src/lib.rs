@@ -27,6 +27,7 @@ pub mod notify;
 pub mod public;
 pub mod runtime;
 pub mod shell;
+pub mod spend;
 pub mod store;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
@@ -103,6 +104,8 @@ pub struct AppsConfig {
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
     pub allow_private: bool,
+    /// Between two passes over spend limits (`spend`).
+    pub spend_every: Duration,
 }
 
 impl AppsConfig {
@@ -121,6 +124,7 @@ impl AppsConfig {
             upload_max: 512 << 20,
             web_url: None,
             allow_private: false,
+            spend_every: Duration::from_secs(30),
         }
     }
 }
@@ -151,6 +155,8 @@ pub struct Apps {
     /// Jobs running on this node: id → its environment (`env_key`). Bounded per environment and
     /// per node, and canceled when the environment goes from this node.
     running_jobs: Mutex<HashMap<String, String>>,
+    /// Services whose project reached its spend limit this month (`spend`), as last read.
+    capped: Mutex<std::collections::HashSet<String>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -219,6 +225,7 @@ impl Apps {
             queues: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             running_jobs: Mutex::new(HashMap::new()),
+            capped: Mutex::new(Default::default()),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             sessions: Mutex::new(HashMap::new()),
@@ -713,7 +720,11 @@ impl Apps {
         self.lives
             .lock()
             .entry(env_key(service, env))
-            .or_insert_with(|| EnvLive::new(service, env, self.deps.runtime.clone(), self.cfg.live.clone(), self.logs.sink(format!("env:{service}/{env}"), Stream::System)))
+            .or_insert_with(|| {
+                let l = EnvLive::new(service, env, self.deps.runtime.clone(), self.cfg.live.clone(), self.logs.sink(format!("env:{service}/{env}"), Stream::System));
+                l.set_capped(self.capped.lock().contains(service));
+                l
+            })
             .clone()
     }
 

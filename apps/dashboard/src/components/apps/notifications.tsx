@@ -8,6 +8,8 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "deploy.failed", label: "Deploy failed" },
   { value: "crash_loop", label: "Crash loop" },
   { value: "deploy.active", label: "Deployed" },
+  { value: "spend.alert", label: "Spend alert" },
+  { value: "spend.limit", label: "Spend limit" },
 ];
 
 const KINDS: { value: NotifyTarget["kind"]; label: string; placeholder: string }[] = [
@@ -21,7 +23,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [targets, setTargets] = useState<NotifyTarget[] | null>(null);
   const [kind, setKind] = useState<NotifyTarget["kind"]>("slack");
   const [url, setUrl] = useState("");
-  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit"]);
   const [secret, setSecret] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const { copied, copy } = useCopy();

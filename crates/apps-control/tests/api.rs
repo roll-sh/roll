@@ -173,6 +173,18 @@ async fn visit(w: &World, host: &str, path: &str) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&b).unwrap_or(Value::Null))
 }
 
+/// GET `path` until `pred` holds of its answer (about 4 s at most).
+async fn get_until(api: &axum::Router, path: &str, pred: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..200 {
+        let (_, v) = call(api, "GET", path, None).await;
+        if pred(&v) {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("{path} never got there")
+}
+
 /// Wait for a deployment to finish; its final state.
 async fn settled(w: &World, svc: &str, env: &str, dep: &str) -> Value {
     for _ in 0..1000 {
@@ -489,6 +501,49 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
 }
 
+/// A project past its alert gets `spend.alert` once; past its hard limit it's capped: its
+/// instances stop, a visitor gets a 402, deploys are refused; raising the limit lifts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_project_over_its_spend_limit_is_paused_until_the_limit_is_raised() {
+    let w = world_with(|cfg| cfg.spend_every = Duration::from_millis(20)).await;
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let limits = format!("/v1/apps/projects/{}/limits", w.project);
+    let (st, l) = call(&w.api, "PUT", &limits, Some(json!({"alert_usd": 1, "hard_usd": 5}))).await;
+    assert_eq!((st, l["capped"].as_bool()), (StatusCode::OK, Some(false)), "{l}");
+    // $3 of CPU this month: past the alert, under the limit.
+    let hour = code_sql::now_ms() / 3_600_000;
+    w.apps.store.add_usage(&id, "production", hour, &apps_control::store::UsageAdd { cpu_seconds: 250_000.0, ..Default::default() }).unwrap();
+    let events = || async { call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().cloned().unwrap_or_default() };
+    for _ in 0..200 {
+        if events().await.iter().any(|e| e["kind"] == "spend.alert") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(events().await.iter().filter(|e| e["kind"] == "spend.alert").count(), 1, "once a month");
+    assert!(!get_until(&w.api, &limits, |l| l["month_usd"].as_f64() > Some(2.9)).await["capped"].as_bool().unwrap());
+    // Another $3: past the limit.
+    w.apps.store.add_usage(&id, "production", hour, &apps_control::store::UsageAdd { cpu_seconds: 250_000.0, ..Default::default() }).unwrap();
+    get_until(&w.api, &limits, |l| l["capped"] == true).await;
+    let host = host(&svc["environments"][0]["url"]);
+    let mut stopped = false;
+    for _ in 0..200 {
+        if !w.fake.instances(&id).iter().any(|(_, _, st)| *st == FakeState::Running) {
+            stopped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(stopped, "a capped project's instances stop: {:?}", w.fake.instances(&id));
+    assert_eq!(visit(&w, &host, "/").await.0, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await.0, StatusCode::CONFLICT);
+    // Raised: it answers again.
+    call(&w.api, "PUT", &limits, Some(json!({"hard_usd": 50}))).await;
+    get_until(&w.api, &limits, |l| l["capped"] == false).await;
+    assert_eq!(visit(&w, &host, "/").await.0, StatusCode::OK);
+}
+
 /// A new environment starts with another's variables, and promoting deploys what another
 /// environment runs (its image, no pull or build) with the target's own variables.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -769,7 +824,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop"]));
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

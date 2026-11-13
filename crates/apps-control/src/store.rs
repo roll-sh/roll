@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS notify_deliveries (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS notify_due ON notify_deliveries (status, next_at);
 CREATE UNIQUE INDEX IF NOT EXISTS notify_once ON notify_deliveries (target, event);
+CREATE TABLE IF NOT EXISTS spend_limits (
+    project TEXT PRIMARY KEY,
+    alert_usd REAL,
+    hard_usd REAL,
+    alerted INTEGER,
+    capped INTEGER
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
@@ -371,6 +378,10 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         port: r.get::<_, Option<i64>>(6)?.map(|p| p as u16),
         created_at: r.get(7)?,
     })
+}
+
+fn spend_row(r: &code_sql::Row<'_>) -> code_sql::Result<crate::spend::Limits> {
+    Ok(crate::spend::Limits { alert_usd: r.get(0)?, hard_usd: r.get(1)?, alerted: r.get(2)?, capped: r.get(3)? })
 }
 
 fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
@@ -1321,6 +1332,57 @@ impl Store {
                 map,
             )?,
         })
+    }
+
+    // ── spend limits ──
+
+    pub fn spend_limits(&self, project: &str) -> Result<Option<crate::spend::Limits>> {
+        Ok(self.db.query_row("SELECT alert_usd, hard_usd, alerted, capped FROM spend_limits WHERE project = ?", [project], spend_row).optional()?)
+    }
+
+    pub fn all_spend_limits(&self) -> Result<Vec<(String, crate::spend::Limits)>> {
+        Ok(self.db.query("SELECT project, alert_usd, hard_usd, alerted, capped FROM spend_limits WHERE alert_usd IS NOT NULL OR hard_usd IS NOT NULL", (), |r| {
+            Ok((r.get(0)?, crate::spend::Limits { alert_usd: r.get(1)?, hard_usd: r.get(2)?, alerted: r.get(3)?, capped: r.get(4)? }))
+        })?)
+    }
+
+    /// New limits; this month's alert and cap are decided again against them.
+    pub fn set_spend_limits(&self, project: &str, alert: Option<f64>, hard: Option<f64>) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM spend_limits WHERE project = ?", [project])?;
+            c.execute("INSERT INTO spend_limits (project, alert_usd, hard_usd, alerted, capped) VALUES (?, ?, ?, NULL, NULL)", params![project, alert, hard])?;
+            Ok(())
+        })
+    }
+
+    /// A project crossed a limit this month: marked (`alerted` or `capped`) with its event, once
+    /// (false when it already was).
+    pub fn spend_crossed(&self, project: &str, kind: &str, month: i64, data: &serde_json::Value) -> Result<bool> {
+        let col = if kind == "spend.limit" { "capped" } else { "alerted" };
+        let now = self.now()?;
+        self.db.write(|c| {
+            let n = c.execute(&format!("UPDATE spend_limits SET {col} = ? WHERE project = ? AND ({col} IS NULL OR {col} <> ?)"), params![month, project, month])?;
+            if n == 0 {
+                return Ok(false);
+            }
+            insert_event(c, now, kind, "", "", None, data)?;
+            Ok(true)
+        })
+    }
+
+    /// The services of every project capped in `month`.
+    pub fn capped_services(&self, month: i64) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT s.id FROM services s JOIN spend_limits l ON l.project = s.project WHERE l.capped = ?", [month], |r| r.get(0))?)
+    }
+
+    /// A project's use since `since_hour`, over the services it has now.
+    pub fn project_usage(&self, project: &str, since_hour: i64) -> Result<UsageAdd> {
+        Ok(self.db.query_row(
+            "SELECT COALESCE(SUM(u.cpu_seconds), 0), COALESCE(SUM(u.gb_seconds), 0), COALESCE(SUM(u.requests), 0), COALESCE(SUM(u.egress_bytes), 0), COALESCE(SUM(u.build_seconds), 0) \
+             FROM usage u JOIN services s ON s.id = u.service WHERE s.project = ? AND u.hour >= ?",
+            params![project, since_hour],
+            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? }),
+        )?)
     }
 
     // ── state ──

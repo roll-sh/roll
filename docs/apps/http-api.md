@@ -38,6 +38,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `DELETE /v1/apps/projects/{project}/notifications/{nid}` | | 204 | write |
 | `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
 | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
+| `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
+| `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
 | `GET /v1/apps/events?after=&limit=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
@@ -277,13 +279,19 @@ type Usage = {
 
 "/** In the event log, each written in the same transaction as the change it records. Sequence
  *  numbers commit in order with no gaps, so a reader moving past `next` never misses one. Kept 7 days. */
-type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop"; service: string; environment: string; deployment: string | null; data: object };
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit"; service: string; environment: string; deployment: string | null; data: object };
 /** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
  *  signed as roll code's webhooks are: X-Roll-Signature-256: sha256=hex(HMAC-SHA256(secret,
  *  X-Roll-Timestamp + "." + body)), the timestamp the send time in Unix seconds (a retry is signed
  *  anew), with X-Roll-Event and X-Roll-Delivery (the delivery's id; a retry keeps it).
  *  Slack gets { text }, Discord { content } (mentions off). */
-type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord"; host: string; events: ("deploy.failed" | "crash_loop" | "deploy.active")[]; created_at: number; secret?: string };
+/** A project's monthly limits, US dollars at roll's prices over the calendar month (UTC). Past
+ *  `alert_usd`: one `spend.alert` event (service ""; data { project, project_name, usd, limit_usd }).
+ *  Past `hard_usd`: one `spend.limit` event and the project is capped (`capped`): its instances
+ *  stop, visitors get a 402 page, deploys, jobs and cron runs are refused, until the month ends or
+ *  the limit is raised. */
+type SpendLimits = { alert_usd: number | null; hard_usd: number | null; month_usd: number; capped: boolean };
+type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord"; host: string; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit")[]; created_at: number; secret?: string };
 type Delivery = { id: string; event: number; kind: string; status: "pending" | "delivered" | "failed"; attempts: number; code: number | null; error: string | null; at: number };
 type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";
 type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };

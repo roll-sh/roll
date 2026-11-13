@@ -50,6 +50,9 @@ impl Apps {
     /// `image` to deploy another image), or of `upload` (a `roll up` tree).
     /// With `key` (an `Idempotency-Key`), a retry answers the deployment the first call queued.
     pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, by: By, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
+        if self.capped(service) {
+            return Err(Error::Conflict("this project reached its spending limit for the month: raise the limit to deploy".into()));
+        }
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
             if !["revision", "image", "message"].contains(&k.as_str()) {
@@ -684,6 +687,8 @@ impl Apps {
         tokio::spawn(async move { this.domains_loop().await });
         let this = self.clone();
         tokio::spawn(async move { this.notifier().await });
+        let this = self.clone();
+        tokio::spawn(async move { this.spender().await });
     }
 
     /// Start and stop a service's work as its lease comes and goes.
@@ -990,7 +995,7 @@ impl Apps {
     async fn cron_tick(self: &Arc<Self>) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         let now = code_sql::now_ms();
-        for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id)) {
+        for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s).ok()) else { continue };
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };

@@ -208,6 +208,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
         Err(WakeError::NoDeployment) => return page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet."),
         Err(WakeError::NotWeb) => return page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP."),
         Err(WakeError::Busy) => return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Busy starting", "Too many requests are waiting for this service to start. Try again in a moment.")),
+        Err(WakeError::Capped) => return page(StatusCode::PAYMENT_REQUIRED, "Paused", "This project reached its spending limit for the month. Its owner can raise the limit to bring it back."),
         Err(e) => {
             live.log.stream(crate::logs::Stream::System).line(format!("a request couldn't wake the service: {e}"));
             return page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up or failing to start. Try again in a few seconds.");

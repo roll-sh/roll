@@ -542,6 +542,20 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
 - **What roll pays for idle**: locally nothing but disk (images, stopped containers). On the
   fleet, the image in ECR ($0.10/GB-month) and the warm window's Fargate seconds.
 
+## Spend limits
+
+A project can have a monthly alert and a hard limit (`PUT /v1/apps/projects/{project}/limits`,
+Settings → Spend limits, `roll apps limits --alert 20 --hard 50`), in US dollars at the prices
+below, over its services' metered use this calendar month (UTC), as Railway's usage limits
+work. One node (`apps:spend`) checks every 30 s: past the alert it writes one
+`spend.alert` event for the month; past the hard limit one `spend.limit` and marks the project
+capped. Each mark is a compare-and-set in the event's own transaction, so a handover never sends
+two. Every node reads the capped services every 30 s and caps their environments here: running
+instances stop, no floor is kept, a wake answers 402 ("Paused"), and deploys, jobs and cron runs
+are refused. Changing the limits clears the month's marks; the next pass decides them again, so
+raising the limit lifts the cap within 30 s. Notification targets get both events by default.
+Spend counts the services a project has now (a deleted service's month drops out).
+
 ## Measured
 
 On ai-server (36 cores, Docker 29, overlayfs, load around 25–30 from other work), 2026-11-12.
@@ -676,25 +690,23 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Spend limits**: a project's monthly alert threshold (a notification) and a hard limit that
-   puts its services to sleep, from the metering already kept.
-2. **CLI polish**: confirm `roll apps delete`/`env-delete` (`--yes`), `roll logs -f --grep`, the
+1. **CLI polish**: confirm `roll apps delete`/`env-delete` (`--yes`), `roll logs -f --grep`, the
    hints that name `roll apps set`/`roll deploy` wrongly, `roll apps vars --from-file .env`,
    `roll apps set` flags for timings, volume, type and watch paths.
-3. **Dashboard costs**: pause polling while the tab is hidden; the service page from the event
+2. **Dashboard costs**: pause polling while the tab is hidden; the service page from the event
    log instead of three requests every 15 s.
-4. **Config as code**: `[app]` in `roll.toml` covering run settings (type, size, instances,
+3. **Config as code**: `[app]` in `roll.toml` covering run settings (type, size, instances,
    schedule) and per-environment blocks, with an end-to-end test.
-5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+4. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+5. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-8. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+6. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+7. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-9. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+8. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-10. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
+9. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.

@@ -134,6 +134,8 @@ pub enum WakeError {
     Timeout(Duration),
     #[error("too many requests are waiting for this service to start")]
     Busy,
+    #[error("this project reached its spending limit for the month")]
+    Capped,
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +184,8 @@ pub struct EnvLive {
     /// Torn down: nothing is made or adopted any more (a request or a tick that held this
     /// environment from before can't bring it back).
     closed: AtomicBool,
+    /// Its project reached its spend limit: nothing starts, and the tick stops what runs.
+    capped: AtomicBool,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
     /// The last failed wake and how many failed in a row: the requests behind it get its error
@@ -215,6 +219,7 @@ impl EnvLive {
             insts: Mutex::new(Vec::new()),
             wake: Arc::new(tokio::sync::Mutex::new(())),
             closed: AtomicBool::new(false),
+            capped: AtomicBool::new(false),
             waiters: AtomicU32::new(0),
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
@@ -364,6 +369,9 @@ impl EnvLive {
         let began = Instant::now();
         if self.closed.load(Ordering::SeqCst) {
             return Err(WakeError::NoDeployment);
+        }
+        if self.capped.load(Ordering::SeqCst) {
+            return Err(WakeError::Capped);
         }
         let tpl = self.template().ok_or(WakeError::NoDeployment)?;
         if tpl.run.kind != RunType::Web {
@@ -653,6 +661,10 @@ impl EnvLive {
         }
     }
 
+    pub fn set_capped(&self, on: bool) {
+        self.capped.store(on, Ordering::SeqCst);
+    }
+
     /// Stop every instance (they stay created); the next request wakes one.
     pub async fn sleep(self: &Arc<Self>) {
         let _g = self.wake.lock().await;
@@ -749,6 +761,14 @@ impl EnvLive {
             if due {
                 self.check_health(&insts, path).await;
             }
+        }
+        if self.capped.load(Ordering::SeqCst) {
+            // Capped: stop what still runs, keep no floor.
+            if insts.iter().any(|i| i.awake()) {
+                self.log.stream(Stream::System).line("the project reached its spending limit: stopped");
+                self.sleep().await;
+            }
+            return;
         }
         let _g = self.wake.lock().await;
         // Read again under the lock: a teardown (`shutdown`) or a new deployment may have

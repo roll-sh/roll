@@ -33,6 +33,9 @@ impl Apps {
             None | Some(Value::Null) => DEFAULT_TIMEOUT_S,
             Some(v) => v.as_u64().filter(|t| (1..=MAX_TIMEOUT_S).contains(t)).ok_or_else(|| Error::BadRequest(format!("timeout_s is 1–{MAX_TIMEOUT_S}")))?,
         };
+        if self.capped(service) {
+            return Err(Error::Conflict("this project reached its spending limit for the month".into()));
+        }
         let live = self.load_live(service, env).await?;
         let Some(tpl) = live.template() else { return Err(Error::Conflict(format!("nothing is deployed in {env} yet"))) };
         let key = crate::env_key(service, env);

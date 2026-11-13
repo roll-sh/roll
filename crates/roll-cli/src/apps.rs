@@ -258,6 +258,16 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 60)]
         minutes: i64,
     },
+    /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
+    /// `0` removes one). At the hard limit its services stop until it's raised.
+    Limits {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        alert: Option<f64>,
+        #[arg(long)]
+        hard: Option<f64>,
+    },
     /// This month's use and what it costs.
     Usage {
         #[command(flatten)]
@@ -1007,6 +1017,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 println!("cold start    {:.0} ms (slowest minute)", max("cold_start_ms"));
                 println!("instances     {} (most)", max("instances"));
                 println!("memory        {} (most)", crate::bytes(max("memory_bytes")));
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Limits { target, alert, hard } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/limits", enc(&s(&svc["project"])));
+            let mut v = api.get(&path).await?;
+            if alert.is_some() || hard.is_some() {
+                // Unset flags keep what's there; 0 removes a limit.
+                let pick = |given: Option<f64>, k: &str| match given {
+                    Some(x) if x <= 0.0 => Value::Null,
+                    Some(x) => json!(x),
+                    None => v[k].clone(),
+                };
+                let body = json!({ "alert_usd": pick(alert, "alert_usd"), "hard_usd": pick(hard, "hard_usd") });
+                v = api.call(reqwest::Method::PUT, &path, Some(body)).await?;
+            }
+            if !json_out {
+                let usd = |k: &str| v[k].as_f64().map_or("none".to_string(), |x| format!("${x:.2}"));
+                println!("this month  ${:.2}{}", v["month_usd"].as_f64().unwrap_or(0.0), if v["capped"] == true { "  (paused: at its limit)" } else { "" });
+                println!("alert       {}", usd("alert_usd"));
+                println!("hard limit  {}", usd("hard_usd"));
                 return Ok(());
             }
             v

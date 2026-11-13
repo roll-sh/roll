@@ -60,6 +60,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
         .route("/v1/apps/events", get(events))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
+        .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
@@ -227,6 +228,14 @@ async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, Str
 async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>) -> R {
     apps.delete_link(&id, &kind, &r).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn limits(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.limits(&project).await?)
+}
+
+async fn set_limits(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    ok(apps.set_limits(&project, body(&b)?).await?)
 }
 
 async fn targets(State(apps): S, Path(project): Path<String>) -> R {

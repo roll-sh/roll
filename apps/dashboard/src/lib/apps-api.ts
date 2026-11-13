@@ -287,7 +287,16 @@ export interface NotifyTarget {
   secret?: string;
 }
 
-export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active";
+export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit";
+
+/** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
+export interface SpendLimits {
+  alert_usd: number | null;
+  hard_usd: number | null;
+  month_usd: number;
+  /** Past `hard_usd` this month: its services are stopped, nothing wakes or deploys. */
+  capped: boolean;
+}
 
 export interface NotifyDelivery {
   id: string;
@@ -361,6 +370,8 @@ export const appsApi = {
   environments: (id: string) => call<Environment[]>("GET", `${svc(id)}/environments`),
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
+  limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
+  setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
   addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url: string; events?: NotifyEvent[] }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
   removeNotifyTarget: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`),
   testNotifyTarget: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/test`),
