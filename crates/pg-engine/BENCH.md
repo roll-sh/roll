@@ -516,6 +516,85 @@ and pwrites per commit fell from ~1.0 to the fsync count (step 2 writes the WAL 
 
 Verification train on the stack's PGO build: see HANDOFF "Profile-guided build".
 
+## Executor, round 16 (2026-11-13, agent 227)
+
+HANDOFF "Executor, round 16" has what changed: a correlated SubPlan's executor tree kept through
+the statement and rescanned per outer row; a Hash Right Semi / Anti Join's Hash and sides of the
+columns the join reads; an outer join's clause a constant made redundant parameterizes no scan;
+EXPLAIN ANALYZE's loop and row counts under a Gather and at semi / anti joins as PostgreSQL's;
+a Parallel Hash over a whole index-only scan read by the scan's workers. **base** is
+`a79309351`; `c001` the SubPlan rescans against base, `c007` the behaviour fixes against `c001`,
+`c008` the Parallel Hash against `c007` (`c002`, a kept store scan for index fetches, dropped).
+Plain dist builds (fat LTO, line tables) of one snapshot path, equal-length binary paths
+(`~/.cache/a227/bin`).
+
+Lane C: each server in its own container on CPUs 14,15,32,33 (`--memory 8g`, host network), the
+client on 16,17,34,35, every pass under `~/.cache/lane-c.lock` (shared with agents 224, 225, 226).
+All three servers at `max_parallel_workers_per_gather = 2`, `max_parallel_workers = 8` and a 2 GB
+cache (roll `--cache-mb 2048`; PostgreSQL 18.6 and pgrust `shared_buffers = 2GB`, set on pgrust
+at start). TPC-H SF1 from `bench tpch-load --sf 1`, the engine's data directory restored before
+every start. Other tenants kept the host at load 13-77 through the round (verification trains
+and builds on every other core); each pass waited up to 60 s for the lane to fall under 30% busy
+and usually didn't get there, so the wall times below carry that load. The gates read user
+instructions (`perf stat -e instructions:u,cycles:u`, a fresh engine, a warm-up, two runs a
+window) first.
+
+### TPC-H SF1, PostgreSQL, base, head (`c008`) and pgrust (three interleaved rounds, medians)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 3.01 | 0.25 | 0.56 | 0.21 | 0.41 | 0.54 | 0.49 | 0.24 | 1.69 | 0.78 | 0.09 | 0.77 | 0.90 | 0.19 | 0.41 | 0.32 | 0.92 | 3.51 | 0.08 | 0.11 | 0.75 | 0.17 | 16.38 |
+| base s | 0.64 | 0.60 | 0.57 | 0.30 | 0.49 | 0.51 | 0.60 | 0.30 | 1.51 | 0.76 | 0.20 | 0.58 | 1.14 | 0.21 | 0.49 | 0.36 | 0.88 | 2.34 | 0.07 | 0.41 | 0.83 | 0.15 | 13.96 |
+| head s | 0.62 | 0.62 | 0.63 | 0.32 | 0.47 | 0.52 | 0.63 | 0.30 | 1.41 | 0.74 | 0.19 | 0.55 | 1.05 | 0.25 | 0.46 | 0.36 | 0.84 | 2.34 | 0.07 | 0.35 | 0.82 | 0.13 | 13.70 |
+| pgrust s | 0.36 | 0.15 | 0.32 | 0.15 | 0.19 | 0.35 | 0.42 | 0.16 | 1.56 | 0.87 | 0.05 | 0.63 | 0.38 | 0.07 | 0.25 | 0.22 | 0.60 | 2.08 | 0.03 | 0.11 | 0.42 | 0.05 | 9.42 |
+| pg CPU, s | 9.04 | 0.38 | 1.55 | 0.58 | 1.15 | 1.47 | 1.38 | 0.67 | 4.52 | 2.07 | 0.09 | 2.26 | 2.37 | 0.52 | 1.11 | 0.77 | 1.04 | 9.03 | 0.21 | 0.12 | 2.15 | 0.43 | 42.91 |
+| base CPU, s | 1.92 | 0.60 | 1.65 | 0.86 | 1.16 | 1.44 | 1.75 | 0.63 | 4.44 | 2.28 | 0.23 | 1.72 | 2.83 | 0.49 | 1.37 | 1.02 | 1.88 | 7.62 | 0.22 | 0.41 | 2.49 | 0.39 | 37.40 |
+| head CPU, s | 1.84 | 0.63 | 1.76 | 0.90 | 1.14 | 1.47 | 1.82 | 0.62 | 4.07 | 2.08 | 0.20 | 1.63 | 2.73 | 0.49 | 1.30 | 1.02 | 1.83 | 7.55 | 0.21 | 0.34 | 2.36 | 0.39 | 36.38 |
+| pgrust CPU, s | 0.83 | 0.20 | 0.68 | 0.30 | 0.36 | 0.79 | 0.85 | 0.31 | 3.03 | 0.96 | 0.06 | 1.09 | 0.79 | 0.15 | 0.51 | 0.38 | 0.67 | 2.31 | 0.06 | 0.12 | 0.91 | 0.11 | 15.47 |
+
+- The head against PostgreSQL: wall 13.70 s against 16.38 (0.84x), CPU 36.38 s against 42.91;
+  against pgrust 1.45x wall, 2.35x CPU. The host was loaded throughout (load 24-37 for this
+  run), PostgreSQL's times are 16% over agent 219's quieter run (14.13 s) and the single-query
+  differences of this run between base and head that no change of this round touches (q03 +10%,
+  q14 +16%, q02 +3%) are that load: their user instructions moved under 1.5% in every gate.
+- Still slower than PostgreSQL: q02 (0.62 / 0.25), q20 (0.35 / 0.11), q11 (0.19 / 0.09), q13
+  (1.05 / 0.90), q07 (0.63 / 0.49), q03, q04, q05, q08, q14, q15, q16, q21; faster: q01, q06,
+  q09, q10, q12, q17, q18, q19, q22.
+- Peak memory (VmHWM of the engine over a pass): base 1,699-1,702 MB, head 1,693-1,698. Per
+  query (VmHWM reset before each, after a warm-up pass): `c001` against base and `c007` against
+  `c001` within the 5-18 MB a query's peak moves between engine instances of one binary (three
+  runs of `c007` against `c001`: +6..+18, +5..+18, +0..+12 MB; the whole-pass HWM of `c007`
+  1,706-1,707 against `c001`'s 1,710-1,712).
+- All 22 result hashes equal PostgreSQL's in every pass of every build.
+
+### The changes, gated (user instructions a run, % against the build before, per round)
+
+| change | targets | wall medians (own runs, 5 reps, 3 alternating pairs) | others | 22-query instructions |
+|---|---|---|---|---|
+| `c001` SubPlan trees rescanned (against base) | q20 -8.1 / -8.1 / -8.1 | q20 0.404 -> 0.370 s (pairs 0.485/0.625, 0.404/0.349, 0.402/0.370; an earlier set 0.421 -> 0.394) | none over +2% twice (q14 +2.2 once, q03 +1.4 / +1.2) | -0.35 / +0.08 / +0.10% |
+| `c007` behaviour fixes (against `c001`) | q20 -6.1 / -6.1 / -6.1 (the Right Semi Join's sides read with the columns it reads) | q20 0.336 -> 0.318 s, 3 of 3 | none over +2% (q12 -34.9% once: a short window) | +0.17 / -2.33 / -0.29% |
+| `c008` Parallel Hash in the workers (against `c007`) | q13 -1.6 / -2.2 / -2.8 (against `c005`: -2.2 / -3.0 / -2.3); cycles -0.2..-6% | q13 1.200 -> 1.110 s, 3 of 3 (1.232/1.055, 1.153/1.110, 1.200/1.125), CPU 3.00 -> 2.88 s | one round of the other 21: none over +2% (q16 +1.6, q03 -5.2) | -0.22% (one round) |
+| `c002` kept store scan for index fetches (against base, dropped) | q20 -6.5 (c001 alone -8.1): the kept scan's reseek costs q20 1.7% | - | q02 / q11 flat | -0.24 / +0.08% |
+
+- The parallelisation gate for `c008`: wall better in all three pairs of the last set; container
+  CPU of the three sets -2.0%, +0.6%, +4.4% (the last at load 15-20), user instructions lower by
+  2-3% and cycles not higher in every round: the work left the executor's thread (its share of
+  q13's samples 11.4% -> 8.7%; the customer build 3.7% -> 2.2%).
+- Point read, range read and short transaction smoke (a fresh 100,000-row fixture, 8 clients,
+  10 s, user instructions over 9 s, five alternating pairs): base against `c001` point_select
+  47.4k against 46.6k instructions an operation (medians), range_scan_100 348.9k against 356.3k
+  (runs 347-368k against 355-366k), short_txn 273.8k against 276.2k; `c001` against `c007`
+  47.4k / 47.4k, 352.3k / 354.2k, 302.6k / 295.5k. Ops/s spread 3,200-9,700 for short_txn
+  between runs of one binary at that load; no change of this round is on these paths.
+- Plans: `tools/bench/plancmp.py` (tpch, orm, tpcds against PostgreSQL 18.6, parallel and serial)
+  identical between base and `c005` (the behaviour fixes): 79 / 89 shapes parallel, 83 / 89
+  serial, the same files. The regression subset (join, join_hash, subselect, equivclass,
+  select_parallel, explain, aggregates, partition_join, memoize, incremental_sort, union, select,
+  inherit, partition_prune, updatable_views, with, window, groupingsets) with the changes:
+  7,417 / 7,431 units, 12 differing from the committed debug-build baseline (join 10, window 2);
+  join and window run again with the base binary and with `c005`: the same 12 units, the same
+  hunks (they differ with the base's release / dist build too).
+
 ## Range reads, round 8 (2026-11-12, agent 223)
 
 HANDOFF.md, "Range reads round 8", has what changed: a rechosen custom plan restarts the executor

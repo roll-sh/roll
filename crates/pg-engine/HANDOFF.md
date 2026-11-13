@@ -3361,6 +3361,84 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 16: SubPlan trees rescanned, behaviour fixes, q13's customer hash in the
+  workers** (agent 227; BENCH.md "Executor, round 16"). Lane C, all three servers at
+  max_parallel_workers_per_gather 2, max_parallel_workers 8 and a 2 GB cache, the host loaded
+  (load 24-37): TPC-H SF1 13.96 -> 13.70 s against PostgreSQL's 16.38 and pgrust's 9.42 (CPU
+  37.40 -> 36.38 s against 42.91 and 15.47; engine peak 1,699-1,702 -> 1,693-1,698 MB).
+  - **A correlated SubPlan's tree kept and rescanned** (`ExecCtx::subplan_rows`,
+    `subplan_trees`; `Node::can_rescan`; `AggNode::rescan`, `ProjectNode::rescan`): each run
+    of a SubPlan with parameters opened its plan again (`collect`: nodes, kernels, buffers, a
+    merging scan for the index entries). Now the tree its last run read is rescanned under the
+    new outer row, as ExecScanSubPlan does, when every node in it can (an Aggregate of no groups
+    whose aggregates don't sort, a projection, a btree / hash index scan: `rescan_index`), kept
+    per subquery id with the plan and snapshot it was opened for; not under EXPLAIN ANALYZE.
+    q20's 8,332 runs: user instructions -8.1% in every round, wall 0.404 -> 0.370 s. q02's and
+    q17's SubPlans aren't covered: q02's is nested loops over a sequential scan of region,
+    q17's a bitmap heap scan (rescans of those would cover them; q17's is 6,782 runs).
+  - **A Hash Right Semi / Anti Join's Hash** (`RightSemiNode::lneed` / `rneed` / `lup`): its
+    tuples sized from every column of the hashed side (q20's 118kB against PostgreSQL's 42kB):
+    now the columns the join returns, then its keys (the Hash's target list, its order), and
+    each side opened with only the columns the join reads or returns (`open_need`). q20 42kB as
+    PostgreSQL; user instructions -6.1% (partsupp's rows decoded for ps_suppkey alone).
+  - **reconsider_outer_join_clauses' constant-TRUE clause parameterizes nothing**
+    (`Search::oj_const_dropped`, `movable_to`): the join search dropped such a clause from the
+    join's restrictions (`oj_const_redundant`), but parameterized paths still took it, so an anti
+    join's inner scan had `(ok = o.ok) AND (ok = 5)` where PostgreSQL reads `ok = 5` (a bitmap
+    scan). Golden `a227_anti_const`. Left open: with a semi join beside the anti join (the
+    general join search: `o.ok = 5 and exists (... l.ok = o.ok) and not exists (... l3.ok =
+    o.ok ...)`) the engine's inner scan has `ok = o.ok` and no `ok = 5` (PostgreSQL derives
+    `l3.ok = 5` there too): `optimize::join` derives the nullable side's constant only from the
+    outer side's own restrictions, not through the semi join's class.
+  - **EXPLAIN ANALYZE's counts** (`Render::children_of`, `header_stats`; `NestLoopNode::step`):
+    under a Gather a nested loop's inner side's loops were multiplied by the processes though
+    its serial count is already all of theirs (q08's inner index scans 122,841 loops, PostgreSQL
+    40,947); a nested loop semi / anti join's inner rows counted every row collected, not the
+    rows up to the first match ExecNestLoop reads (q22's inner index-only scan rows=3.38, now
+    0.67); a plain partial aggregation under a Gather returns a row from each process (Gather
+    rows=3, Partial Aggregate rows=1.00 loops=3; it showed 1 and 0.33). Golden
+    `a227_explain_counts`. Left: q13's per-worker Sort lines and Gather Merge rows (PostgreSQL's
+    workers' partial groups, 344,253 rows over three processes, depend on which rows each read).
+  - **A Parallel Hash over a whole index-only scan** (`whole_index_as_seq`): q13's customer hash
+    (Parallel Index Only Scan of customer_pkey, no bounds) was read row by row on the executor's
+    thread before the workers started; a whole index's rows are the table's, and a Parallel
+    Hash's insert order is nobody's, so it is read as a sequential scan in the parallel scan's
+    workers with its keys computed there (`compute_in_workers`, 204's path). q13 user
+    instructions -1.6 to -3.0%, wall 1.200 -> 1.110 s (3 of 3 pairs), the executor thread's
+    share of samples 11.4% -> 8.7%.
+  - Dropped (`~/.cache/a227/patches/dropped-c002-kept-fetch-scan.*`): an index scan's row
+    fetches through one store scan kept from call to call and sought on (`Scan::reseek`)
+    instead of a new merging scan per call: q20 lost 1.7% of c001's gain, q02 / q11 flat
+    (reseek's `same_sources`, `Merge::new` and range deletions cost what `Scan::new` did).
+  - Measured, not changed:
+    - The serial index-fetch queries (q02, q11, q20) spend 30-45% of their time in random row
+      reads of the LSM (`Block::seek` 8-12% self, mostly misses on the block's restarts and its
+      entries' first bytes; `find_block`, `block_with`): a lookup per row PostgreSQL makes by TID.
+      A kept reader alone doesn't help (207's and this round's attempts): the rows of one
+      rescan are in different blocks.
+    - q07 / q05 / q08's workers' point reads (`Store::get_with`): 25% of its self time is the
+      hot ranges' `RwLock` read (`hot.get`: an atomic compare-exchange three workers share) on
+      every read once any range is hot (TPC-H's nation / region are); 50% is the row's first
+      byte (`has_external`), a miss the decode pays anyway. Point-read owners (agent 221).
+    - q13's executor thread after this round: the parts' merge (`AggNode::run`, 6.4% of
+      samples) and the hash inserts of the workers' rows (`pipe::Built`), 226's path.
+  - Tests: release lib tests, golden (in-process, wire, shuffled), parallel_scan, query_spill,
+    heap_order_scan, big_tables, txn_spill, kept_plans on the rebased branch; three new goldens
+    recorded from PostgreSQL 18.6 (`a227_subplan_rescan`, `a227_anti_const`,
+    `a227_explain_counts`); plancmp identical; the regression subset above. The full
+    verification train on the pushed head `7867694b9` (`tools/verification-train.sh`,
+    `TRAIN_NO_CHECKOUT=1`): release and debug crate tests pass, Clippy 20 warnings (none in the
+    changed code), crash_random seeds 1-30 x 4, power_cut 4 passed, the power and async power
+    crash rounds pass, the regression suite 51,148 / 51,150 units with none newly differing,
+    isolation 1,647 / 1,648 permutations (intra-grant-inplace, as on the other trains), pg_dump
+    TAP 14,609 passed (rerun alone: the first run's client container had made its mount
+    directory as root).
+  - Next steps (largest first): q02 (0.62 s against 0.25: the 158,720-row hash build of nested
+    loop rows, concat and Value clones, 22% the partsupp fetches; its SubPlan's nested loops
+    reopened per run: a nested loop and sequential scan rescan would keep them); q20 (0.35
+    against 0.11: lineitem's row fetches, 30%, and the index entries' scan per run, 19%); q11
+    (0.19 against 0.09: partsupp fetches, 42%); the point-read cost itself (the hot-range lock,
+    block seeks), which these and q07 / q05 / q08 share; q17's SubPlan over a bitmap heap scan.
 - **Executor, round 15: displaced heap rows by the model, batches of few outer rows kept as
   stored** (agent 219; BENCH.md "Executor, round 15"). Lane C (servers on CPUs 14,15,32,33: two
   cores, four threads), PostgreSQL, the engine and pgrust each at max_parallel_workers_per_gather
