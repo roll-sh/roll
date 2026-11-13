@@ -172,8 +172,22 @@ Two resources an agent can read before it acts (`resources/list`, `resources/rea
 | `roll://access/me` | What this connection may do, in words: each rule's products, actions (and which ask first), resources, environments and paths; what approvals allow it for a while and until when; what happens to the rest; its expiry, rate limit and address limit. A second content block holds `GET /v1/access`'s JSON. |
 
 `roll://access/me` is read from `GET /v1/access` through the gated router with the caller's token,
-as a tool is, so it says what the gate decides and the read is in the audit log. There are no
-prompts: nothing roll does needs a canned prompt the tools' descriptions don't already give.
+as a tool is, so it says what the gate decides and the read is in the audit log.
+
+## Prompts
+
+roll's workflows as prompts a client offers as slash commands (`prompts/list`, `prompts/get`;
+`crates/roll-mcp/src/prompts.rs`), as GitHub's and Sentry's MCP servers ship theirs. A prompt is
+only text that walks the agent through roll's tools: it calls nothing, each tool it names is still
+decided by the gate, and a connection is offered only the prompts whose tools it has. Arguments are
+one line of printable text, at most 200 characters.
+
+| Prompt | Arguments | What it does | Tools |
+| --- | --- | --- | --- |
+| `what_can_i_do` | | What this connection may do, in words, and which rule would allow what's missing. | `access_whoami` |
+| `check_diff_for_secrets` | `project` | Before a commit: whether any added value is one of the project's stored secrets (by key and environment, never the value). | `secrets_scan` |
+| `fix_secrets_health` | `project` | What needs fixing in a project's secrets, most urgent first, asking before changing anything. | `secrets_health` |
+| `debug_failing_service` | `service`, `env` | Why an environment is failing (deploys, deploy logs, failing requests, metrics), then a fix or a rollback it asks about first. | `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
 
 ## Tools
 
@@ -362,7 +376,7 @@ waits on a sibling PR reaching main is last.
 4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
+Done lately: MCP prompts (roll's workflows as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
 #28 and search #29 pass rolld's route test); a preview's share link is reveal (`previews_share`);
 search's index mapping, settings, refresh and analyze as MCP tools; the ninth review's findings
 (apps settings that change what production runs, its source, build, start and pre-deploy commands,

@@ -17,6 +17,7 @@
 //! - Toolsets: `/v1/mcp?toolsets=postgres,code` (or `X-MCP-Toolsets`) lists only those products'
 //!   tools, as GitHub's server does: every product's tools are ~35k tokens of an agent's context.
 
+pub mod prompts;
 pub mod resources;
 pub mod tools;
 
@@ -329,12 +330,21 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
             },
             "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": [] })),
-            "prompts/list" => rpc_result(id, json!({ "prompts": [] })),
+            "prompts/list" => rpc_result(id, prompts::list(&tool_names(ctx))),
+            "prompts/get" => match prompts::get(params.get("name").and_then(Value::as_str).unwrap_or(""), params.get("arguments").unwrap_or(&Value::Null), &tool_names(ctx)) {
+                Ok(v) => rpc_result(id, v),
+                Err(e) => rpc_error(id, -32602, e),
+            },
             other => rpc_error(id, -32601, format!("method not found: {other}")),
         };
         responses.push(resp);
     }
     responses
+}
+
+/// The names of the tools this connection is offered (what prompts may use).
+fn tool_names(ctx: &Ctx) -> Vec<String> {
+    ctx.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()
 }
 
 /// A call waiting on a person, for a client that opens URLs: open the approval page, then send the
@@ -362,7 +372,7 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
     };
     json!({
         "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false } },
+        "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false } },
         "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION") },
         "instructions": format!(
             "roll: serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, source control (roll code) and coding agents, grouped into workspace projects. \
