@@ -193,3 +193,24 @@ async fn tools_list_cost() {
     lat.sort_unstable();
     println!("tools/list p50 {} µs  p99 {} µs", lat[lat.len() / 2], lat[lat.len() * 99 / 100]);
 }
+
+/// A prompt's arguments complete from what the connection may list (MCP `completion/complete`,
+/// read through the gate): the operator gets matching projects; a token without the prompt's
+/// tools gets nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_arguments_complete_from_what_it_may_read() {
+    let d = Daemon::with_products(vec!["postgres".into(), "secrets".into(), "workspace".into()]);
+    for name in ["billing", "blog", "api"] {
+        let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": name }))).await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+    let ask = |typed: &str| json!({ "ref": { "type": "ref/prompt", "name": "fix_secrets_health" }, "argument": { "name": "project", "value": typed } });
+    let got = d.rpc(OPERATOR, "completion/complete", ask("b")).await;
+    let mut values: Vec<&str> = got["completion"]["values"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    values.retain(|v| !v.starts_with("prj_"));
+    values.sort();
+    assert_eq!(values, vec!["billing", "blog"], "{got}");
+    let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+    let none = d.rpc(&reader, "completion/complete", ask("")).await;
+    assert_eq!(none["completion"]["values"], json!([]), "{none}");
+}
