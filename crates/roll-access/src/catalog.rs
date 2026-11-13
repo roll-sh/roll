@@ -911,6 +911,9 @@ static ROWS: &[Row] = &[
         .env(EnvFrom::Param("env"))
         .path_query("path")
         .copies_from(CopyFrom::Query("from")),
+    // Which candidates are this project's stored values (`roll secrets scan`): read on the
+    // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
+    row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
