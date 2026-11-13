@@ -1025,39 +1025,40 @@ Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/rol
 
 ## Next
 
-Ranked; the top item not marked *waiting* is what's being worked on. A product review on
-2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
-earlier security, product and integration reviews).
+Ranked; the top item not marked *waiting* is what's being worked on. A bug review and an
+integration review on 2026-11-13 (after the product review against Railway, Render, Fly,
+Vercel, Cloud Run and Heroku) set this order; their findings are fixed or in "With the other
+platform branches".
 
-1. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
+1. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
+   its stream consumer group's lag, which only roll can do natively.
+2. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
+    (`/__roll/feedback.js` before `</body>` of HTML a visitor reached through roll; the rules in
+    `roll-previews/src/runtime.rs` `add_feedback`), in the proxy.
+3. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
    next, importing a Compose file's image services (Railway's) and an end-to-end run against a
    live rolld with Postgres and Redis.
-2. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
-   its stream consumer group's lag, which only roll can do natively.
-3. **Region**: the region shown on the overview and each environment, defaulting to the project's
+4. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-10. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+11. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-12. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
-    (`/__roll/feedback.js` before `</body>` of HTML a visitor reached through roll; the rules in
-    `roll-previews/src/runtime.rs` `add_feedback`), in the proxy.
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
