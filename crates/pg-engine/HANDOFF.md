@@ -9808,6 +9808,9 @@ and confirm on PGO:
   counts and come out cold, which biases against the changed side.
 - A new benchmark class goes into `tools/pgo-train.sh` in the same change (see above).
 
+Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
+"Profile-guided build", part 2.
+
 ## Analytic path against pgrust (agent 220)
 
 TPC-H SF1 on lane C (servers on CPUs 14,15,32,33, i.e. two cores with their hyperthreads;
@@ -10122,6 +10125,12 @@ Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO line
 note, still open).
 
 ## Short write transactions, round 5 (agent 218)
+
+**Landed by agent 225** (2026-11-13), the ten steps below plus a clippy commit, gated on
+profile-guided builds of base and stack (BENCH "Profile-guided build", part 2): short
+transactions -4.4% user cycles at 8 clients, about -8.5% at 32, -4.5% at 1, point reads -2 to -4%
+instructions, range reads -0.9%; fsyncs per commit equal at an equal commit rate; the train
+(crash, power stage with the PGO build) passed. `wip/a213`, `wip/a216`, `wip/a218` deleted.
 
 Nothing kept; BENCH.md "Short write transactions, round 5" has the pairs, the same-day
 three-server table and the PGO measurement. The stack is on origin `wip/a218` (branch

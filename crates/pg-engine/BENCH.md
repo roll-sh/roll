@@ -385,6 +385,49 @@ instrumented build 1,162-1,225 s, training 310 s (611 s with `PGO_BREADTH=1`), o
 1,015-1,115 s; 41 minutes with a client given, 63 without. Disk: each dist target dir ~3 GB
 (instrumented a little more), deleted after its binary is copied; raw profiles 35 MB; the merged
 profile 19 MB. A plain dist build of the same commit: 17-19 minutes.
+### Agent 218's stack under PGO (part 2)
+
+The ten steps of `wip/a218` (BENCH "Short write transactions, round 5"), rebased, against their
+base, both PGO (each `tools/dist-pgo.sh` from its own checkout: its own profile, the same
+training); lane A, user cycles of the connection threads. Pairs with more than 1.0 foreign core
+on the server CPUs are flagged and left out (the host ran at load 20-46 for most of a night).
+
+On `aae3e83f6` (5 alternating pairs at 8 and 32 clients, 3 at 1, none flagged at 8/32):
+
+| | user cycles / txn | tps | user instr / txn |
+|---|---:|---:|---:|
+| short txn, 8 clients | -5.4% (every pair down) | +0.4% | -1.9% |
+| short txn, 32 clients | -8.5% (every pair down) | +12.0% (every pair up) | -1.7% |
+| short txn, 1 client | -5.0% | +0.6% | -3.8% |
+| point reads, 8 clients | -7.4% | +4.8% | -3.2% |
+| range reads, 8 clients (1 pair) | -5.5% | +16.8% | -0.9% |
+| idle footprint, 100 sessions | 42.2-42.4 MB against 43.0-43.1 | | |
+
+Plain dist of the same two commits (5 pairs each): 8 clients -4.4% user cycles (every pair down),
+32 clients -7.4%: the PGO deltas were the plain ones plus about a point.
+
+On `a79309351` (the branch had moved: the fast commit path of a transaction that wrote nothing,
+prepared statements in hashbrown maps, the wire protocol's accept paths), unflagged pairs of four
+alternating series pooled:
+
+| | unflagged pairs | user cycles / txn | tps | user instr |
+|---|---:|---:|---:|---:|
+| short txn, 8 clients | 5 | -4.4% (all 5 down: -1.1 to -6.3%) | +6.2% | |
+| short txn, 32 clients | 6 | ~-8.5% (all 6 down: -3.5 to -10.3%) | ~+8% | |
+| short txn, 1 client | 3 | -4.5% (all down) | +0.9% | -3.6% |
+| point reads, 8 clients | 2 | -6.2%, -5.0% | | -2.2%, -4.2% |
+| range reads, 8 clients | 3 | -1.1% | | -0.9% (median; -3.7 to +0.7) |
+| fsyncs / commit at a fixed 2,000 tps, 8 and 32 clients | 3 + 3 | base 0.988-1.016, stack 0.993-1.017 | | |
+| idle footprint, 100 sessions | 3 + 3 | stack 43.2-44.6 MB, base 43.2-44.6 MB | | |
+
+The quietest 8-client series alone (3 pairs, 0.3-0.8 foreign cores) was -1.1% to -4.5%: part of
+the stack's 8-client gain overlaps what landed meanwhile. Fsyncs per commit at full load were
+lower with the stack (32 clients, 0.51 against 0.52-0.53) because it ran 7-13% more transactions
+a second (more commits a group; fsyncs a second higher); at an equal commit rate they are equal,
+and pwrites per commit fell from ~1.0 to the fsync count (step 2 writes the WAL once per fsync).
+
+Verification train on the stack's PGO build: see HANDOFF "Profile-guided build".
+
 ## Range reads, round 8 (2026-11-12, agent 223)
 
 HANDOFF.md, "Range reads round 8", has what changed: a rechosen custom plan restarts the executor
