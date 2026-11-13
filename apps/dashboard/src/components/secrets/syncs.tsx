@@ -1,6 +1,6 @@
 import { Check, Copy, Plus, RefreshCw, Send } from "lucide-react";
 import { useState } from "react";
-import { FOLDER_PATH, SECRET_KEY, type NewSync, type Sync, type SyncKind } from "@/lib/secrets-api";
+import { FOLDER_PATH, SECRET_KEY, type NewSync, type Sync, type SyncKind, type SyncPreview } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, Teach, useLoad } from "./ui";
 import { Rotators } from "./rotators";
@@ -209,7 +209,7 @@ function SigningSecret({ id, secret, onDone }: { id: string; secret: string; onD
 }
 
 function NewSyncForm({ kinds, onCreate, onCancel }: { kinds: SyncKind[]; onCreate: (s: NewSync) => Promise<void>; onCancel: () => void }) {
-  const { standard, previews } = useSecrets();
+  const { standard, previews, api } = useSecrets();
   const envs = [...standard, ...previews];
   const [kindName, setKindName] = useState(kinds[0]?.kind ?? "");
   const [target, setTarget] = useState<Record<string, string>>({});
@@ -218,12 +218,21 @@ function NewSyncForm({ kinds, onCreate, onCancel }: { kinds: SyncKind[]; onCreat
   const [keys, setKeys] = useState("");
   const [prefix, setPrefix] = useState("");
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<SyncPreview | string | null>(null);
   const kind = kinds.find((k) => k.kind === kindName);
   const keyList = keys.split(/[\s,]+/).filter(Boolean);
   const badKeys = keyList.filter((k) => !SECRET_KEY.test(k));
   const prefixOk = prefix === "" || /^[A-Za-z0-9_]{1,64}$/.test(prefix);
   const ok = !!kind && !!env && FOLDER_PATH.test(path) && badKeys.length === 0 && prefixOk && kind.fields.every((f) => !f.required || (target[f.name] ?? "").trim() !== "");
 
+  const draft = (): NewSync => {
+    const t: Record<string, string> = {};
+    for (const f of kind?.fields ?? []) {
+      const v = (target[f.name] ?? "").trim();
+      if (v) t[f.name] = v;
+    }
+    return { environment: env, path, kind: kindName, target: t, ...(keyList.length && { keys: keyList }), ...(prefix && { prefix }) };
+  };
   return (
     <form
       className="rise mb-3 space-y-3 rounded-xl border border-line-2 bg-panel p-3 shadow-card inset-shadow-highlight"
@@ -231,12 +240,7 @@ function NewSyncForm({ kinds, onCreate, onCancel }: { kinds: SyncKind[]; onCreat
         e.preventDefault();
         if (!ok || !kind) return;
         setBusy(true);
-        const t: Record<string, string> = {};
-        for (const f of kind.fields) {
-          const v = (target[f.name] ?? "").trim();
-          if (v) t[f.name] = v;
-        }
-        await onCreate({ environment: env, path, kind: kind.kind, target: t, ...(keyList.length && { keys: keyList }), ...(prefix && { prefix }) });
+        await onCreate(draft());
         setBusy(false);
       }}
       onKeyDown={(e) => e.key === "Escape" && onCancel()}
@@ -308,7 +312,27 @@ function NewSyncForm({ kinds, onCreate, onCancel }: { kinds: SyncKind[]; onCreat
         </label>
       </div>
       {badKeys.length > 0 && <p className="text-[11.5px] text-danger">Not a key: {badKeys.join(", ")}</p>}
+      {preview && (
+        <div className="rounded-lg border border-line-2 bg-panel-2 px-3 py-2 text-[12px]" role="status">
+          {typeof preview === "string" ? (
+            <p className="text-danger">{preview}</p>
+          ) : (
+            <>
+              <p className="text-muted">
+                It would push {preview.names.length} {preview.names.length === 1 ? "name" : "names"}
+                {preview.credentials.length > 0 && <> (never its credential {preview.credentials.join(", ")})</>}:
+              </p>
+              <p className="mt-1 font-mono text-[11.5px] text-fg">{preview.names.join(", ") || "nothing"}</p>
+              {preview.missing_credentials.length > 0 && <p className="mt-1 text-danger">Not set here: {preview.missing_credentials.join(", ")}, so the first push would fail.</p>}
+              {preview.unknown_keys.length > 0 && <p className="mt-1 text-danger">No such key here: {preview.unknown_keys.join(", ")}.</p>}
+            </>
+          )}
+        </div>
+      )}
       <div className="flex justify-end gap-2">
+        <button type="button" className={ghost} disabled={!ok} onClick={() => api.previewSync(draft()).then(setPreview, (e) => setPreview(errorText(e)))} title="What it would push (names only), before it exists">
+          Preview
+        </button>
         <button type="button" className={ghost} onClick={onCancel}>
           Cancel
         </button>

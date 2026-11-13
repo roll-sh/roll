@@ -163,6 +163,19 @@ pub struct SecretSync {
     pub signing_secret: Option<String>,
 }
 
+/// What a sync would do, before it exists (`POST …/syncs/preview`): names only.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SyncPreview {
+    /// The names it would push, prefix applied.
+    pub names: Vec<String>,
+    /// The keys it reads its platform credentials from (never pushed).
+    pub credentials: Vec<String>,
+    /// Credential keys the folder doesn't set: the first push would fail.
+    pub missing_credentials: Vec<String>,
+    /// Keys `keys` lists that the folder doesn't have.
+    pub unknown_keys: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewSync {
@@ -284,6 +297,30 @@ impl Secrets {
         self.project(project)?;
         let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? ORDER BY s.created_at"), [project], row))?;
         Ok(rows.into_iter().map(|r| masked(r.info)).filter(|s| caller.allows(Action::Read, &Scope::at(project, &s.environment, &s.path))).collect())
+    }
+
+    /// What `create_sync` with `n` would push, without creating it or calling the platform: the
+    /// target checked, the names (from the folder's keys, its `keys` and `prefix`, never a
+    /// credential of any of the folder's syncs), and what's missing. Names only.
+    pub fn preview_sync(&self, project: &str, n: &NewSync, caller: &Caller) -> Result<SyncPreview> {
+        let path = names::path(n.path.as_deref().unwrap_or("/"))?;
+        caller.need(Action::Admin, &Scope::at(project, &n.environment, &path))?;
+        self.project(project)?;
+        let target = self.syncs.get(&n.kind)?.clone();
+        target.check(project, &self.members(project)?, &n.target)?;
+        let creds: BTreeSet<String> = target.credentials(&n.target).into_iter().collect();
+        let others: Vec<(String, Json)> = self.db.read(|c| {
+            c.query("SELECT s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND e.slug = ? AND s.path = ?", params![project, n.environment, path], |x| {
+                Ok((x.get::<_, String>(0)?, serde_json::from_str::<Json>(&x.get::<_, String>(1)?).unwrap_or(Json::Null)))
+            })
+        })?;
+        let all_creds: BTreeSet<String> = others.iter().filter_map(|(k, t)| self.syncs.get(k).ok().map(|tg| tg.credentials(t))).flatten().chain(creds.iter().cloned()).collect();
+        let have: BTreeSet<String> = self.view(project, &n.environment, &path, caller, false, Action::Read)?.into_iter().filter(|e| e.row.owner.is_empty()).map(|e| e.row.key).collect();
+        let prefix = n.prefix.clone().unwrap_or_default();
+        let names = have.iter().filter(|k| !all_creds.contains(*k) && n.keys.as_ref().is_none_or(|ks| ks.contains(k))).map(|k| format!("{prefix}{k}")).collect();
+        let unknown_keys = n.keys.iter().flatten().filter(|k| !have.contains(*k)).cloned().collect();
+        let missing_credentials = creds.iter().filter(|k| !have.contains(*k)).cloned().collect();
+        Ok(SyncPreview { names, credentials: creds.into_iter().collect(), missing_credentials, unknown_keys })
     }
 
     pub fn create_sync(&self, project: &str, n: NewSync, caller: &Caller) -> Result<SecretSync> {

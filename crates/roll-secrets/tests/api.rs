@@ -695,6 +695,9 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     api.set("staging", "DB_URL", "postgres://db").await;
     api.set("staging", "STRIPE_KEY", "sk_live_123").await;
     api.set("staging", "PLATFORM_TOKEN", "tok_platform_1").await;
+    // Before it exists: what it would push (names only), its credential kept out.
+    let p = api.ok(Method::POST, "/syncs/preview", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" }, "keys": ["DB_URL", "STRIPE_KEY", "TYPO"] }))).await;
+    assert_eq!(p, json!({ "names": ["DB_URL", "STRIPE_KEY"], "credentials": ["PLATFORM_TOKEN"], "missing_credentials": [], "unknown_keys": ["TYPO"] }));
     let s = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
     let id = s["id"].as_str().unwrap().to_string();
     assert!(s["signing_secret"].as_str().unwrap().starts_with("whsec_"), "shown once: {s}");

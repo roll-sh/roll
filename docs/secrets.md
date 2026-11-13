@@ -817,7 +817,10 @@ Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terra
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
-change of that key.
+change of that key. Before one is added, `POST …/syncs/preview` (`roll secrets syncs add … --preview`, the form's
+Preview) says what it would push, names only, without calling the platform: its names after `keys`
+and `prefix`, the credential keys it reads (never pushed), and any credential or listed key the
+folder doesn't have.
 
 roll-secrets knows no platform. Each kind is a `SyncTarget` (`crates/roll-secrets/src/syncs.rs`)
 that rolld registers (`crates/rolld/src/secrets/syncs.rs`), as link providers are:
@@ -1297,6 +1300,7 @@ isn't in the workspace is 404.
 | `DELETE /shares/{id}` | | 204 |
 | `GET /syncs` | | `{syncs: Sync[], kinds: SyncKind[]}` |
 | `POST /syncs` | `NewSync` | 201 `Sync & {signing_secret?}` (shown once; `admin`) |
+| `POST /syncs/preview` | `NewSync` | `{names, credentials, missing_credentials, unknown_keys}`: what it would push, before it exists (`admin`; names only, the platform isn't called) |
 | `DELETE /syncs/{id}` | | 204 (`admin`) |
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
@@ -1484,8 +1488,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Sync preview**: before a sync is created, the names it would set and delete at the target
-   (from the environment and what the target already has, where the platform lists them).
 
 Waiting on other pull requests:
 

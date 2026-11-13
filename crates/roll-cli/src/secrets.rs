@@ -367,7 +367,7 @@ pub enum Syncs {
     Ls,
     /// Add a sync of this environment and folder: `add github --target repo=acme/web`.
     Add {
-        /// The kind: github, webhook, notify, vercel, cloudflare, aws-ssm (`syncs ls` lists them).
+        /// The kind: github, gitlab, vercel, aws-secrets-manager, … (`syncs ls` lists them).
         kind: String,
         /// The target's fields as `name=value` (repeat), as `syncs ls` describes them.
         #[arg(long = "target", value_name = "NAME=VALUE")]
@@ -378,6 +378,9 @@ pub enum Syncs {
         /// Prepend this to every name at the target.
         #[arg(long)]
         prefix: Option<String>,
+        /// Only say what it would push (names), without adding it.
+        #[arg(long)]
+        preview: bool,
     },
     /// Push it now, every key.
     Run { id: String },
@@ -1617,7 +1620,7 @@ async fn syncs(c: &Client<'_>, cmd: Syncs, json_out: bool) -> anyhow::Result<()>
             let kinds: Vec<String> = v["kinds"].as_array().into_iter().flatten().map(|k| s(&k["kind"])).collect();
             eprintln!("Kinds: {}", kinds.join(", "));
         }
-        Syncs::Add { kind, target, keys, prefix } => {
+        Syncs::Add { kind, target, keys, prefix, preview } => {
             let mut t = serde_json::Map::new();
             for kv in target {
                 let (k, v) = kv.split_once('=').with_context(|| format!("{kv}: --target is name=value"))?;
@@ -1629,6 +1632,25 @@ async fn syncs(c: &Client<'_>, cmd: Syncs, json_out: bool) -> anyhow::Result<()>
             }
             if let Some(p) = prefix {
                 body["prefix"] = json!(p);
+            }
+            if preview {
+                let v = c.call(Method::POST, &format!("{base}/preview"), Some(body)).await?;
+                if json_out {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(());
+                }
+                let list = |k: &str| v[k].as_array().into_iter().flatten().map(s).collect::<Vec<_>>();
+                let names = list("names");
+                println!("It would push {} name(s): {}", names.len(), if names.is_empty() { "nothing".into() } else { names.join(", ") });
+                if !list("credentials").is_empty() {
+                    println!("Never its credential: {}", list("credentials").join(", "));
+                }
+                for (k, why) in [("missing_credentials", "isn't set here: the first push would fail"), ("unknown_keys", "isn't a key here")] {
+                    for n in list(k) {
+                        println!("{n} {why}");
+                    }
+                }
+                return Ok(());
             }
             let v = c.call(Method::POST, &base, Some(body)).await?;
             if json_out {
