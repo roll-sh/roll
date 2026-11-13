@@ -340,11 +340,15 @@ it's **stale**: unchanged for longer than the environment's `max_age_days`
 log (reveal, export, resolve and sync pushes) over the last 90 days; nothing is decrypted. A stale
 key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 
-**Rotation reminders.** An environment with a `max_age_days` limit and a notify URL (its
-protection policy's `notify_url`) gets one notice a day while it has stale keys: their names (up to
-20, then a count), the limit and a link, through the same outbox and retries as approval notices.
-Live and dynamic links don't count (they change on their own); managed ones do. Two nodes never
-both remind: the day is claimed in the same write that queues the notice.
+**Daily notices.** An environment with a notify URL (its protection policy's `notify_url`) gets one
+notice a day with its health findings (see Health): expired, missing, exposed, expiring and stale
+keys, worst first, each with its detail (`findings`), up to 10 per kind in the text, and a link to
+the Health view. Weak values aren't in it (that says something about a value, and a channel's
+readers needn't be ones who may reveal it), nor unread ones. Stale needs a `max_age_days`; live
+and dynamic links never count as stale (they change on their own), managed ones do. The same
+outbox and retries as approval notices carry it; two nodes never both send it, since the day is
+claimed in the same write that queues the notice, and an environment with nothing to say is
+looked at once a day too.
 
 **Expiry dates.** Some values stop working on a date roll can't see: a vendor's API key, a TLS
 certificate, a trial token. A secret's optional `expires_at` (ms; set in any write's `set`
@@ -353,8 +357,8 @@ comment, so history, rollback, promote, change requests and backups carry it, an
 keeps the date until someone changes it, except a certificate: a new value holding PEM
 certificates is dated by the earliest `notAfter` among them, unless the write gives a date. Insights add `expires_at` and `expiring` (within 14 days,
 or past); the grid and the environment's list show a clock, with the days left inside two weeks
-and "expired" in red after. The daily reminder above also lists expiring and expired keys (soonest
-first, names and dates only), for any environment with a notify URL, limit or not. Like
+and "expired" in red after. The daily notice above lists expiring and expired keys too (names and
+dates only), for any environment with a notify URL, limit or not. Like
 staleness, it's only flagged: nothing stops working in roll. `roll secrets set KEY=v --expires
 2027-03-31`, `roll secrets expire KEY --on 90d` (or `never`) and the editor's date field set it.
 
@@ -400,6 +404,11 @@ imports and base), `exposed` (a protected value also in an unprotected environme
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
+
+Health, `POST …/leaks` and `GET /v1/secrets/search` filter each finding by the caller's own access,
+so roll-access lets a token limited to some environments or folders call them (they're marked
+`filters_itself` in its catalogue): its answer just leaves the rest out. Keep that filter in each:
+without it, the mark would let such a token see the whole project.
 
 ### Compare and promote
 
@@ -1338,7 +1347,7 @@ Done and in PR #20:
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history, and `roll secrets
   scan [--staged]` before a commit;
-- required and typed keys; insights, rotation reminders and expiry dates for values that expire
+- required and typed keys; insights, a daily notice of each environment's health, and expiry dates for values that expire
   outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
@@ -1366,10 +1375,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Health where people already look**: the Health tab carries a count of serious findings
-   (expired, missing, exposed), so they're seen without opening it.
-2. **One daily notice from health**: the reminder an environment's notify URL gets once a day lists
-   every finding there (missing, exposed and weak too, not only stale and expiring), names only.
 
 Waiting on other pull requests:
 

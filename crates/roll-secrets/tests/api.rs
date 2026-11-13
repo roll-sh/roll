@@ -805,9 +805,10 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     .unwrap();
     let sent = api.sent.0.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "one reminder a day");
-    assert_eq!((sent[0]["stale"].clone(), sent[0]["max_age_days"].as_i64()), (json!(["USED"]), Some(90)));
-    assert_eq!(sent[0]["expiring"], json!([{ "key": "CERT", "expires_at": soon }]));
-    assert!(sent[0]["text"].as_str().unwrap().contains("CERT in 3 days"), "{}", sent[0]["text"]);
+    let findings: Vec<(&str, &str)> = sent[0]["findings"].as_array().unwrap().iter().map(|f| (f["issue"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
+    // Every finding there, worst first: USED's value is in staging too.
+    assert_eq!(findings, [("exposed", "USED"), ("expiring", "CERT"), ("stale", "USED")]);
+    assert!(sent[0]["text"].as_str().unwrap().starts_with("roll secrets: production has 1 exposed: USED (also in staging); 1 expiring: CERT (expires "), "{}", sent[0]["text"]);
     assert!(!sent[0].to_string().contains("\"u\"") && !sent[0].to_string().contains("\"c2\""), "names, never values");
 
     // A credential anyone could guess is flagged, to whoever may reveal it.
