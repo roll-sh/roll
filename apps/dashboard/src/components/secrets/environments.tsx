@@ -5,7 +5,7 @@ import { Select } from "../agents/ui/select";
 import { Dialog } from "../agents/ui/dialog";
 import { Switch } from "../agents/ui/switch";
 import { useSecrets } from "./secrets-page";
-import { ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, iconButton, label, primary, Section, until, useLoad } from "./ui";
+import { ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, iconButton, label, primary, Section, until } from "./ui";
 
 /**
  * The project's environments: add, rename (references to the slug are rewritten), reorder (the
@@ -246,15 +246,14 @@ const TYPE_LABEL: Record<KeyType, string> = { url: "URL", int: "integer", port: 
 
 /** Keys every standard environment must set, each with what its value must be (typed keys). */
 function RequiredKeys({ onError }: { onError: (e: string) => void }) {
-  const { api, reloadEnvs } = useSecrets();
-  const list = useLoad(() => api.required(), [api]);
+  const { api, reloadEnvs, required, reloadRequired } = useSecrets();
   const [adding, setAdding] = useState<Required>({ key: "", path: "/", comment: "" });
   const [busy, setBusy] = useState(false);
   const save = async (next: Required[]) => {
     setBusy(true);
     try {
       await api.setRequired(next);
-      list.reload();
+      reloadRequired();
       reloadEnvs();
       return true;
     } catch (e) {
@@ -264,7 +263,7 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
       setBusy(false);
     }
   };
-  const rows = list.data ?? [];
+  const rows = required;
   const keyOk = SECRET_KEY.test(adding.key) && adding.path.startsWith("/");
   return (
     <Section title="Required keys" aside={<span className="text-[11.5px] text-subtle">Every standard environment must set these; typed ones must fit.</span>}>

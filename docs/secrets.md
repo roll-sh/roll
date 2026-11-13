@@ -267,6 +267,8 @@ as a problem, so `roll run` won't start with it. A rollback restores what was th
 Edit them in Environments → Required keys, or `roll secrets required add PORT --type port`.
 A type added after values exist doesn't change them: the overview grid marks each stored value
 that doesn't fit (`misfit` on its cell, the rule it breaks), for a caller who may reveal it.
+The dashboard's add and edit forms check a typed key's value as it's typed, with the same rules
+and messages (`apps/dashboard/src/lib/secrets-required.ts`).
 
 ### Insights
 
@@ -1004,7 +1006,7 @@ checks and sandboxes, leaked secrets don't land, required keys, one-time sharing
 sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), audit
 sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
 previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
-for stored values, and the fixes from two security reviews.
+for stored values, typed keys, and the fixes from two security reviews.
 Reviewed on 2026-11-13 against Infisical, Doppler, Vault, Vercel and 1Password Developer, and
 against the apps, previews, MCP and search branches (previews resolves untrusted; apps refuses
 dynamic links for services and uses the digest for `needs_deploy`). Ranked:
@@ -1021,7 +1023,9 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **Typed keys as you type**: the add and edit forms check a typed key's value before saving
-   (the same rules in TypeScript), so the 400 is never the first sign.
+4. **Shared values across projects**: an import from another project's environment and folder
+   (`{project, environment, path}`), allowed only where the caller may read it there and audited
+   on both sides, so an organisation-wide value (an error tracker's DSN, a shared API key) lives
+   once; cycles across projects are caught like imports'; the grid marks where a value comes from.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

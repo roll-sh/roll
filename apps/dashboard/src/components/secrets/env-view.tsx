@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
 import { childPath, folderName } from "@/lib/secrets-grid";
+import { misfit } from "@/lib/secrets-required";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../agents/ui/menu";
 import { Segmented } from "../agents/ui/toggle-group";
 import { FolderCrumbs } from "./folders";
@@ -298,6 +299,7 @@ export function EnvView({ env }: { env: Environment }) {
           <div className="px-3 pt-2 pb-8">
             {adding && (
               <AddSecret
+                path={path}
                 keys={keys}
                 refs={refSource}
                 onCancel={() => setAdding(false)}
@@ -417,7 +419,8 @@ function NewFolder({ path, onCreate }: { path: string; onCreate: (path: string) 
 
 const parseTags = (s: string) => s.split(/[\s,]+/).filter(Boolean);
 
-function AddSecret({ keys, refs, onAdd, onCancel }: { keys: Set<string>; refs: RefSource; onAdd: (op: Op) => Promise<boolean>; onCancel: () => void }) {
+function AddSecret({ path, keys, refs, onAdd, onCancel }: { path: string; keys: Set<string>; refs: RefSource; onAdd: (op: Op) => Promise<boolean>; onCancel: () => void }) {
+  const { required } = useSecrets();
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [comment, setComment] = useState("");
@@ -429,8 +432,9 @@ function AddSecret({ keys, refs, onAdd, onCancel }: { keys: Set<string>; refs: R
   const tagsOk = tagList.every((t) => TAG.test(t));
   const warn = useRefWarnings(value, key, refs);
   const exists = keys.has(key) && !personal;
+  const unfit = misfit(required.find((r) => r.key === key && r.path === path), value);
   const submit = async () => {
-    if (!keyOk || !tagsOk || busy) return;
+    if (!keyOk || !tagsOk || unfit || busy) return;
     setBusy(true);
     const ok = await onAdd({ op: "set", key, value, comment: comment || undefined, tags: tagList.length ? tagList : undefined, type: personal ? "personal" : undefined });
     setBusy(false);
@@ -458,6 +462,7 @@ function AddSecret({ keys, refs, onAdd, onCancel }: { keys: Set<string>; refs: R
         <label>
           <span className={label}>Value</span>
           <RefInput value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
+          {unfit && value && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
         </label>
         <label>
           <span className={label}>Comment</span>
@@ -479,7 +484,7 @@ function AddSecret({ keys, refs, onAdd, onCancel }: { keys: Set<string>; refs: R
         <button type="button" onClick={onCancel} className={ghost}>
           Cancel
         </button>
-        <button type="submit" disabled={!keyOk || !tagsOk || busy} className={primary}>
+        <button type="submit" disabled={!keyOk || !tagsOk || !!unfit || busy} className={primary}>
           {busy ? "Adding…" : "Add secret"}
         </button>
       </div>
@@ -703,8 +708,10 @@ function Editor({
   const tagList = parseTags(tags);
   const tagsOk = tagList.every((t) => TAG.test(t));
   const warn = useRefWarnings(value, s.key, refs, touched && !linked);
+  const { required } = useSecrets();
+  const unfit = touched && !linked ? misfit(required.find((r) => r.key === s.key && r.path === s.path), value) : null;
   const save = async () => {
-    if (!tagsOk || busy) return;
+    if (!tagsOk || unfit || busy) return;
     setBusy(true);
     await onSave({
       ...(touched && !linked && { value }),
@@ -763,6 +770,7 @@ function Editor({
               className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`}
             />
           )}
+          {unfit && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
         </label>
         <div className="grid grid-cols-2 gap-2">
           <label>
@@ -782,7 +790,7 @@ function Editor({
         <button type="button" onClick={onCancel} className={ghost}>
           Cancel
         </button>
-        <button type="submit" disabled={!tagsOk || busy || (unlink && !touched)} className={primary}>
+        <button type="submit" disabled={!tagsOk || !!unfit || busy || (unlink && !touched)} className={primary}>
           {busy ? "Saving…" : "Save"}
         </button>
       </div>
