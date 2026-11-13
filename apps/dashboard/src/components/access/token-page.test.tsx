@@ -31,8 +31,8 @@ vi.mock("@/lib/access-api", async (orig) => ({
     audit: async () => [event],
     approvals: async () => [],
     revoke: (id: string) => revoke(id),
-    tighten: async () => ({ since: 0, days: 30, used: [{ product: "postgres", action: "read", resource: "prj_billing", count: 12, last_at: 0 }], rules: narrowed, narrower: true }),
-    update: (id: string, patch: unknown) => update(id, patch),
+    tighten: async () => ({ since: 0, days: 30, used: [{ product: "postgres", action: "read", resource: "prj_billing", count: 12, last_at: 0 }], rules: narrowed, from: grant.rules, narrower: true }),
+    applyTighten: (id: string, from: unknown) => update(id, from),
     forget: (id: string, approval: string) => forget(id, approval),
   },
 }));
@@ -64,6 +64,6 @@ describe("the token page", () => {
     await userEvent.click(await screen.findByRole("button", { name: "See what it used" }));
     expect(await screen.findByText(/From 12 requests over 30 days/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Apply these rules" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith("tok_1", { rules: narrowed }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith("tok_1", grant.rules));
   });
 });

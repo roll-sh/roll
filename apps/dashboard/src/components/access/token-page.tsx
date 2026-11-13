@@ -91,6 +91,9 @@ function Tighten({
 }) {
   const [t, setT] = useState<Tightened | null>(null);
   const [busy, setBusy] = useState(false);
+  // A proposal is about the rules it was made from: once they change, it's gone.
+  const rulesKey = JSON.stringify(g.rules);
+  useEffect(() => setT(null), [rulesKey]);
   const [error, setError] = useState<string | null>(null);
   const run = async (f: () => Promise<void>) => {
     setBusy(true);
@@ -107,7 +110,7 @@ function Tighten({
   const apply = () =>
     run(async () => {
       if (!t) return;
-      await accessApi.update(g.id, { rules: t.rules });
+      await accessApi.applyTighten(g.id, t.from, t.days);
       setT(null);
       await refresh();
     });

@@ -475,6 +475,15 @@ mod tests {
         }
     }
 
+    /// A resource whose product filters per environment and path itself matches rules limited to
+    /// some environments or paths, never ones about other resources.
+    #[test]
+    fn a_resource_that_filters_itself() {
+        let r = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["staging"], "paths": ["/api"], "actions": { "read": "allow" } }));
+        let at = |id: &str, filters_itself: bool| Target::One(Resource { filters_itself, ..Resource::new("secrets", id) });
+        assert!(!r.matches(&at("prj_a", false)) && r.matches(&at("prj_a", true)) && !r.matches(&at("prj_b", true)));
+    }
+
     /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;
     /// a narrower scope is covered and a wider one isn't.
     #[test]

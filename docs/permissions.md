@@ -144,15 +144,21 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
 - A route whose product filters its answer per environment and path itself, asking the caller's
-  `Grant` for each finding (secrets' `GET …/health` and `POST …/leaks`), is matched by rules limited
-  to some environments or paths too (`Row::filters_itself`): a token for staging gets staging's
-  findings, never production's, rather than a 403.
+  `Grant` for each finding, can be matched by rules limited to some environments or paths too
+  (`Row::filters_itself`): a token for staging would get staging's findings, never production's,
+  rather than a 403. No row has it yet: secrets' health and leak scan get it with secrets' `Grant`
+  swap, and until then secrets answers every request the gate lets through as the operator. For the
+  same reason secrets' cross-project routes (`GET /v1/secrets/search`, `GET /v1/secrets/findings`)
+  need a rule for all of secrets until the swap makes them any token's. An approval on such a route
+  is approved once (a rule from it would drop the token's environments).
 - Linking another resource to an apps service (`PUT …/services/{id}/links/{kind}/{ref}`, or
   `links` in a new service's body) puts its address and password in the service's variables, where
   the service's code reads them: it also needs `reveal` on each linked resource (a `postgres` link
   on that Postgres project, `redis` on that database, `bucket`, `stream`, `queue`, `nosql` likewise;
   a kind roll doesn't know is refused). When that decides, the approval is about the linked
-  resource, so remembering it allows revealing that one.
+  resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
+  when several linked resources aren't allowed outright, the approval names them all and is
+  approved once. Each linked resource's reveal is its own audit row.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
   `admin`, as in secrets itself.
 - Secrets' imports (`PUT …/environments/{env}/imports`, `[{project?, environment, path}]`) are a
@@ -507,9 +513,15 @@ writes a policy from activity:
 - A rule placed by project keeps its project: a resource can leave the project, and its id would
   still match. An action used without a resource (a list, the product as a whole) keeps the rule's
   resources. What a person allowed for a while is never made permanent.
-- The server checks the proposal is covered by the token's rules, else proposes them unchanged;
-  a token that made no allowed requests is proposed unchanged (revoke it instead).
-- Applying it is a `PATCH` of `rules`.
+- The server checks the proposal is covered by the token's rules and passes the rules' own checks,
+  else proposes them unchanged; a token that made no allowed requests is proposed unchanged (revoke
+  it instead).
+- Applying it (`POST …/tighten {from, days?}`, the operator's) makes the proposal again and swaps
+  the rules only if they're still `from`, the rules it was shown from: a change in between is 409.
+- What it went by: one audit row per request, plus one per second check (a copy's or a link's
+  reveal), so an action a request needed twice isn't dropped. A request that ran on a rule for a
+  while counts for a rule with the same product and action, which can keep an action that rule
+  didn't need; it never widens one.
 
 ## Leaked tokens
 
@@ -583,6 +595,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
+| `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
 | `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |

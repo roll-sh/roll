@@ -400,12 +400,16 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
         }
         Token::Tighten { id, days, apply } => {
             let t = api.get(&format!("/v1/access/tokens/{id}/tighten?days={days}")).await?;
-            if apply && t["narrower"] == true {
-                let g = api.call(reqwest::Method::PATCH, &format!("/v1/access/tokens/{id}"), Some(json!({ "rules": t["rules"] }))).await?;
+            let days = t["days"].as_i64().unwrap_or(i64::from(days));
+            if apply {
+                // Applied over the rules it was made from; the grant as it is after.
+                let g = api.post(&format!("/v1/access/tokens/{id}/tighten"), json!({ "from": t["from"], "days": days })).await?;
                 if json_out {
                     println!("{}", serde_json::to_string_pretty(&g)?);
-                } else {
+                } else if t["narrower"] == true {
                     print_grant(&g);
+                } else {
+                    println!("nothing to narrow: its rules are as they were");
                 }
                 return Ok(());
             }
