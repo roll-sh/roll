@@ -10,7 +10,7 @@
  */
 
 import { ApiError } from "./code-api";
-import { getToken, requestSignIn } from "./code-token";
+import { getToken, requestSignIn, withSession } from "./code-token";
 import {
   array,
   bool,
@@ -2646,12 +2646,15 @@ export function createAgentsApi(
   const call = async (method: string, path: string, body?: unknown): Promise<unknown> => {
     const headers = authHeaders();
     if (body !== undefined) headers["content-type"] = "application/json";
-    const res = await doFetch(`${base}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store",
-    });
+    const res = await doFetch(
+      `${base}${path}`,
+      withSession({
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        cache: "no-store",
+      }),
+    );
     const raw = await res.text();
     let data: unknown = null;
     try {

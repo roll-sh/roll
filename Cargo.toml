@@ -49,6 +49,7 @@ url = "2"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
+aws-sdk-sesv2 = "1"
 # Tests only: endpoints that make the SDK sign with SigV4a.
 aws-smithy-types = "1"
 # Tests only: an S3 client with a test CA and pinned addresses (crates/rolld/tests/fleet_e2e.rs).
@@ -145,8 +146,12 @@ serde_yaml_ng = "0.10"
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 code-sql = { path = "crates/code-sql" }
 roll-cluster = { path = "crates/roll-cluster" }
+roll-accounts = { path = "crates/roll-accounts" }
 roll-auth = { path = "crates/roll-auth" }
 roll-workspace = { path = "crates/roll-workspace" }
+roll-access = { path = "crates/roll-access" }
+roll-net = { path = "crates/roll-net" }
+roll-mcp = { path = "crates/roll-mcp" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }

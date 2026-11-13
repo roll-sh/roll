@@ -138,9 +138,9 @@ async fn auth_errors() {
     let c = Client::default();
     let err = c.ls_refs(&url, None).await.unwrap_err().to_string();
     assert!(err.contains("401"), "{err}");
-    let creds = code_git::Credentials { username: "x-access-token".into(), password: "pw".into() };
+    let creds = code_git::Credentials { username: "x-access-token".into(), password: "pw".into(), vouched: false };
     c.ls_refs(&url, Some(&creds)).await.unwrap();
-    let bearer = code_git::Credentials { username: String::new(), password: "pw".into() };
+    let bearer = code_git::Credentials { username: String::new(), password: "pw".into(), vouched: false };
     c.ls_refs(&url, Some(&bearer)).await.unwrap();
     assert!(c.ls_refs(&url.replace("/p.git", "/nope.git"), None).await.unwrap_err().to_string().contains("404"));
 }

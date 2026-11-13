@@ -9,7 +9,7 @@
  */
 
 import { ApiError } from "./code-api";
-import { getToken, requestSignIn } from "./code-token";
+import { getToken, requestSignIn, withSession } from "./code-token";
 import { array, decode, int, literal, nullable, num, obj, str, withDefault, type Decoder } from "./decode";
 import { machineD, type Machine, type Millis, type SandboxStatus, type StopReason } from "./agents-api";
 import { ROLL_API } from "./roll-api";
@@ -157,12 +157,15 @@ export function createSandboxesApi(
     const t = typeof token === "function" ? token() : token;
     const headers: Record<string, string> = t ? { authorization: `Bearer ${t}` } : {};
     if (body !== undefined) headers["content-type"] = "application/json";
-    const res = await doFetch(`${apiBase}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store",
-    });
+    const res = await doFetch(
+      `${apiBase}${path}`,
+      withSession({
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        cache: "no-store",
+      }),
+    );
     const raw = await res.text();
     let data: unknown = null;
     try {

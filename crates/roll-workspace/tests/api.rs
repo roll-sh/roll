@@ -23,8 +23,18 @@ impl Api {
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_as(None, method, path, body).await
+    }
+
+    /// As a signed-in user (`usr_…`), as rolld's gate would mark the request; `None`: the
+    /// operator.
+    async fn call_as(&self, user: Option<&str>, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
         let req = Request::builder().method(method).uri(path).header("content-type", "application/json");
-        let req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        let mut req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        if let Some(u) = user {
+            let signed_in = roll_auth::SignedIn { user: u.into(), handle: u.into(), admin: false, code_owner: None, session: "ses_test".into() };
+            req.extensions_mut().insert(signed_in);
+        }
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -146,4 +156,59 @@ async fn duplicate_names_conflict_and_bad_input_is_rejected() {
     let (s, e) = api.call(Method::PUT, &format!("/v1/workspace/projects/{id}/resources/redis/db1"), Some(json!({ "x": "left", "y": 0 }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(e["error"].is_string());
+}
+
+#[tokio::test]
+async fn users_see_only_their_own_projects() {
+    let api = Api::new();
+    let ops = api.create("web").await["id"].as_str().unwrap().to_string();
+    let (s, mine) = api.call_as(Some("usr_a"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": "web" }))).await;
+    assert_eq!((s, mine["owner"].as_str()), (StatusCode::CREATED, Some("usr_a")), "names are per owner");
+    let mine = mine["id"].as_str().unwrap().to_string();
+    // The same repo on two canvases: placing it on one doesn't move it off the other.
+    let repo = |p: &str| format!("/v1/workspace/projects/{p}/resources/repo/a%2Fsite");
+    api.call(Method::PUT, &repo(&ops), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (s, _) = api.call_as(Some("usr_a"), Method::PUT, &repo(&mine), Some(json!({ "x": 5, "y": 5 }))).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (_, list) = api.call_as(Some("usr_a"), Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!(list.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect::<Vec<_>>(), vec![mine.as_str()]);
+    for (m, path) in [(Method::GET, format!("/v1/workspace/projects/{ops}")), (Method::DELETE, format!("/v1/workspace/projects/{ops}")), (Method::PUT, repo(&ops))] {
+        let (s, _) = api.call_as(Some("usr_b"), m.clone(), &path, Some(json!({ "x": 1, "y": 1 }))).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{m} {path}: another owner's project");
+    }
+    let (_, all) = api.call(Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!(all.as_array().unwrap().len(), 2, "the operator sees every project");
+    let (_, p) = api.call(Method::GET, &format!("/v1/workspace/projects/{ops}"), None).await;
+    assert_eq!(p["resources"][0]["ref"], "a/site");
+}
+
+#[test]
+fn projects_from_before_owners_become_the_operators() {
+    // Both shapes production has had: the first tables, and those with a description and icon.
+    for look in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let target = code_sql::Target::Sqlite(dir.path().join("workspace.db"));
+        let db = code_sql::Db::open_or_test(&target, "workspace").unwrap();
+        let columns = if look { ", description TEXT NOT NULL DEFAULT '', icon TEXT" } else { "" };
+        db.ensure_schema(&format!(
+            "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL{columns}) WITHOUT ROWID;
+             CREATE TABLE resources (kind TEXT NOT NULL, ref TEXT NOT NULL, project_id TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, added_at INTEGER NOT NULL, PRIMARY KEY (kind, ref)) WITHOUT ROWID;
+             CREATE INDEX resources_project ON resources (project_id);"
+        ))
+        .unwrap();
+        db.execute("INSERT INTO projects (id, name, created_at) VALUES ('prj_old', 'billing', 1)", ()).unwrap();
+        if look {
+            db.execute(r#"UPDATE projects SET description = 'Invoices', icon = '{"kind":"emoji","emoji":"🧾"}'"#, ()).unwrap();
+        }
+        db.execute("INSERT INTO resources (kind, ref, project_id, x, y, added_at) VALUES ('bucket', 'assets', 'prj_old', 1, 2, 3)", ()).unwrap();
+        let ws = roll_workspace::Workspace::new(db.clone()).unwrap();
+        let list = ws.list(roll_workspace::Scope::All).unwrap();
+        assert_eq!((list.len(), list[0].owner.as_str(), list[0].resources.len()), (1, "", 1));
+        let kept = (list[0].description.as_str(), list[0].icon.clone());
+        assert_eq!(kept, if look { ("Invoices", Some(json!({ "kind": "emoji", "emoji": "🧾" }))) } else { ("", None) });
+        drop(ws);
+        // Opening again finds the new tables and leaves them be.
+        assert_eq!(roll_workspace::Workspace::new(db).unwrap().list(roll_workspace::Scope::All).unwrap().len(), 1);
+    }
 }

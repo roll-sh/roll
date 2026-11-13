@@ -219,6 +219,14 @@ impl Store {
         Ok(())
     }
 
+    /// A cluster's id from its id or name, synchronously (roll's access rules resolve resources
+    /// on blocking threads).
+    pub fn id_of(&self, id_or_name: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.db.read(|x| {
+            x.query_row("SELECT id FROM search_clusters WHERE (id = ?1 OR name = ?1) AND deleting = 0 ORDER BY id = ?1 DESC LIMIT 1", params![id_or_name], |r| r.get(0)).optional()
+        })?)
+    }
+
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
         Ok(self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND deleting = 0"), params![arg], row).optional())?)
     }
