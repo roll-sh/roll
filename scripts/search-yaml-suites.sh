@@ -400,11 +400,13 @@ start_roll() {
         port=$((port + 1))
         continue
       fi
-      local log=$OUT/runs/search-dev-$port.log
+      # The server is ours once its own log (one per run) says it listens: another run may
+      # bind the port between the check above and ours.
+      local log=$OUT/runs/search-dev-$port.$$.log
       "$bin" --listen "127.0.0.1:$port" --dialect "$dialect" --yaml-test-cluster "${ROLL_EXTRA_ARGS[@]}" >"$log" 2>&1 &
       local pid=$!
       for _ in $(seq 1 100); do
-        if curl -fs "http://127.0.0.1:$port/" >/dev/null 2>&1 && kill -0 "$pid" 2>/dev/null; then
+        if grep -q "listening" "$log" && kill -0 "$pid" 2>/dev/null && curl -fs "http://127.0.0.1:$port/" >/dev/null 2>&1; then
           started=1
           break
         fi
