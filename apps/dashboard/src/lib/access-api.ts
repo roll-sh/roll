@@ -47,6 +47,8 @@ export interface Grant {
   client?: OAuthClient;
   /** Requests a minute it may make (per node); absent: no limit. */
   rate_per_minute?: number;
+  /** Why roll revoked it (a leaked secret: "found in acme/site .env at …"). */
+  revoked_why?: string;
   /** Its requests over the last day (in the list). */
   activity?: { allowed: number; denied: number; asked: number };
 }

@@ -33,6 +33,8 @@ pub fn public_router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/register", post(register))
         .route("/v1/access/oauth/token", post(token))
         .route("/v1/access/oauth/revoke", post(revoke))
+        // GitHub's secret scanning reports: their signature is the credential.
+        .route("/v1/access/leaks/github", post(crate::leaks::github))
         .with_state(access)
 }
 

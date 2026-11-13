@@ -41,6 +41,12 @@ approves it, the request then running as sent) and one evaluator shared by the A
 | OAuth refresh token | `rlf_` | rotates on every use; 30 days since its last use |
 | product credentials | `rlc_`, `rla_`, keys… | roll code owner tokens, storage IAM, stream and tasks keys: unchanged, checked by their product |
 
+Each grant secret is its prefix, 34 random characters of lowercase base32 and a 6-character
+checksum (CRC-32 of the rest), 44 characters in all. Scanners use the checksum, as GitHub's tokens
+carry one, to tell a real roll token from look-alike text without asking roll
+(`roll_access::checksum_ok`, `find_secrets`). Secrets made before checksums still work; they just
+aren't recognised by scanners.
+
 A scoped token and an OAuth connection are both a **grant**: one row with the rules, expiry, IP
 allowlist, name and who made it. An OAuth connection is a grant whose secrets are the rotating
 access and refresh tokens. Revoking the grant revokes them all at once.
@@ -384,6 +390,28 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
+## Leaked tokens
+
+A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
+it's found, as GitHub does for its own tokens:
+
+- **In roll code.** Everything that lands, in any repository, is read after it lands. The scanner
+  reads the store's durable land log, never inside the lander, with a cursor of its own and one
+  node at a time (`code-control/src/leaks.rs`). It reads every changeset a landing added, and the
+  changed files up to 1 MiB each. A file that mentions a token prefix goes to roll-access, which
+  matches checksums and revokes each live token.
+- **From GitHub.** `POST /v1/access/leaks/github` takes reports from GitHub's secret scanning
+  partner program: tokens found in public repositories, gists and issues. Each report is signed
+  with one of GitHub's ECDSA P-256 keys (`Github-Public-Key-Identifier` and
+  `Github-Public-Key-Signature`, checked against
+  `api.github.com/meta/public_keys/secret_scanning`, cached for an hour and refetched for an
+  unknown key at most once a minute). roll revokes the live tokens and answers each with its
+  `token_hash` and `true_positive` or `false_positive`. An unsigned or wrongly signed report
+  changes nothing.
+- A revoked token answers 401 on its next request. The grant keeps `revoked_why` ("found in
+  acme/site .env at 1a2b…", shown in the dashboard), and the audit log gets a row (`source:
+  "leak"`, `decision: "revoke"`).
+
 ## Rate limits
 
 A grant may have `rate_per_minute` (the builder's "Requests a minute", `roll token create --rate`,
@@ -437,6 +465,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |
 | `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
 | `POST /v1/access/audit/sinks/{id}/retry` | operator | a failed sink's batch at the next sweep → 204 |
