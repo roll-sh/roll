@@ -274,7 +274,8 @@ impl Resolver for WorkspaceResolver {
 
     fn place(&self, project: &str, workspace_kind: &str, r#ref: &str) -> Result<()> {
         let kind = roll_workspace::Kind::parse(workspace_kind).map_err(|e| Error::BadRequest(e.to_string()))?;
-        self.0.place(project, kind, r#ref, 0.0, 0.0).map(|_| ()).map_err(|e| Error::BadRequest(e.to_string()))
+        // Grants are the operator's: they act on every owner's projects.
+        self.0.place(roll_workspace::Scope::All, project, kind, r#ref, 0.0, 0.0).map(|_| ()).map_err(|e| Error::BadRequest(e.to_string()))
     }
 }
 
