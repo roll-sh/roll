@@ -91,7 +91,8 @@ type Rule = {
 
 type Selector =
   | { project: string }             // a workspace project: every resource in it, as it is now
-  | { id: string };                 // one resource, by its product's id
+  | { id: string; index?: string }; // one resource, by its product's id; search: only some indices
+// A selector has exactly these fields: any other is refused, never dropped.
 
 type Product = "workspace" | "postgres" | "redis" | "storage" | "streams" | "nosql" | "queues"
   | "tasks" | "code" | "agents" | "secrets" | "apps" | "previews" | "search" | "observability"
@@ -135,7 +136,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   compressed, needs `write`, `delete` and `deploy`. Fetches are `read`. git sends the token as a Basic password (any user
   name), which the gate takes like a bearer token; roll code's git server then takes the gate's
   word (`code_git::Vouched`) and records the push as `token:<name>`. An `ask` push is bound to its
-  ref updates; resend it with `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
+  ref updates; push again once it's approved (the same push finds its approval), or wait on it with
+  `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
@@ -148,8 +150,11 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   webhook notification target, and an apps log drain (every service's output, POSTed signed).
 - Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT
   …/environments/{env}` and its `variables_from`, secrets' `POST …/environments/{env}/promote` and
-  its `?from=`) also needs `reveal` on the same resource in the environment the body or query names, and the request gets the weaker of the two decisions. When the copy
-  decides, the approval is about the environment copied from, so remembering it allows exactly that.
+  its `?from=`) also needs `reveal` on the same resource in the environment the body or query
+  names, and the request gets the weaker of the two decisions. When the copy decides, the approval
+  is about the environment and folder copied from, so remembering it allows exactly that. A query
+  parameter the gate decides from (`?path=`, `?from=`) must appear once: a repeated one is
+  `400 repeated_parameter`, since the product could read another copy of it.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -227,6 +232,27 @@ repeat across accounts:
 - A named account's bucket list is filtered to the `<account>/<bucket>` ids a token has there.
 - Anything else in a named account (keys, roles, IAM) is about storage as a whole: only a rule for
   every storage resource covers it.
+
+### Search indices
+
+A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,metrics"}`
+(the builder writes it `cl_1/logs-*,metrics`).
+
+- It covers the index routes (`/v1/search/clusters/{id}/indices/{index}/…`: search, documents,
+  bulk, mappings, the index itself) when every name or pattern in `{index}` is covered: a name
+  listed, or one starting with what's before a listed pattern's trailing `*` (`logs-*` covers
+  `logs-2025` and `logs-2025-*`, not `logs` or `l*`). Exclusions (`-logs-old`) only narrow, so they
+  needn't be covered; `_all` is `*`; date math only by `*`; another cluster's indices
+  (`remote:logs`) never.
+- The cluster's own routes stay the cluster's: the index list, the console (`request`, any method
+  and path as the cluster's owner), keys, branches and settings need a rule for the whole cluster.
+- Search checks the rest at query time as the caller: a query's reads of other indices (terms
+  lookups, `more_like_this`, lookup runtime fields, `indexed_shape`, templates after rendering, and
+  the bodies of reindex, ES|QL, SQL and the other query-bearing APIs) and a body's `_index` values
+  stay within `{index}` (search's `control.rs`, `per_index_routes`; feature/roll-search 5db7c2602
+  and fae055c31). A document an ingest pipeline moves to another index isn't re-checked there yet.
+- An approval about some indices names them (`cl_1/logs-a`), and remembering it allows those
+  indices only.
 
 ### Presets
 
@@ -317,7 +343,9 @@ type Approval = {
 - The request waits up to 55 seconds for a decision. Approved, it runs exactly as sent and its answer
   is the request's answer. Denied, it gets `403 {"code": "denied"}`.
 - Still pending after the wait, it gets `403 {"code": "approval_pending", "approval": "apr_…",
-  "url": …}`. Sending the same request again with `X-Roll-Approval: apr_…` waits again, or runs it
+  "url": …}`. Sending the same request again (with `X-Roll-Approval: apr_…`, or without: the gate
+  finds the grant's approval for exactly that request) waits again, is refused with the person's
+  reason if they denied it (for the approval's ten minutes, rather than asking them again), or runs it
   once approved. An approval runs one request: the one whose method, path and body hash it holds.
   It can't be reused.
 - The person decides on the dashboard (a notification in the header, and the list under

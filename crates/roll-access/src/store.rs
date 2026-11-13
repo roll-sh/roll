@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS approvals (
     expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS approvals_state ON approvals (state, created_at);
+CREATE INDEX IF NOT EXISTS approvals_request ON approvals (grant_id, request_hash);
 CREATE TABLE IF NOT EXISTS audit (
     id TEXT PRIMARY KEY,
     at INTEGER NOT NULL,
@@ -243,9 +244,11 @@ pub struct Approval {
     pub expires_at: i64,
     #[serde(skip)]
     pub request_hash: String,
-    /// The environment and path the request was about (a remembered approval keeps to them).
+    /// The environment, path and indices the request was about (a remembered approval keeps to them).
     pub environment: Option<String>,
     pub scope_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_index: Option<String>,
 }
 
 /// A new approval, before it's stored.
@@ -263,6 +266,7 @@ pub struct Ask<'a> {
     pub request_hash: String,
     pub environment: Option<&'a str>,
     pub scope_path: Option<&'a str>,
+    pub scope_index: Option<&'a str>,
 }
 
 /// An approval stays pending this long.
@@ -372,7 +376,7 @@ pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
 }
 
 const APPROVAL_COLUMNS: &str =
-    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path";
+    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
     let args: Option<String> = r.get(10)?;
@@ -398,6 +402,7 @@ fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
         request_hash: r.get(18)?,
         environment: r.get(19)?,
         scope_path: r.get(20)?,
+        scope_index: r.get(21)?,
     })
 }
 
@@ -446,7 +451,7 @@ impl Store {
             db.add_column("approvals", "chat", "TEXT")?;
         }
         // What environment and path a request was about (a remembered approval keeps to them).
-        for col in ["environment", "scope_path"] {
+        for col in ["environment", "scope_path", "scope_index"] {
             if !db.has_column("approvals", col)? {
                 db.add_column("approvals", col, "TEXT")?;
             }
@@ -728,7 +733,7 @@ impl Store {
                 return Err(Error::TooMany("this token has 50 approvals waiting: decide some first".into()));
             }
             c.execute(
-                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?)"),
+                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?)"),
                 params![
                     id,
                     a.grant.id,
@@ -746,7 +751,8 @@ impl Store {
                     now + APPROVAL_TTL_MS,
                     a.request_hash,
                     a.environment,
-                    a.scope_path
+                    a.scope_path,
+                    a.scope_index
                 ],
             )?;
             Ok(())
@@ -765,6 +771,21 @@ impl Store {
             a.state = "expired".into();
         }
         Ok(a)
+    }
+
+    /// The approval a grant already has for exactly this request, still pending, approved and
+    /// unused, or denied (within its time): sending the request again waits on it, runs with it,
+    /// or is refused with the person's reason, as `X-Roll-Approval` would. Never asked again.
+    pub fn open_approval(&self, grant: &str, request_hash: &str) -> Result<Option<Approval>> {
+        let now = code_sql::now_ms();
+        Ok(self.db.read(|c| {
+            c.query_row(
+                &format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE grant_id = ? AND request_hash = ? AND state IN ('pending', 'approved', 'denied') AND expires_at > ? ORDER BY created_at DESC LIMIT 1"),
+                params![grant, request_hash, now],
+                approval_row,
+            )
+            .optional()
+        })?)
     }
 
     /// The newest approvals, in a state and of some grants when given (`Some(&[])`: none).

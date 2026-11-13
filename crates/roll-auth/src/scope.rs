@@ -84,11 +84,89 @@ pub const PRODUCTS: &[&str] = &[
 ];
 
 /// One resource: by its product's own id, or every resource in a workspace project.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Selector {
-    Project { project: String },
-    Id { id: String },
+    Project {
+        project: String,
+    },
+    Id {
+        id: String,
+        /// Only some indices of it (search: `logs-*`, `a,b`), as Elasticsearch names them: each
+        /// name or pattern a request's index expression lists must be one of these, or start with
+        /// what's before one's trailing `*`. A request about the resource as a whole never matches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<String>,
+    },
+}
+
+/// Exactly `{project}` or `{id, index?}`: a field that isn't one of these (`{project, index}`) is
+/// refused, never dropped, since dropping it would widen the rule.
+impl<'de> Deserialize<'de> for Selector {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            project: Option<String>,
+            id: Option<String>,
+            index: Option<String>,
+        }
+        match Raw::deserialize(d)? {
+            Raw { project: Some(project), id: None, index: None } => Ok(Selector::Project { project }),
+            Raw { project: None, id: Some(id), index } => Ok(Selector::Id { id, index }),
+            _ => Err(serde::de::Error::custom("a resource is {\"project\": …} or {\"id\": …, \"index\"?: …}")),
+        }
+    }
+}
+
+impl Selector {
+    pub fn id(id: impl Into<String>) -> Selector {
+        Selector::Id { id: id.into(), index: None }
+    }
+
+    fn matches(&self, r: &Resource) -> bool {
+        match self {
+            Selector::Id { id, index } => {
+                r.id.as_deref() == Some(id.as_str())
+                    && match index {
+                        None => true,
+                        Some(mine) => r.index.as_deref().is_some_and(|asked| index_covers(mine, asked)),
+                    }
+            }
+            Selector::Project { project } => r.project.as_deref() == Some(project) || r.also_in.contains(project),
+        }
+    }
+
+    /// Whether everything `other` selects, this selects too.
+    fn covers(&self, other: &Selector) -> bool {
+        match (self, other) {
+            (Selector::Project { project: a }, Selector::Project { project: b }) => a == b,
+            (Selector::Id { id: a, index: None }, Selector::Id { id: b, .. }) => a == b,
+            (Selector::Id { id: a, index: Some(mine) }, Selector::Id { id: b, index: Some(theirs) }) => a == b && index_covers(mine, theirs),
+            _ => false,
+        }
+    }
+}
+
+/// The names and patterns an index expression lists (`logs-*,-logs-old` → `logs-*`): exclusions
+/// only narrow what the others reach, so only these need covering. `_all` is `*`.
+fn index_names(expr: &str) -> impl Iterator<Item = &str> {
+    expr.split(',').map(str::trim).filter(|n| !n.is_empty() && !n.starts_with('-')).map(|n| if n == "_all" { "*" } else { n })
+}
+
+/// Whether the indices `mine` lists cover every name or pattern `asked` lists. A pattern covers a
+/// name or pattern that starts with what's before its trailing `*`; date math (`<logs-{now/d}>`)
+/// and other clusters' indices (`remote:logs`) only by `*`, and never at all, respectively.
+fn index_covers(mine: &str, asked: &str) -> bool {
+    let mine: Vec<&str> = index_names(mine).collect();
+    let mut asked = index_names(asked).peekable();
+    asked.peek().is_some()
+        && asked.all(|n| {
+            !n.contains(':')
+                && mine.iter().any(|m| {
+                    *m == "*" || (!n.starts_with('<') && (*m == n || m.strip_suffix('*').is_some_and(|prefix| !prefix.is_empty() && n.starts_with(prefix))))
+                })
+        })
 }
 
 /// `"*"` (every resource, including ones made later) or a list of selectors.
@@ -163,6 +241,8 @@ pub struct Resource {
     pub also_in: Vec<String>,
     pub environment: Option<String>,
     pub path: Option<String>,
+    /// The indices of it the request names (search's `{index}`: an index expression).
+    pub index: Option<String>,
 }
 
 impl Resource {
@@ -226,10 +306,7 @@ impl Rule {
             Target::One(r) => {
                 let resource = match &self.resources {
                     Resources::All => true,
-                    Resources::Some(sel) => sel.iter().any(|s| match s {
-                        Selector::Id { id } => r.id.as_deref() == Some(id),
-                        Selector::Project { project } => r.project.as_deref() == Some(project) || r.also_in.contains(project),
-                    }),
+                    Resources::Some(sel) => sel.iter().any(|s| s.matches(r)),
                 };
                 resource && self.environment_matches(r.environment.as_deref()) && self.path_matches(r.path.as_deref())
             }
@@ -251,7 +328,7 @@ impl Rule {
         let resources = match (&self.resources, &other.resources) {
             (Resources::All, _) => true,
             (Resources::Some(_), Resources::All) => false,
-            (Resources::Some(mine), Resources::Some(theirs)) => theirs.iter().all(|t| mine.contains(t)),
+            (Resources::Some(mine), Resources::Some(theirs)) => theirs.iter().all(|t| mine.iter().any(|m| m.covers(t))),
         };
         let environments = match (&self.environments, &other.environments) {
             (None, _) => true,
@@ -317,9 +394,16 @@ impl Scope {
                 Resources::Some(v) if v.len() > 256 => out.push(format!("{at}: at most 256 resources")),
                 Resources::Some(v) => {
                     for s in v {
-                        let (Selector::Project { project: x } | Selector::Id { id: x }) = s;
+                        let (Selector::Project { project: x } | Selector::Id { id: x, .. }) = s;
                         if x.is_empty() || x.len() > 200 || !plain(x) {
                             out.push(format!("{at}: a resource id must be 1-200 characters, one line without backticks"));
+                        }
+                        if let Selector::Id { index: Some(ix), .. } = s {
+                            if r.product != "search" {
+                                out.push(format!("{at}: only search resources have indices"));
+                            } else if index_names(ix).next().is_none() || ix.len() > 200 || !plain(ix) {
+                                out.push(format!("{at}: an index is 1-200 characters naming at least one index or pattern"));
+                            }
                         }
                     }
                 }
@@ -360,6 +444,31 @@ mod tests {
         assert!(!r.environment_matches(Some("production")) && !r.environment_matches(None));
         let narrower: Rule = serde_json::from_value(serde_json::json!({ "product": "apps", "resources": "*", "environments": ["pv-42"], "actions": { "write": "allow" } })).unwrap();
         assert!(r.covers(&narrower) && !narrower.covers(&r));
+    }
+
+    /// A selector's indices cover an index expression name by name and pattern by pattern, as
+    /// Elasticsearch authorizes one; the cluster as a whole is never theirs.
+    #[test]
+    fn indices_narrow_a_resource() {
+        let r = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*,metrics" }], "actions": { "read": "allow" } }));
+        let at = |index: Option<&str>| Target::One(Resource { index: index.map(str::to_string), ..Resource::new("search", "cl_1") });
+        for ok in ["logs-2025", "logs-2025-*", "logs-*,-logs-old", "metrics", "logs-a,metrics"] {
+            assert!(r.matches(&at(Some(ok))), "{ok}");
+        }
+        for no in ["logs", "l*", "*", "_all", "logs-a,users", "remote:logs-a", "<logs-{now/d}>", "-logs-a", ""] {
+            assert!(!r.matches(&at(Some(no))), "{no}");
+        }
+        assert!(!r.matches(&at(None)), "the cluster itself");
+        assert!(!r.matches(&Target::One(Resource { index: Some("logs-a".into()), ..Resource::new("search", "cl_2") })));
+        let whole = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "allow" } }));
+        let one = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-a" }], "actions": { "read": "allow" } }));
+        assert!(whole.matches(&at(Some("anything"))) && whole.covers(&r) && r.covers(&one) && !one.covers(&r) && !r.covers(&whole));
+        assert!(!Scope(vec![rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "-x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
+        assert!(!Scope(vec![rule(serde_json::json!({ "product": "redis", "resources": [{ "id": "rdb_1", "index": "x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
+        // A field a selector doesn't have is refused, never dropped (that would widen the rule).
+        for bad in [serde_json::json!({ "project": "p", "index": "logs-*" }), serde_json::json!({ "id": "a", "extra": 1 }), serde_json::json!({})] {
+            assert!(serde_json::from_value::<Selector>(bad.clone()).is_err(), "{bad}");
+        }
     }
 
     /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;

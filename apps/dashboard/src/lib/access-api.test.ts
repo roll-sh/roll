@@ -51,6 +51,13 @@ describe("the builder", () => {
     expect(draftOf(rules)).toEqual(d);
   });
 
+  it("keeps a search rule's indices (cluster/indices), and a repo's owner/name whole", () => {
+    const d = { matrix: { search: { read: "allow" as const }, code: { read: "allow" as const } }, project: null, environments: [], ids: { search: ["cl_1/logs-*", "cl_2"], code: ["acme/site"] } };
+    const rules = rulesOf(d);
+    expect(rules.map((r) => r.resources)).toEqual([[{ id: "cl_1", index: "logs-*" }, { id: "cl_2" }], [{ id: "acme/site" }]]);
+    expect(draftOf(rules)).toEqual(d);
+  });
+
   it("round-trips rules through its matrix, and leaves rules it can't show as they are", () => {
     const rules = [
       { product: "postgres", resources: [{ project: "prj_a" }], environments: ["development"], actions: { read: "allow", delete: "ask" } },

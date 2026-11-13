@@ -65,6 +65,9 @@ fn postgres() -> Router {
         .route("/v1/storage/buckets/{name}", get(|| async { axum::Json(json!({ "name": "logs" })) }))
         .route("/v1/storage/buckets", get(|| async { axum::Json(json!([{ "name": "logs" }, { "name": "media" }])) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
+        .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
+        .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
+        .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
@@ -322,6 +325,11 @@ async fn escalation_paths_are_shut() {
     assert_eq!(e["code"], "approval_pending", "{s} {e}");
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", e["approval"].as_str().unwrap()), None).await;
     assert_eq!(asked["args"]["updates"][0]["ref"], "refs/heads/old", "the approval shows the ref updates: {asked}");
+    // The same push again, its pack different (repacked, or split otherwise), finds that approval.
+    let repacked = push(&[format!("{c} {z} refs/heads/old\0report-status\n"), format!("{z} {c} refs/heads/new\n")]);
+    let repacked = Body::from(format!("{}MORE", String::from_utf8(axum::body::to_bytes(repacked, 1 << 20).await.unwrap().to_vec()).unwrap()));
+    let (_, again) = d.raw(&both, Method::POST, git, repacked, &[], None).await;
+    assert_eq!(again["approval"], e["approval"], "{again}");
     assert_eq!(d.raw(&cleaner, Method::POST, git, Body::from("garbage"), &[], None).await.0, StatusCode::FORBIDDEN);
 
     // A signed hop from a node that decided it for this grant: no second approval, and the
@@ -833,6 +841,8 @@ async fn approvals_can_be_remembered() {
     };
     let (s, e) = promote("production").await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    // A parameter the decision reads is given once (secrets would read another copy of it).
+    assert_eq!(promote("development&from=production").await.0, StatusCode::BAD_REQUEST);
     assert_eq!(promote("development").await.0, StatusCode::OK);
     // Imports read each in-project source (reveal there); another project's folder is admin.
     let import = |list: Value| {
@@ -844,6 +854,19 @@ async fn approvals_can_be_remembered() {
     assert_eq!(import(json!([{ "environment": "development", "path": "/" }])).await.0, StatusCode::OK);
     let (s, e) = import(json!([{ "project": "prj_o", "environment": "development", "path": "/" }])).await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("admin")), "{e}");
+    // Asked about an import, the approval is about the folder imported; denied, asking again
+    // answers the denial instead of asking the person again.
+    let (asks, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "write": "allow", "reveal": "ask" } }]), json!({})).await;
+    let put = || {
+        let (d, t) = (&d, asks.clone());
+        async move { d.call(&t, Method::PUT, "/v1/secrets/projects/prj_s/environments/staging/imports?path=/app", Some(json!([{ "environment": "production", "path": "/db" }]))).await }
+    };
+    let apr = put().await.1["approval"].as_str().unwrap().to_string();
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
+    assert_eq!((asked["environment"].as_str(), asked["scope_path"].as_str()), (Some("production"), Some("/db")), "{asked}");
+    d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/deny"), Some(json!({ "reason": "not prod" }))).await;
+    let (_, again) = put().await;
+    assert_eq!((again["code"].as_str(), again["approval"].as_str()), (Some("denied"), Some(apr.as_str())), "{again}");
 
     // Remembered where it was asked: development's values, never production's.
     let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;
@@ -855,4 +878,33 @@ async fn approvals_can_be_remembered() {
     assert_eq!(approve(apr, json!("1h")).await.0, StatusCode::OK);
     assert_eq!(values("development").await.0, StatusCode::OK);
     assert_eq!(values("production").await.1["code"], "approval_pending");
+}
+
+/// A rule can grant some indices of a search cluster: index routes are decided name by name, the
+/// cluster's own (the index list, the console) stay shut, and a remembered approval keeps to the
+/// index it was about.
+#[tokio::test]
+async fn a_rule_can_grant_some_indices() {
+    let d = Daemon::new(50);
+    let (logs, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*" }], "actions": { "read": "allow" } }]), json!({})).await;
+    let search = |t: &str, index: &str| {
+        let (d, t, path) = (&d, t.to_string(), format!("/v1/search/clusters/cl_1/indices/{index}/search"));
+        async move { d.call(&t, Method::POST, &path, Some(json!({}))).await.0 }
+    };
+    assert_eq!(search(&logs, "logs-2025").await, StatusCode::OK);
+    assert_eq!(search(&logs, "logs-*,-logs-old").await, StatusCode::OK);
+    assert_eq!(search(&logs, "logs-a,users").await, StatusCode::FORBIDDEN);
+    assert_eq!(search(&logs, "*").await, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&logs, Method::GET, "/v1/search/clusters/cl_1/indices", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&logs, Method::POST, "/v1/search/clusters/cl_1/request", Some(json!({}))).await.0, StatusCode::FORBIDDEN);
+
+    // Asked about one index and remembered: that index, not its neighbours.
+    let (asker, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "ask" } }]), json!({})).await;
+    let (_, pending) = d.call(&asker, Method::POST, "/v1/search/clusters/cl_1/indices/logs-a/search", Some(json!({}))).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(search(&asker, "logs-a").await, StatusCode::OK);
+    let (_, again) = d.call(&asker, Method::POST, "/v1/search/clusters/cl_1/indices/logs-b/search", Some(json!({}))).await;
+    assert_eq!(again["code"], "approval_pending", "logs-b still asks: {again}");
 }

@@ -43,7 +43,14 @@ impl Daemon {
     }
 
     async fn http(&self, token: &str, method: Method, path: &str, body: Option<Value>) -> (StatusCode, axum::http::HeaderMap, Value) {
+        self.http_with(token, method, path, body, &[]).await
+    }
+
+    async fn http_with(&self, token: &str, method: Method, path: &str, body: Option<Value>, extra: &[(&str, &str)]) -> (StatusCode, axum::http::HeaderMap, Value) {
         let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json").header("accept", "application/json, text/event-stream");
+        for (k, v) in extra {
+            req = req.header(*k, *v);
+        }
         if !token.is_empty() {
             req = req.header("authorization", format!("Bearer {token}"));
         }
@@ -113,9 +120,25 @@ async fn tools_follow_the_tokens_rules() {
     let id = pending["structuredContent"]["approval"].as_str().unwrap();
     let waited = d.tool(&asker, "access_wait_approval", json!({ "approval_id": id, "wait": 0 })).await;
     assert_eq!(waited["structuredContent"]["state"], "pending");
+    // Sent again without the id, the same call waits on the same approval (one per request) and,
+    // once approved, runs.
+    let again = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa" })).await;
+    assert_eq!(again["structuredContent"]["approval"].as_str(), Some(id), "{again}");
     assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
-    let done = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa", "approval": id })).await;
+    let done = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!(done["isError"], false, "{done}");
+
+    // A client that opens URLs gets the approval as one to open (MCP's URL elicitation), named by
+    // the session id initialize gave it.
+    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": { "elicitation": { "url": {} } } } });
+    let (_, h, _) = d.http(&asker, Method::POST, "/v1/mcp", Some(init)).await;
+    let session = h["mcp-session-id"].to_str().unwrap().to_string();
+    assert!(session.starts_with("roll-url-1.") && session.len() > 20, "unique per session: {session}");
+    let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pb" } } });
+    let (_, _, out) = d.http_with(&asker, Method::POST, "/v1/mcp", Some(call), &[("mcp-session-id", &session)]).await;
+    let e = &out["error"]["data"]["elicitations"][0];
+    assert_eq!((out["error"]["code"].as_i64(), e["mode"].as_str()), (Some(-32042), Some("url")), "{out}");
+    assert!(e["url"].as_str().unwrap().contains(e["elicitationId"].as_str().unwrap()), "{out}");
 
     // Every call is audited with its tool and redacted arguments.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

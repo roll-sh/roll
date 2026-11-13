@@ -35,6 +35,9 @@ pub struct McpCall {
     pub tool: Arc<str>,
     pub args: Arc<Value>,
     pub ip: Option<IpAddr>,
+    /// The client shows the person the approval page itself (MCP URL elicitation): an `ask`
+    /// answers at once instead of waiting for the decision.
+    pub elicits: bool,
 }
 
 /// The evaluator, as rolld's gate wants it.
@@ -119,6 +122,7 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
                 EnvFrom::Fixed(e) => r.environment = Some(e.into()),
                 EnvFrom::None => {}
             }
+            r.index = row.index.and_then(param);
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
                 r.path = Some(path.filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into()));
@@ -151,7 +155,11 @@ fn storage_account(row: &Row, query: Option<&str>, headers: &axum::http::HeaderM
 
 pub(crate) fn describe(t: &Target) -> Option<String> {
     match t {
-        Target::One(r) => r.id.clone(),
+        // Indices of a resource read as `cl_1/logs-*`.
+        Target::One(r) => r.id.clone().map(|id| match &r.index {
+            Some(ix) => format!("{id}/{ix}"),
+            None => id,
+        }),
         Target::Create { project: Some(p), .. } => Some(format!("new in {p}")),
         _ => None,
     }
@@ -287,6 +295,16 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             }
         }
     };
+    // A query parameter the decision reads (a folder, a copy's source) must be there once: products
+    // may read another copy of it than the gate did.
+    let decides = [row.path_query, match row.copies_from {
+        Some(catalog::CopyFrom::Query(name)) => Some(name),
+        _ => None,
+    }];
+    if let Some(name) = decides.into_iter().flatten().find(|n| original.query().is_some_and(|q| url::form_urlencoded::parse(q.as_bytes()).filter(|(k, _)| k == n).count() > 1)) {
+        ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
+        return deny(StatusCode::BAD_REQUEST, "repeated_parameter", format!("?{name}= is given more than once"), json!({}));
+    }
     let target = {
         let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());
         let params = params.clone();
@@ -322,13 +340,16 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             let repo = describe(&target).unwrap_or_default();
             let a2 = access.clone();
             let default = tokio::task::spawn_blocking(move || a2.resolvers.resolve("default-branch", &repo).map(|r| r.id)).await.ok().flatten();
+            // Bound to its ref updates as parsed, never to however much of the pack came with
+            // them: the same push sent again finds its approval.
+            git_commands = Some(prefix.clone());
             if let catalog::Push::Commands(updates) = catalog::git_push(&prefix, default.as_deref()) {
                 needs = updates.iter().map(|u| u.action).collect();
+                git_commands = Some(bytes::Bytes::from(json!(updates).to_string()));
                 ctx.args = Some(json!({ "updates": updates }));
             }
             let head = prefix.clone();
             body = Some(Body::from_stream(futures::stream::once(async move { Ok::<_, axum::Error>(head) }).chain(rest)));
-            git_commands = Some(prefix);
         }
     }
     let (mut outcome, mut action) = if matches!(row.target, Tgt::AnyGrant) { (Outcome::Allow, needs[0]) } else { weakest(&needs, |a| scope.outcome(&target, a)) };
@@ -346,11 +367,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // reveal on the same resource there too, and the request gets the weaker of the two. When the
     // copy decides, the approval is about the environment copied from.
     let mut asked_env: Option<String> = None;
-    if let Some((copied, from)) = copy_outcome(&access, row, &params, &target, (json_body.as_ref(), original.query()), &scope).await
+    let mut asked_path: Option<String> = None;
+    if let Some((copied, from, from_path)) = copy_outcome(&access, row, &params, &target, (json_body.as_ref(), original.query()), &scope).await
         && rank(copied) < rank(outcome)
     {
         (outcome, action) = (copied, Action::Reveal);
-        asked_env = Some(from);
+        (asked_env, asked_path) = (Some(from), from_path);
     }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
     // were refused before any rule; a move between projects stays refused.
@@ -397,11 +419,13 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 target,
                 bound.join("\n")
             ));
-            let (environment, scope_path) = match &target {
-                Target::One(r) => (asked_env.clone().or_else(|| r.environment.clone()), r.path.clone()),
-                _ => (None, None),
+            let (environment, scope_path, scope_index) = match &target {
+                // When a copy's source decided, the approval is about that folder: remembering it
+                // allows exactly that.
+                Target::One(r) => (asked_env.clone().or_else(|| r.environment.clone()), asked_path.clone().or_else(|| r.path.clone()), r.index.clone()),
+                _ => (None, None, None),
             };
-            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path };
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(id) => approval_used = Some(id),
                 Err(resp) => return *resp,
@@ -492,7 +516,7 @@ pub(crate) async fn copy_outcome(
     target: &Target,
     (body, query): (Option<&Value>, Option<&str>),
     scope: &Scope,
-) -> Option<(Outcome, String)> {
+) -> Option<(Outcome, String, Option<String>)> {
     let (Some(from), Target::One(r), Tgt::Param(names, _)) = (row.copies_from, target, row.target) else { return None };
     let sources: catalog::Sources = match from {
         catalog::CopyFrom::Body(field) => vec![(body?.get(field)?.as_str()?.to_string(), None)],
@@ -501,18 +525,21 @@ pub(crate) async fn copy_outcome(
     };
     let id = names.iter().filter_map(|n| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone())).collect::<Vec<_>>().join("/");
     // The weakest of the sources decides, and the approval is about that one.
-    let mut weakest: Option<(Outcome, String)> = None;
+    let mut weakest: Option<(Outcome, String, Option<String>)> = None;
     for (src, path) in sources {
-        let (a, product, id) = (access.clone(), row.product, id.clone());
-        let env = tokio::task::spawn_blocking(move || a.resolvers.environment(product, &id, &src)).await.ok()?;
+        let (a, product, id, s2) = (access.clone(), row.product, id.clone(), src.clone());
+        // A lookup that fails decides nothing in the request's favour.
+        let Ok(env) = tokio::task::spawn_blocking(move || a.resolvers.environment(product, &id, &s2)).await else {
+            return Some((Outcome::Deny, src, path));
+        };
         let mut from = r.clone();
         from.environment = Some(env.clone());
         if let Some(p) = path {
             from.path = Some(p);
         }
-        let outcome = scope.outcome(&Target::One(from), Action::Reveal);
-        if weakest.as_ref().is_none_or(|(w, _)| rank(outcome) < rank(*w)) {
-            weakest = Some((outcome, env));
+        let outcome = scope.outcome(&Target::One(from.clone()), Action::Reveal);
+        if weakest.as_ref().is_none_or(|(w, _, _)| rank(outcome) < rank(*w)) {
+            weakest = Some((outcome, env, from.path));
         }
     }
     weakest
@@ -581,16 +608,23 @@ struct Asked<'a> {
     request_hash: String,
     /// What it does, when its body isn't JSON (a push's ref updates).
     args: Option<Value>,
-    /// The environment and path the request is about.
+    /// The environment, path and indices the request is about.
     environment: Option<String>,
     scope_path: Option<String>,
+    scope_index: Option<String>,
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
-    let Asked { headers, path, body, request_hash, args, environment, scope_path } = req;
+    let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index } = req;
     let access = &ctx.access;
-    let existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
+    let mut existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
+    // The same request again (a client retrying after the person opened the approval, an agent
+    // that dropped the id) waits on or runs with the approval it already has: one per request.
+    if existing.is_none() {
+        let (a, g, h) = (access.clone(), ctx.grant.id.clone(), request_hash.clone());
+        existing = blocking(move || a.store.open_approval(&g, &h)).await.map_err(|e| Box::new(e.into_response()))?.map(|a| a.id);
+    }
     let approval = match existing {
         Some(id) => {
             let a = access.clone();
@@ -624,6 +658,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
                     request_hash,
                     environment: environment.as_deref(),
                     scope_path: scope_path.as_deref(),
+                    scope_index: scope_index.as_deref(),
                 })
             })
             .await
@@ -631,7 +666,8 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
             .inspect(|a| access.announce(a))?
         }
     };
-    let decided = wait(access, &approval.id, access.config.approval_wait).await.map_err(|e| Box::new(e.into_response()))?;
+    let max = if ctx.mcp.as_ref().is_some_and(|m| m.elicits) { std::time::Duration::ZERO } else { access.config.approval_wait };
+    let decided = wait(access, &approval.id, max).await.map_err(|e| Box::new(e.into_response()))?;
     let url = format!("{}/dashboard/access/approvals?id={}", access.config.web_url.trim_end_matches('/'), decided.id);
     match decided.state.as_str() {
         "approved" => {

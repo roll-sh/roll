@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, approvalWhere, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -98,7 +98,10 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
               </>
             ) : null}
           </p>
-          <h2 className="mt-1 truncate font-mono text-[14px]">{a.resource ?? productName(a.product)}</h2>
+          <h2 className="mt-1 truncate font-mono text-[14px]">
+            {a.resource ?? productName(a.product)}
+            {approvalWhere(a) && <span className="text-muted"> · {approvalWhere(a)}</span>}
+          </h2>
           <p className="mt-1 font-mono text-[11px] text-subtle">
             {a.method} {a.route} · asked {relative(a.created_at)} · expires {relative(a.expires_at)}
           </p>
@@ -110,7 +113,7 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
               onChange={(e) => setRemember(e.target.value as Remember)}
               className={input}
               aria-label="How long this approval also allows the same action on this resource"
-              title={`Also allow ${a.action} on ${a.resource} without asking`}
+              title={`Also allow ${a.action} on ${a.resource}${approvalWhere(a) ? ` (${approvalWhere(a)})` : ""} without asking`}
             >
               {REMEMBER.map((r) => (
                 <option key={r.value} value={r.value}>

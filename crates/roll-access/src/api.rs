@@ -164,7 +164,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
     let mut action = row.action(&method, &params, c.body.as_ref());
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
-    if let Some((copied, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
+    if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (copied, Action::Reveal);
@@ -402,10 +402,15 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     let Some(resource) = found.resource.clone().filter(|r| !r.starts_with("new in ")) else {
         return Err(Error::BadRequest("this request isn't about one resource: approve it once".into()));
     };
+    // The indices it was about stay part of it (`cl_1/logs-a` is cluster `cl_1`, index `logs-a`).
+    let selector = match found.scope_index.clone() {
+        Some(ix) => roll_auth::scope::Selector::Id { id: resource.strip_suffix(&format!("/{ix}")).unwrap_or(&resource).to_string(), index: Some(ix) },
+        None => roll_auth::scope::Selector::id(resource),
+    };
     let action: Action = serde_json::from_value(json!(found.action)).map_err(|_| Error::Internal(format!("approval {id} has action {}", found.action)))?;
     let rule = roll_auth::scope::Rule {
         product: found.product.clone(),
-        resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: resource }]),
+        resources: roll_auth::scope::Resources::Some(vec![selector]),
         // Only where the request was: an approval in development never reaches production.
         environments: found.environment.clone().map(|e| vec![e]),
         paths: found.scope_path.clone().map(|p| vec![p]),

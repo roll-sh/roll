@@ -86,10 +86,19 @@ Still waiting, the result is not an error:
 { "status": "approval_pending", "approval": "apr_…", "url": "https://roll.sh/dashboard/access/approvals?id=apr_…" }
 ```
 
-The agent tells the user, then calls the same tool again with the same arguments plus
-`"approval": "apr_…"`. That waits again and runs the call once it's approved. An approval runs
-exactly the request it was asked for (same method, path and body), once. `access_wait_approval`
-waits for a decision without running anything. A denied call fails with the user's reason.
+The agent tells the user, then calls the same tool again with the same arguments (`"approval":
+"apr_…"` too, though the same call finds its approval without it). That waits again and runs the
+call once it's approved. An approval runs exactly the request it was asked for (same method, path
+and body), once, and asking the same thing again waits on the same approval rather than making
+another. `access_wait_approval` waits for a decision without running anything. A denied call
+fails with the user's reason.
+
+A client that opens URLs for elicitation (it declares `capabilities.elicitation.url` in
+`initialize`, MCP 2025-11-25) gets the approval as one instead: the call answers the JSON-RPC error
+`-32042` with `data.elicitations[0]` = `{mode: "url", elicitationId: "apr_…", url, message}` (and
+`data.approval`) at once, without waiting. The client shows the person the approval page, and sends
+the call again once they've decided; the gate finds its approval (and a denial answers with the
+person's reason).
 
 ## Authorization
 
@@ -127,8 +136,11 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 
 - Streamable HTTP, JSON-RPC 2.0, protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26` and
   `2024-11-05`.
-- **Stateless:** no `Mcp-Session-Id`. Every node of a cluster answers every request, and nothing is
-  lost on a restart. `GET` and `DELETE` answer 405.
+- **Stateless:** every node of a cluster answers every request, and nothing is lost on a restart.
+  `initialize` answers an `Mcp-Session-Id` that holds no state: its prefix says whether the client
+  declared URL elicitation (`roll-url-1.` or `roll-1.`, then a random part, so ids are unique), so
+  later calls know how to ask for approvals.
+  A request without one works as before. `GET` and `DELETE` answer 405.
 - Responses are JSON, or server-sent events when `Accept` has `text/event-stream` without
   `application/json`. Keep-alive comments come every 15 seconds while a call waits, for example on
   an approval.
@@ -274,6 +286,7 @@ previews are listed once those products are on.
 | `apps_create_service` | A new service in a project, from a repo, an image or an upload. | `POST /v1/apps/projects/{project}/services` |
 | `apps_list_environments` | A service's environments. | `GET /v1/apps/services/{service}/environments` |
 | `apps_get_service` | A service with its environments and deploys. | `GET /v1/apps/services/{service}` |
+| `apps_update_service` | Change a service's name, source, build or run settings (run takes `alerts {memory_pct, error_pct, p95_ms}`). | `PATCH /v1/apps/services/{service}` |
 | `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
 | `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
@@ -291,7 +304,7 @@ previews are listed once those products are on.
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_rollback` | Roll an environment back to an earlier deploy. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
-| `apps_logs` | Recent logs of a service's environment. | `GET /v1/apps/services/{service}/environments/{env}/logs` |
+| `apps_logs` | Recent logs of a service's environment, or with `http` its requests (filter by `status`, `min_ms`). | `GET /v1/apps/services/{service}/environments/{env}/logs` |
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_remove_domain` | Remove a domain. | `DELETE /v1/apps/services/{service}/environments/{env}/domains/{host}` |
@@ -314,17 +327,15 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **A fifth review pass** (in progress) over what changed since the fourth: the token page, MCP
-   resources, the drains rows, and the user-tokens branch's merges.
-2. **Search indexes as resources** (`<cluster>/<index>`, read expressions covered name by name),
-   once search's query-time lookups check index privileges (their top item).
-3. **Blocked on sibling PRs reaching main:** wire previews', search's, apps' and secrets' lookups
+1. **Dry-merge the sibling heads after each of their pushes** (in progress) that touches the gate, the catalogue or
+   rolld, and send each thread its conflicts and their resolutions (last done for every head today).
+2. **Blocked on sibling PRs reaching main:** wire previews', search's, apps' and secrets' lookups
    (`by_fn` / `environment_fn`, one line each; their branches have them ready); secrets' `Grant`
    swap; one sink module with secrets; apps' deploys by id; users' own tokens' PR (#18, #19 on main).
-4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+3. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: MCP resources (`roll://access/me`: what this connection may do in words, read through the gate; `roll://guide`); apps' log drains in the catalogue (adding one is reveal); a page per token (`/dashboard/access/tokens/<id>`: its rules and its rules for a while in words, its approvals and recent requests, edit, rotate and revoke; names in the list link to it); the fourth review's findings (a copy's approval names the source environment, the apps shell is admin everywhere, use recorded only from allowed addresses, `check` decides as the gate, the popover shows details and sends bodies to review); `Resolvers::by_fn` / `environment_fn` (a product's lookups as one-line closures), and every sibling head dry-merged with this branch (conflicts and their resolutions sent to each thread); approvals decided from the top bar's waiting badge (approve or deny in a popover) and a request's arguments shown readably (a push's ref updates, SQL, CQL or a Redis command as code); MCP tools for the sibling branches' routes at their heads (search: clusters, indices, documents, bulk; apps: create a service, promote, environments, sleep and wake, usage, cancel; previews: keep, activity), and search's bulk decided by its lines; the builder picks resources by name (each product's "Which": all, the project, or ticked resources) and says in words what the token can do and what happens to the rest; the evaluator's suites run in `pnpm test:code` (on Postgres with `--docker`) and CI; "ask for anything else" (`ask_otherwise`: what a token's rules don't allow asks a person, and remembered approvals grow it); hop hardening for users' own tokens (the carried route is judged too, on their branch); copying another environment's variables needs reveal there; the third security review's findings (remembered approvals keep their environment and path, every MCP tool call counts against a rate limit, GitHub key fetching single-flight with fallback, the leak scanner skips unreadable files under a budget and hides private repos, per-person and live-only token caps, admin tokens owned by the admin); tokens about to expire are named in the list and posted to the approvals channel daily; `apps_deploy` takes an `idempotency_key` (sent as `Idempotency-Key`); an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
+Done lately: a search cluster's indices ticked by name in the builder, and approvals showing the environment and folder they're about; the sixth review's findings (a copy's approval names the source folder, strict selectors, denials answered again, pushes bound to their parsed ref updates, failed source lookups deny, parameters the gate reads can't repeat, unique session ids, URL-elicitation clients answered at once); `apps_update_service`; secrets' leak scan; approvals as URL elicitation (a client declaring `elicitation.url` gets `-32042` with the approval page; `Mcp-Session-Id` carries only that) and the same request finding its approval again (no header needed, one approval per request), checked live with the official TypeScript SDK; `apps_logs` reads request logs (`http`, `status`, `min_ms`); a Postgres branch's app role; search indices as resources (`{id, index}` selectors covered name by name and pattern by pattern; the cluster's own routes stay the cluster's; remembered approvals keep their indices); secrets' promote, imports (per source), backup, restore and rotators classed as secrets classes them; the fifth review's findings (what agents read is quoted, a person's token's reach is stated, approvals filtered by token in the query, the token page honest about dead tokens and failed refreshes); MCP resources (`roll://access/me`: what this connection may do in words, read through the gate; `roll://guide`); apps' log drains in the catalogue (adding one is reveal); a page per token (`/dashboard/access/tokens/<id>`: its rules and its rules for a while in words, its approvals and recent requests, edit, rotate and revoke; names in the list link to it); the fourth review's findings (a copy's approval names the source environment, the apps shell is admin everywhere, use recorded only from allowed addresses, `check` decides as the gate, the popover shows details and sends bodies to review); `Resolvers::by_fn` / `environment_fn` (a product's lookups as one-line closures), and every sibling head dry-merged with this branch (conflicts and their resolutions sent to each thread); approvals decided from the top bar's waiting badge (approve or deny in a popover) and a request's arguments shown readably (a push's ref updates, SQL, CQL or a Redis command as code); MCP tools for the sibling branches' routes at their heads (search: clusters, indices, documents, bulk; apps: create a service, promote, environments, sleep and wake, usage, cancel; previews: keep, activity), and search's bulk decided by its lines; the builder picks resources by name (each product's "Which": all, the project, or ticked resources) and says in words what the token can do and what happens to the rest; the evaluator's suites run in `pnpm test:code` (on Postgres with `--docker`) and CI; "ask for anything else" (`ask_otherwise`: what a token's rules don't allow asks a person, and remembered approvals grow it); hop hardening for users' own tokens (the carried route is judged too, on their branch); copying another environment's variables needs reveal there; the third security review's findings (remembered approvals keep their environment and path, every MCP tool call counts against a rate limit, GitHub key fetching single-flight with fallback, the leak scanner skips unreadable files under a budget and hides private repos, per-person and live-only token caps, admin tokens owned by the admin); tokens about to expire are named in the list and posted to the approvals channel daily; `apps_deploy` takes an `idempotency_key` (sent as `Idempotency-Key`); an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
 one action on one resource, a while never made permanent through a child token); leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
 secrets, roll code's landings scanned from the land log, GitHub's secret scanning partner
 endpoint); audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in

@@ -7,7 +7,8 @@
 //! each one calls; a test checks it's in the permission catalogue), and their annotations
 //! (`readOnlyHint`, `destructiveHint`) come from the action the catalogue gives that route.
 //!
-//! - Stateless: no `Mcp-Session-Id` (the spec allows it), so any node answers any request.
+//! - Stateless: any node answers any request. `initialize` answers an `Mcp-Session-Id` that only
+//!   says whether the client opens URLs for elicitation ([`SESSION_URL`]); nothing is kept.
 //! - Responses are JSON, or server-sent events when the client accepts only `text/event-stream`
 //!   (keep-alive comments while a call waits on an approval).
 //! - Without a token on a daemon that needs one: 401 with `WWW-Authenticate` naming the protected
@@ -32,6 +33,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tower::ServiceExt;
+
+/// What the session ids `initialize` answers start with: the client declared URL elicitation, or
+/// not. The rest is random (ids are unique, as the spec asks, for proxies that key on them). They
+/// hold no state (any node reads the prefix), and a client lying about it only changes how
+/// approvals come back to itself.
+pub const SESSION_URL: &str = "roll-url-1.";
+pub const SESSION_PLAIN: &str = "roll-1.";
+/// JSON-RPC error asking the client to open a URL, then retry (MCP 2025-11-25).
+const URL_ELICITATION_REQUIRED: i64 = -32042;
 
 /// Protocol versions spoken, newest first.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -159,19 +169,26 @@ async fn handle(State(m): State<Mcp>, ext: Extensions, headers: HeaderMap, body:
         (true, Some(ip)) => Some(ip),
         _ => ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip()),
     };
-    let ctx = Arc::new(Ctx { m, headers, principal, ip });
-    if wants_sse(&ctx.headers) {
+    // Whether the client opens URLs for elicitation: from `initialize` in this message, else the
+    // session id it was given.
+    let declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| m["params"]["capabilities"]["elicitation"].get("url").is_some());
+    let url_elicitation = declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with(SESSION_URL)));
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation });
+    let mut resp = if wants_sse(&ctx.headers) {
         let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {
             futures::stream::iter(responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))))
         });
-        return Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response();
-    }
-    let mut responses = process(&ctx, messages).await;
-    if batch {
-        Json(Value::Array(responses)).into_response()
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
     } else {
-        Json(responses.pop().unwrap_or(Value::Null)).into_response()
+        let mut responses = process(&ctx, messages).await;
+        if batch { Json(Value::Array(responses)).into_response() } else { Json(responses.pop().unwrap_or(Value::Null)).into_response() }
+    };
+    if let Some(url) = declared
+        && let Ok(v) = HeaderValue::from_str(&format!("{}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s")))
+    {
+        resp.headers_mut().insert("mcp-session-id", v);
     }
+    resp
 }
 
 fn wants_sse(h: &HeaderMap) -> bool {
@@ -184,6 +201,8 @@ struct Ctx {
     headers: HeaderMap,
     principal: Principal,
     ip: Option<std::net::IpAddr>,
+    /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
+    url_elicitation: bool,
 }
 
 impl Ctx {
@@ -241,6 +260,9 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else {
                     match call(ctx, &name, args).await {
+                        Some(r) if ctx.url_elicitation && r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
+                            approval_elicitation(id, &r)
+                        }
                         Some(r) => rpc_result(id, r),
                         None => rpc_error(id, -32602, format!("unknown tool {name:?}")),
                     }
@@ -262,6 +284,19 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         responses.push(resp);
     }
     responses
+}
+
+/// A call waiting on a person, for a client that opens URLs: open the approval page, then send the
+/// same call again (the gate finds its approval: one per request).
+fn approval_elicitation(id: Value, result: &Value) -> Value {
+    let s = &result["structuredContent"];
+    let (approval, url) = (s["approval"].as_str().unwrap_or(""), s["url"].as_str().unwrap_or(""));
+    let message = format!("roll needs a person to approve this ({}). Open the page to approve or deny it; the call runs when it's sent again after approval.", s["error"].as_str().unwrap_or("approval"));
+    json!({ "jsonrpc": "2.0", "id": id, "error": {
+        "code": URL_ELICITATION_REQUIRED,
+        "message": "a person must approve this call",
+        "data": { "elicitations": [{ "mode": "url", "elicitationId": approval, "url": url, "message": message }], "approval": approval },
+    } })
 }
 
 fn initialize(ctx: &Ctx, params: &Value) -> Value {
@@ -293,7 +328,7 @@ Read the resource roll://access/me for what this connection may do, in words, an
 async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
     let redacted = roll_access::redact::value(&args);
     let mut ext = Extensions::new();
-    ext.insert(McpCall { tool: name.into(), args: Arc::new(redacted), ip: ctx.ip });
+    ext.insert(McpCall { tool: name.into(), args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation });
     let started = std::time::Instant::now();
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
     let (result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
@@ -341,7 +376,7 @@ async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
         req = req.header(k, v);
     }
     let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
-    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": resources::ME })), ip: ctx.ip });
+    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": resources::ME })), ip: ctx.ip, elicits: false });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
