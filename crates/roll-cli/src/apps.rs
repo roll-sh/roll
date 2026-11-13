@@ -326,6 +326,9 @@ pub enum AppsCmd {
         no_branch: bool,
         #[arg(long)]
         variables_from: Option<String>,
+        /// Deploy a push only once its commit's checks pass (`true`), or at once (`false`).
+        #[arg(long)]
+        wait_for_ci: Option<bool>,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -1239,7 +1242,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -1250,6 +1253,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(f) = variables_from {
                 body.insert("variables_from".into(), json!(f));
+            }
+            if let Some(w) = wait_for_ci {
+                body.insert("wait_for_ci".into(), json!(w));
             }
             api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(Value::Object(body))).await?
         }

@@ -26,6 +26,10 @@ struct FakeCode {
     pushed: Mutex<BTreeMap<String, Vec<String>>>,
     head: Mutex<(String, String)>,
     landings: Mutex<Vec<Landing>>,
+    /// Commit statuses roll apps posted: (sha, context, state).
+    statuses: Mutex<Vec<(String, String, String)>>,
+    /// What a commit's checks say (CI).
+    ci: Mutex<Option<apps_control::integrations::Ci>>,
 }
 
 impl FakeCode {
@@ -76,6 +80,13 @@ impl Sources for FakeCode {
     }
     /// The paths `to`'s push changed, matched as `dir/**` prefixes (roll code's real matcher is
     /// CODEOWNERS', tested there).
+    async fn set_status(&self, _repo: &str, sha: &str, st: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
+        self.statuses.lock().push((sha.to_string(), st.context.clone(), st.state.to_string()));
+        Ok(())
+    }
+    async fn ci(&self, _repo: &str, _sha: &str) -> anyhow::Result<apps_control::integrations::Ci> {
+        Ok(self.ci.lock().clone().unwrap_or(apps_control::integrations::Ci::None))
+    }
     async fn touches(&self, _repo: &str, _from: &str, to: &str, patterns: &[String]) -> anyhow::Result<bool> {
         let changed = self.pushed.lock().get(to).cloned().unwrap_or_default();
         Ok(changed.iter().any(|f| patterns.iter().any(|p| f.starts_with(p.trim_end_matches("**")))))
@@ -599,6 +610,36 @@ async fn roll_toml_sets_run_settings_per_environment() {
     assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(up(&w), 1, "a redeploy keeps what roll.toml set");
+}
+
+/// A deploy reports on its commit; an environment that waits for CI deploys a push only once its
+/// checks pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deploys_report_on_their_commit_and_can_wait_for_ci() {
+    use apps_control::integrations::Ci;
+    let w = world().await;
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let posted: Vec<(String, String)> = w.code.statuses.lock().iter().map(|(_, c, s)| (c.clone(), s.clone())).collect();
+    assert_eq!(posted, [("roll/apps/site/production".to_string(), "pending".to_string()), ("roll/apps/site/production".to_string(), "success".to_string())]);
+    // Waiting for CI: a push whose checks are still running waits, then deploys once they pass.
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (_, env) = call(&w.api, "PUT", &base, Some(json!({"wait_for_ci": true}))).await;
+    assert_eq!(env["wait_for_ci"], true, "{env}");
+    *w.code.ci.lock() = Some(Ci::Pending);
+    w.code.push("c1c1c1c1c1c1", "tested", &[("server.js", "v2")]);
+    let env = get_until(&w.api, &base, |e| e["waiting_for_ci"] == "c1c1c1c1c1c1").await;
+    assert_ne!(env["latest"]["status"], "queued", "nothing deploys while its checks run: {env}");
+    *w.code.ci.lock() = Some(Ci::Passed);
+    let env = get_until(&w.api, &base, |e| e["waiting_for_ci"].is_null() && e["active"]["revision"] == "c1c1c1c1c1c1").await;
+    assert_eq!(env["active"]["revision"], "c1c1c1c1c1c1");
+    // A push whose check failed doesn't deploy.
+    *w.code.ci.lock() = Some(Ci::Failed("ci/test".into()));
+    w.code.push("d2d2d2d2d2d2", "broken", &[("server.js", "v3")]);
+    let (_, log) = (0, get_until(&w.api, &format!("{base}/logs"), |l| l.to_string().contains("its check ci/test failed")).await);
+    assert!(log.to_string().contains("d2d2d2d2d2d2"));
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["active"]["revision"], "c1c1c1c1c1c1");
 }
 
 /// A project past its alert gets `spend.alert` once; past its hard limit it's capped: its

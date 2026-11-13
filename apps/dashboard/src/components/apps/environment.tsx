@@ -62,6 +62,24 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </form>
         )}
 
+        {repo && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Wait for CI</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.wait_for_ci
+                  ? env.waiting_for_ci
+                    ? `Push ${env.waiting_for_ci.slice(0, 7)} deploys once its checks pass.`
+                    : "A push deploys once its commit's checks pass; a failed check doesn't deploy."
+                  : "A push deploys at once, whatever its checks say."}
+              </p>
+            </div>
+            <button className={btn} disabled={busy} onClick={() => runner.run("ci", () => appsApi.putEnvironment(service.id, env.name, { wait_for_ci: !env.wait_for_ci }))} aria-pressed={!!env.wait_for_ci}>
+              {env.wait_for_ci ? "Deploy at once" : "Wait for checks"}
+            </button>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-end gap-3 px-5 py-4">
           <div className="min-w-56 flex-1">
             <p className="text-[13px] font-medium">Promote</p>

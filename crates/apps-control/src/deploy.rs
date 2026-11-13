@@ -340,6 +340,7 @@ impl Apps {
         self.cancels.lock().insert(d.id.clone(), cancel.clone());
         let log = self.deploy_log(&d.id);
         let began = Instant::now();
+        self.report(&d, "pending", "deploying").await;
         let result = self.run_inner(&d, &log, cancel.clone()).await;
         self.cancels.lock().remove(&d.id);
         let id = d.id.clone();
@@ -347,11 +348,14 @@ impl Apps {
             Ok(()) => {
                 log.stream(Stream::System).line(format!("deployed in {:.1} s", began.elapsed().as_secs_f64()));
                 info!(service = %d.service, env = %d.environment, deployment = %d.id, "apps: deployed");
+                self.report(&d, "success", "live").await;
             }
             Err(e) if cancel.is_cancelled() => {
                 let _ = e;
+                self.report(&d, "failure", "canceled").await;
             }
             Err(e) => {
+                self.report(&d, "failure", &e.to_string()).await;
                 self.step(&d.id, "failed").await;
                 let msg = e.to_string();
                 log.stream(Stream::System).line(format!("failed: {msg}"));
@@ -361,6 +365,26 @@ impl Apps {
         }
         self.logs.flush().await;
         self.logs.retire(&format!("build:{}", d.id));
+    }
+
+    /// A repo deployment's progress as a commit status on its revision (`roll/apps/<service>/<env>`,
+    /// linking to the environment): pending while it's on its way, then success or failure, as
+    /// Railway's and Vercel's GitHub deployments. Best effort: a status that doesn't post is a
+    /// warning, never a failed deploy.
+    async fn report(self: &Arc<Self>, d: &Deployment, state: &'static str, what: &str) {
+        let (Some(sources), Some(rev)) = (self.deps.sources.clone(), d.revision.clone()) else { return };
+        let (sid, e) = (d.service.clone(), d.environment.clone());
+        let Ok((svc, env)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return };
+        let Source::Repo { repo, .. } = &svc.source else { return };
+        let status = crate::integrations::CommitStatus {
+            context: format!("roll/apps/{}/{}", svc.name, d.environment),
+            state,
+            description: what.chars().take(140).collect(),
+            target_url: Some(self.url(&env.slug)),
+        };
+        if let Err(err) = sources.set_status(repo, &rev, &status).await {
+            warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
+        }
     }
 
     async fn run_inner(self: &Arc<Self>, d: &Deployment, log: &LogSink, cancel: CancellationToken) -> anyhow::Result<()> {
@@ -1046,6 +1070,7 @@ impl Apps {
                         continue;
                     }
                 }
+                self.settle_ci_waits().await;
             }
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {}
@@ -1067,6 +1092,50 @@ impl Apps {
         let scope = crate::config::EnvScope { name: env, ephemeral };
         let run = file.as_ref().and_then(|f| f.apply(&svc.build, &svc.run, Some(scope)).ok()).map_or_else(|| svc.run.clone(), |(_, r, _)| r);
         if ephemeral { crate::config::preview_defaults(run, file.as_ref()).0 } else { run }
+    }
+
+    /// Pushes waiting for their checks: deployed once they pass (or there are none), dropped when
+    /// one fails or after an hour, each said in its environment's log.
+    pub async fn settle_ci_waits(self: &Arc<Self>) {
+        let Some(sources) = self.deps.sources.clone() else { return };
+        let Ok(waits) = self.db(|s| s.ci_waits()).await else { return };
+        let now = code_sql::now_ms();
+        for (w, since) in waits {
+            let Ok(svc) = self.db({
+                let sid = w.service.clone();
+                move |s| s.service(&sid)
+            })
+            .await
+            else {
+                let (sid, e, l) = (w.service.clone(), w.env.clone(), w.landing);
+                let _ = self.db(move |s| s.end_ci_wait(&sid, &e, l)).await;
+                continue;
+            };
+            let Source::Repo { repo, .. } = &svc.source else { continue };
+            let log = self.logs.sink(format!("env:{}/{}", w.service, w.env), Stream::System);
+            let sha = &w.sha[..w.sha.len().min(12)];
+            let done = match sources.ci(repo, &w.sha).await {
+                Ok(crate::integrations::Ci::Pending) if now - since > 3_600_000 => {
+                    log.line(format!("push {sha} not deployed: its checks didn't finish within an hour"));
+                    true
+                }
+                Ok(crate::integrations::Ci::Pending) | Err(_) => false,
+                Ok(crate::integrations::Ci::Failed(which)) => {
+                    log.line(format!("push {sha} not deployed: its check {which} failed"));
+                    true
+                }
+                Ok(_) => {
+                    log.line(format!("push {sha}'s checks passed: deploying"));
+                    let body = serde_json::json!({ "revision": w.sha, "message": w.message });
+                    let by = By { trigger: Trigger::Push, actor: w.author.as_ref().map(|a| format!("git:{a}")) };
+                    self.deploy(&w.service, &w.env, body, by, None, Some(&format!("landing:{}", w.landing))).await.is_ok()
+                }
+            };
+            if done {
+                let (sid, e, l) = (w.service.clone(), w.env.clone(), w.landing);
+                let _ = self.db(move |s| s.end_ci_wait(&sid, &e, l)).await;
+            }
+        }
     }
 
     /// `roll.toml` `[app]` at a pushed revision (in the service's root), if it reads.
@@ -1115,6 +1184,28 @@ impl Apps {
                     let sha = &l.revision.sha[..l.revision.sha.len().min(12)];
                     self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {sha} changes nothing this service watches ({}): not deployed", patterns.join(", ")));
                     continue;
+                }
+                // An environment that waits for CI deploys a push once its checks pass.
+                if e.wait_for_ci {
+                    let Source::Repo { repo, .. } = &svc.source else { continue };
+                    let sources = self.deps.sources.clone().ok_or_else(|| Error::Internal("roll code isn't on this node".into()))?;
+                    match sources.ci(repo, &l.revision.sha).await {
+                        Ok(crate::integrations::Ci::Pending) => {
+                            let w = crate::store::CiWait { service: svc.id.clone(), env: e.name.clone(), landing: l.seq, sha: l.revision.sha.clone(), message: l.revision.message.lines().next().unwrap_or("").to_string(), author: l.author.clone() };
+                            self.db(move |s| s.wait_for_ci(&w)).await?;
+                            self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} waits for its checks", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                            continue;
+                        }
+                        Ok(crate::integrations::Ci::Failed(which)) => {
+                            self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: its check {which} failed", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                            continue;
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            failed.get_or_insert(Error::Internal(format!("reading {}'s checks: {err}", l.revision.sha)));
+                            continue;
+                        }
+                    }
                 }
                 let body = serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") });
                 // The owner queues it (it may be another node: the queue is in the store).

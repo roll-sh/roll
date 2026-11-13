@@ -50,6 +50,36 @@ pub trait Sources: Send + Sync {
     async fn touches(&self, _repo: &str, _from: &str, _to: &str, _patterns: &[String]) -> anyhow::Result<bool> {
         Ok(true)
     }
+    /// Report a deploy on its commit (roll code's commit statuses; mirrored to GitHub):
+    /// `state` is `pending`, `success` or `failure`.
+    async fn set_status(&self, _repo: &str, _sha: &str, _status: &CommitStatus) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// What the commit's checks say, roll apps' own statuses (`roll/apps…`) left out.
+    async fn ci(&self, _repo: &str, _sha: &str) -> anyhow::Result<Ci> {
+        Ok(Ci::None)
+    }
+}
+
+/// A commit status roll apps reports for a deploy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommitStatus {
+    /// `roll/apps/<service>/<env>`.
+    pub context: String,
+    pub state: &'static str,
+    pub description: String,
+    pub target_url: Option<String>,
+}
+
+/// A commit's checks (its statuses but roll apps' own).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ci {
+    /// None reported: nothing to wait for.
+    None,
+    Pending,
+    Passed,
+    /// Which failed.
+    Failed(String),
 }
 
 /// Project secrets per environment: roll secrets (feature/roll-secrets, docs/secrets.md).

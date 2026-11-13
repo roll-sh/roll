@@ -147,6 +147,7 @@ export interface EnvironmentPut {
   access?: { token: string; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
+  wait_for_ci?: boolean;
 }
 
 export interface Instance {
@@ -188,6 +189,10 @@ export interface Environment extends EnvironmentSummary {
   next_run_at: number | null;
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
+  /** A push deploys only once its commit's checks pass. */
+  wait_for_ci?: boolean;
+  /** The push (sha) waiting for its checks, if one is. */
+  waiting_for_ci?: string | null;
   created_at: number;
 }
 

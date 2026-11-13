@@ -242,6 +242,37 @@ impl Sources for CodeSources {
         })
         .await
     }
+
+    async fn set_status(&self, repo: &str, sha: &str, st: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
+        let (this, repo, sha) = (self.clone(), repo.to_string(), sha.to_string());
+        let body = serde_json::json!({ "state": st.state, "context": st.context, "description": st.description, "target_url": st.target_url });
+        blocking(move || {
+            let r = this.repo(&repo)?;
+            this.0.post_status(&code_control::Caller::Admin, &r, &sha, &body).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn ci(&self, repo: &str, sha: &str) -> anyhow::Result<apps_control::integrations::Ci> {
+        use apps_control::integrations::Ci;
+        let (this, repo, sha) = (self.clone(), repo.to_string(), sha.to_string());
+        blocking(move || {
+            let r = this.repo(&repo)?;
+            let v = this.0.get_statuses(&r, &sha).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let theirs: Vec<&serde_json::Value> = v["statuses"].as_array().into_iter().flatten().filter(|s| !s["context"].as_str().unwrap_or("").starts_with("roll/apps")).collect();
+            Ok(if theirs.is_empty() {
+                Ci::None
+            } else if let Some(f) = theirs.iter().find(|s| matches!(s["state"].as_str(), Some("failure" | "error"))) {
+                Ci::Failed(f["context"].as_str().unwrap_or("a check").to_string())
+            } else if theirs.iter().any(|s| s["state"] == "pending") {
+                Ci::Pending
+            } else {
+                Ci::Passed
+            })
+        })
+        .await
+    }
 }
 
 /// The data products' connection variables for links.

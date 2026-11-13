@@ -105,6 +105,16 @@ CREATE TABLE IF NOT EXISTS notify_deliveries (
 CREATE INDEX IF NOT EXISTS notify_due ON notify_deliveries (status, next_at);
 DELETE FROM notify_deliveries WHERE id NOT IN (SELECT MIN(id) FROM notify_deliveries GROUP BY target, event);
 CREATE UNIQUE INDEX IF NOT EXISTS notify_once ON notify_deliveries (target, event);
+CREATE TABLE IF NOT EXISTS ci_waits (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    landing INTEGER NOT NULL,
+    sha TEXT NOT NULL,
+    message TEXT NOT NULL,
+    author TEXT,
+    since INTEGER NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS log_drains (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL,
@@ -273,6 +283,18 @@ impl Sealer {
 }
 
 /// A row of `environments`.
+/// A push waiting for its commit's checks before it deploys to an environment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CiWait {
+    pub service: String,
+    pub env: String,
+    /// The landing's sequence number (its deploys' idempotency key).
+    pub landing: i64,
+    pub sha: String,
+    pub message: String,
+    pub author: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnvRow {
     pub service: String,
@@ -283,6 +305,8 @@ pub struct EnvRow {
     pub slug: String,
     pub port: Option<u16>,
     pub created_at: i64,
+    /// A push deploys only once its commit's checks pass.
+    pub wait_for_ci: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -363,7 +387,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci";
 const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
@@ -396,6 +420,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         slug: r.get(5)?,
         port: r.get::<_, Option<i64>>(6)?.map(|p| p as u16),
         created_at: r.get(7)?,
+        wait_for_ci: r.get::<_, i64>(8)? != 0,
     })
 }
 
@@ -461,6 +486,7 @@ impl Store {
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("deployments", "actor", "TEXT")?;
+        db.add_column("environments", "wait_for_ci", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(Store { db, sealer })
     }
 
@@ -600,7 +626,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1362,6 +1388,39 @@ impl Store {
                 map,
             )?,
         })
+    }
+
+    // ── pushes waiting for their checks ──
+
+    pub fn set_wait_for_ci(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET wait_for_ci = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    /// A push waiting for its checks in an environment: a newer one takes its place (it would
+    /// supersede the older deploy anyway).
+    pub fn wait_for_ci(&self, w: &CiWait) -> Result<()> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            c.execute("DELETE FROM ci_waits WHERE service = ? AND env = ?", params![w.service, w.env])?;
+            c.execute(
+                "INSERT INTO ci_waits (service, env, landing, sha, message, author, since) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![w.service, w.env, w.landing, w.sha, w.message, w.author, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn ci_waits(&self) -> Result<Vec<(CiWait, i64)>> {
+        Ok(self.db.query("SELECT service, env, landing, sha, message, author, since FROM ci_waits ORDER BY since", (), |r| {
+            Ok((CiWait { service: r.get(0)?, env: r.get(1)?, landing: r.get(2)?, sha: r.get(3)?, message: r.get(4)?, author: r.get(5)? }, r.get(6)?))
+        })?)
+    }
+
+    /// Done waiting (deployed, failed or given up), unless a newer push took its place.
+    pub fn end_ci_wait(&self, service: &str, env: &str, landing: i64) -> Result<()> {
+        self.db.execute("DELETE FROM ci_waits WHERE service = ? AND env = ? AND landing = ?", params![service, env, landing])?;
+        Ok(())
     }
 
     // ── log drains ──

@@ -555,6 +555,10 @@ pub struct Environment {
     pub next_run_at: Option<i64>,
     /// Its instances keep crashing: three or more in the last ten minutes.
     pub crash_loop: Option<CrashLoop>,
+    /// A push deploys only once its commit's checks pass (Railway's "Wait for CI").
+    pub wait_for_ci: bool,
+    /// The push waiting for its checks, if one is.
+    pub waiting_for_ci: Option<String>,
     pub created_at: i64,
 }
 

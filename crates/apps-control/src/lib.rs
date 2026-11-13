@@ -601,7 +601,24 @@ impl Apps {
             None => false,
         };
         let private = self.access(&r.service, &r.name).await?.is_some();
-        Ok(Environment { summary, service: r.service.clone(), branch: r.branch.clone(), ephemeral: r.ephemeral, instances, domains, port: r.port, needs_deploy, private, next_run_at, crash_loop, created_at: r.created_at })
+        let (sid, e) = (r.service.clone(), r.name.clone());
+        let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
+        Ok(Environment {
+            summary,
+            service: r.service.clone(),
+            branch: r.branch.clone(),
+            ephemeral: r.ephemeral,
+            instances,
+            domains,
+            port: r.port,
+            needs_deploy,
+            private,
+            next_run_at,
+            crash_loop,
+            wait_for_ci: r.wait_for_ci,
+            waiting_for_ci,
+            created_at: r.created_at,
+        })
     }
 
     /// `PUT …/environments/{env}`: make it (a preview environment, a staging one) or change its
@@ -609,7 +626,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -674,6 +691,14 @@ impl Apps {
         if let Some(vars) = copied.filter(|v| !v.is_empty()) {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.change_variables(&sid, &e, &vars, &[])).await?;
+        }
+        match o.get("wait_for_ci") {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(on)) => {
+                let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+                self.db(move |s| s.set_wait_for_ci(&sid, &e, on)).await?;
+            }
+            Some(_) => return Err(Error::BadRequest("wait_for_ci is a boolean".into())),
         }
         if let Some(access) = access {
             let (sid, e, a) = (service.to_string(), env.to_string(), access.clone());

@@ -201,6 +201,9 @@ type EnvironmentPut = {
   access?: { token: string; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables (ignored when it exists). */
   variables_from?: string;
+  /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
+   *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it. */
+  wait_for_ci?: boolean;
 };
 
 type Environment = EnvironmentSummary & {
@@ -214,6 +217,8 @@ type Environment = EnvironmentSummary & {
   private: boolean;          // its hostnames answer only visitors with its access token
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
+  wait_for_ci: boolean;
+  waiting_for_ci: string | null; // the push (sha) waiting for its checks
   created_at: number;
 };
 
