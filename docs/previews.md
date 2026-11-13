@@ -729,9 +729,16 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+1. **The same branch across a project's repos**: a change on `feat/x` in `acme/web` runs
+   `acme/api` at its own `feat/x` when it has one (and follows it), not its default branch, so a
+   feature split across a front end and a back end previews as one (Signadot, Bunnyshell and
+   Qovery match branches by name across repos).
+2. **Skipping or asking for a preview per change**: `[skip preview]` in a change's title or a
+   `no-preview` label skips it (Render's `[skip render]`, Vercel's ignored builds); with
+   `branches` narrowed, a `preview` label asks for one anyway.
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
