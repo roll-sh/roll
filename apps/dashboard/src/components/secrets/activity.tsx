@@ -1,13 +1,15 @@
-import { Eye, GitPullRequest, KeyRound, Pencil, RefreshCw, RotateCw, Search, Shield } from "lucide-react";
+import { Eye, GitPullRequest, KeyRound, Pencil, RefreshCw, RotateCw, Search, Shield, ShieldAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AuditEntry, Environment } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, Chip, ErrorNote, errorText, sized } from "./ui";
 
-type Kind = "all" | "changes" | "reads" | "requests" | "syncs";
+type Kind = "all" | "changes" | "reads" | "requests" | "syncs" | "alerts";
 
 const KIND_OF = (action: string): Exclude<Kind, "all"> | "other" =>
-  action.startsWith("secrets.reveal") || action === "secrets.export" || action === "secrets.resolve" || action === "request.reveal" || action.startsWith("share.")
+  action === "secrets.alert"
+    ? "alerts"
+    : action.startsWith("secrets.reveal") || action === "secrets.export" || action === "secrets.resolve" || action === "request.reveal" || action.startsWith("share.")
     ? "reads"
     : action.startsWith("request.")
       ? "requests"
@@ -17,7 +19,7 @@ const KIND_OF = (action: string): Exclude<Kind, "all"> | "other" =>
           ? "changes"
           : "other";
 
-const ICON: Record<ReturnType<typeof KIND_OF>, typeof Pencil> = { changes: Pencil, reads: Eye, requests: GitPullRequest, syncs: RefreshCw, other: Shield };
+const ICON: Record<ReturnType<typeof KIND_OF>, typeof Pencil> = { changes: Pencil, reads: Eye, requests: GitPullRequest, syncs: RefreshCw, alerts: ShieldAlert, other: Shield };
 
 const day = (ms: number) => new Date(ms).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 
@@ -56,7 +58,7 @@ export function Activity({ env }: { env: Environment }) {
           <Search className="size-3.5" />
           <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="Key" aria-label="Activity of a key" spellCheck={false} className={`${sized} h-auto min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[12px]`} />
         </label>
-        {(["all", "changes", "reads", "requests", "syncs"] as const).map((k) => (
+        {(["all", "changes", "reads", "requests", "syncs", "alerts"] as const).map((k) => (
           <Chip key={k} on={kind === k} onClick={() => setKind(k)}>
             {k === "all" ? "Everything" : k[0].toUpperCase() + k.slice(1)}
           </Chip>
@@ -74,7 +76,7 @@ export function Activity({ env }: { env: Environment }) {
             <li key={r.id}>
               {head && <p className="mt-3 mb-1 text-[11px] font-medium text-subtle first:mt-0">{d}</p>}
               <div className="flex flex-wrap items-baseline gap-x-2 rounded-md px-1.5 py-1 text-[12.5px] hover:bg-fg/[0.03]">
-                <Icon className="size-3.5 shrink-0 translate-y-0.5 text-muted" />
+                <Icon className={`size-3.5 shrink-0 translate-y-0.5 ${r.action === "secrets.alert" ? "text-danger" : "text-muted"}`} />
                 <span className="text-soft">{r.summary}</span>
                 {r.keys.slice(0, 6).map((k) => (
                   <button key={k} className="font-mono text-[11px] text-muted transition-colors hover:text-accent hover:underline" onClick={() => go({ env: env.slug, path: r.path && r.path !== "/" ? r.path : undefined, key: k })}>

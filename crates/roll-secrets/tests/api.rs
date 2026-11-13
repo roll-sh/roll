@@ -835,6 +835,9 @@ async fn reads_unlike_the_reader_are_alerted() {
     let mut alerts: Vec<Value> = sent.iter().map(|n| n["alert"].clone()).collect();
     alerts.sort_by_key(|a| a["kind"].as_str().map(String::from));
     assert_eq!(alerts, vec![json!({ "kind": "many_reveals", "actor": "alice", "count": 30 }), json!({ "kind": "new_address", "actor": "token:tok_ci", "ip": "203.0.113.7" })], "{sent:?}");
+    // The audit log keeps them too: the environment's activity, and audit sinks.
+    let logged = api.ok(Method::GET, "/audit?action=secrets.alert", None).await;
+    assert_eq!(logged.as_array().map(Vec::len), Some(2), "{logged}");
 }
 
 #[tokio::test]

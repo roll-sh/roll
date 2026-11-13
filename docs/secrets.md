@@ -367,7 +367,8 @@ hears of reads that look unlike the reader, from the audit log, within a sweep o
   it out by hand).
 
 An alert names the principal, the address or the count, the environment and a link to its
-activity: never a value. The sweep walks the audit log after a cursor; advancing the cursor,
+activity: never a value. Each is also an audit row (`secrets.alert`, by `roll:alerts`), told or
+not: the environment's Activity has an Alerts filter, and audit sinks carry them to a SIEM. The sweep walks the audit log after a cursor; advancing the cursor,
 recording the addresses seen and queueing the notices are one write, so two nodes never both
 alert, and history from before the first sweep isn't alerted on.
 
@@ -1279,8 +1280,12 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Rotation for values outside roll** (AWS Secrets Manager's rotation functions, Infisical's
+   rotation providers): a key names a rotator, a URL roll calls (signed, through the guarded client)
+   on its schedule or on demand; the answer is the new value, stored as a new version, with the old
+   one kept for a grace period and a `rotated` notice.
+3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
