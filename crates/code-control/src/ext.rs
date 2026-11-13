@@ -48,4 +48,10 @@ pub trait SecretEnv: Send + Sync {
     /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
     /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>>;
+    /// Of `keys`, the ones a standard environment of the project that has repo `owner/name` on its
+    /// canvas doesn't define, with those environments: (key, [environment]). Names only.
+    async fn missing(&self, repo: &str, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        let _ = (repo, keys);
+        Ok(Vec::new())
+    }
 }

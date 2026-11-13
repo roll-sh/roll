@@ -269,11 +269,22 @@ pub struct Blocker {
     /// added; show unknown ones by their message).
     pub kind: String,
     pub message: String,
+    /// The roll secrets key a `secret_leak` blocker or `secret_missing` notice is about, and the
+    /// environments: where the dashboard links to fix it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
 }
 
 impl Blocker {
     pub fn new(kind: &str, message: impl Into<String>) -> Blocker {
-        Blocker { kind: kind.into(), message: message.into() }
+        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new() }
+    }
+
+    /// One about roll secrets key `key` in `environments`.
+    pub fn secret(kind: &str, message: impl Into<String>, key: &str, environments: Vec<String>) -> Blocker {
+        Blocker { key: Some(key.into()), environments, ..Blocker::new(kind, message) }
     }
 }
 
@@ -391,6 +402,10 @@ pub struct Change {
     pub queue: Option<QueueInfo>,
     /// Why it can't land right now (empty: it can).
     pub blockers: Vec<Blocker>,
+    /// What it should know but needn't block on: `secret_missing` (it reads an environment
+    /// variable a roll secrets environment doesn't set; docs/secrets.md).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<Blocker>,
     /// Its review state under the repo's rules.
     pub review: Option<crate::review::ReviewSummary>,
     pub created_at: i64,

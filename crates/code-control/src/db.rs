@@ -247,6 +247,7 @@ fn change_row(r: &Row<'_>) -> code_sql::Result<Change> {
         run_approved: r.get::<_, i64>(21)? != 0,
         queue: None,
         blockers: Vec::new(),
+        notices: Vec::new(),
         review: None,
     })
 }

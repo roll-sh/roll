@@ -279,8 +279,12 @@ export interface Blocker {
     | "review_pending"
     | "review_required"
     | "secret_leak"
+    | "secret_missing"
     | (string & {});
   message: string;
+  /** `secret_leak`, `secret_missing`: the roll secrets key, and the environments it's about. */
+  key?: string;
+  environments?: string[];
 }
 
 export type EntryState = "waiting" | "testing" | "bisecting" | "landing" | "ejected" | "landed";
@@ -353,6 +357,8 @@ export interface Change {
   queue?: QueueInfo | null;
   /** Why it can't be queued or land right now; empty when it can. */
   blockers?: Blocker[];
+  /** What it should know but needn't block on (`secret_missing`); absent when there's nothing. */
+  notices?: Blocker[];
   /** Where its review stands under the repo's rules. */
   review?: ReviewSummary;
   checks: Check[];

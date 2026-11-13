@@ -87,6 +87,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
         .route(&format!("{P}/syncs"), get(list_syncs).post(create_sync))
+        .route(&format!("{P}/syncs/preview"), post(preview_sync))
         .route(&format!("{P}/syncs/{{id}}"), axum::routing::delete(delete_sync))
         .route(&format!("{P}/syncs/{{id}}/run"), post(run_sync))
         // Public: a share's link (docs/secrets.md, "Sharing a value once").
@@ -838,6 +839,11 @@ async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(Str
 async fn list_syncs(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     let v = blocking(s, move |s| Ok(json!({ "syncs": s.list_syncs(&project, &c)?, "kinds": s.sync_kinds() }))).await?;
     Ok(ok(v))
+}
+
+async fn preview_sync(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewSync = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.preview_sync(&project, &n, &c)).await?))
 }
 
 async fn create_sync(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {

@@ -551,6 +551,7 @@ roll secrets import  .env [--overwrite]                         # one change (.e
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
 roll secrets health                                            # every finding, every environment, worst first
+roll secrets doctor                                            # this machine's setup, checked
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
 roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
@@ -574,6 +575,11 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   `~/.config/roll/secrets.json` (never the repo), so `roll run -- npm start` needs no flags there
   (`--show`, `--clear`). Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
   project.
+- `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
+  the project it's bound to), the directory's project and environment and how many keys it can
+  read there, the keys a `.env.example` names that it lacks, and whether staged files hold any of
+  the project's values (the scan, names only). It fails when a check does: a first step when
+  `roll run` doesn't see what it should.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
   effective keys, versions, fingerprints and links, and of what their references reach (in this
@@ -690,6 +696,20 @@ the change`. The blocker names keys and environments, never the value or the lin
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
 
+#### Keys a change starts reading
+
+The same pass over the lines a change adds also picks out the environment variables they read, by
+their usual spellings (`process.env.X`, `process.env["X"]`, `import.meta.env.X`, `os.environ["X"]`,
+`os.getenv("X")`, `env::var("X")`, `os.Getenv("X")`, `ENV["X"]`, `System.getenv("X")`; upper-case
+names, and not the ones platforms set themselves such as `PATH`, `PORT` or `GITHUB_*`). Each one a
+standard environment of the repository's project doesn't define (set in any folder, or reaching its
+root through an import or its base) becomes a `secret_missing` notice on the change: "reads
+SENTRY_DSN, which production doesn't set in roll secrets". A notice never blocks a landing, since
+a variable can come from elsewhere: it's there so the key is added before the code that needs it
+ships. Both a `secret_leak` blocker and a `secret_missing` notice carry the `key` and its
+`environments`, and the change page links straight to that key in the project that has the repo
+on its canvas ("Rotate STRIPE_KEY in roll secrets", "Add SENTRY_DSN in roll secrets").
+
 #### Before a commit: `roll secrets scan`
 
 The same check runs on a laptop, before anything is pushed: `roll secrets scan [PATH…]` walks
@@ -805,7 +825,10 @@ Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terra
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
-change of that key.
+change of that key. Before one is added, `POST …/syncs/preview` (`roll secrets syncs add … --preview`, the form's
+Preview) says what it would push, names only, without calling the platform: its names after `keys`
+and `prefix`, the credential keys it reads (never pushed), and any credential or listed key the
+folder doesn't have.
 
 roll-secrets knows no platform. Each kind is a `SyncTarget` (`crates/roll-secrets/src/syncs.rs`)
 that rolld registers (`crates/rolld/src/secrets/syncs.rs`), as link providers are:
@@ -1285,6 +1308,7 @@ isn't in the workspace is 404.
 | `DELETE /shares/{id}` | | 204 |
 | `GET /syncs` | | `{syncs: Sync[], kinds: SyncKind[]}` |
 | `POST /syncs` | `NewSync` | 201 `Sync & {signing_secret?}` (shown once; `admin`) |
+| `POST /syncs/preview` | `NewSync` | `{names, credentials, missing_credentials, unknown_keys}`: what it would push, before it exists (`admin`; names only, the platform isn't called) |
 | `DELETE /syncs/{id}` | | 204 (`admin`) |
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |

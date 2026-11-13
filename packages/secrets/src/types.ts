@@ -226,6 +226,8 @@ export type Sync = {
   created_at: number;
   created_by: string;
 };
+/** What a sync would push before it exists (`POST …/syncs/preview`): names only. */
+export type SyncPreview = { names: string[]; credentials: string[]; missing_credentials: string[]; unknown_keys: string[] };
 export type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
 export type SyncField = { name: string; label: string; required: boolean; placeholder: string };
 /** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */

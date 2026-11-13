@@ -154,13 +154,16 @@ Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, tit
            landed_as: string | null, conflict: {paths, head} | null,
            queue: QueueInfo | null /* its latest time in the merge queue */,
            blockers: Blocker[] /* why it can't be queued or land right now; [] when it can */,
+           notices?: Blocker[] /* what it should know but needn't block on: secret_missing (it reads an environment variable a roll secrets environment doesn't set); absent when none */,
            review: ReviewSummary /* see Reviews */,
            created_at, updated_at}
 Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval" | "needs_codeowner" | "changes_requested"
                    | "unresolved_threads" | "review_pending" | "review_required"
                    | "secret_leak" /* it adds a roll secrets value; names keys, never values (docs/secrets.md) */
+                   | "secret_missing" /* a notice: it reads an environment variable roll secrets doesn't set */
                    /* more may come: show unknown kinds by message */,
-             message}
+             message,
+             key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,
              output: string | null /* the failing checks' log tail behind `error`, "<check>:\n<tail>" per check */,

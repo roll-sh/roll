@@ -2,9 +2,11 @@ import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, Database, ExternalLink, GitMergeConflict, ListOrdered, MemoryStick, MessageSquare, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "@/components/link";
+import { useWorkspace } from "@/lib/workspace-store";
 import {
   codeApi,
   shortId,
+  type Blocker,
   type Change,
   type ChangeState,
   type Compare,
@@ -140,6 +142,7 @@ export function ChangesTab({ repo, tick }: { repo: Repo; tick: number }) {
 
 /** A change by per-repo number (or `chg_…` id, which landed events and work items carry). */
 export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
+  const ws = useWorkspace();
   const { repo, info, offline, missing, refresh: refreshRepo } = useRepo(fullName);
   const [change, setChange] = useState<Change | null>(null);
   const [notFound, setNotFound] = useState(false);
@@ -318,6 +321,14 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
           }
         };
         const blockers = c.blockers ?? [];
+        // A secrets blocker or notice links to its key in the project that has this repo on its canvas.
+        const project = ws.projects.find((p) => p.resources.some((x) => x.kind === "repo" && x.ref === r.full_name));
+        const fixIn = (b: Blocker) =>
+          project && b.key ? (
+            <Link href={`/dashboard/projects/${project.id}/secrets?env=${encodeURIComponent(b.environments?.[0] ?? "")}&key=${encodeURIComponent(b.key)}`} className="mt-1 inline-block text-[12px] text-accent hover:underline">
+              {b.kind === "secret_leak" ? `Rotate ${b.key} in roll secrets` : `Add ${b.key} in roll secrets`}
+            </Link>
+          ) : null;
         const canLand = (c.state === "open" || c.state === "conflict") && !c.draft;
         const conflict = landed?.status === "conflict" ? landed : c.conflict;
         /** Land (post-merge), queue (merge queue) or bypass: one path, so every outcome reads the same. */
@@ -528,6 +539,7 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                     <div className="px-5 py-4">
                       <BlockerList
                         blockers={blockers}
+                        extra={fixIn}
                         action={(kind) =>
                           !writer ? null : kind === "ready" ? (
                             <button
@@ -551,6 +563,18 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                         }
                       />
                     </div>
+                  </Panel>
+                )}
+                {!!c.notices?.length && c.state !== "landed" && c.state !== "closed" && (
+                  <Panel title="Worth knowing">
+                    <ul className="space-y-1 px-5 py-4 text-[12.5px] text-muted">
+                      {c.notices.map((n) => (
+                        <li key={n.message}>
+                          {n.message}
+                          {fixIn(n) && <span className="ml-2">{fixIn(n)}</span>}
+                        </li>
+                      ))}
+                    </ul>
                   </Panel>
                 )}
                 <ChecksPanel repo={r.full_name} change={c} policy={r.land_policy} required={r.required_checks} />
