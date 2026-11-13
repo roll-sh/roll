@@ -59,6 +59,7 @@ roll-secrets.workspace = true
 http-body-util.workspace = true
 tower.workspace = true
 url.workspace = true
+roll-previews.workspace = true
 s3-api.workspace = true
 s3-proto.workspace = true
 s3-control.workspace = true

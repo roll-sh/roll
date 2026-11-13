@@ -852,6 +852,31 @@ impl Db {
         })
     }
 
+    /// Set a change's preview when it differs from the stored one, promising the `preview`
+    /// event in the same transaction. `None` when the change doesn't exist or nothing changed;
+    /// else the change's repo and the promise.
+    pub fn set_change_preview_promised(&self, id: &str, preview: Option<&Preview>) -> Result<Option<(String, crate::webhooks::Promises)>> {
+        let new = preview.map(json);
+        self.write(|c| {
+            let row: Option<(String, Option<String>)> =
+                c.query_row("SELECT repo_id, preview FROM changes WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let Some((repo, old)) = row else { return Ok(None) };
+            let same = match (&old, &new) {
+                (Some(a), Some(b)) => serde_json::from_str::<Value>(a).ok() == serde_json::from_str::<Value>(b).ok(),
+                (None, None) => true,
+                _ => false,
+            };
+            if same {
+                return Ok(None);
+            }
+            c.execute("UPDATE changes SET preview = ?, updated_at = ? WHERE id = ?", params![new, now(), id])?;
+            let mut p = crate::webhooks::Promises::default();
+            let data = serde_json::json!({ "change": id, "preview": preview });
+            p.promise(c, &repo, "preview", id, Some(&data))?;
+            Ok(Some((repo, p)))
+        })
+    }
+
     pub fn set_change_preview(&self, id: &str, preview: Option<&Preview>) -> Result<()> {
         self.sql.execute("UPDATE changes SET preview = ?, updated_at = ? WHERE id = ?", params![preview.map(json), now(), id])?;
         Ok(())
