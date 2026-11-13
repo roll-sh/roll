@@ -89,8 +89,13 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
             tick.tick().await;
             let a = a.clone();
             let days = a.config.audit_days;
-            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a.store.prune(days)).await {
+            let a2 = a.clone();
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a2.store.prune(days)).await {
                 tracing::warn!(error = %e, "pruning the access store");
+            }
+            // Tokens about to expire, once a day, where approvals go.
+            if let Err(e) = a.expiry_digest().await {
+                tracing::warn!(error = %e, "posting tokens about to expire");
             }
         }
     });
@@ -261,6 +266,11 @@ impl roll_access::ApprovalChat for ChatCards {
     fn update(&self, install: String, channel: String, ts: String, a: roll_access::store::Approval) -> futures::future::BoxFuture<'static, Result<(), String>> {
         let (code, c) = (self.code.clone(), card(&self.web, &a));
         Box::pin(async move { code.update_access_card(&install, &channel, &ts, &c).await })
+    }
+
+    fn notice(&self, install: String, channel: String, text: String) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let code = self.code.clone();
+        Box::pin(async move { code.post_access_notice(&install, &channel, &text).await })
     }
 }
 

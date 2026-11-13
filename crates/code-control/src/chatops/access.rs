@@ -112,6 +112,22 @@ impl Code {
         }
     }
 
+    /// Post a plain message where approvals go (the daily list of tokens about to expire).
+    pub async fn post_access_notice(&self, install: &str, channel: &str, text: &str) -> Result<(), String> {
+        let i = self.install(install)?;
+        match i.platform {
+            super::Platform::Slack => {
+                let (client, token) = self.slack_token(&i)?;
+                let m = code_chat::slack::Message { channel: channel.into(), text: text.into(), blocks: None, thread_ts: None };
+                client.post_message(&token, &m).await.map(|_| ()).map_err(|e| e.to_string())
+            }
+            super::Platform::Discord => {
+                let payload = serde_json::json!({ "content": text, "allowed_mentions": { "parse": [] } });
+                self.discord_client()?.create_message(channel, &payload).await.map(|_| ()).map_err(|e| e.to_string())
+            }
+        }
+    }
+
     /// Edit a posted approval card (decided, used or expired).
     pub async fn update_access_card(&self, install: &str, channel: &str, ts: &str, c: &AccessCard) -> Result<(), String> {
         let i = self.install(install)?;
