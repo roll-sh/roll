@@ -418,9 +418,6 @@ impl Access {
 }
 
 impl Access {
-    /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
-    /// secret scanning): each live grant they open is revoked at once, with why, and logged.
-    /// Returns the grants revoked.
     /// This node's share of a grant's `rate_per_minute`: the rate over the nodes serving requests,
     /// rounded up (at least one a minute). Counted in memory on each node, so the fleet as a whole
     /// allows about the rate, with no shared write per request; a client whose requests all reach
@@ -437,6 +434,9 @@ impl Access {
         self.revokers.write().unwrap_or_else(|e| e.into_inner()).push((prefix, Box::new(revoke)));
     }
 
+    /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
+    /// secret scanning): each live grant they open is revoked at once, with why, and logged.
+    /// Returns the grants revoked.
     pub fn revoke_leaked(&self, secrets: &[String], found_at: &str) -> Result<Vec<store::Grant>> {
         let mut out = Vec::new();
         for s in secrets.iter().filter(|s| checksum_ok(s)) {
