@@ -206,7 +206,13 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 SHOT_PATH="/${SHOT_URL#*://*/}"
-[ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API$SHOT_PATH")" = image/png ] || { echo "the signed link should open the screenshot: $SHOT_URL"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API$SHOT_PATH")" = image/png ] || {
+  echo "the signed link should open the screenshot: $SHOT_URL"
+  api GET "/v1/previews/$PV" | jq_ "{k: d[k] for k in ('state', 'error', 'head', 'screenshot_at', 'updated_at')}"
+  api GET "/v1/previews/projects/$PRJ/settings" | jq_ "(d['access'], d['github'])"
+  api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"
+  exit 1
+}
 [ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API${SHOT_PATH%?}0")" = 403 ] || { echo "a changed signature should be refused"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 

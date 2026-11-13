@@ -708,6 +708,10 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- a fifth adversarial review and its fixes (the superuser never runs what a preview's code
+  planted: pinned `search_path`, the schema diff as the branch's role, no in-place rewrite after
+  preview code ran, triggers restored exactly; screenshots off the reconciler's pass; links bound
+  to one screenshot of a live public preview);
 - a fourth adversarial review and its fixes (masks
   without triggers and with a salt, masked branches reset by branching again, changed rules
   masking open previews again, deploys checked again instead of awaited, a failed deploy retried
