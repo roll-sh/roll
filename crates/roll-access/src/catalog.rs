@@ -843,6 +843,9 @@ static ROWS: &[Row] = &[
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/health", "secrets", R, Tgt::AnyGrant),
+    // Search across projects: secrets keeps each project's results only where the token may read
+    // (`Grant::allows`, one check per project inside the request).
+    row("GET", "/v1/secrets/search", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.
