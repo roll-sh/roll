@@ -4,10 +4,12 @@
 //! Fargate tasks and CodeBuild builds with `ROLL_APPS_RUNTIME=fargate`.
 //!
 //! What roll apps needs from the other products is adapted here: trees and the land log from
-//! roll code, connection variables from roll postgres and roll redis.
+//! roll code, connection variables from roll postgres and roll redis, custom domains'
+//! certificates from the edge (`ROLL_APPS_TLS`: Cloudflare for SaaS, or the active domains
+//! handed to the edge's HTTP-01 orders and their state handed back).
 
-use apps_control::integrations::{Doh, Landing, NoSecrets, Resources, Revision, Sources};
-use apps_control::model::LinkKind;
+use apps_control::integrations::{DomainTls, Doh, EdgeTls, Landing, NoSecrets, NoTls, Resources, Revision, Sources};
+use apps_control::model::{LinkKind, TlsStatus};
 use apps_control::store::{Sealer, Store};
 use apps_control::{Apps, AppsConfig, Deps};
 use async_trait::async_trait;
@@ -40,6 +42,84 @@ pub struct AppsArgs {
     /// BuildKit asks for, which `docker build` can't limit per build).
     #[arg(id = "apps_builds", long = "apps-builds", env = "ROLL_APPS_BUILDS", default_value_t = 2)]
     pub builds: usize,
+    /// Custom domains' certificates (docs/apps/README.md, "Networking").
+    #[arg(id = "apps_tls", long = "apps-tls", env = "ROLL_APPS_TLS", value_enum, default_value_t = AppsTls::None)]
+    pub tls: AppsTls,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum AppsTls {
+    /// None: custom domains are served as the edge's certificates allow (or in the clear
+    /// without the edge).
+    #[default]
+    None,
+    /// The edge orders one per active custom domain over ACME HTTP-01: a node alone, with
+    /// `ROLL_EDGE_HTTP` reachable on port 80 and `ROLL_ACME_DIRECTORY`.
+    Acme,
+    /// Cloudflare for SaaS custom hostnames on the site zone (`ROLL_CLOUDFLARE_API_TOKEN`), with
+    /// `up.<site>` as the zone's fallback origin: the fleet.
+    Cloudflare,
+}
+
+/// Cloudflare for SaaS as roll apps' certificate provider.
+struct SaasTls(roll_edge::saas::CustomHostnames);
+
+#[async_trait]
+impl DomainTls for SaasTls {
+    async fn ensure(&self, host: &str) -> anyhow::Result<Option<(TlsStatus, Option<String>)>> {
+        use roll_edge::saas::HostnameCert;
+        Ok(Some(match self.0.ensure(host).await? {
+            HostnameCert::Pending(why) => (TlsStatus::Pending, why),
+            HostnameCert::Issued => (TlsStatus::Issued, None),
+            HostnameCert::Failed(why) => (TlsStatus::Failed, Some(why)),
+        }))
+    }
+
+    async fn remove(&self, host: &str) -> anyhow::Result<()> {
+        self.0.delete(host).await
+    }
+}
+
+/// roll apps' active custom domains, for the edge's HTTP-01 certificates, and their state back.
+struct AppsDomains(Arc<Apps>);
+
+impl roll_edge::domains::CustomDomains for AppsDomains {
+    fn active(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<String>>> {
+        Box::pin(async move { self.0.active_custom_domains().await.map_err(|e| anyhow::anyhow!("{e}")) })
+    }
+
+    fn report<'a>(&'a self, host: &'a str, state: &'a roll_edge::domains::CertState) -> futures::future::BoxFuture<'a, ()> {
+        use roll_edge::domains::CertState;
+        let (tls, error) = match state {
+            CertState::Issued { .. } => (TlsStatus::Issued, None),
+            CertState::Failed(why) => (TlsStatus::Failed, Some(why.clone())),
+        };
+        Box::pin(async move {
+            if let Err(e) = self.0.set_domain_tls(host, tls, error).await {
+                warn!(host, error = %e, "apps: a custom domain's certificate state wasn't kept");
+            }
+        })
+    }
+}
+
+/// The certificate provider `ROLL_APPS_TLS` names.
+fn domain_tls(args: &crate::Args, single: bool) -> anyhow::Result<Arc<dyn DomainTls>> {
+    let e = &args.edge;
+    Ok(match args.apps.tls {
+        AppsTls::None => Arc::new(NoTls),
+        AppsTls::Acme => {
+            anyhow::ensure!(e.enabled, "ROLL_APPS_TLS=acme needs the edge (ROLL_EDGE=1), which serves the certificates");
+            anyhow::ensure!(single, "ROLL_APPS_TLS=acme is for a node alone (the node holding an HTTP-01 token must answer it); on a fleet use cloudflare");
+            Arc::new(EdgeTls)
+        }
+        AppsTls::Cloudflare => {
+            anyhow::ensure!(e.enabled, "ROLL_APPS_TLS=cloudflare needs the edge (ROLL_EDGE=1), Cloudflare's fallback origin");
+            let token = e.cloudflare_api_token.as_deref().ok_or_else(|| anyhow::anyhow!("ROLL_APPS_TLS=cloudflare needs ROLL_CLOUDFLARE_API_TOKEN (SSL and Certificates edit on the site zone)"))?;
+            let cf = Arc::new(roll_edge::acme::Cloudflare::new(token, &e.cloudflare_api)?);
+            let hosts = e.hostnames();
+            Arc::new(SaasTls(roll_edge::saas::CustomHostnames::new(cf, &hosts.site_domain, vec![hosts.domain.clone(), hosts.site_domain.clone()])))
+        }
+    })
 }
 
 fn parse_ports(s: &str) -> anyhow::Result<(u16, u16)> {
@@ -262,6 +342,10 @@ pub async fn start(
         cfg.scheme = "https".into();
         cfg.url_port = None;
         cfg.reserved = vec![args.edge.domain.clone(), args.edge.site_domain.clone()];
+        // Cloudflare for SaaS: customers point at the zone's fallback origin.
+        if a.tls == AppsTls::Cloudflare {
+            cfg.cname_target = Some(cfg.domain.clone());
+        }
     } else {
         cfg.url_port = Some(a.listen.port());
     }
@@ -295,6 +379,7 @@ pub async fn start(
         secrets: Arc::new(NoSecrets),
         resources: Arc::new(RollResources { postgres, redis }),
         resolver: Arc::new(Doh::new(&a.doh)),
+        tls: domain_tls(args, single)?,
         objects,
         cluster,
         workspace: Some(workspace),
@@ -316,6 +401,11 @@ impl AppsNode {
     /// Services' hostnames and custom domains, for the edge's HTTPS listener.
     pub fn public_router(&self) -> axum::Router {
         apps_control::public::router(self.apps.clone())
+    }
+
+    /// The active custom domains, for the edge's HTTP-01 certificates (`ROLL_APPS_TLS=acme`).
+    pub fn custom_domains(&self) -> Arc<dyn roll_edge::domains::CustomDomains> {
+        Arc::new(AppsDomains(self.apps.clone()))
     }
 
     /// The apps listener, and each environment's own port as environments appear.

@@ -489,6 +489,7 @@ async fn run() -> anyhow::Result<()> {
         nosql: nosql.as_ref(),
         queues: queues.as_ref(),
         apps: apps.as_ref().map(|a| a.public_router()),
+        custom_domains: apps.as_ref().map(|a| a.custom_domains()),
         auth: &auth,
     };
     // Connections other nodes splice here, on every cluster node (the edge or not).

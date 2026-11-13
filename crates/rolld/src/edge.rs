@@ -8,11 +8,16 @@
 //! - Certificates come from object storage (`system/certs/`, issued over ACME by whichever node
 //!   holds the `acme` singleton), or from `ROLL_EDGE_CERT_DIR` (dev mode: a self-signed one is
 //!   written there if it's empty).
+//! - roll apps' custom domains (`ROLL_APPS_TLS`): `acme` orders one certificate per active
+//!   domain over HTTP-01, answered on the plain-HTTP listener (`ROLL_EDGE_HTTP`), from the list
+//!   `crate::apps` adapts (`roll_edge::domains`); `cloudflare` serves the fallback origin's
+//!   certificate to Cloudflare's connections for custom hostnames (`roll_edge::saas`).
 //! - `GET /healthz` joins the internal API; on SIGTERM the stop runs in `roll_edge::drain`'s order
 //!   around the products' drains (`stopping`).
 //! - The splice hop's owner side (`splice_routes`) is on every cluster node, edge or not.
 
 use crate::Args;
+use crate::apps::AppsTls;
 use axum::http::{HeaderMap, Uri, header};
 use pg_storage::StorageConfig;
 use roll_edge::certs::{CertManager, Singleton};
@@ -46,6 +51,10 @@ pub struct EdgeArgs {
     pub proxy_protocol: bool,
     #[arg(long = "edge-https", env = "ROLL_EDGE_HTTPS", default_value = "0.0.0.0:8443")]
     pub https_listen: SocketAddr,
+    /// Plain HTTP (port 80 on a node alone): ACME HTTP-01 answers for custom domains
+    /// (`ROLL_APPS_TLS=acme`) and a redirect to HTTPS for everything else. Unset: not served.
+    #[arg(long = "edge-http", env = "ROLL_EDGE_HTTP")]
+    pub http_listen: Option<SocketAddr>,
     #[arg(long = "edge-pg", env = "ROLL_EDGE_PG", default_value = "0.0.0.0:5432")]
     pub pg_listen: SocketAddr,
     #[arg(long = "edge-redis", env = "ROLL_EDGE_REDIS", default_value = "0.0.0.0:6379")]
@@ -230,6 +239,8 @@ pub struct Products<'a> {
     pub queues: Option<&'a crate::queues::Queues>,
     /// roll apps' public traffic (services' hostnames and custom domains).
     pub apps: Option<axum::Router>,
+    /// roll apps' active custom domains (certificates over HTTP-01 with `ROLL_APPS_TLS=acme`).
+    pub custom_domains: Option<Arc<dyn roll_edge::domains::CustomDomains>>,
     /// The operator-token gate: the Kafka HTTP and tasks hosts carry control-plane routes too.
     pub auth: &'a crate::auth::Auth,
 }
@@ -285,11 +296,38 @@ impl Edge {
         let drain = Drain::new();
         let store = CertStore::new();
         store.set_default_name(&hosts.domain);
-        load_certificates(e, &hosts, storage, &store, singleton)?;
+        let apps_tls = args.apps.tls;
+        // Stored certificates and the ACME account: ROLL_SECRET_KEY seals them.
+        let jobs = match e.cert_dir.is_none() || apps_tls == AppsTls::Acme {
+            true => Some(CertJobs::new(e, storage)?),
+            false => None,
+        };
+        load_certificates(e, &hosts, jobs.as_ref(), &store, singleton.clone(), apps_tls)?;
         let opts = ListenOptions { proxy_protocol: e.proxy_protocol, ..Default::default() };
         let plain = roll_edge::tls::server_config(store.clone(), &[]);
 
         let mut served: Vec<Served> = vec![];
+        // Custom domains' certificates (docs/apps/README.md, "Networking").
+        let challenges = roll_edge::acme::Http01::new();
+        match apps_tls {
+            AppsTls::Acme => {
+                let (Some(jobs), Some(domains)) = (&jobs, p.custom_domains.clone()) else { anyhow::bail!("ROLL_APPS_TLS=acme needs roll apps on this node") };
+                let account = jobs.account.clone().ok_or_else(|| anyhow::anyhow!("ROLL_APPS_TLS=acme needs ROLL_ACME_DIRECTORY"))?;
+                anyhow::ensure!(e.http_listen.is_some(), "ROLL_APPS_TLS=acme needs ROLL_EDGE_HTTP (plain HTTP, port 80 from outside) for the CA's HTTP-01 checks");
+                let issuer = Arc::new(roll_edge::acme::Acme::new(account, roll_edge::acme::Solver::Http01(challenges.clone())));
+                let refuse = vec![hosts.domain.clone(), hosts.site_domain.clone()];
+                let certs = roll_edge::domains::DomainCerts::new(jobs.objects.clone(), jobs.sealer.clone(), store.clone(), issuer, singleton, domains, refuse, Default::default());
+                tokio::spawn(Arc::new(certs).run(Duration::from_secs(30)));
+            }
+            // Cloudflare connects for a custom hostname with it as the server name: it gets the
+            // fallback origin's certificate.
+            AppsTls::Cloudflare => store.set_unknown_name(&args.apps.domain.clone().unwrap_or_else(|| format!("up.{}", hosts.site_domain))),
+            AppsTls::None => {}
+        }
+        if let Some(addr) = e.http_listen {
+            let l = bind(addr).await?;
+            served.push(io(roll_edge::http::serve_plain(l, opts, challenges, drain.clone())));
+        }
         // HTTPS.
         let origin_pull = match e.origin_pull.unwrap_or(e.cert_dir.is_none()) {
             true => {
@@ -457,7 +495,33 @@ pub async fn serve(edge: Option<Edge>) -> anyhow::Result<()> {
     }
 }
 
-fn load_certificates(e: &EdgeArgs, hosts: &Hostnames, storage: &StorageConfig, store: &Arc<CertStore>, singleton: Arc<dyn Singleton>) -> anyhow::Result<()> {
+/// What the edge's certificate jobs share: object storage, the sealer, and the ACME account
+/// (with `ROLL_ACME_DIRECTORY`), one for the edge's own names and custom domains alike.
+struct CertJobs {
+    objects: pg_storage::Objects,
+    sealer: roll_edge::seal::Sealer,
+    account: Option<Arc<roll_edge::acme::AcmeAccount>>,
+}
+
+impl CertJobs {
+    fn new(e: &EdgeArgs, storage: &StorageConfig) -> anyhow::Result<Self> {
+        let secret = std::env::var("ROLL_SECRET_KEY").map_err(|_| anyhow::anyhow!("the edge needs ROLL_SECRET_KEY (stored certificates are sealed with it) or ROLL_EDGE_CERT_DIR"))?;
+        let sealer = roll_edge::seal::Sealer::new(&secret)?;
+        let objects = pg_storage::Objects::new_durable(storage)?;
+        let account = e.acme_directory.as_deref().filter(|d| !d.is_empty()).map(|dir| {
+            let cfg = roll_edge::acme::AcmeConfig {
+                email: e.acme_email.clone().filter(|m| !m.is_empty()),
+                ca_file: e.acme_ca_file.clone(),
+                propagation: Duration::from_secs(e.acme_propagation_s),
+                ..roll_edge::acme::AcmeConfig::new(dir)
+            };
+            roll_edge::acme::AcmeAccount::new(cfg, objects.clone(), sealer.clone())
+        });
+        Ok(Self { objects, sealer, account })
+    }
+}
+
+fn load_certificates(e: &EdgeArgs, hosts: &Hostnames, jobs: Option<&CertJobs>, store: &Arc<CertStore>, singleton: Arc<dyn Singleton>, apps_tls: AppsTls) -> anyhow::Result<()> {
     if let Some(dir) = &e.cert_dir {
         let mut d = roll_edge::tls::CertDir::new(dir);
         d.ensure_self_signed(&hosts.all_cert_names())?;
@@ -465,27 +529,24 @@ fn load_certificates(e: &EdgeArgs, hosts: &Hostnames, storage: &StorageConfig, s
         tokio::spawn(d.watch(store.clone(), Duration::from_secs(5)));
         return Ok(());
     }
-    let secret = std::env::var("ROLL_SECRET_KEY").map_err(|_| anyhow::anyhow!("the edge needs ROLL_SECRET_KEY (stored certificates are sealed with it) or ROLL_EDGE_CERT_DIR"))?;
-    let sealer = roll_edge::seal::Sealer::new(&secret)?;
-    let objects = pg_storage::Objects::new_durable(storage)?;
-    let issuer: Option<Arc<dyn roll_edge::acme::Issuer>> = match &e.acme_directory {
-        Some(dir) => {
-            let token = e.cloudflare_api_token.as_deref().ok_or_else(|| anyhow::anyhow!("ROLL_ACME_DIRECTORY needs ROLL_CLOUDFLARE_API_TOKEN (DNS-01)"))?;
+    let jobs = jobs.ok_or_else(|| anyhow::anyhow!("the edge needs ROLL_SECRET_KEY or ROLL_EDGE_CERT_DIR"))?;
+    let issuer: Option<Arc<dyn roll_edge::acme::Issuer>> = match (&jobs.account, e.cloudflare_api_token.as_deref()) {
+        (Some(account), Some(token)) => {
             let dns = Arc::new(roll_edge::acme::Cloudflare::new(token, &e.cloudflare_api)?);
-            let cfg = roll_edge::acme::AcmeConfig {
-                email: e.acme_email.clone().filter(|m| !m.is_empty()),
-                ca_file: e.acme_ca_file.clone(),
-                propagation: Duration::from_secs(e.acme_propagation_s),
-                ..roll_edge::acme::AcmeConfig::new(dir)
-            };
-            Some(Arc::new(roll_edge::acme::Acme::new(cfg, dns, objects.clone(), sealer.clone())))
+            Some(Arc::new(roll_edge::acme::Acme::new(account.clone(), roll_edge::acme::Solver::Dns01(dns))))
         }
-        None => {
+        // HTTP-01 for custom domains needs no DNS API; the edge's own wildcards do.
+        (Some(_), None) if apps_tls == AppsTls::Acme => {
+            warn!("edge: no ROLL_CLOUDFLARE_API_TOKEN; the edge's own names aren't issued (DNS-01), only custom domains (HTTP-01)");
+            None
+        }
+        (Some(_), None) => anyhow::bail!("ROLL_ACME_DIRECTORY needs ROLL_CLOUDFLARE_API_TOKEN (DNS-01)"),
+        (None, _) => {
             warn!("edge: no ROLL_ACME_DIRECTORY; serving only certificates other nodes issued");
             None
         }
     };
-    let manager = Arc::new(CertManager::new(objects, sealer, store.clone(), hosts.cert_sets(), issuer, singleton));
+    let manager = Arc::new(CertManager::new(jobs.objects.clone(), jobs.sealer.clone(), store.clone(), hosts.cert_sets(), issuer, singleton));
     tokio::spawn(manager.run(Duration::from_secs(e.cert_poll_s.max(1))));
     Ok(())
 }
@@ -628,7 +689,7 @@ mod tests {
     async fn every_cluster_node_takes_spliced_connections() {
         let args = crate::Args::parse_from(["rolld"]);
         let auth = crate::auth::Auth::new(&args).unwrap();
-        let products = Products { api: axum::Router::new(), pg: None, redis: None, streams: None, tasks: None, storage: None, nosql: None, queues: None, apps: None, auth: &auth };
+        let products = Products { api: axum::Router::new(), pg: None, redis: None, streams: None, tasks: None, storage: None, nosql: None, queues: None, apps: None, custom_domains: None, auth: &auth };
         let cfg = |id: &str| roll_cluster::ClusterConfig::for_tests(id, "http://127.0.0.1:9", b"splice test cluster secret".to_vec());
         let alone = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), cfg("alone")).unwrap();
         assert!(splice_routes(&alone, &products).unwrap().is_none());
