@@ -190,6 +190,8 @@ struct Ctx {
     args: Option<Value>,
     /// A list's items are named under this (a named storage account's buckets: `<account>/<name>`).
     list_prefix: Option<String>,
+    /// The product an audit row is about when not the route's (a link's: the linked resource's).
+    about: Option<&'static str>,
 }
 
 impl Ctx {
@@ -203,7 +205,7 @@ impl Ctx {
             tool: self.mcp.as_ref().map(|m| m.tool.to_string()),
             method: self.method.clone(),
             route: self.route.clone(),
-            product: row.map(|r| r.product.to_string()),
+            product: self.about.or(row.map(|r| r.product)).map(str::to_string),
             action: action.map(|a| a.as_str().to_string()),
             resource,
             decision: decision.into(),
@@ -251,7 +253,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
         }
     }
-    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None };
+    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None, about: None };
     if !ctx.grant.ip_allow.is_empty() {
         let nets = crate::store::parse_ip_allow(&ctx.grant.ip_allow).unwrap_or_default();
         if !ip.is_some_and(|ip| nets.iter().any(|n| n.contains(&ip))) {
@@ -367,23 +369,29 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Copying another environment's values (apps' `variables_from`) is reading them: it needs
     // reveal on the same resource there too, and the request gets the weaker of the two. When the
     // copy decides, the approval is about the environment copied from.
+    // What the request itself does, and the second checks it took (a copy's or a link's reveal):
+    // each is its own audit row, so what a token used ("Tighten to what it used") has them all.
+    let own = (action, describe(&target));
+    let mut seconds: Vec<(&'static str, Option<String>)> = Vec::new();
     let mut asked_env: Option<String> = None;
     let mut asked_path: Option<String> = None;
-    if let Some((copied, from, from_path)) = copy_outcome(&access, row, &params, &target, (json_body.as_ref(), original.query()), &scope).await
-        && rank(copied) < rank(outcome)
-    {
-        (outcome, action) = (copied, Action::Reveal);
-        (asked_env, asked_path) = (Some(from), from_path);
+    if let Some((copied, from, from_path)) = copy_outcome(&access, row, &params, &target, (json_body.as_ref(), original.query()), &scope).await {
+        seconds.push((row.product, own.1.clone()));
+        if rank(copied) < rank(outcome) {
+            (outcome, action) = (copied, Action::Reveal);
+            (asked_env, asked_path) = (Some(from), from_path);
+        }
     }
     // Handing another resource's credentials to this one (apps' links) is revealing them: when
     // that decides, the request (and its approval) is about the linked resource.
     let mut lent: Option<(&'static str, String)> = None;
-    if let Some((o, product, id)) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope).await
-        && rank(o) < rank(outcome)
-    {
-        (outcome, action) = (o, Action::Reveal);
-        (asked_env, asked_path) = (None, None);
-        lent = Some((product, id));
+    if let Some((o, product, id, all)) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope).await {
+        seconds.extend(all.into_iter().map(|(p, r)| (p, Some(r))));
+        if rank(o) < rank(outcome) {
+            (outcome, action) = (o, Action::Reveal);
+            (asked_env, asked_path) = (None, None);
+            lent = Some((product, id));
+        }
     }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
     // were refused before any rule; a move between projects stays refused.
@@ -392,6 +400,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
     let about = lent.as_ref().map_or(row.product, |(p, _)| p);
+    ctx.about = lent.as_ref().map(|(p, _)| *p);
     let mut approval_used: Option<String> = None;
     match outcome {
         Outcome::Deny => {
@@ -489,7 +498,13 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         limit_headers(resp.headers_mut(), rate, remaining, reset);
     }
     if !decided_before {
-        ctx.audit(Some(row), Some(action), resource, if approval_used.is_some() { "ask" } else { "allow" }, approval_used.as_deref(), resp.status());
+        let decision = if approval_used.is_some() { "ask" } else { "allow" };
+        ctx.about = None;
+        ctx.audit(Some(row), Some(own.0), own.1, decision, approval_used.as_deref(), resp.status());
+        for (product, r) in seconds {
+            ctx.about = Some(product);
+            ctx.audit(Some(row), Some(Action::Reveal), r, decision, approval_used.as_deref(), resp.status());
+        }
     }
     resp
 }
@@ -560,13 +575,14 @@ pub(crate) async fn copy_outcome(
 
 /// What handing other resources' credentials to this one needs ([`catalog::Lend`]): `reveal` on
 /// each, as a rule places it. The weakest decides; a kind roll doesn't know is refused.
-pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope) -> Option<(Outcome, &'static str, String)> {
+#[allow(clippy::type_complexity)]
+pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope) -> Option<(Outcome, &'static str, String, Vec<(&'static str, String)>)> {
     let param = |n: &str| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
     let links: Vec<(String, String)> = match row.lends? {
         // A route that names them otherwise than its row is refused, never let through.
         catalog::Lend::Path(k, r) => match (param(k), param(r)) {
             (Some(k), Some(r)) => vec![(k, r)],
-            _ => return Some((Outcome::Deny, row.product, "a link this route doesn't name".into())),
+            _ => return Some((Outcome::Deny, row.product, "a link this route doesn't name".into(), Vec::new())),
         },
         catalog::Lend::Body(field) => body?
             .get(field)?
@@ -576,22 +592,30 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
             .collect(),
     };
     let mut weakest: Option<(Outcome, &'static str, String)> = None;
+    // Every linked resource not allowed outright is named (approving once hands over all of them).
+    let mut short: Vec<String> = Vec::new();
+    let mut all: Vec<(&'static str, String)> = Vec::new();
     for (kind, r) in links {
         let found = match catalog::link_target(&kind) {
             None => (Outcome::Deny, row.product, format!("{kind}/{r}")),
             Some((product, rkind)) => {
                 let (a, r2) = (access.clone(), r.clone());
                 match tokio::task::spawn_blocking(move || a.resource(product, rkind, &r2)).await {
-                    Ok(res) => (scope.outcome(&Target::One(res), Action::Reveal), product, r),
+                    // Named as rules name it (a database by name is its id).
+                    Ok(res) => (scope.outcome(&Target::One(res.clone()), Action::Reveal), product, res.id.unwrap_or(r)),
                     Err(_) => (Outcome::Deny, product, r),
                 }
             }
         };
+        if found.0 != Outcome::Allow {
+            short.push(found.2.clone());
+        }
+        all.push((found.1, found.2.clone()));
         if weakest.as_ref().is_none_or(|(w, ..)| rank(found.0) < rank(*w)) {
             weakest = Some(found);
         }
     }
-    weakest
+    weakest.map(|(o, p, id)| (o, p, if short.len() > 1 { short.join(", ") } else { id }, all))
 }
 
 /// Outcomes from weakest to strongest.

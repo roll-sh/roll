@@ -253,8 +253,8 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(d.call(&secrets, Method::GET, &at("development", "secrets"), None).await.0, StatusCode::OK);
     assert_eq!(d.call(&secrets, Method::GET, &at("production", "secrets"), None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(&secrets, Method::GET, &at("development", "values"), None).await.0, StatusCode::FORBIDDEN);
-    // A route that filters per environment itself (health) lets it in: its answer leaves out the rest.
-    assert_eq!(d.call(&secrets, Method::GET, &format!("/v1/secrets/projects/{}/health", project.id), None).await.0, StatusCode::OK);
+    // Health spans every environment: refused until secrets filters it by the token's grant.
+    assert_eq!(d.call(&secrets, Method::GET, &format!("/v1/secrets/projects/{}/health", project.id), None).await.0, StatusCode::FORBIDDEN);
 
     // Rotated: the old secret is dead at once, the new one has the same rules.
     let (s, rotated) = d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{grant}/rotate"), None).await;
@@ -915,6 +915,14 @@ async fn a_rule_can_grant_some_indices() {
     let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{logs_id}/tighten"), None).await;
     assert_eq!(t["narrower"], true, "{t}");
     assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*,-logs-old" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
+    // Applied only over the rules it was made from: a change in between is a conflict.
+    let apply = |from: Value| {
+        let (d, path) = (&d, format!("/v1/access/tokens/{logs_id}/tighten"));
+        async move { d.call(OPERATOR, Method::POST, &path, Some(json!({ "from": from }))).await }
+    };
+    assert_eq!(apply(json!([{ "product": "search", "resources": "*", "actions": { "read": "allow" } }])).await.0, StatusCode::CONFLICT);
+    let (s, g) = apply(t["from"].clone()).await;
+    assert_eq!((s, &g["rules"]), (StatusCode::OK, &t["rules"]), "{g}");
 
     // Asked about one index and remembered: that index, not its neighbours.
     let (asker, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "ask" } }]), json!({})).await;
@@ -945,14 +953,26 @@ async fn a_link_needs_reveal_on_what_it_links() {
     let (s, e) = d.call(&apps, Method::POST, "/v1/apps/services", Some(create)).await;
     assert_eq!((s, e["needs"]["product"].as_str()), (StatusCode::FORBIDDEN, Some("redis")), "{e}");
 
-    let (both, _) = d.token(json!([
-        { "product": "apps", "resources": "*", "actions": { "write": "allow" } },
+    let (both, both_id) = d.token(json!([
+        { "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } },
         { "product": "postgres", "resources": [{ "id": "prj_x" }], "actions": { "reveal": "allow" } },
-        { "product": "postgres", "resources": [{ "id": "prj_y" }], "actions": { "reveal": "ask" } },
+        { "product": "postgres", "resources": [{ "id": "prj_y" }, { "id": "prj_z" }], "actions": { "reveal": "ask" } },
     ]), json!({})).await;
     assert_eq!(link(&both, "postgres", "prj_x").await.0, StatusCode::OK);
+    // The link's reveal is what the token used too: tightening keeps it.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{both_id}/tighten"), None).await;
+    assert!(t["used"].as_array().unwrap().iter().any(|u| u["product"] == "postgres" && u["action"] == "reveal" && u["resource"] == "prj_x"), "{t}");
     let (_, pending) = link(&both, "postgres", "prj_y").await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
     assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["resource"].as_str()), (Some("postgres"), Some("reveal"), Some("prj_y")), "{asked}");
+    // Several links it may not reveal outright: the approval names them all, and is approved once.
+    let two = json!({ "project": "p", "name": "web", "source": { "image": "nginx" }, "links": [{ "kind": "postgres", "ref": "prj_y" }, { "kind": "postgres", "ref": "prj_z" }] });
+    let (_, pending) = d.call(&both, Method::POST, "/v1/apps/services", Some(two)).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
+    assert_eq!(asked["resource"], "prj_y, prj_z", "{asked}");
+    let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }
