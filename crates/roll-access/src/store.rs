@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS grants (
     revoked_at INTEGER,
     client_id TEXT,
     rate_per_minute INTEGER,
+    user_id TEXT,
     revoked_why TEXT,
     temp_rules TEXT,
     ask_otherwise INTEGER
@@ -115,18 +116,29 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
 
 /// A grant's secret prefixes: scoped tokens, OAuth access and refresh tokens.
 pub const TOKEN_PREFIX: &str = "rlt_";
+/// Live workload grants at most (an identity's logins: a CI job each), apart from tokens' caps.
+pub const MAX_WORKLOADS: usize = 10_000;
+/// Live workload grants one owner's identities hold at most, so one busy pipeline doesn't take
+/// everyone's room.
+pub const OWNER_MAX_WORKLOADS: usize = 1_000;
+/// How long a workload grant lives, in minutes.
+pub const WORKLOAD_MINUTES: std::ops::RangeInclusive<u32> = 5..=60;
 pub const ACCESS_PREFIX: &str = "rlo_";
 pub const REFRESH_PREFIX: &str = "rlf_";
 
 /// An OAuth access token lives an hour; a refresh token 30 days from its last use.
 pub const ACCESS_TTL_MS: i64 = 3600 * 1000;
 pub const REFRESH_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
+/// A spent refresh token presented again this soon after its use is a client retrying (a lost
+/// answer), not a stolen copy: refused, without revoking the connection.
+pub const REFRESH_GRACE_MS: i64 = 30 * 1000;
 /// An authorization code is good for one minute, once.
 pub const CODE_TTL_MS: i64 = 60 * 1000;
 /// `last_used_at` is written at most this often per grant.
 const TOUCH_MS: i64 = 60 * 1000;
-/// Grants kept at most (revoked ones count until they're pruned).
+/// Live grants kept at most, and per person.
 pub const MAX_GRANTS: usize = 10_000;
+pub const USER_MAX_GRANTS: usize = 100;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Grant {
@@ -146,6 +158,9 @@ pub struct Grant {
     /// Requests a minute it may make, per node (`None`: no limit).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_per_minute: Option<u32>,
+    /// A signed-in user's own token (`usr_…`): it acts as them. `None`: the operator's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
     /// Why roll revoked it ("found in acme/site: .env"), when roll did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revoked_why: Option<String>,
@@ -196,6 +211,13 @@ pub struct Client {
     pub redirect_uris: Vec<String>,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+}
+
+/// Who connects an OAuth client: who consented, and whose own grant it is (`None`: the operator's).
+#[derive(Clone, Copy, Debug)]
+pub struct Issuer<'a> {
+    pub created_by: &'a str,
+    pub user: Option<&'a str>,
 }
 
 /// What a new grant is.
@@ -322,6 +344,9 @@ pub struct AuditQuery {
     pub action: Option<String>,
     pub before: Option<i64>,
     pub limit: Option<usize>,
+    /// Only these grants' rows (a user's own tokens); set by the route, never from the query.
+    #[serde(skip)]
+    pub grants: Option<Vec<String>>,
 }
 
 pub struct Store {
@@ -447,9 +472,9 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
     }
 }
 
-/// A grant's columns, as `grant_row` reads them (21 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (22 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.revoked_why, g.temp_rules, g.ask_otherwise";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
@@ -469,7 +494,11 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
     Ok(Grant {
         id: r.get(0)?,
         name: r.get(1)?,
-        kind: if r.get::<_, String>(2)? == "oauth" { "oauth" } else { "token" },
+        kind: match r.get::<_, String>(2)?.as_str() {
+            "oauth" => "oauth",
+            "workload" => "workload",
+            _ => "token",
+        },
         rules: serde_json::from_str(&rules).unwrap_or_default(),
         expires_at: r.get(4)?,
         ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
@@ -480,9 +509,10 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         revoked_at: r.get(10)?,
         client,
         rate_per_minute: r.get::<_, Option<i64>>(17)?.and_then(|n| u32::try_from(n).ok()),
-        revoked_why: r.get(18)?,
-        temporary: r.get::<_, Option<String>>(19)?.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
-        ask_otherwise: r.get::<_, Option<bool>>(20)?.unwrap_or(false),
+        user: r.get(18)?,
+        revoked_why: r.get(19)?,
+        temporary: r.get::<_, Option<String>>(20)?.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
+        ask_otherwise: r.get::<_, Option<bool>>(21)?.unwrap_or(false),
     })
 }
 
@@ -599,6 +629,10 @@ impl Store {
         if !db.has_column("grants", "rate_per_minute")? {
             db.add_column("grants", "rate_per_minute", "INTEGER")?;
         }
+        if !db.has_column("grants", "user_id")? {
+            db.add_column("grants", "user_id", "TEXT")?;
+        }
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS grants_user ON grants (user_id);")?;
         // Why it was revoked, when roll did it (a leaked secret).
         if !db.has_column("grants", "revoked_why")? {
             db.add_column("grants", "revoked_why", "TEXT")?;
@@ -659,7 +693,13 @@ impl Store {
     // ── grants ──
 
     /// Store a new grant; the token is returned this once.
-    pub fn create(&self, new: &NewGrant, kind: GrantKind, created_by: &str, client_id: Option<&str>) -> Result<(Grant, String)> {
+    /// The ids of the grants `user` owns (live or not).
+    pub fn grant_ids_of(&self, user: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.db.read(|c| c.query("SELECT id FROM grants WHERE user_id = ?", [user], |r| r.get::<_, String>(0)))?.into_iter().collect())
+    }
+
+    /// A new grant; `user`: whose own token it is (it acts as them), `None` for the operator's.
+    pub fn create(&self, new: &NewGrant, kind: GrantKind, created_by: &str, client_id: Option<&str>, user: Option<&str>) -> Result<(Grant, String)> {
         check_name(&new.name)?;
         check_rules(&new.rules)?;
         parse_ip_allow(&new.ip_allow)?;
@@ -679,13 +719,20 @@ impl Store {
         let kind_s = if kind == GrantKind::Oauth { "oauth" } else { "token" };
         self.db.write(|c| {
             // Live ones: a revoked token doesn't keep a place.
-            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL", (), |r| r.get(0))?;
+            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL AND kind <> 'workload'", (), |r| r.get(0))?;
             if count as usize >= MAX_GRANTS {
                 return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
             }
+            // One person never fills everyone's room.
+            if let Some(u) = user {
+                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL AND kind <> 'workload'", [u], |r| r.get(0))?;
+                if theirs as usize >= USER_MAX_GRANTS {
+                    return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
+                }
+            }
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, ask_otherwise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), new.ask_otherwise],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise],
             )?;
             c.execute(
                 "INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -702,9 +749,51 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("no token {id}")))
     }
 
-    /// Every grant, newest first (revoked ones too: the list shows them).
+    /// Every token and connection, newest first (revoked ones too: the list shows them), not
+    /// workloads ([`Store::workloads`]): they come and go by the minute.
     pub fn list(&self) -> Result<Vec<Grant>> {
-        Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} ORDER BY g.created_at DESC, g.id"), (), grant_row))?)
+        Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind <> 'workload' ORDER BY g.created_at DESC, g.id"), (), grant_row))?)
+    }
+
+    /// Workload grants, newest first, at most `limit`: a person's own (`user`), or everyone's.
+    pub fn workloads(&self, limit: usize, user: Option<&str>) -> Result<Vec<Grant>> {
+        Ok(self.db.read(|c| match user {
+            Some(u) => c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind = 'workload' AND g.user_id = ? ORDER BY g.created_at DESC, g.id LIMIT ?"), params![u, limit as i64], grant_row),
+            None => c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind = 'workload' ORDER BY g.created_at DESC, g.id LIMIT ?"), [limit as i64], grant_row),
+        })?)
+    }
+
+    /// A workload grant (`Access::mint_workload`): a token for `minutes`, whose secret dies with it.
+    pub fn create_workload(&self, new: &NewGrant, minutes: u32, created_by: &str, user: Option<&str>) -> Result<(Grant, String)> {
+        check_name(&new.name)?;
+        check_rules(&new.rules)?;
+        parse_ip_allow(&new.ip_allow)?;
+        if !WORKLOAD_MINUTES.contains(&minutes) {
+            return Err(Error::BadRequest(format!("a workload lives {} to {} minutes", WORKLOAD_MINUTES.start(), WORKLOAD_MINUTES.end())));
+        }
+        let now = code_sql::now_ms();
+        let until = now + i64::from(minutes) * 60_000;
+        let id = new_id("tok");
+        let token = new_secret(TOKEN_PREFIX);
+        let rules = serde_json::to_string(&new.rules).map_err(|e| Error::Internal(e.to_string()))?;
+        let ip = serde_json::to_string(&new.ip_allow).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE kind = 'workload' AND revoked_at IS NULL AND expires_at > ?", [now], |r| r.get(0))?;
+            if live as usize >= MAX_WORKLOADS {
+                return Err(Error::Conflict(format!("at most {MAX_WORKLOADS} live workload tokens")));
+            }
+            let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND created_by = ?", params![now, created_by], |r| r.get(0))?;
+            if theirs as usize >= OWNER_MAX_WORKLOADS {
+                return Err(Error::Conflict(format!("at most {OWNER_MAX_WORKLOADS} live workload tokens for one owner's identities")));
+            }
+            c.execute(
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise) VALUES (?, ?, 'workload', ?, ?, ?, ?, ?, NULL, ?, ?, 0)",
+                params![id, new.name.trim(), rules, until, ip, created_by, now, new.rate_per_minute.map(i64::from), user],
+            )?;
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'token', ?, ?)", params![hash(&token), id, until, now])?;
+            Ok(())
+        })?;
+        Ok((self.get(&id)?, token))
     }
 
     /// The grant a presented secret belongs to, when both are live. Looked up every time.
@@ -715,15 +804,27 @@ impl Store {
             c.query_row(
                 &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(21)?, r.get::<_, Option<i64>>(22)?)),
+                |r| Ok((grant_row(r)?, r.get::<_, String>(22)?, r.get::<_, Option<i64>>(23)?)),
             )
             .optional()
         })?;
         // A refresh token opens nothing but the token endpoint.
-        Ok(row.filter(|(g, kind, exp)| kind != "refresh" && exp.is_none_or(|e| e > now) && g.live(now)).map(|(g, ..)| g))
+        // Only what signs a request in: a token's secret or an access token (never a refresh
+        // token, spent or not).
+        Ok(row.filter(|(g, kind, exp)| matches!(kind.as_str(), "token" | "access") && exp.is_none_or(|e| e > now) && g.live(now)).map(|(g, ..)| g))
+    }
+
+    /// A workload token is fixed (minutes, within its identity's scope): never edited, rotated or
+    /// grown by a remembered approval, only revoked or left to end.
+    fn changeable(&self, id: &str) -> Result<()> {
+        if self.get(id)?.kind == "workload" {
+            return Err(Error::Conflict("a workload token can't be changed: it ends in minutes; revoke it instead".into()));
+        }
+        Ok(())
     }
 
     pub fn update(&self, id: &str, change: &GrantChange) -> Result<Grant> {
+        self.changeable(id)?;
         if let Some(n) = &change.name {
             check_name(n)?;
         }
@@ -783,6 +884,7 @@ impl Store {
     /// Allow `rule` on a grant: for good (`until: None`, added to its rules unless they hold it), or
     /// until a time (its temporary rules, the lapsed ones dropped).
     pub fn remember(&self, id: &str, rule: &roll_auth::scope::Rule, until: Option<i64>, approval: &str) -> Result<Grant> {
+        self.changeable(id)?;
         let now = code_sql::now_ms();
         self.db.write(|c| {
             let row: Option<(String, Option<String>, Option<i64>)> =
@@ -865,6 +967,7 @@ impl Store {
     /// A new secret for a token, the same rules (the old secret stops working at once). OAuth
     /// connections rotate through their refresh tokens instead.
     pub fn rotate(&self, id: &str) -> Result<(Grant, String)> {
+        self.changeable(id)?;
         let grant = self.get(id)?;
         if grant.kind() != GrantKind::Token {
             return Err(Error::Conflict("an OAuth connection rotates its own tokens: revoke it and connect again".into()));
@@ -1123,6 +1226,13 @@ impl Store {
                 args.push(code_sql::Value::Text(v.to_string()));
             }
         }
+        if let Some(ids) = &q.grants {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            sql.push_str(&format!(" AND grant_id IN ({})", vec!["?"; ids.len()].join(", ")));
+            args.extend(ids.iter().map(|i| code_sql::Value::Text(i.clone())));
+        }
         // "Who touched this?": the resource, or what's under it (its indices, its objects).
         // As a range (`x/` up to `x0`, the character after `/`): exact in both databases (SQLite's
         // LIKE ignores ASCII case) and on `audit_resource`.
@@ -1203,6 +1313,12 @@ impl Store {
             c.execute("DELETE FROM grant_networks WHERE last_at < ?", [before])?;
             c.execute("DELETE FROM oauth_codes WHERE expires_at < ?", [now])?;
             c.execute("DELETE FROM grant_secrets WHERE expires_at IS NOT NULL AND expires_at < ?", [now])?;
+            let ended = "SELECT id FROM grants WHERE kind = 'workload' AND COALESCE(revoked_at, expires_at) < ?";
+            let day = now - 24 * 3600 * 1000;
+            for table in ["grant_secrets", "grant_networks", "approvals"] {
+                c.execute(&format!("DELETE FROM {table} WHERE grant_id IN ({ended})"), [day])?;
+            }
+            c.execute(&format!("DELETE FROM grants WHERE id IN ({ended})"), [day])?;
             Ok::<_, Error>(())
         })
     }
@@ -1260,7 +1376,8 @@ impl Store {
     }
 
     /// The consent screen's grant, waiting for its code to be exchanged: stored without secrets.
-    pub fn issue_code(&self, client: &Client, new: &NewGrant, created_by: &str, redirect_uri: &str, challenge: &str, resource: Option<&str>) -> Result<String> {
+    pub fn issue_code(&self, client: &Client, new: &NewGrant, by: Issuer<'_>, redirect_uri: &str, challenge: &str, resource: Option<&str>) -> Result<String> {
+        let Issuer { created_by, user } = by;
         check_name(&new.name)?;
         check_rules(&new.rules)?;
         parse_ip_allow(&new.ip_allow)?;
@@ -1271,10 +1388,21 @@ impl Store {
         let rules = serde_json::to_string(&new.rules).unwrap_or_default();
         let ip = serde_json::to_string(&new.ip_allow).unwrap_or_default();
         self.db.write(|c| {
+            // The same room a token takes: everyone's, and its person's.
+            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL AND kind <> 'workload'", (), |r| r.get(0))?;
+            if count as usize >= MAX_GRANTS {
+                return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
+            }
+            if let Some(u) = user {
+                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL AND kind <> 'workload'", [u], |r| r.get(0))?;
+                if theirs as usize >= USER_MAX_GRANTS {
+                    return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
+                }
+            }
             // The grant exists from now, unusable (no secret) until the code is exchanged.
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, ask_otherwise) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), new.ask_otherwise],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise],
             )?;
             c.execute(
                 "INSERT INTO oauth_codes (hash, client_id, grant_id, redirect_uri, challenge, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1329,32 +1457,117 @@ impl Store {
     }
 
     /// A refresh token for a new access token and a new refresh token (the old one stops working).
-    pub fn refresh(&self, refresh_token: &str, client_id: &str) -> Result<(Grant, String, String)> {
+    ///
+    /// The old one is kept as spent until it would have expired: presented again, someone else has
+    /// a copy (OAuth 2.1, §4.3.1), so the whole connection is revoked. Within [`REFRESH_GRACE_MS`]
+    /// of its use it's only refused: a client retrying after a lost answer keeps its connection.
+    pub fn refresh(&self, refresh_token: &str, client_id: &str, grace_ms: i64) -> Result<(Grant, String, String)> {
+        enum Outcome {
+            Fresh(String),
+            Retry(String),
+            Reused(String),
+            Bad(&'static str),
+        }
         let now = code_sql::now_ms();
         let h = hash(refresh_token);
         let (access, refresh) = (new_secret(ACCESS_PREFIX), new_secret(REFRESH_PREFIX));
-        let grant_id = self.db.write(|c| {
+        let outcome = self.db.write(|c| {
             let row = c
                 .query_row(
-                    "SELECT s.grant_id, s.expires_at, g.client_id, g.revoked_at, g.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind = 'refresh'",
+                    "SELECT s.grant_id, s.expires_at, g.client_id, g.revoked_at, g.expires_at, s.kind, s.created_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind IN ('refresh', 'spent_refresh')",
                     [&h],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<i64>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, Option<i64>>(3)?,
+                            r.get::<_, Option<i64>>(4)?,
+                            r.get::<_, String>(5)?,
+                            r.get::<_, i64>(6)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            let Some((grant_id, exp, cid, revoked, grant_exp)) = row else { return Err(Error::OAuth("invalid_grant", "unknown refresh token".into())) };
-            c.execute("DELETE FROM grant_secrets WHERE hash = ?", [&h])?;
-            if exp.is_some_and(|e| e <= now) || revoked.is_some() || grant_exp.is_some_and(|e| e <= now) {
-                return Err(Error::OAuth("invalid_grant", "the connection expired or was revoked: connect again".into()));
-            }
+            let Some((grant_id, exp, cid, revoked, grant_exp, kind, at)) = row else { return Ok(Outcome::Bad("unknown refresh token")) };
             if cid.as_deref() != Some(client_id) {
-                return Err(Error::OAuth("invalid_grant", "the refresh token belongs to another client".into()));
+                return Ok(Outcome::Bad("the refresh token belongs to another client"));
             }
+            if kind == "spent_refresh" {
+                if now - at < grace_ms {
+                    return Ok(Outcome::Retry(grant_id));
+                }
+                c.execute(
+                    "UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL",
+                    params![now, "its refresh token was used again after it was spent: someone else may have a copy", grant_id],
+                )?;
+                c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [&grant_id])?;
+                return Ok(Outcome::Reused(grant_id));
+            }
+            if exp.is_some_and(|e| e <= now) || revoked.is_some() || grant_exp.is_some_and(|e| e <= now) {
+                return Ok(Outcome::Bad("the connection expired or was revoked: connect again"));
+            }
+            c.execute("UPDATE grant_secrets SET kind = 'spent_refresh', created_at = ? WHERE hash = ?", params![now, h])?;
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now])?;
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'refresh', ?, ?)", params![hash(&refresh), grant_id, now + REFRESH_TTL_MS, now])?;
             c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
-            Ok(grant_id)
+            Ok::<_, Error>(Outcome::Fresh(grant_id))
         })?;
-        Ok((self.get(&grant_id)?, access, refresh))
+        match outcome {
+            Outcome::Fresh(grant_id) => Ok((self.get(&grant_id)?, access, refresh)),
+            // Refused, not revoked (a client's own retry), but on the record: a copy used inside the
+            // grace looks the same, and the token's page should show it.
+            Outcome::Retry(grant_id) => {
+                let g = self.get(&grant_id).ok();
+                self.audit(&AuditEvent {
+                    id: crate::new_id("aud"),
+                    at: now,
+                    grant_id: Some(grant_id),
+                    grant_name: g.map(|g| g.name),
+                    source: "oauth".into(),
+                    tool: None,
+                    method: "POST".into(),
+                    route: "/v1/access/oauth/token".into(),
+                    product: Some("access".into()),
+                    action: Some("admin".into()),
+                    resource: Some("a refresh token used again within its grace".into()),
+                    decision: "deny".into(),
+                    approval: None,
+                    status: 400,
+                    args: None,
+                    ip: None,
+                    duration_ms: 0,
+                    client: None,
+                });
+                Err(Error::OAuth("invalid_grant", "this refresh token was just used: use the tokens that answer gave".into()))
+            }
+            Outcome::Bad(why) => Err(Error::OAuth("invalid_grant", why.into())),
+            Outcome::Reused(grant_id) => {
+                tracing::warn!(grant = %grant_id, "a spent refresh token was used again: the connection was revoked");
+                let g = self.get(&grant_id).ok();
+                self.audit(&AuditEvent {
+                    id: crate::new_id("aud"),
+                    at: now,
+                    grant_id: Some(grant_id),
+                    grant_name: g.map(|g| g.name),
+                    source: "oauth".into(),
+                    tool: None,
+                    method: "POST".into(),
+                    route: "/v1/access/oauth/token".into(),
+                    product: Some("access".into()),
+                    action: Some("admin".into()),
+                    resource: None,
+                    decision: "revoke".into(),
+                    approval: None,
+                    status: 400,
+                    args: None,
+                    ip: None,
+                    duration_ms: 0,
+                    client: None,
+                });
+                Err(Error::OAuth("invalid_grant", "this refresh token was already used, so the connection was revoked: connect again".into()))
+            }
+        }
     }
 
     /// RFC 7009: forget one access or refresh token (whatever it is, the answer is the same).

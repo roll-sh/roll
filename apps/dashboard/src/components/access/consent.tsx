@@ -3,6 +3,7 @@ import { ExternalLink, LucideProvider } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   accessApi,
+  catalogFor,
   denyRedirect,
   describeRule,
   EXPIRIES,
@@ -45,6 +46,17 @@ export function Consent({ search }: { search: Record<string, unknown> }) {
   );
 }
 
+/**
+ * What the client's identity is worth: a client ID metadata document (its id an https URL) is
+ * vouched for by whoever controls that address; a client registered here chose its own name.
+ */
+export function clientIdentity(id: string): string {
+  if (id.startsWith("https://")) {
+    return `Identified by its own address, ${new URL(id).host}: whoever controls that address published this client. Check it's the app you meant.`;
+  }
+  return "Any app can register under any name: check the address it returns to below, and that you started this from that app.";
+}
+
 function Problem({ text }: { text: string }) {
   return (
     <section className="rise rounded-xl border border-line bg-panel p-6">
@@ -72,7 +84,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
       try {
         const [me, catalog, client] = await Promise.all([accessApi.me(), accessApi.catalog(), accessApi.client(req.client_id)]);
         setSignedOut(false);
-        setLoaded({ me, catalog, client });
+        setLoaded({ me, catalog: catalogFor(catalog, me), client });
         setName(client.name);
         const preset = presetFor(req.scope, catalog.presets);
         if (preset) setRules(presetRules(preset));
@@ -102,7 +114,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
   }
   if (!loaded) return error ? <Problem text={error} /> : <Connecting />;
   const { me, catalog, client } = loaded;
-  if (me.kind !== "operator") return <Problem text="Only roll's operator can connect clients, and you're signed in with a token." />;
+  if (me.kind !== "operator" && me.kind !== "user") return <Problem text="Connect clients signed in to your account, not with a token." />;
   if (!client.redirect_uris.includes(req.redirect_uri)) return <Problem text="The redirect isn't one this client registered." />;
 
   const back = new URL(req.redirect_uri);
@@ -139,9 +151,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
           <h1 className="text-xl font-semibold tracking-[-0.04em]">
             {client.name} wants to use roll
           </h1>
-          <p className="mt-1 text-[12px] text-subtle">
-            Any app can register under any name: check the address it returns to below, and that you started this from that app.
-          </p>
+          <p className="mt-1 text-[12px] text-subtle">{clientIdentity(client.id)}</p>
           <p className="mt-1 text-[13px] text-muted">
             It will act on your behalf through roll&apos;s MCP server, and can do only what you allow below. You can narrow it now and
             revoke it any time in MCP &amp; access.

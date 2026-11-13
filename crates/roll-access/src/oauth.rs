@@ -180,12 +180,16 @@ pub struct Consent {
     pub ask_otherwise: bool,
 }
 
-/// The consent screen's answer, from the signed-in operator: a code for the client, in the
-/// redirect the dashboard sends the browser to.
+/// The consent screen's answer, from the operator or a signed-in user (whose connection is
+/// their own: it acts as them): a code for the client, in the redirect the dashboard sends the
+/// browser to.
 pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
-    if !matches!(crate::api::who(&a, &ext)?, crate::api::Who::Operator) {
-        return Err(Error::Forbidden("only the operator connects MCP clients".into()));
-    }
+    let user = match crate::api::who(&a, &ext)? {
+        // A signed-in admin's connection is theirs (it acts as the operator while they're one).
+        crate::api::Who::Operator => ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone()),
+        crate::api::Who::User(u) => Some(u.user),
+        crate::api::Who::Grant(_) => return Err(Error::Forbidden("a token never connects an MCP client".into())),
+    };
     let c: Consent = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     if c.code_challenge_method.as_deref().unwrap_or("S256") != "S256" {
         return Err(Error::BadRequest("code_challenge_method must be S256".into()));
@@ -207,7 +211,9 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
     a.check_policy(c.expires_at)?;
     let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute, ask_otherwise: c.ask_otherwise };
     let (a2, cl, uri, ch, res, by) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)), crate::api::actor(&ext));
-    let code = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, &by, &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let code = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
     {
         let mut q = redirect.query_pairs_mut();
@@ -331,7 +337,7 @@ async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, St
         }
         Some("refresh_token") => {
             let Some(refresh) = get("refresh_token") else { return Error::OAuth("invalid_request", "refresh_token is required".into()).into_response() };
-            tokio::task::spawn_blocking(move || a.store.refresh(&refresh, &client_id)).await
+            tokio::task::spawn_blocking(move || a.store.refresh(&refresh, &client_id, a.config.refresh_grace.as_millis() as i64)).await
         }
         _ => return Error::OAuth("unsupported_grant_type", "grant_type is authorization_code or refresh_token".into()).into_response(),
     };

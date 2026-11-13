@@ -53,6 +53,14 @@ fn words(answer: &Value, now: i64) -> String {
     let g = &answer["grant"];
     match answer["kind"].as_str() {
         Some("operator") => return "You're connected as roll's operator: every tool and every action is allowed.\n".into(),
+        Some("user") => {
+            let reach: Vec<_> = answer["reach"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            return format!(
+                "You're signed in as {}: you may use {} as far as your account reaches there; everything else is the operator's.\n",
+                lit(answer["user"]["handle"].as_str().unwrap_or("")),
+                reach.join(", ")
+            );
+        }
         Some("token" | "oauth") if g.is_object() => {}
         _ => return "roll didn't say what this connection may do: try a call, and ask the user if it's refused.\n".into(),
     }
@@ -93,7 +101,7 @@ fn words(answer: &Value, now: i64) -> String {
         limits.push(format!("it expires in {}", span(at - now)));
     }
     if let Some(n) = g["rate_per_minute"].as_u64() {
-        limits.push(format!("it may make {n} requests a minute on each roll node"));
+        limits.push(format!("it may make about {n} requests a minute (then 429 with Retry-After)"));
     }
     if g["ip_allow"].as_array().is_some_and(|a| !a.is_empty()) {
         limits.push("it works only from the addresses its owner chose".into());

@@ -252,6 +252,18 @@ impl Code {
         Ok(r)
     }
 
+    /// A user's own token on git smart HTTP (`/git/{owner}/{repo}[.git]/…`): what that user could
+    /// do there signed in. A push (`git-receive-pack`) needs write.
+    pub fn user_may_git(&self, user: &roll_auth::SignedIn, uri: &axum::http::Uri) -> Result<()> {
+        let caller = self.session_caller(user)?;
+        let mut parts = uri.path().trim_start_matches('/').splitn(4, '/');
+        let (Some("git"), Some(owner), Some(repo)) = (parts.next(), parts.next(), parts.next()) else {
+            return Err(Error::NotFound("repository".into()));
+        };
+        let push = uri.path().ends_with("/git-receive-pack") || uri.query().is_some_and(|q| q.split('&').any(|kv| kv == "service=git-receive-pack"));
+        if push { self.writable(&caller, owner, repo).map(|_| ()) } else { self.readable(&caller, owner, repo).map(|_| ()) }
+    }
+
     pub fn check_write(&self, caller: &Caller, r: &RepoRow) -> Result<()> {
         match caller {
             _ if Self::owns(caller, &r.owner_id) => Ok(()),

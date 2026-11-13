@@ -187,6 +187,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         (true, Some(ip)) => Some(ip),
         _ => ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip()),
     };
+    // A user's own token (the gate signed them in): only the products their account reaches.
+    let as_user = ext.get::<roll_auth::SignedIn>().is_some_and(|u| !u.admin);
     // Whether the client opens URLs for elicitation: from `initialize` in this message, else the
     // session id it was given.
     let declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| m["params"]["capabilities"]["elicitation"].get("url").is_some());
@@ -203,7 +205,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, toolsets, client });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, toolsets, client });
     let mut resp = if wants_sse(&ctx.headers) {
         let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {
             futures::stream::iter(responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))))
@@ -242,6 +244,8 @@ struct Ctx {
     headers: HeaderMap,
     principal: Principal,
     ip: Option<std::net::IpAddr>,
+    /// A signed-in user's own token: tools only for what their account reaches.
+    as_user: bool,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
     /// The products whose tools are listed (`None`: every product's).
@@ -255,7 +259,8 @@ impl Ctx {
     /// for its toolset.
     fn may(&self, product: &str, actions: &[Action]) -> bool {
         let on = self.asked(product) && (product == "access" || product == "workspace" || self.m.config.products.iter().any(|p| p == product));
-        on && match &self.principal {
+        let reached = !self.as_user || product == "access" || roll_access::USER_REACH.contains(&product);
+        on && reached && match &self.principal {
             Principal::Operator => true,
             // A token that asks for anything else may use any tool (some of them by asking).
             Principal::Grant(g) => g.ask_otherwise || actions.iter().any(|a| g.scope.may(product, *a)),

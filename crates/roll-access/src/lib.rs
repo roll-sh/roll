@@ -100,7 +100,8 @@ fn checksum(body: &str) -> String {
 }
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`) and other
-/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlk_`).
+/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlk_`). (`rlh_` is roll code's
+/// automations' inbound webhook secrets: another shape, not ours.)
 pub const SECRET_PREFIXES: [&str; 4] = ["rlt_", "rlo_", "rlf_", "rlk_"];
 
 /// Whether `s` is shaped like a roll secret ([`SECRET_PREFIXES`]) whose checksum holds: what
@@ -152,6 +153,7 @@ mod policy_tests {
             revoked_at: None,
             client: None,
             rate_per_minute: None,
+            user: None,
             revoked_why: None,
             temporary: vec![],
             ask_otherwise: false,
@@ -175,6 +177,25 @@ mod secret_tests {
         assert!(!super::checksum_ok(&wrong), "one character off fails");
         let text = format!("export ROLL_TOKEN={t}\nnot a token: rlt_{}\n{wrong}", "a".repeat(40));
         assert_eq!(super::find_secrets(&text), vec![t]);
+    }
+}
+
+#[cfg(test)]
+mod mail_tests {
+    /// Nobody's text reads as a link in roll's mail, and nobody is mailed without end.
+    #[test]
+    fn mail_shows_words_and_holds_back_floods() {
+        assert_eq!(super::mail_name("https://roll-verify.example/approve?x=1"), "https roll-verify example approve x 1");
+        assert_eq!(super::mail_name("ci: acme/site"), "ci acme site");
+        let mut gate = super::MailGate::default();
+        let key = Some(("approval:tok_a", super::APPROVAL_EVERY_MS));
+        assert!(gate.admit("usr_a", key, 0));
+        assert!(!gate.admit("usr_a", key, 60_000), "one approval mail per token per ten minutes");
+        assert!(gate.admit("usr_a", key, super::APPROVAL_EVERY_MS));
+        let sent = (0..30).filter(|i| gate.admit("usr_a", None, 1_000 + i)).count();
+        assert_eq!(sent as u32, super::MAIL_PER_HOUR - 2, "at most this many an hour");
+        assert!(gate.admit("usr_b", None, 2_000), "someone else's mail isn't held back");
+        assert!(gate.admit("usr_a", None, 3_600_000 + 1), "a new hour");
     }
 }
 
@@ -206,6 +227,8 @@ pub struct Config {
     pub trust_forwarded_for: bool,
     /// How long a request waits for an approval before answering `approval_pending`.
     pub approval_wait: std::time::Duration,
+    /// A spent refresh token presented again within this is a retry, not a stolen copy.
+    pub refresh_grace: std::time::Duration,
     /// Fetch MCP clients' metadata documents from private addresses and over http (local
     /// development and tests only; `ROLL_ACCESS_METADATA_ALLOW_PRIVATE`).
     pub metadata_allow_private: bool,
@@ -222,6 +245,7 @@ impl Default for Config {
             audit_days: 90,
             trust_forwarded_for: false,
             approval_wait: std::time::Duration::from_secs(55),
+            refresh_grace: std::time::Duration::from_millis(store::REFRESH_GRACE_MS as u64),
             metadata_allow_private: false,
             github_keys_url: leaks::GITHUB_KEYS.into(),
         }
@@ -342,6 +366,56 @@ pub fn plain(name: &str) -> String {
     if kept.is_empty() { "(unnamed)".into() } else { kept }
 }
 
+/// A name as roll's mail shows it: letters, digits, spaces, `-` and `_`, at most 40 characters.
+/// Token and client names are anyone's text (an OAuth client names itself), and mail from roll is
+/// trusted: nothing in it may read as a link, an address or a path.
+pub fn mail_name(name: &str) -> String {
+    let kept: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_') { c } else { ' ' }).collect();
+    let kept: String = kept.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect();
+    if kept.is_empty() { "(unnamed)".into() } else { kept }
+}
+
+/// How often roll mails one person: `PER_HOUR` mails an hour, and one approval mail per token per
+/// `APPROVAL_EVERY_MS` (more waiting show on the approvals page).
+const MAIL_PER_HOUR: u32 = 20;
+const APPROVAL_EVERY_MS: i64 = 10 * 60_000;
+
+/// Mail sent lately, on this node: per person `(hour started, sent)`, and per key its last send.
+#[derive(Default)]
+pub(crate) struct MailGate {
+    people: std::collections::HashMap<String, (i64, u32)>,
+    keys: std::collections::HashMap<String, i64>,
+}
+
+impl MailGate {
+    /// Whether a mail to `user` (with `key`, sent at most once per `every` ms) may go now.
+    fn admit(&mut self, user: &str, key: Option<(&str, i64)>, now: i64) -> bool {
+        if self.people.len() > 10_000 {
+            self.people.retain(|_, (start, _)| now - *start < 3_600_000);
+        }
+        if self.keys.len() > 10_000 {
+            self.keys.retain(|_, at| now - *at < 3_600_000);
+        }
+        if let Some((k, every)) = key
+            && self.keys.get(k).is_some_and(|at| now - at < every)
+        {
+            return false;
+        }
+        let (start, sent) = self.people.entry(user.to_string()).or_insert((now, 0));
+        if now - *start >= 3_600_000 {
+            (*start, *sent) = (now, 0);
+        }
+        if *sent >= MAIL_PER_HOUR {
+            return false;
+        }
+        *sent += 1;
+        if let Some((k, _)) = key {
+            self.keys.insert(k.to_string(), now);
+        }
+        true
+    }
+}
+
 /// A resolver from closures ([`Resolvers::by_fn`], [`Resolvers::environment_fn`]).
 struct Fns {
     id: Option<IdFn>,
@@ -365,17 +439,28 @@ pub struct Access {
     pub resolvers: Resolvers,
     /// Approvals in chat, when rolld wires them.
     pub chat: std::sync::OnceLock<Arc<dyn ApprovalChat>>,
+    /// How many nodes serve requests now (rolld's cluster): a grant's rate is shared among them
+    /// ([`Access::rate_share`]). Unset: one.
+    pub nodes: std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>,
     /// How other products revoke their own leaked secrets, by prefix ([`Access::on_leaked`]).
     revokers: std::sync::RwLock<Vec<(&'static str, Revoker)>>,
     /// Grants' request limits on this node.
     pub limiter: rate::Limiter,
     /// Delivers audit sinks, when rolld can (it needs `ROLL_SECRET_KEY`).
     pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
+    /// Users as they are now, for their own tokens (rolld: roll-accounts' sessions).
+    pub people: std::sync::OnceLock<Arc<dyn roll_auth::Sessions>>,
+    /// What this node mailed lately (`tell`'s limits).
+    pub(crate) mail_gate: std::sync::Mutex<MailGate>,
     /// GitHub's secret scanning keys, cached.
     pub(crate) github_keys: leaks::GithubKeys,
     /// The token policy as last read (`policy_now`).
     policy_cache: std::sync::Mutex<Option<(std::time::Instant, Policy)>>,
 }
+
+/// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
+/// session can reach").
+pub const USER_REACH: [&str; 3] = ["code", "agents", "workspace"];
 
 impl Access {
     pub fn open(target: &code_sql::Target, pg: code_sql::PgOptions, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
@@ -388,7 +473,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -411,9 +496,15 @@ impl Access {
 }
 
 impl Access {
-    /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
-    /// secret scanning): each live grant they open is revoked at once, with why, and logged.
-    /// Returns the grants revoked.
+    /// This node's share of a grant's `rate_per_minute`: the rate over the nodes serving requests,
+    /// rounded up (at least one a minute). Counted in memory on each node, so the fleet as a whole
+    /// allows about the rate, with no shared write per request; a client whose requests all reach
+    /// one node gets that node's share.
+    pub fn rate_share(&self, rate: u32) -> u32 {
+        let nodes = self.nodes.get().map_or(1, |n| n()).max(1) as u32;
+        rate.div_ceil(nodes).max(1)
+    }
+
     /// A product's own leaked secrets (apps' deploy hooks, `rlk_`): found wherever roll's are
     /// (roll code's landings, GitHub's secret scanning), revoked by `revoke`, which says what it
     /// revoked (`None`: nothing live).
@@ -421,6 +512,10 @@ impl Access {
         self.revokers.write().unwrap_or_else(|e| e.into_inner()).push((prefix, Box::new(revoke)));
     }
 
+    /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
+    /// secret scanning): each live grant they open is revoked at once, with why, logged, and its
+    /// person (if it has one) mailed.
+    /// Returns the grants revoked.
     pub fn revoke_leaked(&self, secrets: &[String], found_at: &str) -> Result<Vec<store::Grant>> {
         let mut out = Vec::new();
         for s in secrets.iter().filter(|s| checksum_ok(s)) {
@@ -454,6 +549,18 @@ impl Access {
             }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
                 tracing::warn!(grant = %g.id, name = %g.name, at = %found_at, "a leaked token was revoked");
+                self.tell(
+                    g.user.as_deref(),
+                    None,
+                    format!("roll revoked your token \"{}\"", mail_name(&g.name)),
+                    format!(
+                        "roll revoked your token \"{}\" ({}): its secret was found where others could read it. Its page says where: {}/dashboard/access/tokens/{}\n\nMake a new one if you still need it, and keep it out of code and logs.\n",
+                        mail_name(&g.name),
+                        g.id,
+                        self.web_url(),
+                        g.id,
+                    ),
+                );
                 self.store.audit(&store::AuditEvent {
                     id: new_id("aud"),
                     at: code_sql::now_ms(),
@@ -491,10 +598,14 @@ impl Access {
     /// week before a token expires). One node posts it (the day is claimed in the store). Whether
     /// it posted.
     pub async fn expiry_digest(self: &Arc<Self>) -> Result<bool> {
-        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return Ok(false) };
+        let chat = self.chat.get().cloned().zip(self.chat_target());
+        if chat.is_none() && self.people.get().is_none() {
+            return Ok(false);
+        }
         let now = code_sql::now_ms();
         let week = now + 7 * 86_400_000;
-        let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week)).collect();
+        // A token made to last a day or less (one a workload made for its job) knows its end.
+        let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week && e - g.created_at > 86_400_000)).collect();
         if soon.is_empty() {
             return Ok(false);
         }
@@ -502,32 +613,128 @@ impl Access {
             return Ok(false);
         }
         soon.sort_by_key(|g| g.expires_at);
-        let names: Vec<String> = soon
-            .iter()
-            .take(20)
-            .map(|g| {
-                let days = (g.expires_at.unwrap_or(now) - now).max(0) / 86_400_000;
-                format!("{} ({})", plain(&g.name), if days == 0 { "today".to_string() } else if days == 1 { "tomorrow".to_string() } else { format!("in {days} days") })
-            })
-            .collect();
-        let count = if soon.len() == 1 { "One roll token expires".to_string() } else { format!("{} roll tokens expire", soon.len()) };
-        let text = format!("{count} within a week: {}. Give one longer at {}/dashboard/access, or let it go.", names.join(", "), self.config.web_url.trim_end_matches('/'));
-        chat.notice(install, channel, text).await.map_err(Error::Internal)?;
+        let digest = |grants: &[&store::Grant], name: fn(&str) -> String| {
+            let names: Vec<String> = grants
+                .iter()
+                .take(20)
+                .map(|g| {
+                    let days = (g.expires_at.unwrap_or(now) - now).max(0) / 86_400_000;
+                    format!("{} ({})", name(&g.name), if days == 0 { "today".to_string() } else if days == 1 { "tomorrow".to_string() } else { format!("in {days} days") })
+                })
+                .collect();
+            let count = if grants.len() == 1 { "One roll token expires".to_string() } else { format!("{} roll tokens expire", grants.len()) };
+            format!("{count} within a week: {}. Give one longer at {}/dashboard/access, or let it go.", names.join(", "), self.web_url())
+        };
+        // Each person hears of their own tokens only.
+        let mut people: std::collections::BTreeMap<&str, Vec<&store::Grant>> = Default::default();
+        for g in &soon {
+            if let Some(u) = g.user.as_deref() {
+                people.entry(u).or_default().push(g);
+            }
+        }
+        for (user, grants) in people {
+            let subject = if grants.len() == 1 { format!("Your roll token \"{}\" expires within a week", mail_name(&grants[0].name)) } else { format!("{} of your roll tokens expire within a week", grants.len()) };
+            self.tell(Some(user), None, subject, format!("{}\n", digest(&grants, mail_name)));
+        }
+        if let Some((chat, (install, channel))) = chat {
+            chat.notice(install, channel, digest(&soon.iter().collect::<Vec<_>>(), plain)).await.map_err(Error::Internal)?;
+        }
         Ok(true)
+    }
+
+    /// A short-lived token for a workload that proved who it is (roll secrets' identity logins: a
+    /// CI job's OIDC token): `rules` within `within` (the identity's scope), for `minutes`
+    /// ([`store::WORKLOAD_MINUTES`]), owned by whoever set the identity up (`user`, or the
+    /// operator). The login is the authentication, so there's no caller to gate; a person who
+    /// can't sign in any more gets none. Left out of the token list and the checkup, outside the
+    /// tokens' caps, and pruned a day after it ends; what it does is audited as any token's, and
+    /// each mint is a row.
+    pub async fn mint_workload(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>) -> Result<(store::Grant, String)> {
+        if !within.covers(&new.rules) {
+            return Err(Error::Forbidden("a workload's rules must be within its identity's".into()));
+        }
+        if let Some(u) = user {
+            let people = self.people.get().cloned().ok_or_else(|| Error::Forbidden("no accounts here".into()))?;
+            if people.person(u).await.map_err(Error::Internal)?.is_none() {
+                return Err(Error::Forbidden("the identity's owner can't sign in".into()));
+            }
+        }
+        let a = self.clone();
+        let by = user.unwrap_or("operator").to_string();
+        let user = user.map(str::to_string);
+        let (g, secret) = tokio::task::spawn_blocking(move || {
+            let made = a.store.create_workload(&new, minutes, &by, user.as_deref())?;
+            a.store.audit(&store::AuditEvent {
+                id: new_id("aud"),
+                at: code_sql::now_ms(),
+                grant_id: Some(made.0.id.clone()),
+                grant_name: Some(made.0.name.clone()),
+                source: "workload".into(),
+                tool: None,
+                method: "-".into(),
+                route: "minted".into(),
+                product: Some("access".into()),
+                action: Some("write".into()),
+                resource: None,
+                decision: "allow".into(),
+                approval: None,
+                status: 201,
+                args: None,
+                ip: None,
+                duration_ms: 0,
+                client: None,
+            });
+            Ok::<_, Error>(made)
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+        Ok((g, secret))
+    }
+
+    fn web_url(&self) -> &str {
+        self.config.web_url.trim_end_matches('/')
+    }
+
+    /// Mail a grant's person (a user's own token; an operator's has none), off the caller's path.
+    /// Nothing without accounts or a runtime.
+    /// At most [`MAIL_PER_HOUR`] mails a person an hour on a node, and `key`'s at most once per its
+    /// interval: what's held back is on roll's pages.
+    fn tell(&self, user: Option<&str>, key: Option<(&str, i64)>, subject: String, text: String) {
+        let (Some(user), Some(people), Ok(rt)) = (user, self.people.get().cloned(), tokio::runtime::Handle::try_current()) else { return };
+        if !self.mail_gate.lock().unwrap_or_else(|e| e.into_inner()).admit(user, key, code_sql::now_ms()) {
+            tracing::info!("a person's mail held back (they've been mailed enough lately)");
+            return;
+        }
+        let user = user.to_string();
+        rt.spawn(async move {
+            if let Err(e) = people.tell(&user, &subject, &text).await {
+                tracing::warn!(error = %e, "mailing a token's person");
+            }
+        });
     }
 
     /// A token used from a network it hasn't been before, told where approvals go (GitHub and
     /// Google mail a new sign-in's place): a leaked token is used from somewhere new.
-    pub fn network_notice(self: &Arc<Self>, name: &str, id: &str, new: &store::NewNetwork) {
+    pub fn network_notice(self: &Arc<Self>, name: &str, id: &str, user: Option<&str>, new: &store::NewNetwork) {
         let name = plain(name);
-        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
         let roams = if new.networks >= store::ROAMING { " It's used from many networks now, so this is the last message like this about it." } else { "" };
         let text = format!(
             "roll token \"{name}\" was used from a new network, {} (it's been used from {} now). Not you? Revoke it: {}/dashboard/access/tokens/{id}.{roams}",
             new.network,
             new.networks,
-            self.config.web_url.trim_end_matches('/'),
+            self.web_url(),
         );
+        if user.is_some() {
+            let name = mail_name(&name);
+            let mail = format!(
+                "Your roll token \"{name}\" ({id}) was used from a new network, {} (it's been used from {} now). Not you? Revoke it: {}/dashboard/access/tokens/{id}\n",
+                new.network,
+                new.networks,
+                self.web_url(),
+            );
+            self.tell(user, None, format!("Your roll token \"{name}\" was used from a new network"), mail);
+        }
+        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
         tokio::spawn(async move {
             if let Err(e) = chat.notice(install, channel, text).await {
                 tracing::warn!(error = %e, "telling chat of a token's new network");
@@ -535,8 +742,30 @@ impl Access {
         });
     }
 
-    /// A new approval: posted to chat, when approvals go there (in the background).
-    pub fn announce(self: &Arc<Self>, a: &store::Approval) {
+    /// A new approval: posted to chat, when approvals go there, and mailed to the token's person
+    /// (they decide their own token's), in the background. The mail names the token, the product
+    /// and the action, never the resource or the request's arguments (a request can name anything,
+    /// and what an agent wrote stays on roll's page); one per token per ten minutes.
+    pub fn announce(self: &Arc<Self>, a: &store::Approval, user: Option<&str>) {
+        if user.is_some() {
+            let name = mail_name(&a.grant_name);
+            let key = format!("approval:{}", a.grant_id);
+            self.tell(
+                user,
+                Some((&key, APPROVAL_EVERY_MS)),
+                format!("Your roll token \"{name}\" waits on your approval"),
+                format!(
+                    "Your roll token \"{name}\" ({}) asks to {} in {}. See what it asks and approve or deny it at {}/dashboard/access/approvals?id={}; it waits until it expires.\n\nNot something you're running? Revoke the token at {}/dashboard/access/tokens/{}\n",
+                    a.grant_id,
+                    a.action,
+                    a.product,
+                    self.web_url(),
+                    a.id,
+                    self.web_url(),
+                    a.grant_id,
+                ),
+            );
+        }
         let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
         let (me, a) = (self.clone(), a.clone());
         tokio::spawn(async move {
@@ -660,7 +889,7 @@ impl Access {
 impl roll_auth::Grants for Access {
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
-        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), ask_otherwise: g.ask_otherwise })
+        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
     }
 }
 
