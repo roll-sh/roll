@@ -156,6 +156,27 @@ pub enum Format {
     Shell,
     Json,
     Yaml,
+    /// Docker's `--env-file`: `KEY=value`, taken literally, one line each.
+    Docker,
+    /// A Kubernetes Secret manifest (`kubectl apply -f -`).
+    Kubernetes,
+}
+
+/// What a Kubernetes Secret is called and where (`name`, `namespace`).
+#[derive(Clone, Debug, Default)]
+pub struct Manifest {
+    pub name: String,
+    pub namespace: Option<String>,
+}
+
+/// A DNS-1123 subdomain (a Secret's name) or label (a namespace).
+pub fn k8s_name(s: &str, max: usize) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= max
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-' || (max > 63 && *c == b'.'))
+        && b[0].is_ascii_alphanumeric()
+        && b[b.len() - 1].is_ascii_alphanumeric()
 }
 
 impl Format {
@@ -165,6 +186,8 @@ impl Format {
             "shell" | "sh" => Format::Shell,
             "json" => Format::Json,
             "yaml" | "yml" => Format::Yaml,
+            "docker" => Format::Docker,
+            "kubernetes" | "k8s" => Format::Kubernetes,
             _ => return None,
         })
     }
@@ -172,16 +195,45 @@ impl Format {
     pub fn content_type(self) -> &'static str {
         match self {
             Format::Json => "application/json",
-            Format::Yaml => "application/yaml",
+            Format::Yaml | Format::Kubernetes => "application/yaml",
             _ => "text/plain; charset=utf-8",
         }
     }
 }
 
 /// Values written out in `f`. The result holds values: callers zeroize or drop it promptly.
-pub fn format(values: &BTreeMap<String, Value>, f: Format) -> zeroize::Zeroizing<String> {
+/// Fails, naming the keys (never a value), when `f` can't carry a value: Docker's env file has no
+/// quoting, so a line break can't be in one.
+pub fn format(values: &BTreeMap<String, Value>, f: Format, manifest: &Manifest) -> Result<zeroize::Zeroizing<String>, String> {
     let mut out = zeroize::Zeroizing::new(String::new());
     match f {
+        Format::Docker => {
+            let bad: Vec<&str> = values.iter().filter(|(_, v)| v.expose().contains(['\n', '\r'])).map(|(k, _)| k.as_str()).collect();
+            if !bad.is_empty() {
+                return Err(format!("a Docker env file can't hold a line break, and {} has one: use dotenv or json", bad.join(", ")));
+            }
+            for (k, v) in values {
+                out.push_str(&format!("{k}={}\n", v.expose()));
+            }
+        }
+        Format::Kubernetes => {
+            use base64::Engine;
+            out.push_str("apiVersion: v1\nkind: Secret\nmetadata:\n");
+            out.push_str(&format!("  name: {}\n", manifest.name));
+            if let Some(ns) = &manifest.namespace {
+                out.push_str(&format!("  namespace: {ns}\n"));
+            }
+            out.push_str("  labels:\n    app.kubernetes.io/managed-by: roll-secrets\ntype: Opaque\n");
+            if values.is_empty() {
+                out.push_str("data: {}\n");
+            } else {
+                out.push_str("data:\n");
+                for (k, v) in values {
+                    let b = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(v.expose()));
+                    out.push_str(&format!("  {k}: {}\n", b.as_str()));
+                }
+            }
+        }
         Format::Json => {
             let m: BTreeMap<&str, &str> = values.iter().map(|(k, v)| (k.as_str(), v.expose())).collect();
             out.push_str(&serde_json::to_string_pretty(&m).expect("JSON"));
@@ -203,7 +255,7 @@ pub fn format(values: &BTreeMap<String, Value>, f: Format) -> zeroize::Zeroizing
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// A double-quoted dotenv value, when it needs quoting.
@@ -232,6 +284,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn docker_and_kubernetes_exports() {
+        let mut v = BTreeMap::new();
+        v.insert("A".to_string(), Value::new("x y=\"z\" $HOME"));
+        let m = Manifest { name: "web-prod".into(), namespace: Some("shop".into()) };
+        // Docker takes the line literally: no quotes, no expansion.
+        assert_eq!(format(&v, Format::Docker, &m).unwrap().as_str(), "A=x y=\"z\" $HOME\n");
+        let k = format(&v, Format::Kubernetes, &m).unwrap();
+        assert!(k.contains("kind: Secret\nmetadata:\n  name: web-prod\n  namespace: shop\n"), "{}", k.as_str());
+        assert!(k.ends_with("data:\n  A: eCB5PSJ6IiAkSE9NRQ==\n"), "{}", k.as_str());
+        // A line break can't be carried: the error names the key, never the value.
+        v.insert("PEM".to_string(), Value::new("-----BEGIN-----\nsecretbody"));
+        let e = format(&v, Format::Docker, &m).unwrap_err();
+        assert!(e.contains("PEM") && !e.contains("secretbody"), "{e}");
+        assert!(k8s_name("web-prod.v2", 253) && !k8s_name("Web", 253) && !k8s_name("a.b", 63) && !k8s_name("-a", 63));
+    }
+
+    #[test]
     fn dotenv_round_trips() {
         let text = "# the database\nexport DATABASE_URL=postgres://u:p@h/db # prod\nNAME='it''s'\nKEY=\"line1\\nline2 \\\"q\\\"\"\nPEM=\"-----BEGIN-----\nabc\n-----END-----\"\n\nEMPTY=\n";
         let e = parse(text).unwrap();
@@ -247,7 +316,7 @@ mod tests {
             ]
         );
         let values: BTreeMap<String, Value> = e.into_iter().map(|e| (e.key, e.value)).collect();
-        let again = parse(&format(&values, Format::Dotenv)).unwrap();
+        let again = parse(&format(&values, Format::Dotenv, &Manifest::default()).unwrap()).unwrap();
         assert_eq!(again.into_iter().map(|e| (e.key, e.value)).collect::<BTreeMap<_, _>>(), values);
         assert!(parse("1BAD=x").unwrap_err().starts_with("line 1"));
         assert!(parse("A=\"open").is_err());

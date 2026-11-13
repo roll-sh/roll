@@ -433,7 +433,7 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
-roll secrets export  [--format dotenv|json|shell|yaml]
+roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging
@@ -1015,7 +1015,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=` | | `Values`, or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
@@ -1205,6 +1205,8 @@ Done and in PR #20:
   changes, reads, requests and syncs' pushes as one timeline, by key);
 - finding a key across every project the caller may read (`roll secrets find`, the dashboard's
   "Find a key"), for rotating an organisation-wide key;
+- exports as a Docker `--env-file` and a Kubernetes Secret manifest, next to dotenv, shell, JSON and
+  YAML;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1225,13 +1227,11 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **More export formats**: a Docker `--env-file` (no quoting, one line each) and a Kubernetes
-   Secret manifest (`kubectl apply -f -`), next to dotenv, shell, JSON and YAML.
-3. **Templates** (Doppler's `secrets substitute`, Infisical's `export --template`): `roll secrets
+2. **Templates** (Doppler's `secrets substitute`, Infisical's `export --template`): `roll secrets
    render FILE` fills `${KEY}` in a config file from an environment, failing on a key that isn't
    set, for tools that read a file rather than the environment.
-4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-5. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

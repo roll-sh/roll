@@ -143,7 +143,8 @@ export function EnvView({ env }: { env: Environment }) {
   const exportAs = async (format: ExportFormat) => {
     setError(null);
     try {
-      saveText(`${project.name}.${env.slug}${format === "dotenv" ? ".env" : format === "shell" ? ".sh" : `.${format}`}`, await api.exportText(env.slug, format, path));
+      const ext = { dotenv: ".env", shell: ".sh", json: ".json", yaml: ".yaml", docker: ".docker.env", kubernetes: ".secret.yaml" }[format];
+      saveText(`${project.name}.${env.slug}${ext}`, await api.exportText(env.slug, format, path));
     } catch (e) {
       setError(errorText(e));
     }
@@ -188,9 +189,9 @@ export function EnvView({ env }: { env: Environment }) {
                 <Download className="size-3.5" /> Export
               </MenuTrigger>
               <MenuPopup align="end" className="w-48">
-                {(["dotenv", "json", "shell", "yaml"] as const).map((f) => (
+                {(["dotenv", "json", "shell", "yaml", "docker", "kubernetes"] as const).map((f) => (
                   <MenuItem key={f} onClick={() => exportAs(f)}>
-                    {f === "dotenv" ? ".env" : f} <span className="ml-auto text-[10.5px] text-subtle">audited</span>
+                    {{ dotenv: ".env", json: "json", shell: "shell", yaml: "yaml", docker: "Docker env file", kubernetes: "Kubernetes Secret" }[f]} <span className="ml-auto text-[10.5px] text-subtle">audited</span>
                   </MenuItem>
                 ))}
               </MenuPopup>

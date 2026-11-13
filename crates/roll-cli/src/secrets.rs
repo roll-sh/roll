@@ -150,10 +150,16 @@ pub enum Secrets {
         #[arg(long)]
         request: bool,
     },
-    /// Print the resolved values: dotenv, json, shell or yaml.
+    /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
         format: String,
+        /// kubernetes: the Secret's name (default: the environment's).
+        #[arg(long)]
+        name: Option<String>,
+        /// kubernetes: its namespace.
+        #[arg(long)]
+        namespace: Option<String>,
     },
     /// Environments: list, add, rename, delete, order, protect.
     #[command(subcommand, alias = "env")]
@@ -790,8 +796,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Skipped {} existing (use --overwrite): {}", sk.len(), sk.iter().map(s).collect::<Vec<_>>().join(", "));
             }
         }
-        Secrets::Export { format } => {
-            let url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
+        Secrets::Export { format, name, namespace } => {
+            let mut url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
+            for (k, v) in [("name", name), ("namespace", namespace)] {
+                if let Some(v) = v {
+                    url.push_str(&format!("&{k}={}", enc(&v)));
+                }
+            }
             let mut req = c.api.http.get(url);
             if let Some(k) = &c.api.key {
                 req = req.bearer_auth(k);

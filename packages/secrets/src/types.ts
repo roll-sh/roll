@@ -194,7 +194,8 @@ export type AuditFormat = "csv" | "jsonl";
 export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 export type Imported = Applied & { skipped: string[] };
 export type ImportedAsRequest = { request: ChangeRequest; skipped: string[] };
-export type ExportFormat = "dotenv" | "json" | "shell" | "yaml";
+/** `docker`: Docker's `--env-file`; `kubernetes`: a Secret manifest (`name`, `namespace`). */
+export type ExportFormat = "dotenv" | "json" | "shell" | "yaml" | "docker" | "kubernetes";
 /** A one-way push of an environment's values to a platform outside roll (docs/secrets.md, "Syncs"). Never holds a value. */
 export type Sync = {
   id: string;
