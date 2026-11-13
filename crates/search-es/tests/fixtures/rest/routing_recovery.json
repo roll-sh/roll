@@ -1,0 +1,1551 @@
+{
+  "description" : "_routing (required, doc_values) parsing, merging and printing; recovery details",
+  "steps" : [
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : true,
+            "doc_values" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true,
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : {
+                "_routing" : {
+                  "required" : true,
+                  "doc_values" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : {
+                "_routing" : {
+                  "required" : true,
+                  "doc_values" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "doc_values" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : {
+                "_routing" : {
+                  "doc_values" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : {
+                "_routing" : {
+                  "required" : false,
+                  "doc_values" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "doc_values" : false
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : { }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : { }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "doc_values" : "x"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: Failed to parse value [x] as only [true] or [false] are allowed."
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: Failed to parse value [x] as only [true] or [false] are allowed.",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Failed to parse value [x] as only [true] or [false] are allowed."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-rt]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-rt",
+              "index_uuid" : "_na_",
+              "index" : "esm-rt"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-rt]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-rt",
+          "index_uuid" : "_na_",
+          "index" : "esm-rt"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-rt]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-rt",
+              "index_uuid" : "_na_",
+              "index" : "esm-rt"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-rt]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-rt",
+          "index_uuid" : "_na_",
+          "index" : "esm-rt"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing?include_defaults=true",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-rt]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-rt",
+              "index_uuid" : "_na_",
+              "index" : "esm-rt"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-rt]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-rt",
+          "index_uuid" : "_na_",
+          "index" : "esm-rt"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-rt]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-rt",
+              "index_uuid" : "_na_",
+              "index" : "esm-rt"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-rt]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-rt",
+          "index_uuid" : "_na_",
+          "index" : "esm-rt"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : false
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : { }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : { }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : {
+                "_routing" : {
+                  "required" : true
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping/field/_routing?include_defaults=true",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "full_name" : "_routing",
+              "mapping" : {
+                "_routing" : {
+                  "required" : true,
+                  "doc_values" : false
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : true,
+            "doc_values" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt/_mapping",
+      "body" : {
+        "_routing" : {
+          "required" : false
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [required] from [true] to [false]\n\tCannot update parameter [doc_values] from [true] to [false]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [required] from [true] to [false]\n\tCannot update parameter [doc_values] from [true] to [false]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true,
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : true,
+            "doc_values" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt/_mapping",
+      "body" : {
+        "_routing" : {
+          "required" : true
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [doc_values] from [true] to [false]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [doc_values] from [true] to [false]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true,
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : true,
+            "doc_values" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt/_mapping",
+      "body" : {
+        "_routing" : {
+          "doc_values" : true
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [required] from [true] to [false]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Mapper for [_routing] conflicts with existing mapper:\n\tCannot update parameter [required] from [true] to [false]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true,
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : true,
+            "doc_values" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt/_mapping",
+      "body" : {
+        "_routing" : {
+          "required" : true,
+          "doc_values" : true
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true,
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : true,
+            "doc_values" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt/_mapping",
+      "body" : {
+        "_routing" : { }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true,
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt",
+      "body" : {
+        "mappings" : {
+          "_routing" : {
+            "required" : true,
+            "doc_values" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt/_mapping",
+      "body" : {
+        "properties" : {
+          "a" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true,
+              "doc_values" : true
+            },
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ct1",
+      "body" : {
+        "template" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ct2",
+      "body" : {
+        "template" : {
+          "mappings" : {
+            "_routing" : {
+              "required" : false,
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-it",
+      "body" : {
+        "index_patterns" : [
+          "esm-rt*"
+        ],
+        "composed_of" : [
+          "esm-ct1",
+          "esm-ct2"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "composable template [esm-it] template after composition with component templates [esm-ct1, esm-ct2] is invalid"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "composable template [esm-it] template after composition with component templates [esm-ct1, esm-ct2] is invalid",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "invalid composite mappings for [esm-it]",
+            "caused_by" : {
+              "type" : "mapper_parsing_exception",
+              "reason" : "contradicting `_routing.required` settings"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rt1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rt1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rt1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-rt1" : {
+          "mappings" : { }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rt1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-it",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_template_missing_exception",
+              "reason" : "index_template [esm-it] missing"
+            }
+          ],
+          "type" : "index_template_missing_exception",
+          "reason" : "index_template [esm-it] missing"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_component_template/esm-ct1,esm-ct2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rc",
+      "body" : {
+        "settings" : {
+          "number_of_replicas" : 0,
+          "number_of_shards" : 2
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rc"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rc/_recovery?detailed=true&human",
+      "mask" : [
+        "start_time",
+        "start_time_in_millis",
+        "stop_time",
+        "stop_time_in_millis",
+        "total_time",
+        "total_time_in_millis",
+        "host",
+        "transport_address",
+        "ip",
+        "name",
+        "target.id"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-rc" : {
+          "shards" : [
+            {
+              "id" : 0,
+              "type" : "EMPTY_STORE",
+              "stage" : "DONE",
+              "primary" : true,
+              "start_time" : "2026-10-21T09:07:51.397Z",
+              "start_time_in_millis" : 1792573671397,
+              "stop_time" : "2026-10-21T09:07:51.438Z",
+              "stop_time_in_millis" : 1792573671438,
+              "total_time" : "41ms",
+              "total_time_in_millis" : 41,
+              "source" : { },
+              "target" : {
+                "id" : "2AU6uEV5S82s9FCi0WUJKg",
+                "host" : "172.17.0.2",
+                "transport_address" : "172.17.0.2:9300",
+                "ip" : "172.17.0.2",
+                "name" : "9a12ac153b52"
+              },
+              "index" : {
+                "size" : {
+                  "total" : "0b",
+                  "total_in_bytes" : 0,
+                  "reused" : "0b",
+                  "reused_in_bytes" : 0,
+                  "recovered" : "0b",
+                  "recovered_in_bytes" : 0,
+                  "recovered_from_snapshot" : "0b",
+                  "recovered_from_snapshot_in_bytes" : 0,
+                  "percent" : "0.0%"
+                },
+                "files" : {
+                  "total" : 0,
+                  "reused" : 0,
+                  "recovered" : 0,
+                  "percent" : "0.0%",
+                  "details" : [ ]
+                },
+                "total_time" : "26ms",
+                "total_time_in_millis" : 26,
+                "source_throttle_time" : "-1",
+                "source_throttle_time_in_millis" : 0,
+                "target_throttle_time" : "-1",
+                "target_throttle_time_in_millis" : 0
+              },
+              "translog" : {
+                "recovered" : 0,
+                "total" : 0,
+                "percent" : "100.0%",
+                "total_on_start" : 0,
+                "total_time" : "11ms",
+                "total_time_in_millis" : 11
+              },
+              "verify_index" : {
+                "check_index_time" : "0s",
+                "check_index_time_in_millis" : 0,
+                "total_time" : "0s",
+                "total_time_in_millis" : 0
+              }
+            },
+            {
+              "id" : 1,
+              "type" : "EMPTY_STORE",
+              "stage" : "DONE",
+              "primary" : true,
+              "start_time" : "2026-10-21T09:07:51.400Z",
+              "start_time_in_millis" : 1792573671400,
+              "stop_time" : "2026-10-21T09:07:51.444Z",
+              "stop_time_in_millis" : 1792573671444,
+              "total_time" : "43ms",
+              "total_time_in_millis" : 43,
+              "source" : { },
+              "target" : {
+                "id" : "2AU6uEV5S82s9FCi0WUJKg",
+                "host" : "172.17.0.2",
+                "transport_address" : "172.17.0.2:9300",
+                "ip" : "172.17.0.2",
+                "name" : "9a12ac153b52"
+              },
+              "index" : {
+                "size" : {
+                  "total" : "0b",
+                  "total_in_bytes" : 0,
+                  "reused" : "0b",
+                  "reused_in_bytes" : 0,
+                  "recovered" : "0b",
+                  "recovered_in_bytes" : 0,
+                  "recovered_from_snapshot" : "0b",
+                  "recovered_from_snapshot_in_bytes" : 0,
+                  "percent" : "0.0%"
+                },
+                "files" : {
+                  "total" : 0,
+                  "reused" : 0,
+                  "recovered" : 0,
+                  "percent" : "0.0%",
+                  "details" : [ ]
+                },
+                "total_time" : "25ms",
+                "total_time_in_millis" : 25,
+                "source_throttle_time" : "-1",
+                "source_throttle_time_in_millis" : 0,
+                "target_throttle_time" : "-1",
+                "target_throttle_time_in_millis" : 0
+              },
+              "translog" : {
+                "recovered" : 0,
+                "total" : 0,
+                "percent" : "100.0%",
+                "total_on_start" : 0,
+                "total_time" : "9ms",
+                "total_time_in_millis" : 9
+              },
+              "verify_index" : {
+                "check_index_time" : "0s",
+                "check_index_time_in_millis" : 0,
+                "total_time" : "0s",
+                "total_time_in_millis" : 0
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rc/_recovery?human",
+      "mask" : [
+        "start_time",
+        "start_time_in_millis",
+        "stop_time",
+        "stop_time_in_millis",
+        "total_time",
+        "total_time_in_millis",
+        "host",
+        "transport_address",
+        "ip",
+        "name",
+        "target.id"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-rc" : {
+          "shards" : [
+            {
+              "id" : 0,
+              "type" : "EMPTY_STORE",
+              "stage" : "DONE",
+              "primary" : true,
+              "start_time" : "2026-10-21T09:07:51.397Z",
+              "start_time_in_millis" : 1792573671397,
+              "stop_time" : "2026-10-21T09:07:51.438Z",
+              "stop_time_in_millis" : 1792573671438,
+              "total_time" : "41ms",
+              "total_time_in_millis" : 41,
+              "source" : { },
+              "target" : {
+                "id" : "2AU6uEV5S82s9FCi0WUJKg",
+                "host" : "172.17.0.2",
+                "transport_address" : "172.17.0.2:9300",
+                "ip" : "172.17.0.2",
+                "name" : "9a12ac153b52"
+              },
+              "index" : {
+                "size" : {
+                  "total" : "0b",
+                  "total_in_bytes" : 0,
+                  "reused" : "0b",
+                  "reused_in_bytes" : 0,
+                  "recovered" : "0b",
+                  "recovered_in_bytes" : 0,
+                  "recovered_from_snapshot" : "0b",
+                  "recovered_from_snapshot_in_bytes" : 0,
+                  "percent" : "0.0%"
+                },
+                "files" : {
+                  "total" : 0,
+                  "reused" : 0,
+                  "recovered" : 0,
+                  "percent" : "0.0%"
+                },
+                "total_time" : "26ms",
+                "total_time_in_millis" : 26,
+                "source_throttle_time" : "-1",
+                "source_throttle_time_in_millis" : 0,
+                "target_throttle_time" : "-1",
+                "target_throttle_time_in_millis" : 0
+              },
+              "translog" : {
+                "recovered" : 0,
+                "total" : 0,
+                "percent" : "100.0%",
+                "total_on_start" : 0,
+                "total_time" : "11ms",
+                "total_time_in_millis" : 11
+              },
+              "verify_index" : {
+                "check_index_time" : "0s",
+                "check_index_time_in_millis" : 0,
+                "total_time" : "0s",
+                "total_time_in_millis" : 0
+              }
+            },
+            {
+              "id" : 1,
+              "type" : "EMPTY_STORE",
+              "stage" : "DONE",
+              "primary" : true,
+              "start_time" : "2026-10-21T09:07:51.400Z",
+              "start_time_in_millis" : 1792573671400,
+              "stop_time" : "2026-10-21T09:07:51.444Z",
+              "stop_time_in_millis" : 1792573671444,
+              "total_time" : "43ms",
+              "total_time_in_millis" : 43,
+              "source" : { },
+              "target" : {
+                "id" : "2AU6uEV5S82s9FCi0WUJKg",
+                "host" : "172.17.0.2",
+                "transport_address" : "172.17.0.2:9300",
+                "ip" : "172.17.0.2",
+                "name" : "9a12ac153b52"
+              },
+              "index" : {
+                "size" : {
+                  "total" : "0b",
+                  "total_in_bytes" : 0,
+                  "reused" : "0b",
+                  "reused_in_bytes" : 0,
+                  "recovered" : "0b",
+                  "recovered_in_bytes" : 0,
+                  "recovered_from_snapshot" : "0b",
+                  "recovered_from_snapshot_in_bytes" : 0,
+                  "percent" : "0.0%"
+                },
+                "files" : {
+                  "total" : 0,
+                  "reused" : 0,
+                  "recovered" : 0,
+                  "percent" : "0.0%"
+                },
+                "total_time" : "25ms",
+                "total_time_in_millis" : 25,
+                "source_throttle_time" : "-1",
+                "source_throttle_time_in_millis" : 0,
+                "target_throttle_time" : "-1",
+                "target_throttle_time_in_millis" : 0
+              },
+              "translog" : {
+                "recovered" : 0,
+                "total" : 0,
+                "percent" : "100.0%",
+                "total_on_start" : 0,
+                "total_time" : "9ms",
+                "total_time_in_millis" : 9
+              },
+              "verify_index" : {
+                "check_index_time" : "0s",
+                "check_index_time_in_millis" : 0,
+                "total_time" : "0s",
+                "total_time_in_millis" : 0
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rc/_recovery?detailed=true",
+      "mask" : [
+        "start_time",
+        "start_time_in_millis",
+        "stop_time",
+        "stop_time_in_millis",
+        "total_time",
+        "total_time_in_millis",
+        "host",
+        "transport_address",
+        "ip",
+        "name",
+        "target.id"
+      ],
+      "status" : 200,
+      "response" : {
+        "esm-rc" : {
+          "shards" : [
+            {
+              "id" : 0,
+              "type" : "EMPTY_STORE",
+              "stage" : "DONE",
+              "primary" : true,
+              "start_time_in_millis" : 1792573671397,
+              "stop_time_in_millis" : 1792573671438,
+              "total_time_in_millis" : 41,
+              "source" : { },
+              "target" : {
+                "id" : "2AU6uEV5S82s9FCi0WUJKg",
+                "host" : "172.17.0.2",
+                "transport_address" : "172.17.0.2:9300",
+                "ip" : "172.17.0.2",
+                "name" : "9a12ac153b52"
+              },
+              "index" : {
+                "size" : {
+                  "total_in_bytes" : 0,
+                  "reused_in_bytes" : 0,
+                  "recovered_in_bytes" : 0,
+                  "recovered_from_snapshot_in_bytes" : 0,
+                  "percent" : "0.0%"
+                },
+                "files" : {
+                  "total" : 0,
+                  "reused" : 0,
+                  "recovered" : 0,
+                  "percent" : "0.0%",
+                  "details" : [ ]
+                },
+                "total_time_in_millis" : 26,
+                "source_throttle_time_in_millis" : 0,
+                "target_throttle_time_in_millis" : 0
+              },
+              "translog" : {
+                "recovered" : 0,
+                "total" : 0,
+                "percent" : "100.0%",
+                "total_on_start" : 0,
+                "total_time_in_millis" : 11
+              },
+              "verify_index" : {
+                "check_index_time_in_millis" : 0,
+                "total_time_in_millis" : 0
+              }
+            },
+            {
+              "id" : 1,
+              "type" : "EMPTY_STORE",
+              "stage" : "DONE",
+              "primary" : true,
+              "start_time_in_millis" : 1792573671400,
+              "stop_time_in_millis" : 1792573671444,
+              "total_time_in_millis" : 43,
+              "source" : { },
+              "target" : {
+                "id" : "2AU6uEV5S82s9FCi0WUJKg",
+                "host" : "172.17.0.2",
+                "transport_address" : "172.17.0.2:9300",
+                "ip" : "172.17.0.2",
+                "name" : "9a12ac153b52"
+              },
+              "index" : {
+                "size" : {
+                  "total_in_bytes" : 0,
+                  "reused_in_bytes" : 0,
+                  "recovered_in_bytes" : 0,
+                  "recovered_from_snapshot_in_bytes" : 0,
+                  "percent" : "0.0%"
+                },
+                "files" : {
+                  "total" : 0,
+                  "reused" : 0,
+                  "recovered" : 0,
+                  "percent" : "0.0%",
+                  "details" : [ ]
+                },
+                "total_time_in_millis" : 25,
+                "source_throttle_time_in_millis" : 0,
+                "target_throttle_time_in_millis" : 0
+              },
+              "translog" : {
+                "recovered" : 0,
+                "total" : 0,
+                "percent" : "100.0%",
+                "total_on_start" : 0,
+                "total_time_in_millis" : 9
+              },
+              "verify_index" : {
+                "check_index_time_in_millis" : 0,
+                "total_time_in_millis" : 0
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-rc",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

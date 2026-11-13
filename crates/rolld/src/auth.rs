@@ -39,12 +39,17 @@ pub const RULES: &[Rule] = &[
     // Version, node and which products are on: the dashboard's sidebar reads it before sign-in.
     // It (and the 404s of products that are off) is merged in front of the gate in main.rs.
     Rule { route: "/v1/info", access: Access::Public("version, node and products on, for the dashboard before sign-in") },
+    Rule { route: "/v1/previews/{id}/screenshot.png", access: Access::Public("a public preview's screenshot behind a signed, expiring link (GitHub fetches the pull request comment's image anonymously)") },
     // roll code has owners and tokens of its own (docs/code/http-api.md "Auth"): public repos and
     // pages read anonymously, git per its own rules, GitHub/Slack/Discord/Linear webhooks verify
     // their signatures, agents' device login and machine links use their own tokens. It takes the
     // operator's token as its admin.
     Rule { route: "/v1/code", access: Access::Product("roll code: owners, tokens, public repos, signed webhooks, device login") },
     Rule { route: "/git", access: Access::Product("roll code's git smart HTTP: its tokens, public repos") },
+    // roll apps' deploy hooks: the secret is the URL's last segment (`rlk_…`, a hash kept), for CI
+    // and registries' webhooks that send no header; anything but a live hook is a 404, and each
+    // deploy is in the service's activity with the caller's address (docs/apps/README.md).
+    Rule { route: "/v1/apps/hooks", access: Access::Product("roll apps' deploy hooks: the secret in the URL") },
     // Accounts: sign-in is public; the rest checks the session, an admin's, or the operator's
     // token (docs/accounts.md).
     Rule { route: "/v1/accounts", access: Access::Product("accounts: sign-in, then the session decides") },
@@ -199,6 +204,7 @@ fn listeners(a: &Args) -> Vec<SocketAddr> {
     l.extend([q.amqp, q.management, q.stomp, q.web_stomp, q.mqtt, q.web_mqtt, q.stream, q.http]);
     l.extend([n.nosql_cql, n.nosql_cql_shard_aware, n.nosql_alternator, n.nosql_rest]);
     l.extend([n.nosql_alternator_https, n.nosql_cql_tls, n.nosql_cql_shard_aware_tls, n.nosql_metrics].into_iter().flatten());
+    l.push(a.search.search_http);
     l
 }
 

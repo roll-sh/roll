@@ -23,6 +23,8 @@ pub struct Products<'a> {
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub code: Option<&'a Arc<code_control::Code>>,
     pub secrets: SecretsEnvs,
+    pub apps: Option<Arc<apps_control::Apps>>,
+    pub search: Option<Arc<search_control::Control>>,
 }
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
@@ -49,6 +51,10 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
     if let Some(broker) = p.streams {
         r.by_fn("stream", move |id: &str| broker.find_stream(id).map(|s| s.id.clone()));
     }
+    if let Some(search) = p.search {
+        // A cluster by its id, also when a path names it.
+        r.by_fn("cluster", move |id: &str| search.store.id_of(id).ok().flatten());
+    }
     if let Some(code) = p.code {
         let c = code.clone();
         r.by_fn("default-branch", move |repo: &str| c.default_branch_of(repo));
@@ -56,6 +62,11 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
             let code = code.clone();
             r.by_fn(kind, move |id: &str| code.repo_of(kind, id));
         }
+    }
+    if let Some(apps) = p.apps {
+        // A preview's own (ephemeral) environment is what rules call `preview`, so the "previews
+        // only" preset reaches `pv-<id>` and not a hand-named one.
+        r.environment_fn("apps", move |id: &str, env: &str| apps.store.environment(id, env).ok().filter(|e| e.ephemeral).map(|_| "preview".to_string()));
     }
     r
 }

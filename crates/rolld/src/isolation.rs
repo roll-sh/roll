@@ -17,6 +17,8 @@ use tracing::info;
 pub async fn setup(home: &Path, sandboxes: &mut SandboxConfig) -> anyhow::Result<Arc<dyn Isolation>> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let Some(cfg) = FargateConfig::from_lookup(env, home.join("code").join("runs"))? else {
+        // Containers carry this daemon's home, so a restart cleans up only its own leftovers.
+        code_preview::docker::set_home(home);
         return Ok(Arc::new(code_preview::docker::Docker));
     };
     if matches!(sandboxes.backend, Some(BackendConfig::Docker(_))) {

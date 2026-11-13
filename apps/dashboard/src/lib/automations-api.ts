@@ -38,7 +38,7 @@ export const AGENT_EVENTS: readonly AgentEvent[] = [
 ];
 
 /** The roll code events a `code` trigger can listen for (the webhook events). */
-export const CODE_EVENTS = ["landed", "change", "review", "check", "queue", "work", "preview", "push", "thread"] as const;
+export const CODE_EVENTS = ["landed", "change", "review", "check", "queue", "work", "preview", "push", "thread", "budget"] as const;
 
 export type Trigger =
   /** Only by hand: the dashboard's button, `roll agent automation run`, the MCP tool. */

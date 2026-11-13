@@ -101,6 +101,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - the HTTP API (`http/`): the control plane, a connectionless data plane, and Confluent REST v3
   - Produce and fetch never decode records: batches go to disk and back to clients as received. Only compaction, timestamp lookups, compacted-topic key checks and the HTTP API decode them, through `records.rs`.
   - Compaction rewrites uploaded chunks into new objects with `.c<generation>.kb` keys and swaps them in atomically, keeping offsets. Never reuse a chunk key.
+  - Branches (`branch.rs`) share chunk objects by key across streams, so an object under one stream's prefix may be another stream's data. Delete a chunk object only when the catalog says no row references it: the keys `Store::delete_chunks`, `replace_chunks`, `delete_topic` and `delete_stream` return from the same transaction. Never `delete_prefix` a stream's or topic's objects (`Broker::sweep` skips referenced keys).
   - Local disk is a cache: closed partitions drop their local copies (`evict_on_unload`), and `local_disk_bytes` caps open ones. Never drop a segment that isn't fully uploaded or that holds an open transaction (`keep_local_from`): transaction state is rebuilt from local segments.
   - On the fleet (`fleet.rs`, the broker README's "On the fleet") a stream has one owner (lease `stream:cluster:<id>`) and only it opens the stream's partitions; connections are spliced to it after SASL and HTTP is forwarded. Every catalog write that belongs to a stream is fenced (`Store::fenced`: the stream's generation checked in the same transaction), and object keys written there carry the tenure. Acknowledgements wait for the owner's write-ahead log object in object storage (`LogConfig::remote`): never move a high watermark past what object storage has, and never trust a node's local copy of a stream it just took over.
   - Encoding fails if a response sets a field outside its version range. Gate every field on `ctx.version`. `tests/protocol.rs` encodes every API at every version.
@@ -299,6 +300,28 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it
   with every product's own API in `lib/workspace-resources.ts`, and holds it in `lib/workspace-store.ts`
   for the sidebar, Home and `/dashboard/projects/$id`. A new resource kind needs its row in all three.
+- **Apps (roll apps: hosting the user's own code; docs/apps/README.md):**
+  - `crates/apps-build` detects how to build a tree and writes the Dockerfile (reads files only);
+    `crates/apps-control` is the store, the deploy queue, the runtimes (`runtime/`: Docker, a fake
+    for tests), the waking proxy (`public.rs`, `live.rs`) and `/v1/apps`; rolld wires it in
+    `crates/rolld/src/apps.rs`. `docs/apps/http-api.md` is the contract with
+    `apps/dashboard/src/lib/apps-api.ts` and `roll-cli/src/apps.rs`: change them together.
+  - A service is the workspace resource kind `service`; its owner is the holder of
+    `apps:service:<id>`, and every `/v1/apps/services/{id}/…` route runs there (`Cluster::dispatch`).
+    Put the service id, and the environment where an action targets one, in the path: the
+    permissions catalogue (feature/roll-mcp) classifies routes by pattern, and production deploys
+    are `deploy`, not `write`. Don't add token or scope checks in roll apps.
+  - Deployments are immutable: a rollback deploys an old image again, never rebuilds. An
+    environment's active deployment moves only through `Store::switch_active` (a compare-and-swap).
+  - Customer code never runs on a fleet node: instances and builds go through the `Runtime` and
+    `Builder` traits. Everything made is named `roll-apps-…` and labelled `sh.roll.apps=<service>`.
+    Variables are sealed at rest, go to containers as Engine API `Env` values (a 0600 env file
+    only over the CLI; never argv), and are
+    returned in the clear only by `…/variables/values`.
+  - An idle service costs nothing: only running instances are metered. Keep cold starts measured
+    (`pnpm test:apps --docker` prints them; the numbers live in docs/apps/README.md, "Measured").
+  - After touching anything apps-related, run `pnpm test:apps` (`--docker` for real Docker). New
+    tests go in `apps-control/tests/api.rs` (in process, fake runtime) or `tests/docker.rs`.
 - **Accounts (sign-in to roll.sh):** `crates/roll-accounts` (docs/accounts.md: invites, email
   codes, GitHub, Google, TOTP), mounted by `crates/rolld/src/accounts.rs`. Sessions are hashed
   cookies that rolld's gate (`roll_auth::check`) resolves on every request, never cached, with
@@ -455,6 +478,28 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Put new tests in the matching file: differential scripts in `crates/nosql-server/tests/compat/*.cql`, drivers in `tests/drivers.rs`, persistence in `tests/storage.rs`, `branches.rs` and `restore.rs`, several nodes sharing databases in `crates/nosql-control/tests/cluster.rs`.
   - On a fleet a database is loaded only on the holder of its lease `nosql:db:<id>`, and every manifest write is a compare-and-swap (`nosql_storage::manifest::swap_manifest`): never `put` a manifest. The design is "On a fleet" in `docs/nosql/architecture.md`.
   - SSTable backup imports: format parsers are unit-tested in `crates/nosql-sstable-import`, imports end to end in `crates/nosql-control/tests/import_sstables.rs`. Its fixtures are made by `tests/fixtures/generate.sh` on the references (`imp_` keyspaces; `cleanup.sh` drops them and their snapshots).
+- **Search (Elasticsearch / OpenSearch compatible):**
+  - The design is in `docs/search/` (start with `README.md` and `architecture.md`; cross-crate
+    interfaces in `contracts.md`). The target is 1:1 client-visible behaviour with Elasticsearch
+    9.5.5, plus an OpenSearch 3.9 dialect: gate on `Dialect`, never on a guess.
+  - `search-analysis`, `search-codec`, `search-index`, `search-aggs` and `search-painless` are the
+    engine (no I/O); `search-store` is object storage (WAL, segments, manifests, branches, GC);
+    `search-es` is the REST API; `search-server` the multi-tenant node; `search-control`
+    `/v1/search`, metering and the fleet; `search-yaml` the YAML REST runner.
+  - On a fleet a cluster is loaded only on the holder of its lease `search:cluster:<name>`
+    (`search_control::cluster`), and every request for it runs there (`Cluster::dispatch`). Writes
+    are fenced by the ownership markers in object storage (`Store::claim_next`), never by the
+    lease's epoch, and acknowledged once their WAL batch is in object storage. A call about one
+    cluster under `/v1/search/clusters/{id}/` runs on its owner; put new ones there.
+  - Elasticsearch's YAML suites and module sources are downloaded at test time into `target/`
+    (they aren't Apache-licensed): never commit them. Only test ids go in
+    `crates/search-yaml/baseline/`, and a pass count only goes up (`docs/search/compatibility.md`
+    holds the minimums).
+  - After touching anything search-related, run `pnpm test:search` (it skips itself when nothing
+    relevant changed; `--unit` skips Docker). Put new tests in the matching place: engine
+    behaviour as unit tests in its crate, REST behaviour as fixtures checked against Elasticsearch
+    (`search-es/tests/`), the node in `search-server/tests/`, `/v1/search` and the fleet in
+    `search-control/tests/{control,cluster}.rs`, the CLI in `roll-cli/tests/search.rs`.
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.
   - Test Postgres with `docker run --rm postgres:18-alpine psql "postgres://...@host.docker.internal:55432/main?options=endpoint%3D<ep>"`, because there is no local psql.

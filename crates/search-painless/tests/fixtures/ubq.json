@@ -1,0 +1,2014 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.a += 1",
+    "lang": "painless"
+   },
+   "id": "c0",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c0",
+    "_routing": null,
+    "_source": {
+     "a": 2,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 1,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 0,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.str = ctx.toString().replaceAll(/_now=[0-9]+/, m -> '_now=N'); ctx._source.keys = new ArrayList(ctx.keySet())",
+    "lang": "painless"
+   },
+   "id": "c1",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c1",
+    "_routing": null,
+    "_source": {
+     "str": "{_source={a=1, s=x, tags=[t1], o={k=2}}, _routing=null, op=index, _index=painless-write, _id=c1, _now=N, _version=-1}",
+     "a": 1,
+     "s": "x",
+     "keys": [
+      "_source",
+      "_routing",
+      "op",
+      "_index",
+      "_id",
+      "_now",
+      "_version"
+     ],
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 1,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 0,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.v = ctx._version; ctx._source.i = ctx._index; ctx._source.id = ctx._id; ctx._source.r = ctx._routing",
+    "lang": "painless"
+   },
+   "id": "c2",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c2",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "r": null,
+     "s": "x",
+     "v": -1,
+     "i": "painless-write",
+     "id": "c2",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 1,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 0,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'noop'",
+    "lang": "painless"
+   },
+   "id": "c3",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c3",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 0,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 1,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'delete'",
+    "lang": "painless"
+   },
+   "id": "c4",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 0,
+   "deleted": 1,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 0,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'bogus'",
+    "lang": "painless"
+   },
+   "id": "c5",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c5",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.lambda$stringSetValidator$1(Metadata.java:416)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx.op = 'bogus'",
+       "         ^---- HERE"
+      ],
+      "script": "ctx.op = 'bogus'",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.lambda$stringSetValidator$1(Metadata.java:416)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx.op = 'bogus'",
+     "         ^---- HERE"
+    ],
+    "script": "ctx.op = 'bogus'",
+    "lang": "painless",
+    "position": {
+     "offset": 9,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[op] must be one of delete, index, noop, not [bogus]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = null",
+    "lang": "painless"
+   },
+   "id": "c6",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c6",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:370)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx.op = null",
+       "   ^---- HERE"
+      ],
+      "script": "ctx.op = null",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 13
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:370)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx.op = null",
+     "   ^---- HERE"
+    ],
+    "script": "ctx.op = null",
+    "lang": "painless",
+    "position": {
+     "offset": 3,
+     "start": 0,
+     "end": 13
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "op cannot be null"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.op = 'none'",
+    "lang": "painless"
+   },
+   "id": "c7",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c7",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.lambda$stringSetValidator$1(Metadata.java:416)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx.op = 'none'",
+       "         ^---- HERE"
+      ],
+      "script": "ctx.op = 'none'",
+      "lang": "painless",
+      "position": {
+       "offset": 9,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.lambda$stringSetValidator$1(Metadata.java:416)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx.op = 'none'",
+     "         ^---- HERE"
+    ],
+    "script": "ctx.op = 'none'",
+    "lang": "painless",
+    "position": {
+     "offset": 9,
+     "start": 0,
+     "end": 15
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[op] must be one of delete, index, noop, not [none]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._index = 'x'",
+    "lang": "painless"
+   },
+   "id": "c8",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c8",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._index = 'x'",
+       "             ^---- HERE"
+      ],
+      "script": "ctx._index = 'x'",
+      "lang": "painless",
+      "position": {
+       "offset": 13,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx._index = 'x'",
+     "             ^---- HERE"
+    ],
+    "script": "ctx._index = 'x'",
+    "lang": "painless",
+    "position": {
+     "offset": 13,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "_index cannot be updated"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._id = 'x'",
+    "lang": "painless"
+   },
+   "id": "c9",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c9",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._id = 'x'",
+       "          ^---- HERE"
+      ],
+      "script": "ctx._id = 'x'",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 13
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx._id = 'x'",
+     "          ^---- HERE"
+    ],
+    "script": "ctx._id = 'x'",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 13
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "_id cannot be updated"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._version = 5",
+    "lang": "painless"
+   },
+   "id": "c10",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c10",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._version = 5",
+       "   ^---- HERE"
+      ],
+      "script": "ctx._version = 5",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx._version = 5",
+     "   ^---- HERE"
+    ],
+    "script": "ctx._version = 5",
+    "lang": "painless",
+    "position": {
+     "offset": 3,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "_version cannot be updated"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._routing = 'r'",
+    "lang": "painless"
+   },
+   "id": "c11",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c11",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._routing = 'r'",
+       "               ^---- HERE"
+      ],
+      "script": "ctx._routing = 'r'",
+      "lang": "painless",
+      "position": {
+       "offset": 15,
+       "start": 0,
+       "end": 18
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx._routing = 'r'",
+     "               ^---- HERE"
+    ],
+    "script": "ctx._routing = 'r'",
+    "lang": "painless",
+    "position": {
+     "offset": 15,
+     "start": 0,
+     "end": 18
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "_routing cannot be updated"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._now = 1",
+    "lang": "painless"
+   },
+   "id": "c12",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c12",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._now = 1",
+       "   ^---- HERE"
+      ],
+      "script": "ctx._now = 1",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 12
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:363)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:96)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx._now = 1",
+     "   ^---- HERE"
+    ],
+    "script": "ctx._now = 1",
+    "lang": "painless",
+    "position": {
+     "offset": 3,
+     "start": 0,
+     "end": 12
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "_now cannot be updated"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.foo = 1",
+    "lang": "painless"
+   },
+   "id": "c13",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c13",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:103)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx.foo = 1",
+       "   ^---- HERE"
+      ],
+      "script": "ctx.foo = 1",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 11
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:103)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx.foo = 1",
+     "   ^---- HERE"
+    ],
+    "script": "ctx.foo = 1",
+    "lang": "painless",
+    "position": {
+     "offset": 3,
+     "start": 0,
+     "end": 11
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot put key [foo] with value [1] into ctx"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('op')",
+    "lang": "painless"
+   },
+   "id": "c14",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c14",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:137)",
+       "ctx.remove('op')",
+       "           ^---- HERE"
+      ],
+      "script": "ctx.remove('op')",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 16
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:137)",
+     "ctx.remove('op')",
+     "           ^---- HERE"
+    ],
+    "script": "ctx.remove('op')",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 16
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "op cannot be removed"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx.remove('_routing')",
+    "lang": "painless"
+   },
+   "id": "c15",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c15",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:137)",
+       "ctx.remove('_routing')",
+       "           ^---- HERE"
+      ],
+      "script": "ctx.remove('_routing')",
+      "lang": "painless",
+      "position": {
+       "offset": 11,
+       "start": 0,
+       "end": 22
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:379)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.remove(Metadata.java:255)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.remove(CtxMap.java:137)",
+     "ctx.remove('_routing')",
+     "           ^---- HERE"
+    ],
+    "script": "ctx.remove('_routing')",
+    "lang": "painless",
+    "position": {
+     "offset": 11,
+     "start": 0,
+     "end": 22
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "_routing cannot be removed"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source = ['n': 1]",
+    "lang": "painless"
+   },
+   "id": "c16",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c16",
+    "_routing": null,
+    "_source": {
+     "n": 1
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 1,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 0,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source = 1",
+    "lang": "painless"
+   },
+   "id": "c17",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c17",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.replaceSource(CtxMap.java:114)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:101)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+       "ctx._source = 1",
+       "   ^---- HERE"
+      ],
+      "script": "ctx._source = 1",
+      "lang": "painless",
+      "position": {
+       "offset": 3,
+       "start": 0,
+       "end": 15
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.replaceSource(CtxMap.java:114)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:101)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.CtxMap.put(CtxMap.java:31)",
+     "ctx._source = 1",
+     "   ^---- HERE"
+    ],
+    "script": "ctx._source = 1",
+    "lang": "painless",
+    "position": {
+     "offset": 3,
+     "start": 0,
+     "end": 15
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Expected [_source] to be a Map, not [1] with type [java.lang.Integer]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.m = metadata().getIndex() + '/' + metadata().getId() + '/' + metadata().getRouting() + '/' + metadata().getVersion() + '/' + metadata().getOp()",
+    "lang": "painless"
+   },
+   "id": "c18",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c18",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "m": "painless-write/c18/null/-1/index",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 1,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 0,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setOp('noop')",
+    "lang": "painless"
+   },
+   "id": "c19",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c19",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 0,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 1,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setOp('bogus')",
+    "lang": "painless"
+   },
+   "id": "c20",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c20",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.lambda$stringSetValidator$1(Metadata.java:416)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+       "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.setOp(Metadata.java:164)",
+       "metadata().setOp('bogus')",
+       "          ^---- HERE"
+      ],
+      "script": "metadata().setOp('bogus')",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 25
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.lambda$stringSetValidator$1(Metadata.java:416)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.checkType(Metadata.java:407)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata$FieldProperty.check(Metadata.java:373)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.put(Metadata.java:218)",
+     "org.elasticsearch.server@9.5.5/org.elasticsearch.script.Metadata.setOp(Metadata.java:164)",
+     "metadata().setOp('bogus')",
+     "          ^---- HERE"
+    ],
+    "script": "metadata().setOp('bogus')",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 25
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "[op] must be one of delete, index, noop, not [bogus]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "metadata().setIndex('x')",
+    "lang": "painless"
+   },
+   "id": "c21",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c21",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "metadata().setIndex('x')",
+       "          ^---- HERE"
+      ],
+      "script": "metadata().setIndex('x')",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 24
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "metadata().setIndex('x')",
+     "          ^---- HERE"
+    ],
+    "script": "metadata().setIndex('x')",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 24
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [org.elasticsearch.script.Metadata, setIndex/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.n = metadata().getNow()",
+    "lang": "painless"
+   },
+   "id": "c22",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c22",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... tx._source.n = metadata().getNow()",
+       "                             ^---- HERE"
+      ],
+      "script": "ctx._source.n = metadata().getNow()",
+      "lang": "painless",
+      "position": {
+       "offset": 26,
+       "start": 1,
+       "end": 35
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... tx._source.n = metadata().getNow()",
+     "                             ^---- HERE"
+    ],
+    "script": "ctx._source.n = metadata().getNow()",
+    "lang": "painless",
+    "position": {
+     "offset": 26,
+     "start": 1,
+     "end": 35
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [org.elasticsearch.script.Metadata, getNow/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "field('o.k').set(9)",
+    "lang": "painless"
+   },
+   "id": "c23",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c23",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 9
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 1,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 0,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.x = params.x",
+    "lang": "painless"
+   },
+   "id": "c24",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c24",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "x": null,
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "total": 1,
+   "updated": 1,
+   "deleted": 0,
+   "batches": 1,
+   "version_conflicts": 0,
+   "noops": 0,
+   "retries": {
+    "bulk": 0,
+    "search": 0
+   },
+   "throttled_millis": 0,
+   "requests_per_second": -1.0,
+   "throttled_until_millis": 0,
+   "failures": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "params.x = 6",
+    "lang": "painless",
+    "params": {
+     "x": 5
+    }
+   },
+   "id": "c25",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c25",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.Collections$UnmodifiableMap.put(Collections.java:1666)",
+       "params.x = 6",
+       "      ^---- HERE"
+      ],
+      "script": "params.x = 6",
+      "lang": "painless",
+      "position": {
+       "offset": 6,
+       "start": 0,
+       "end": 12
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.Collections$UnmodifiableMap.put(Collections.java:1666)",
+     "params.x = 6",
+     "      ^---- HERE"
+    ],
+    "script": "params.x = 6",
+    "lang": "painless",
+    "position": {
+     "offset": 6,
+     "start": 0,
+     "end": 12
+    },
+    "caused_by": {
+     "type": "unsupported_operation_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ctx._source.c = (char) 'c'",
+    "lang": "painless"
+   },
+   "id": "c26",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c26",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "illegal_argument_exception",
+      "reason": "cannot write xcontent for unknown value of type class java.lang.Character"
+     }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "cannot write xcontent for unknown value of type class java.lang.Character"
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "throw new IllegalArgumentException('nope')",
+    "lang": "painless"
+   },
+   "id": "c27",
+   "doc": {
+    "a": 1,
+    "s": "x",
+    "tags": [
+     "t1"
+    ],
+    "o": {
+     "k": 2
+    }
+   },
+   "doc_raw": "{\"a\": 1, \"s\": \"x\", \"tags\": [\"t1\"], \"o\": {\"k\": 2}}"
+  },
+  "after": [
+   {
+    "_index": "painless-write",
+    "_id": "c27",
+    "_routing": null,
+    "_source": {
+     "a": 1,
+     "s": "x",
+     "tags": [
+      "t1"
+     ],
+     "o": {
+      "k": 2
+     }
+    }
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "throw new IllegalArgumentException('nope')",
+       "      ^---- HERE"
+      ],
+      "script": "throw new IllegalArgumentException('nope')",
+      "lang": "painless",
+      "position": {
+       "offset": 6,
+       "start": 0,
+       "end": 42
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "throw new IllegalArgumentException('nope')",
+     "      ^---- HERE"
+    ],
+    "script": "throw new IllegalArgumentException('nope')",
+    "lang": "painless",
+    "position": {
+     "offset": 6,
+     "start": 0,
+     "end": 42
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "nope"
+    }
+   },
+   "status": 400
+  }
+ }
+]

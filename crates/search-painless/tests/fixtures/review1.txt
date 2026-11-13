@@ -1,0 +1,215 @@
+return BigInteger.ONE.shiftLeft(Integer.MAX_VALUE).bitLength()
+----
+return new BigDecimal('1.5').setScale(1000000000)
+----
+return new BigDecimal('1.5').movePointRight(Integer.MAX_VALUE)
+----
+return new BigDecimal('-12345.678900').movePointLeft(Integer.MIN_VALUE)
+----
+return new BigDecimal('1.5').pow(999999999)
+----
+return new BigDecimal('1.5').setScale(-1000000000, RoundingMode.HALF_UP)
+----
+try { BigInteger.TWO.pow(Integer.MAX_VALUE); return 'no' } catch (ArithmeticException e) { return e.getMessage() }
+----
+return [BigInteger.ONE.shiftLeft(Integer.MIN_VALUE), BigInteger.ONE.negate().shiftLeft(Integer.MIN_VALUE), BigInteger.ZERO.shiftLeft(Integer.MAX_VALUE), BigInteger.ZERO.shiftRight(Integer.MIN_VALUE)]
+----
+return BigInteger.valueOf(-2).pow(Integer.MAX_VALUE)
+----
+try { BigInteger.valueOf(3).pow(Integer.MAX_VALUE); return 'no' } catch (ArithmeticException e) { return e.getMessage() }
+----
+return BigInteger.TEN.pow(715827883).signum()
+----
+return BigInteger.ONE.shiftRight(Integer.MIN_VALUE)
+----
+return BigInteger.valueOf(-4).pow(3) + ' ' + BigInteger.valueOf(-2).pow(31) + ' ' + BigInteger.valueOf(-1).pow(7) + ' ' + BigInteger.valueOf(12).pow(0) + ' ' + BigInteger.ZERO.pow(0) + ' ' + BigInteger.valueOf(6).pow(40)
+----
+String s = BigInteger.ONE.shiftLeft(3000000).toString(); return [s.length(), s.hashCode(), s.substring(0, 30), s.substring(s.length() - 30)]
+----
+String s = BigInteger.valueOf(7).pow(100000).toString(); return [s.length(), s.hashCode(), s.substring(0, 30), s.substring(s.length() - 30)]
+----
+BigInteger x = BigInteger.valueOf(-3).pow(20001); List out = []; for (int r : [2, 3, 7, 8, 10, 16, 36]) { String s = x.toString(r); out.add([r, s.length(), s.hashCode(), s.substring(0, 12)]) } return out
+----
+BigInteger x = BigInteger.TEN.pow(5000).subtract(BigInteger.ONE); String s = x.toString(); return [s.length(), s.chars().allMatch(c -> c == 57), x.add(BigInteger.ONE).toString().length()]
+----
+BigInteger x = BigInteger.TEN.pow(4000).add(BigInteger.valueOf(7)); String s = x.toString(); return [s.length(), s.substring(0, 3), s.substring(3990)]
+----
+BigInteger a = BigInteger.valueOf(3).pow(5000); BigInteger b = BigInteger.valueOf(7).pow(4000).negate(); BigInteger p = a.multiply(b); return [p.mod(BigInteger.valueOf(1000000007)), p.bitLength(), p.hashCode(), p.signum(), p.divide(a).equals(b), p.remainder(b)]
+----
+BigInteger a = BigInteger.ONE.shiftLeft(70000).subtract(BigInteger.ONE); BigInteger p = a.multiply(a); return [p.bitCount(), p.bitLength(), p.getLowestSetBit(), p.hashCode()]
+----
+BigInteger a = BigInteger.valueOf(123456789).pow(3000); BigInteger b = BigInteger.valueOf(987654321).pow(1000); return [a.multiply(b).hashCode(), b.multiply(a).hashCode(), a.multiply(a).hashCode(), a.pow(2).equals(a.multiply(a))]
+----
+return new BigDecimal('1.5').setScale(20000).toString().length()
+----
+BigDecimal d = new BigDecimal('2').pow(3000); return [d.precision(), d.toString().length(), d.toString().hashCode()]
+----
+return new BigDecimal('123.456').movePointRight(5000).toBigInteger().bitLength()
+----
+return HexFormat.of().parseHex('é')
+----
+return HexFormat.of().parseHex('€a')
+----
+return HexFormat.ofDelimiter(':').parseHex('é')
+----
+return HexFormat.of().parseHex('0g')
+----
+return HexFormat.of().parseHex('g0')
+----
+return HexFormat.of().parseHex('0A1b')
+----
+return HexFormat.ofDelimiter(':').withPrefix('0x').parseHex('0x0a:0x0b')
+----
+return HexFormat.ofDelimiter(':').withPrefix('0x').parseHex('0x0a;0x0b')
+----
+return HexFormat.ofDelimiter(':').withPrefix('0x').parseHex('1x0a:0x0b')
+----
+return HexFormat.of().withSuffix('h').parseHex('0ah0bx')
+----
+return HexFormat.ofDelimiter(', ').parseHex('0a, 0b,\n0c')
+----
+return HexFormat.ofDelimiter(':').parseHex('0a:0b:0')
+----
+return HexFormat.of().parseHex('é0a1', 1, 3)
+----
+return HexFormat.of().parseHex('é0a1', 1, 6)
+----
+return Long.parseUnsignedLong('abc', -1)
+----
+return Integer.parseUnsignedInt('abc', 37)
+----
+return Integer.parseUnsignedInt('-1')
+----
+return Integer.parseUnsignedInt('4294967296')
+----
+return [Integer.parseUnsignedInt('4294967295'), Long.parseUnsignedLong('18446744073709551615'), Integer.parseUnsignedInt('+12'), Integer.parseUnsignedInt('zz', 36), Integer.parseUnsignedInt('٣٤')]
+----
+return Long.parseUnsignedLong('18446744073709551616')
+----
+return Long.parseUnsignedLong('+')
+----
+return Integer.parseUnsignedInt('')
+----
+return Integer.parseUnsignedInt('99999999999x')
+----
+return Integer.parseUnsignedInt('12x')
+----
+return Integer.parseUnsignedInt('ff', 10)
+----
+return Integer.parseUnsignedInt(null)
+----
+return ['İ'.equalsIgnoreCase('i'), 'ı'.equalsIgnoreCase('I'), 'ß'.equalsIgnoreCase('SS'), 'K'.equalsIgnoreCase('K'), 'ǅ'.equalsIgnoreCase('ǆ'), 'ﬀ'.equalsIgnoreCase('FF'), 'Σ'.equalsIgnoreCase('ς'), 'aİ'.equalsIgnoreCase('Ai')]
+----
+return ['İ'.regionMatches(true, 0, 'i', 0, 1), 'xİy'.regionMatches(true, 1, 'i', 0, 1), 'İ'.compareToIgnoreCase('i'), 'ı'.compareToIgnoreCase('i')]
+----
+return Integer.decode('08')
+----
+return Integer.decode('-08')
+----
+return Long.decode('09')
+----
+return Integer.decode('0x')
+----
+return Integer.decode('#')
+----
+return Integer.decode('+-1')
+----
+return [Integer.decode('0'), Integer.decode('-0x80000000'), Integer.decode('010'), Integer.decode('#ff'), Long.decode('-0X10')]
+----
+return Integer.decode('0x80000000')
+----
+return Integer.decode('-')
+----
+return Integer.decode('')
+----
+def s = new DecimalFormat('#,##0.00'); s.setMaximumFractionDigits(Integer.MAX_VALUE); return s.toPattern().length();
+----
+def s = new DecimalFormat('#,##0.00'); s.setMaximumFractionDigits(Integer.MAX_VALUE); return s.toLocalizedPattern().length();
+----
+def s = new DecimalFormat('#,##0.00'); s.setMinimumIntegerDigits(Integer.MAX_VALUE); return [s.toPattern(), s.getMinimumIntegerDigits()]
+----
+def s = new DecimalFormat('#,##0.00'); s.setMaximumFractionDigits(1000); s.setMinimumFractionDigits(10); return [s.toPattern().length(), s.toPattern().substring(0, 20)]
+----
+def s = new DecimalFormat('#,##0.00'); s.setMaximumFractionDigits(Integer.MAX_VALUE); try { s.toPattern() } catch (Exception e) { return 'caught' } return 'no'
+----
+return ZoneId.getAvailableZoneIds().size()
+----
+List l = new ArrayList(ZoneId.getAvailableZoneIds()); Collections.sort(l); return l
+----
+return ZoneId.of('SystemV/EST5')
+----
+return ZoneId.of('EST')
+----
+return ZoneId.of('MST')
+----
+return ZoneId.of('HST')
+----
+return ZoneId.of('ROC')
+----
+return ZoneId.of('GMT+0')
+----
+return ZoneId.of('GMT-0')
+----
+return [ZoneId.of('GMT0'), ZoneId.of('UTC'), ZoneId.of('UT'), ZoneId.of('Etc/GMT+0'), ZoneId.of('GMT')]
+----
+return [ZoneId.of('EST', ZoneId.SHORT_IDS), ZoneId.of('MST', ZoneId.SHORT_IDS), ZoneId.of('HST', ZoneId.SHORT_IDS), ZoneId.of('PST', ZoneId.SHORT_IDS)]
+----
+return new TreeMap(ZoneId.SHORT_IDS)
+----
+return ZonedDateTime.parse('2026-01-01T00:00:00 EST', DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss z"))
+----
+return ZonedDateTime.parse('2026-01-01T00:00:00 MST', DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss z"))
+----
+return ZonedDateTime.parse('2026-01-01T00:00:00 HST', DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss z"))
+----
+List out = []; for (String z : ['SystemV/AST4', 'SystemV/AST4ADT', 'SystemV/CST6', 'SystemV/CST6CDT', 'SystemV/EST5', 'SystemV/EST5EDT', 'SystemV/HST10', 'SystemV/MST7', 'SystemV/MST7MDT', 'SystemV/PST8', 'SystemV/PST8PDT', 'SystemV/YST9', 'SystemV/YST9YDT']) { ZoneId id = ZoneId.of(z); out.add([id.getId(), id.getRules().getOffset(Instant.parse('2026-01-15T00:00:00Z')), id.getRules().getOffset(Instant.parse('2026-07-15T00:00:00Z')), id.getRules().isFixedOffset()]) } return out
+----
+return [TimeZone.getTimeZone('EST').getID(), TimeZone.getTimeZone('EST').getRawOffset(), TimeZone.getTimeZone('SystemV/EST5').getID(), TimeZone.getTimeZone('ROC').getID()]
+----
+return ZonedDateTime.of(2026, 1, 1, 0, 0, 0, 0, ZoneId.of('SystemV/EST5EDT')).format(DateTimeFormatter.ofPattern('zzzz z VV'))
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.cbrt(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.tanh(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.cosh(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.sinh(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = 0 + r.nextDouble() * 100; out.add(Double.doubleToRawLongBits(StrictMath.log10(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.cos(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.sin(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.tan(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.exp(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = 0 + r.nextDouble() * 100; out.add(Double.doubleToRawLongBits(StrictMath.log(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -0.99 + r.nextDouble() * 20.99; out.add(Double.doubleToRawLongBits(StrictMath.log1p(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.expm1(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -20 + r.nextDouble() * 40; out.add(Double.doubleToRawLongBits(StrictMath.atan(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -1 + r.nextDouble() * 2; out.add(Double.doubleToRawLongBits(StrictMath.asin(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = -1 + r.nextDouble() * 2; out.add(Double.doubleToRawLongBits(StrictMath.acos(x))) } return out
+----
+List out = []; Random r = new Random(7); for (int i = 0; i < 400; i++) { double x = 0 + r.nextDouble() * 100; out.add(Double.doubleToRawLongBits(StrictMath.sqrt(x))) } return out
+----
+List out = []; Random r = new Random(11); for (int i = 0; i < 400; i++) { double x = r.nextDouble() * 20 - 5; double y = r.nextDouble() * 20 - 5; out.add(Double.doubleToRawLongBits(StrictMath.hypot(x, y))) } return out
+----
+List out = []; Random r = new Random(11); for (int i = 0; i < 400; i++) { double x = r.nextDouble() * 20 - 5; double y = r.nextDouble() * 20 - 5; out.add(Double.doubleToRawLongBits(StrictMath.atan2(x, y))) } return out
+----
+List out = []; Random r = new Random(11); for (int i = 0; i < 400; i++) { double x = r.nextDouble() * 20 - 5; double y = r.nextDouble() * 20 - 5; out.add(Double.doubleToRawLongBits(StrictMath.pow(x, y))) } return out
+----
+List out = []; Random r = new Random(11); for (int i = 0; i < 400; i++) { double x = r.nextDouble() * 20 - 5; double y = r.nextDouble() * 20 - 5; out.add(Double.doubleToRawLongBits(Math.hypot(x, y))) } return out
+----
+return [StrictMath.cbrt(4.26), StrictMath.tanh(0.62), Math.hypot(9.202991727310675, 8.527895705637803), StrictMath.hypot(9.202991727310675, 8.527895705637803), StrictMath.sinh(0.7)]
+----
+List out = []; for (double x : [0.0, -0.0, 1e-300, -1e-300, 1e300, 710.0, 711.0, -710.0, 22.0, -22.0, 1e-8, 0.5, 2.0, 3.0, 1e308, 4.9e-324, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY]) { out.add([Double.doubleToRawLongBits(StrictMath.cbrt(x)), Double.doubleToRawLongBits(StrictMath.tanh(x)), Double.doubleToRawLongBits(StrictMath.cosh(x)), Double.doubleToRawLongBits(StrictMath.sinh(x)), Double.doubleToRawLongBits(StrictMath.log10(x)), Double.doubleToRawLongBits(StrictMath.cos(x)), Double.doubleToRawLongBits(StrictMath.sin(x)), Double.doubleToRawLongBits(StrictMath.hypot(x, 3.0))]) } return out
+----
+List out = []; for (double x : [1e22, 1e100, 3.14159265358979, 1.5707963267948966, 6.283185307179586, 1e6, 123456.789, -1e15, 2.0e9, 1.0e19]) { out.add([Double.doubleToRawLongBits(StrictMath.cos(x)), Double.doubleToRawLongBits(StrictMath.sin(x)), Double.doubleToRawLongBits(StrictMath.tan(x))]) } return out

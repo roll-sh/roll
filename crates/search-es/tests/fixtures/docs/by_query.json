@@ -1,0 +1,527 @@
+{
+  "description" : "delete_by_query, update_by_query and reindex",
+  "steps" : [
+    {
+      "req" : "PUT /es-docs-b",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "n" : {
+              "type" : "long"
+            },
+            "kind" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-b"
+      }
+    },
+    {
+      "req" : "POST /es-docs-b/_bulk?refresh=true",
+      "raw" : "{\"index\": {\"_id\": \"0\"}}\n{\"n\": 0, \"kind\": \"even\"}\n{\"index\": {\"_id\": \"1\"}}\n{\"n\": 1, \"kind\": \"odd\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"n\": 2, \"kind\": \"even\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"n\": 3, \"kind\": \"odd\"}\n{\"index\": {\"_id\": \"4\"}}\n{\"n\": 4, \"kind\": \"even\"}\n{\"index\": {\"_id\": \"5\"}}\n{\"n\": 5, \"kind\": \"odd\"}\n{\"index\": {\"_id\": \"6\"}}\n{\"n\": 6, \"kind\": \"even\"}\n{\"index\": {\"_id\": \"7\"}}\n{\"n\": 7, \"kind\": \"odd\"}\n{\"index\": {\"_id\": \"8\"}}\n{\"n\": 8, \"kind\": \"even\"}\n{\"index\": {\"_id\": \"9\"}}\n{\"n\": 9, \"kind\": \"odd\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "0",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 4,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "5",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 5,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "6",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 6,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "7",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 7,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "8",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 8,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-b",
+              "_id" : "9",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 9,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-b/_update_by_query?refresh=true",
+      "body" : {
+        "query" : {
+          "term" : {
+            "kind" : "odd"
+          }
+        },
+        "script" : {
+          "source" : "ctx._source.n += 100"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 47,
+        "timed_out" : false,
+        "total" : 5,
+        "updated" : 5,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-b/_search",
+      "body" : {
+        "query" : {
+          "range" : {
+            "n" : {
+              "gte" : 100
+            }
+          }
+        },
+        "size" : 0
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 5,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-b/_delete_by_query?refresh=true",
+      "body" : {
+        "query" : {
+          "range" : {
+            "n" : {
+              "lt" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 37,
+        "timed_out" : false,
+        "total" : 2,
+        "deleted" : 2,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_reindex?refresh=true",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-b",
+          "query" : {
+            "term" : {
+              "kind" : "even"
+            }
+          }
+        },
+        "dest" : {
+          "index" : "es-docs-b2"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 332,
+        "timed_out" : false,
+        "total" : 3,
+        "updated" : 0,
+        "created" : 3,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-b2/_count",
+      "status" : 200,
+      "response" : {
+        "count" : 3,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-b"
+        },
+        "dest" : {
+          "index" : "es-docs-b2",
+          "op_type" : "create"
+        }
+      },
+      "status" : 409,
+      "response" : {
+        "took" : 23,
+        "timed_out" : false,
+        "total" : 8,
+        "updated" : 0,
+        "created" : 5,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 3,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [
+          {
+            "index" : "es-docs-b2",
+            "id" : "4",
+            "cause" : {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[4]: version conflict, document already exists (current version [1])",
+              "index_uuid" : "OZbFvHnHTa-Tw2N6nSLHKw",
+              "shard" : "0",
+              "index" : "es-docs-b2"
+            },
+            "status" : 409
+          },
+          {
+            "index" : "es-docs-b2",
+            "id" : "6",
+            "cause" : {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[6]: version conflict, document already exists (current version [1])",
+              "index_uuid" : "OZbFvHnHTa-Tw2N6nSLHKw",
+              "shard" : "0",
+              "index" : "es-docs-b2"
+            },
+            "status" : 409
+          },
+          {
+            "index" : "es-docs-b2",
+            "id" : "8",
+            "cause" : {
+              "type" : "version_conflict_engine_exception",
+              "reason" : "[8]: version conflict, document already exists (current version [1])",
+              "index_uuid" : "OZbFvHnHTa-Tw2N6nSLHKw",
+              "shard" : "0",
+              "index" : "es-docs-b2"
+            },
+            "status" : 409
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "conflicts" : "proceed",
+        "source" : {
+          "index" : "es-docs-b"
+        },
+        "dest" : {
+          "index" : "es-docs-b2",
+          "op_type" : "create"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 9,
+        "timed_out" : false,
+        "total" : 8,
+        "updated" : 0,
+        "created" : 0,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 8,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "POST /_reindex",
+      "body" : {
+        "source" : {
+          "remote" : {
+            "host" : "http://example.com:9200"
+          },
+          "index" : "es-docs-b"
+        },
+        "dest" : {
+          "index" : "es-docs-b3"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[example.com:9200] not whitelisted in reindex.remote.whitelist"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[example.com:9200] not whitelisted in reindex.remote.whitelist"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-b/_update_by_query",
+      "body" : {
+        "query" : {
+          "match_all" : { }
+        },
+        "script" : {
+          "source" : "ctx.op = 'noop'"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "total" : 8,
+        "updated" : 0,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 8,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-b",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-b2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

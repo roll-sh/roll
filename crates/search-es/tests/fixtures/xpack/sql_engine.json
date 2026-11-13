@@ -1,0 +1,1199 @@
+{
+  "description" : "SQL engine: selects, grouping (null group order), functions, DESCRIBE/SHOW, errors",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-emp",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "name" : {
+              "type" : "keyword"
+            },
+            "dept" : {
+              "type" : "keyword"
+            },
+            "salary" : {
+              "type" : "long"
+            },
+            "rate" : {
+              "type" : "double"
+            },
+            "hired" : {
+              "type" : "date"
+            },
+            "active" : {
+              "type" : "boolean"
+            },
+            "tags" : {
+              "type" : "keyword"
+            },
+            "ip" : {
+              "type" : "ip"
+            },
+            "msg" : {
+              "type" : "text"
+            },
+            "v" : {
+              "type" : "version"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-emp"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-emp/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"name\": \"alice\", \"dept\": \"eng\", \"salary\": 120, \"rate\": 1.5, \"hired\": \"2020-01-15T10:00:00Z\", \"active\": true, \"tags\": [\"a\", \"b\"], \"ip\": \"10.0.0.1\", \"msg\": \"hello world\", \"v\": \"1.2.3\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"name\": \"bob\", \"dept\": \"eng\", \"salary\": 100, \"rate\": 2.25, \"hired\": \"2021-06-01T00:00:00Z\", \"active\": false, \"tags\": \"c\", \"ip\": \"10.0.0.2\", \"msg\": \"quick brown fox\", \"v\": \"1.10.0\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"name\": \"carol\", \"dept\": \"ops\", \"salary\": 90, \"hired\": \"2019-03-20T12:30:00Z\", \"active\": true, \"tags\": [\"b\", \"c\", \"a\"], \"ip\": \"192.168.1.1\", \"msg\": \"hello fox\", \"v\": \"2.0.0\"}\n{\"index\": {\"_id\": \"4\"}}\n{\"name\": \"dave\", \"dept\": \"ops\", \"rate\": 3.0, \"hired\": \"2022-11-11T11:11:11Z\", \"active\": true, \"ip\": \"::1\", \"msg\": \"lazy dog\", \"v\": \"0.9\"}\n{\"index\": {\"_id\": \"5\"}}\n{\"name\": \"eve\", \"salary\": 150, \"rate\": 0.5, \"hired\": \"2018-07-04T00:00:00Z\", \"active\": false, \"tags\": [], \"msg\": \"world peace\", \"v\": \"1.2.3\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name, salary FROM \"compat-xpack-emp\" ORDER BY name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            "alice",
+            120
+          ],
+          [
+            "bob",
+            100
+          ],
+          [
+            "carol",
+            90
+          ],
+          [
+            "dave",
+            null
+          ],
+          [
+            "eve",
+            150
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name, salary FROM \"compat-xpack-emp\" WHERE salary > 95 ORDER BY salary DESC"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "salary",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            "eve",
+            150
+          ],
+          [
+            "alice",
+            120
+          ],
+          [
+            "bob",
+            100
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT dept, COUNT(*) AS c, AVG(salary) a, MAX(rate) FROM \"compat-xpack-emp\" GROUP BY dept ORDER BY dept"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "a",
+            "type" : "double"
+          },
+          {
+            "name" : "MAX(rate)",
+            "type" : "double"
+          }
+        ],
+        "rows" : [
+          [
+            null,
+            1,
+            150.0,
+            0.5
+          ],
+          [
+            "eng",
+            2,
+            110.0,
+            2.25
+          ],
+          [
+            "ops",
+            2,
+            90.0,
+            3.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT COUNT(*), SUM(salary), MIN(hired), MAX(hired) FROM \"compat-xpack-emp\""
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "COUNT(*)",
+            "type" : "long"
+          },
+          {
+            "name" : "SUM(salary)",
+            "type" : "long"
+          },
+          {
+            "name" : "MIN(hired)",
+            "type" : "datetime"
+          },
+          {
+            "name" : "MAX(hired)",
+            "type" : "datetime"
+          }
+        ],
+        "rows" : [
+          [
+            5,
+            460,
+            "2018-07-04T00:00:00.000Z",
+            "2022-11-11T11:11:11.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name FROM \"compat-xpack-emp\" WHERE name LIKE 'a%' OR name = 'bob' ORDER BY name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "alice"
+          ],
+          [
+            "bob"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name FROM \"compat-xpack-emp\" WHERE dept IS NULL"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "eve"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name FROM \"compat-xpack-emp\" WHERE salary BETWEEN 90 AND 120 ORDER BY name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "alice"
+          ],
+          [
+            "bob"
+          ],
+          [
+            "carol"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name FROM \"compat-xpack-emp\" WHERE dept IN ('eng', 'x') ORDER BY name LIMIT 1"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "alice"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT UCASE(name) u, LENGTH(name) l, SUBSTRING(name, 1, 2) s, CONCAT(name, 'x') c FROM \"compat-xpack-emp\" ORDER BY name LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "u",
+            "type" : "keyword"
+          },
+          {
+            "name" : "l",
+            "type" : "integer"
+          },
+          {
+            "name" : "s",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "ALICE",
+            5,
+            "al",
+            "alicex"
+          ],
+          [
+            "BOB",
+            3,
+            "bo",
+            "bobx"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT YEAR(hired) y, MONTH(hired) m, DAY_OF_WEEK(hired) d FROM \"compat-xpack-emp\" ORDER BY hired LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "y",
+            "type" : "integer"
+          },
+          {
+            "name" : "m",
+            "type" : "integer"
+          },
+          {
+            "name" : "d",
+            "type" : "integer"
+          }
+        ],
+        "rows" : [
+          [
+            2018,
+            7,
+            4
+          ],
+          [
+            2019,
+            3,
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT ROUND(rate, 1) r, ABS(-salary) a, salary / 3 d, salary % 7 m FROM \"compat-xpack-emp\" ORDER BY name LIMIT 3"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "r",
+            "type" : "double"
+          },
+          {
+            "name" : "a",
+            "type" : "long"
+          },
+          {
+            "name" : "d",
+            "type" : "long"
+          },
+          {
+            "name" : "m",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            1.5,
+            120,
+            40,
+            1
+          ],
+          [
+            2.3,
+            100,
+            33,
+            2
+          ],
+          [
+            null,
+            90,
+            30,
+            6
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT CAST(salary AS VARCHAR) s, CAST(rate AS INTEGER) i FROM \"compat-xpack-emp\" ORDER BY name LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "text"
+          },
+          {
+            "name" : "i",
+            "type" : "integer"
+          }
+        ],
+        "rows" : [
+          [
+            "120",
+            2
+          ],
+          [
+            "100",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name, CASE WHEN salary > 100 THEN 'hi' ELSE 'lo' END x FROM \"compat-xpack-emp\" ORDER BY name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "x",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "alice",
+            "hi"
+          ],
+          [
+            "bob",
+            "lo"
+          ],
+          [
+            "carol",
+            "lo"
+          ],
+          [
+            "dave",
+            "lo"
+          ],
+          [
+            "eve",
+            "hi"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT * FROM \"compat-xpack-emp\" ORDER BY name LIMIT 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_argument_exception",
+              "reason" : "Arrays (returned by [tags]) are not supported"
+            }
+          ],
+          "type" : "invalid_argument_exception",
+          "reason" : "Arrays (returned by [tags]) are not supported"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT msg FROM \"compat-xpack-emp\" WHERE MATCH(msg, 'hello') ORDER BY name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "msg",
+            "type" : "text"
+          }
+        ],
+        "rows" : [
+          [
+            "hello world"
+          ],
+          [
+            "hello fox"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT nope FROM \"compat-xpack-emp\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:8: Unknown column [nope], did you mean [name]?"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:8: Unknown column [nope], did you mean [name]?"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name FROM nope"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:18: Unknown index [nope]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:18: Unknown index [nope]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT FROM \"compat-xpack-emp\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "line 1:8: extraneous input 'FROM' expecting {'ALL', 'ANALYZE', 'ANALYZED', 'CASE', 'CAST', 'CATALOGS', 'COLUMNS', 'CONVERT', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'DAY', 'DEBUG', 'DISTINCT', 'EXECUTABLE', 'EXISTS', 'EXPLAIN', 'EXTRACT', 'FALSE', 'FIRST', 'FORMAT', 'FULL', 'FUNCTIONS', 'GRAPHVIZ', 'HOUR', 'INTERVAL', 'LAST', 'LEFT', 'LIMIT', 'MAPPED', 'MATCH', 'MINUTE', 'MONTH', 'NOT', 'NULL', 'OPTIMIZED', 'PARSED', 'PHYSICAL', 'PIVOT', 'PLAN', 'RIGHT', 'RLIKE', 'QUERY', 'SCHEMAS', 'SECOND', 'SHOW', 'SYS', 'TABLES', 'TEXT', 'TRUE', 'TOP', 'TYPE', 'TYPES', 'VERIFY', 'YEAR', FUNCTION_ESC, DATE_ESC, TIME_ESC, TIMESTAMP_ESC, GUID_ESC, '(', '+', '-', '*', '?', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER, DIGIT_IDENTIFIER, QUOTED_IDENTIFIER, BACKQUOTED_IDENTIFIER}"
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "line 1:8: extraneous input 'FROM' expecting {'ALL', 'ANALYZE', 'ANALYZED', 'CASE', 'CAST', 'CATALOGS', 'COLUMNS', 'CONVERT', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'DAY', 'DEBUG', 'DISTINCT', 'EXECUTABLE', 'EXISTS', 'EXPLAIN', 'EXTRACT', 'FALSE', 'FIRST', 'FORMAT', 'FULL', 'FUNCTIONS', 'GRAPHVIZ', 'HOUR', 'INTERVAL', 'LAST', 'LEFT', 'LIMIT', 'MAPPED', 'MATCH', 'MINUTE', 'MONTH', 'NOT', 'NULL', 'OPTIMIZED', 'PARSED', 'PHYSICAL', 'PIVOT', 'PLAN', 'RIGHT', 'RLIKE', 'QUERY', 'SCHEMAS', 'SECOND', 'SHOW', 'SYS', 'TABLES', 'TEXT', 'TRUE', 'TOP', 'TYPE', 'TYPES', 'VERIFY', 'YEAR', FUNCTION_ESC, DATE_ESC, TIME_ESC, TIMESTAMP_ESC, GUID_ESC, '(', '+', '-', '*', '?', STRING, INTEGER_VALUE, DECIMAL_VALUE, IDENTIFIER, DIGIT_IDENTIFIER, QUOTED_IDENTIFIER, BACKQUOTED_IDENTIFIER}"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "DESCRIBE \"compat-xpack-emp\""
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "column",
+            "type" : "keyword"
+          },
+          {
+            "name" : "type",
+            "type" : "keyword"
+          },
+          {
+            "name" : "mapping",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "active",
+            "BOOLEAN",
+            "boolean"
+          ],
+          [
+            "dept",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "hired",
+            "TIMESTAMP",
+            "datetime"
+          ],
+          [
+            "ip",
+            "VARCHAR",
+            "ip"
+          ],
+          [
+            "msg",
+            "VARCHAR",
+            "text"
+          ],
+          [
+            "name",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "rate",
+            "DOUBLE",
+            "double"
+          ],
+          [
+            "salary",
+            "BIGINT",
+            "long"
+          ],
+          [
+            "tags",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "v",
+            "VARCHAR",
+            "version"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SHOW COLUMNS FROM \"compat-xpack-emp\""
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "column",
+            "type" : "keyword"
+          },
+          {
+            "name" : "type",
+            "type" : "keyword"
+          },
+          {
+            "name" : "mapping",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "active",
+            "BOOLEAN",
+            "boolean"
+          ],
+          [
+            "dept",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "hired",
+            "TIMESTAMP",
+            "datetime"
+          ],
+          [
+            "ip",
+            "VARCHAR",
+            "ip"
+          ],
+          [
+            "msg",
+            "VARCHAR",
+            "text"
+          ],
+          [
+            "name",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "rate",
+            "DOUBLE",
+            "double"
+          ],
+          [
+            "salary",
+            "BIGINT",
+            "long"
+          ],
+          [
+            "tags",
+            "VARCHAR",
+            "keyword"
+          ],
+          [
+            "v",
+            "VARCHAR",
+            "version"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT 1 + 1, 'a', TRUE, NULL"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "1 + 1",
+            "type" : "integer"
+          },
+          {
+            "name" : "'a'",
+            "type" : "keyword"
+          },
+          {
+            "name" : "TRUE",
+            "type" : "boolean"
+          },
+          {
+            "name" : "NULL",
+            "type" : "null"
+          }
+        ],
+        "rows" : [
+          [
+            2,
+            "a",
+            true,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SHOW FUNCTIONS LIKE 'A%'"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "type",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "AVG",
+            "AGGREGATE"
+          ],
+          [
+            "ABS",
+            "SCALAR"
+          ],
+          [
+            "ACOS",
+            "SCALAR"
+          ],
+          [
+            "ASIN",
+            "SCALAR"
+          ],
+          [
+            "ATAN",
+            "SCALAR"
+          ],
+          [
+            "ATAN2",
+            "SCALAR"
+          ],
+          [
+            "ASCII",
+            "SCALAR"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name, tags FROM \"compat-xpack-emp\" ORDER BY name LIMIT 1"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_argument_exception",
+              "reason" : "Arrays (returned by [tags]) are not supported"
+            }
+          ],
+          "type" : "invalid_argument_exception",
+          "reason" : "Arrays (returned by [tags]) are not supported"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT IFNULL(dept, 'none') d, COALESCE(salary, 0) s FROM \"compat-xpack-emp\" ORDER BY name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "keyword"
+          },
+          {
+            "name" : "s",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            "eng",
+            120
+          ],
+          [
+            "eng",
+            100
+          ],
+          [
+            "ops",
+            90
+          ],
+          [
+            "ops",
+            0
+          ],
+          [
+            "none",
+            150
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT DATE_TRUNC('year', hired) t FROM \"compat-xpack-emp\" ORDER BY t LIMIT 2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "t",
+            "type" : "datetime"
+          }
+        ],
+        "rows" : [
+          [
+            "2018-01-01T00:00:00.000Z"
+          ],
+          [
+            "2019-01-01T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT HISTOGRAM(salary, 50) h, COUNT(*) c FROM \"compat-xpack-emp\" GROUP BY h ORDER BY h"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "h",
+            "type" : "long"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            null,
+            1
+          ],
+          [
+            50.0,
+            1
+          ],
+          [
+            100.0,
+            2
+          ],
+          [
+            150.0,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT PERCENTILE(salary, 50) p, STDDEV_POP(salary) s FROM \"compat-xpack-emp\""
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "p",
+            "type" : "double"
+          },
+          {
+            "name" : "s",
+            "type" : "double"
+          }
+        ],
+        "rows" : [
+          [
+            110.0,
+            22.9128784747792
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name, dept FROM \"compat-xpack-emp\" ORDER BY dept, name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "alice",
+            "eng"
+          ],
+          [
+            "bob",
+            "eng"
+          ],
+          [
+            "carol",
+            "ops"
+          ],
+          [
+            "dave",
+            "ops"
+          ],
+          [
+            "eve",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT name, dept FROM \"compat-xpack-emp\" ORDER BY dept DESC, name"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "eve",
+            null
+          ],
+          [
+            "carol",
+            "ops"
+          ],
+          [
+            "dave",
+            "ops"
+          ],
+          [
+            "alice",
+            "eng"
+          ],
+          [
+            "bob",
+            "eng"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT dept, COUNT(*) FROM \"compat-xpack-emp\" GROUP BY dept ORDER BY dept DESC"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "COUNT(*)",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            "ops",
+            2
+          ],
+          [
+            "eng",
+            2
+          ],
+          [
+            null,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT dept, COUNT(*) FROM \"compat-xpack-emp\" GROUP BY dept"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "dept",
+            "type" : "keyword"
+          },
+          {
+            "name" : "COUNT(*)",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            null,
+            1
+          ],
+          [
+            "eng",
+            2
+          ],
+          [
+            "ops",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT salary s FROM \"compat-xpack-emp\" ORDER BY s"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            90
+          ],
+          [
+            100
+          ],
+          [
+            120
+          ],
+          [
+            150
+          ],
+          [
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT dept d, COUNT(*) c FROM \"compat-xpack-emp\" GROUP BY dept ORDER BY c DESC, d"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "keyword"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            "eng",
+            2
+          ],
+          [
+            "ops",
+            2
+          ],
+          [
+            null,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-emp",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

@@ -544,3 +544,75 @@ async fn http_and_kafka_clients_share_the_log() {
     let r = ok(c.get(format!("{base}/topics/shared/partitions/0/records?offset=earliest&limit=1000&isolation=read_uncommitted"))).await;
     assert!(values(&r).contains(&json!("aborted")));
 }
+
+/// `(offset, value)` of a partition's records from the start.
+async fn offsets_and_values(c: &Client, stream: &str, topic: &str, p: i32, extra: &str) -> Vec<(i64, String)> {
+    let r = ok(c.get(format!("{stream}/topics/{topic}/partitions/{p}/records?offset=earliest&limit=1000{extra}"))).await;
+    r["records"].as_array().unwrap().iter().map(|r| (r["offset"].as_i64().unwrap(), r["value"].as_str().unwrap().to_string())).collect()
+}
+
+/// `POST /v1/streams/{s}/branches`: a new stream with its own key that reads the parent's records
+/// at the same offsets (a transaction open at the branch is aborted there), resumes the parent's
+/// committed group offsets, shares the parent's bytes rather than owning them, and from then on
+/// goes its own way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_starts_from_the_parents_records_and_offsets() {
+    let tb = TestBroker::start("http-branch").await;
+    let (c, base) = (client(), tb.http.clone());
+    let parent = format!("{base}/v1/streams/test");
+    create_topic(&c, &base, "test", "orders", 2).await;
+    let recs: Vec<Value> = (0..20).map(|i| json!({ "value": i, "partition": i % 2 })).collect();
+    ok(c.post(format!("{parent}/topics/orders/records")).json(&recs)).await;
+    let commit = json!({ "offsets": [{ "topic": "orders", "partition": 0, "offset": 4 }, { "topic": "orders", "partition": 1, "offset": 3 }] });
+    ok(c.post(format!("{parent}/groups/billing/commit")).json(&commit)).await;
+    let addr = tb.addr.clone();
+    let tx = tokio::task::spawn_blocking(move || {
+        let p: ThreadedProducer<DefaultProducerContext> = ClientConfig::new().set("bootstrap.servers", &addr).set("transactional.id", "branch-tx").create().unwrap();
+        p.init_transactions(T).unwrap();
+        p.begin_transaction().unwrap();
+        p.send(BaseRecord::to("orders").partition(1).key("tx").payload("open")).map_err(|e| e.0).unwrap();
+        p.flush(T).unwrap();
+        p
+    })
+    .await
+    .unwrap();
+
+    let made = ok(c.post(format!("{parent}/branches")).json(&json!({ "name": "pv-1" }))).await;
+    let id = made["id"].as_str().unwrap().to_string();
+    assert_ne!(id, tb.stream_id);
+    assert_eq!(made["branch_of"]["stream"], tb.stream_id.as_str());
+    assert!(made["connect"]["username"].as_str().unwrap().starts_with("rk_"));
+    assert_eq!(made["connect"]["secret"].as_str().unwrap().len(), 40);
+    let (st, _) = status(c.post(format!("{parent}/branches")).json(&json!({ "name": "pv-1" }))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = status(c.post(format!("{base}/v1/streams/nope/branches")).json(&json!({ "name": "pv-2" }))).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let branch = format!("{base}/v1/streams/{id}");
+    let topics = ok(c.get(format!("{branch}/topics"))).await;
+    assert_eq!((topics[0]["name"].clone(), topics[0]["partitions"].clone()), (json!("orders"), json!(2)));
+    for p in 0..2 {
+        assert_eq!(offsets_and_values(&c, &branch, "orders", p, "").await, offsets_and_values(&c, &parent, "orders", p, "").await, "partition {p}");
+    }
+    let uncommitted = offsets_and_values(&c, &branch, "orders", 1, "&isolation=read_uncommitted").await;
+    assert_eq!(uncommitted.last().unwrap(), &(10, "open".to_string()), "the open transaction's records are in the branch");
+    assert_eq!(offsets_and_values(&c, &branch, "orders", 1, "").await.len(), 10, "but aborted there");
+    let shared = ok(c.get(&branch)).await["storage"].clone();
+    assert!(shared["shared_bytes"].as_i64().unwrap() > 0 && shared["own_bytes"] == 0, "{shared}");
+    let own = ok(c.get(&parent)).await["storage"].clone();
+    assert_eq!(own["own_bytes"], own["remote_bytes"], "the parent still owns what it wrote: {own}");
+
+    // A consumer of the branch resumes where the parent's group was.
+    let (got, _) = group_read(&c, &format!("{branch}/topics/orders/records?group=billing&consumer=c&limit=100"), 13).await;
+    let want: BTreeSet<i64> = (8..20).step_by(2).chain((7..20).step_by(2)).collect();
+    assert_eq!(got.into_iter().collect::<BTreeSet<_>>(), want);
+
+    // From here on the two are separate: the same offset holds different records.
+    tokio::task::spawn_blocking(move || tx.commit_transaction(T).unwrap()).await.unwrap();
+    ok(c.post(format!("{branch}/topics/orders/records")).json(&json!({ "value": "branch", "partition": 0 }))).await;
+    ok(c.post(format!("{parent}/topics/orders/records")).json(&json!({ "value": "parent", "partition": 0 }))).await;
+    assert_eq!(offsets_and_values(&c, &branch, "orders", 0, "").await.last().unwrap(), &(10, "branch".to_string()));
+    assert_eq!(offsets_and_values(&c, &parent, "orders", 0, "").await.last().unwrap(), &(10, "parent".to_string()));
+    assert!(offsets_and_values(&c, &parent, "orders", 1, "").await.contains(&(10, "open".to_string())), "committed in the parent");
+    assert_eq!(offsets_and_values(&c, &branch, "orders", 1, "").await.len(), 10, "still aborted in the branch");
+}

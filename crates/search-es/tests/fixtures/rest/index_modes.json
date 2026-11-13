@@ -1,0 +1,2178 @@
+{
+  "description" : "Index modes: time_series, logsdb, lookup and standard rules, TSDB and logsdb data streams",
+  "steps" : [
+    {
+      "req" : "PUT /esm-t1",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host"
+        },
+        "mappings" : {
+          "properties" : {
+            "host" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            },
+            "v" : {
+              "type" : "double",
+              "time_series_metric" : "gauge"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-t1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-t1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-t1" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              },
+              "host" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              },
+              "v" : {
+                "type" : "double",
+                "time_series_metric" : "gauge"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-t1/_settings?flat_settings&filter_path=**.index.mode,**.index.routing_path,**.index.number_of_shards",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t2",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[index.mode=time_series] requires a non-empty [index.routing_path]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[index.mode=time_series] requires a non-empty [index.routing_path]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t3",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host",
+          "index.routing_partition_size" : 2,
+          "number_of_shards" : 2
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[index.mode=time_series] is incompatible with [index.routing_partition_size]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[index.mode=time_series] is incompatible with [index.routing_partition_size]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t4",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host",
+          "index.sort.field" : "host"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[index.mode=time_series] is incompatible with [index.sort.field]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[index.mode=time_series] is incompatible with [index.sort.field]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t5",
+      "body" : {
+        "settings" : {
+          "index.routing_path" : "host"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[index.routing_path] requires [index.mode=time_series]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[index.routing_path] requires [index.mode=time_series]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t6",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host"
+        },
+        "mappings" : {
+          "_routing" : {
+            "required" : true
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "routing is forbidden on CRUD operations that target indices in [index.mode=time_series]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "routing is forbidden on CRUD operations that target indices in [index.mode=time_series]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t7",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host"
+        },
+        "mappings" : {
+          "_source" : {
+            "enabled" : false
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: _source can not be disabled in index using [time_series] index mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: _source can not be disabled in index using [time_series] index mode",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "_source can not be disabled in index using [time_series] index mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t8",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host"
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "data stream timestamp field [@timestamp] is of type [keyword], but [date,date_nanos] is expected"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "data stream timestamp field [@timestamp] is of type [keyword], but [date,date_nanos] is expected"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t9",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host"
+        },
+        "aliases" : {
+          "esm-ta" : {
+            "routing" : "1"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-t9"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t10",
+      "body" : {
+        "settings" : {
+          "index.time_series.start_time" : "2020-01-01T00:00:00Z"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-t10"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t11",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host",
+          "index.time_series.start_time" : "2030-01-01T00:00:00Z",
+          "index.time_series.end_time" : "2020-01-01T00:00:00Z"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index.time_series.end_time must be larger than index.time_series.start_time"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index.time_series.end_time must be larger than index.time_series.start_time"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t12",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : [
+            "host",
+            "*.dim"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "host" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            },
+            "a" : {
+              "properties" : {
+                "dim" : {
+                  "type" : "keyword",
+                  "time_series_dimension" : true
+                }
+              }
+            },
+            "m" : {
+              "type" : "long",
+              "time_series_metric" : "counter"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-t12"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t13",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host"
+        },
+        "mappings" : {
+          "properties" : {
+            "host" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "All fields that match routing_path must be configured with [time_series_dimension: true] or flattened fields with a list of dimensions in [time_series_dimensions] and without the [script] parameter. [host] was not a dimension."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "All fields that match routing_path must be configured with [time_series_dimension: true] or flattened fields with a list of dimensions in [time_series_dimensions] and without the [script] parameter. [host] was not a dimension."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t14",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host"
+        },
+        "mappings" : {
+          "properties" : {
+            "host" : {
+              "type" : "long",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-t14"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t15",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "host"
+        },
+        "mappings" : {
+          "properties" : {
+            "host" : {
+              "type" : "text",
+              "time_series_dimension" : true
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "unknown parameter [time_series_dimension] on mapper [host] of type [text]"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: unknown parameter [time_series_dimension] on mapper [host] of type [text]",
+          "caused_by" : {
+            "type" : "mapper_parsing_exception",
+            "reason" : "unknown parameter [time_series_dimension] on mapper [host] of type [text]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-t16",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "o"
+        },
+        "mappings" : {
+          "properties" : {
+            "o" : {
+              "type" : "object"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "All fields that match routing_path must be flattened fields. [o] was [object]."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "All fields that match routing_path must be flattened fields. [o] was [object]."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-l1",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-l1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-l1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-l1" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date",
+                "ignore_malformed" : false
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-l2",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb",
+          "index.routing_path" : "host"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[index.routing_path] requires [index.mode=time_series]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[index.routing_path] requires [index.mode=time_series]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-l3",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb"
+        },
+        "mappings" : {
+          "_source" : {
+            "enabled" : false
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: _source can not be disabled in index using [logsdb] index mode"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "Failed to parse mapping: _source can not be disabled in index using [logsdb] index mode",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "_source can not be disabled in index using [logsdb] index mode"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-l4",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb",
+          "index.logsdb.sort_on_host_name" : true
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "validation_exception",
+              "reason" : "Validation Failed: 1: private index setting [index.logsdb.sort_on_host_name] can not be set explicitly;"
+            }
+          ],
+          "type" : "validation_exception",
+          "reason" : "Validation Failed: 1: private index setting [index.logsdb.sort_on_host_name] can not be set explicitly;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-l4/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-l4]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-l4",
+              "index_uuid" : "_na_",
+              "index" : "esm-l4"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-l4]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-l4",
+          "index_uuid" : "_na_",
+          "index" : "esm-l4"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-l5",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb",
+          "index.logsdb.add_host_name_field" : true,
+          "index.logsdb.sort_on_host_name" : true
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "validation_exception",
+              "reason" : "Validation Failed: 1: private index setting [index.logsdb.add_host_name_field] can not be set explicitly;2: private index setting [index.logsdb.sort_on_host_name] can not be set explicitly;"
+            }
+          ],
+          "type" : "validation_exception",
+          "reason" : "Validation Failed: 1: private index setting [index.logsdb.add_host_name_field] can not be set explicitly;2: private index setting [index.logsdb.sort_on_host_name] can not be set explicitly;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-l5/_mapping",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-l5]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-l5",
+              "index_uuid" : "_na_",
+              "index" : "esm-l5"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-l5]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-l5",
+          "index_uuid" : "_na_",
+          "index" : "esm-l5"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-l6",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb"
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-l6"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-l7",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb"
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "data stream timestamp field [@timestamp] is of type [keyword], but [date,date_nanos] is expected"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "data stream timestamp field [@timestamp] is of type [keyword], but [date,date_nanos] is expected"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-l8",
+      "body" : {
+        "settings" : {
+          "index.mode" : "logsdb",
+          "index.sort.field" : "k"
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-l8"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-l8/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-l8" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date",
+                "ignore_malformed" : false
+              },
+              "k" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.mapping.source.mode" : "COLUMNAR_STORED"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unsupported source mode [COLUMNAR_STORED] for index mode [standard]; supported values: [DISABLED, STORED, SYNTHETIC]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unsupported source mode [COLUMNAR_STORED] for index mode [standard]; supported values: [DISABLED, STORED, SYNTHETIC]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s2",
+      "body" : {
+        "settings" : {
+          "index.mode" : "time_series",
+          "index.routing_path" : "h",
+          "index.mapping.source.mode" : "stored"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s2/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-s2" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-v1",
+      "body" : {
+        "index_patterns" : [
+          "esm-v1*"
+        ],
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-v1] invalid, cause [Validation Failed: 1: [index.mode=time_series] requires a non-empty [index.routing_path];]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-v1] invalid, cause [Validation Failed: 1: [index.mode=time_series] requires a non-empty [index.routing_path];]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-v2",
+      "body" : {
+        "index_patterns" : [
+          "esm-v2*"
+        ],
+        "template" : {
+          "settings" : {
+            "index.routing_path" : "x"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "composable template [esm-v2] template after composition is invalid"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "composable template [esm-v2] template after composition is invalid",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[index.routing_path] requires [index.mode=time_series]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-v3",
+      "body" : {
+        "index_patterns" : [
+          "esm-v3*"
+        ],
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series",
+            "index.routing_path" : "x",
+            "index.sort.field" : "x"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-v3] invalid, cause [Validation Failed: 1: [index.mode=time_series] is incompatible with [index.sort.field];]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-v3] invalid, cause [Validation Failed: 1: [index.mode=time_series] is incompatible with [index.sort.field];]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-c1",
+      "body" : {
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[index.mode=time_series] requires a non-empty [index.routing_path]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[index.mode=time_series] requires a non-empty [index.routing_path]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-v4",
+      "body" : {
+        "index_patterns" : [
+          "esm-v4*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series"
+          },
+          "mappings" : {
+            "properties" : {
+              "@timestamp" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-v4] invalid, cause [Validation Failed: 1: [index.mode=time_series] requires a non-empty [index.routing_path];2: [index.mode=time_series] requires a non-empty [index.routing_path];]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-v4] invalid, cause [Validation Failed: 1: [index.mode=time_series] requires a non-empty [index.routing_path];2: [index.mode=time_series] requires a non-empty [index.routing_path];]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-v5",
+      "body" : {
+        "index_patterns" : [
+          "esm-v5*"
+        ],
+        "template" : {
+          "settings" : {
+            "index.mode" : "logsdb"
+          },
+          "mappings" : {
+            "_source" : {
+              "enabled" : false
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "composable template [esm-v5] template after composition is invalid"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "composable template [esm-v5] template after composition is invalid",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "invalid composite mappings for [esm-v5]",
+            "caused_by" : {
+              "type" : "mapper_parsing_exception",
+              "reason" : "Failed to parse mapping: _source can not be disabled in index using [logsdb] index mode",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "_source can not be disabled in index using [logsdb] index mode"
+              }
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-v6",
+      "body" : {
+        "index_patterns" : [
+          "esm-v6*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series"
+          },
+          "mappings" : {
+            "properties" : {
+              "@timestamp" : {
+                "type" : "keyword"
+              },
+              "h" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "composable template [esm-v6] template after composition is invalid"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "composable template [esm-v6] template after composition is invalid",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "invalid composite mappings for [esm-v6]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "data stream timestamp field [@timestamp] is of type [keyword], but [date,date_nanos] is expected"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-v7",
+      "body" : {
+        "index_patterns" : [
+          "esm-v7*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "index.mode" : "logsdb"
+          },
+          "mappings" : {
+            "properties" : {
+              "host" : {
+                "properties" : {
+                  "name" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-v7a",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /.ds-esm-v7a-*/_settings?flat_settings&expand_wildcards=all&filter_path=**.index.logsdb*,**.index.mode",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-v7a?filter_path=**.index_mode,**.failure_store",
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "indices" : [
+              {
+                "index_mode" : "logsdb"
+              }
+            ],
+            "index_mode" : "logsdb",
+            "failure_store" : {
+              "enabled" : false,
+              "rollover_on_write" : true,
+              "indices" : [ ]
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-tsdb",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-tsdb*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series"
+          },
+          "mappings" : {
+            "properties" : {
+              "host" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              },
+              "pod" : {
+                "properties" : {
+                  "name" : {
+                    "type" : "keyword",
+                    "time_series_dimension" : true
+                  }
+                }
+              },
+              "v" : {
+                "type" : "double",
+                "time_series_metric" : "gauge"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-tsdb1",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /.ds-esm-tsdb1-*/_settings?flat_settings&expand_wildcards=all&filter_path=**.index.dimensions,**.index.mode,**.index.disable_sequence_numbers,**.index.mapping.synthetic_id,**.index.time_series*,**.index.routing_path",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /.ds-esm-tsdb1-*/_mapping?expand_wildcards=all",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        ".ds-esm-tsdb1-2026.10.21-000001" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date"
+              },
+              "host" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              },
+              "pod" : {
+                "properties" : {
+                  "name" : {
+                    "type" : "keyword",
+                    "time_series_dimension" : true
+                  }
+                }
+              },
+              "v" : {
+                "type" : "double",
+                "time_series_metric" : "gauge"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-tsdb1",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "name" : "esm-tsdb1",
+            "timestamp_field" : {
+              "name" : "@timestamp"
+            },
+            "indices" : [
+              {
+                "index_name" : ".ds-esm-tsdb1-2026.10.21-000001",
+                "index_uuid" : "emr2049NSMirzCq472ARgg",
+                "managed_by" : "Unmanaged",
+                "prefer_ilm" : true,
+                "index_mode" : "time_series"
+              }
+            ],
+            "generation" : 1,
+            "status" : "YELLOW",
+            "template" : "esm-tsdb",
+            "next_generation_managed_by" : "Unmanaged",
+            "prefer_ilm" : true,
+            "hidden" : false,
+            "system" : false,
+            "allow_custom_routing" : false,
+            "replicated" : false,
+            "rollover_on_write" : false,
+            "index_mode" : "time_series",
+            "time_series" : {
+              "temporal_ranges" : [
+                {
+                  "start" : "2026-10-21T07:45:48.000Z",
+                  "end" : "2026-10-21T09:54:48.000Z"
+                }
+              ]
+            },
+            "settings" : { },
+            "mappings" : { },
+            "failure_store" : {
+              "enabled" : false,
+              "rollover_on_write" : true,
+              "indices" : [ ]
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-tsdb1/_rollover",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "old_index" : ".ds-esm-tsdb1-2026.10.21-000001",
+        "new_index" : ".ds-esm-tsdb1-2026.10.21-000002",
+        "rolled_over" : true,
+        "dry_run" : false,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-tsdb1?filter_path=**.time_series,**.index_mode",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "indices" : [
+              {
+                "index_mode" : "time_series"
+              },
+              {
+                "index_mode" : "time_series"
+              }
+            ],
+            "index_mode" : "time_series",
+            "time_series" : {
+              "temporal_ranges" : [
+                {
+                  "start" : "2026-10-21T07:45:48.000Z",
+                  "end" : "2026-10-21T10:03:48.000Z"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-tsdb2",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-dyn*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series"
+          },
+          "mappings" : {
+            "dynamic_templates" : [
+              {
+                "labels" : {
+                  "path_match" : "labels.*",
+                  "mapping" : {
+                    "type" : "keyword",
+                    "time_series_dimension" : true
+                  }
+                }
+              }
+            ],
+            "properties" : {
+              "host" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-dyn1",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /.ds-esm-dyn1-*/_settings?flat_settings&expand_wildcards=all&filter_path=**.routing_path,**.dimensions",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-tsdb3",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-nod*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "invalid_index_template_exception",
+              "reason" : "index_template [esm-tsdb3] invalid, cause [Validation Failed: 1: [index.mode=time_series] requires a non-empty [index.routing_path];2: [index.mode=time_series] requires a non-empty [index.routing_path];]"
+            }
+          ],
+          "type" : "invalid_index_template_exception",
+          "reason" : "index_template [esm-tsdb3] invalid, cause [Validation Failed: 1: [index.mode=time_series] requires a non-empty [index.routing_path];2: [index.mode=time_series] requires a non-empty [index.routing_path];]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-nod1",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "no matching index template found for data stream [esm-nod1]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "no matching index template found for data stream [esm-nod1]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-std",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-mig*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "mappings" : {
+            "properties" : {
+              "host" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-mig1",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-std",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-mig*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "index.mode" : "time_series"
+          },
+          "mappings" : {
+            "properties" : {
+              "host" : {
+                "type" : "keyword",
+                "time_series_dimension" : true
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-mig1/_rollover",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "old_index" : ".ds-esm-mig1-2026.10.21-000001",
+        "new_index" : ".ds-esm-mig1-2026.10.21-000002",
+        "rolled_over" : true,
+        "dry_run" : false,
+        "lazy" : false,
+        "conditions" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-mig1?filter_path=**.time_series,**.index_mode",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "indices" : [
+              {
+                "index_mode" : "standard"
+              },
+              {
+                "index_mode" : "time_series"
+              }
+            ],
+            "index_mode" : "time_series",
+            "time_series" : {
+              "temporal_ranges" : [
+                {
+                  "start" : "2026-10-21T07:45:48.000Z",
+                  "end" : "2026-10-21T09:54:48.000Z"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-lg",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "body" : {
+        "index_patterns" : [
+          "esm-lgs*"
+        ],
+        "data_stream" : { },
+        "template" : {
+          "settings" : {
+            "index.mode" : "logsdb"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_data_stream/esm-lgs1",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /.ds-esm-lgs1-*/_mapping?expand_wildcards=all",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        ".ds-esm-lgs1-2026.10.21-000001" : {
+          "mappings" : {
+            "_data_stream_timestamp" : {
+              "enabled" : true
+            },
+            "properties" : {
+              "@timestamp" : {
+                "type" : "date",
+                "ignore_malformed" : false
+              },
+              "host" : {
+                "properties" : {
+                  "name" : {
+                    "type" : "keyword",
+                    "ignore_above" : 1024
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_data_stream/esm-lgs1?filter_path=**.index_mode,**.failure_store",
+      "mask" : [
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+        "index.time_series.start_time",
+        "index.time_series.end_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "data_streams" : [
+          {
+            "indices" : [
+              {
+                "index_mode" : "logsdb"
+              }
+            ],
+            "index_mode" : "logsdb",
+            "failure_store" : {
+              "enabled" : false,
+              "rollover_on_write" : true,
+              "indices" : [ ]
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-t1?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-t9?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-t10?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-t12?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-t14?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-l1?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-l4?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-l5?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-l6?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-l8?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s2?ignore_unavailable=true",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-tsdb1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-dyn1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-mig1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-lgs1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/esm-v7a",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-tsdb?ignore_unavailable=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_index_template/esm-tsdb] contains unrecognized parameter: [ignore_unavailable]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_index_template/esm-tsdb] contains unrecognized parameter: [ignore_unavailable]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-tsdb2?ignore_unavailable=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_index_template/esm-tsdb2] contains unrecognized parameter: [ignore_unavailable]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_index_template/esm-tsdb2] contains unrecognized parameter: [ignore_unavailable]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-tsdb3?ignore_unavailable=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_index_template/esm-tsdb3] contains unrecognized parameter: [ignore_unavailable]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_index_template/esm-tsdb3] contains unrecognized parameter: [ignore_unavailable]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-std?ignore_unavailable=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_index_template/esm-std] contains unrecognized parameter: [ignore_unavailable]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_index_template/esm-std] contains unrecognized parameter: [ignore_unavailable]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-lg?ignore_unavailable=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_index_template/esm-lg] contains unrecognized parameter: [ignore_unavailable]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_index_template/esm-lg] contains unrecognized parameter: [ignore_unavailable]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/esm-v7?ignore_unavailable=true",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_index_template/esm-v7] contains unrecognized parameter: [ignore_unavailable]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_index_template/esm-v7] contains unrecognized parameter: [ignore_unavailable]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

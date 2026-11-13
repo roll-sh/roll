@@ -1,0 +1,9 @@
+# Tests of Elasticsearch 9.5.5's `analysis-nori` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plugins).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+analysis-nori:analysis_nori/10_basic/Analyzer
+analysis-nori:analysis_nori/10_basic/Number filter
+analysis-nori:analysis_nori/10_basic/Part of speech filter
+analysis-nori:analysis_nori/10_basic/Reading filter
+analysis-nori:analysis_nori/10_basic/Tokenizer
+analysis-nori:analysis_nori/20_search/Index Korean content

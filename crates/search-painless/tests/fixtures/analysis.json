@@ -1,0 +1,7922 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "token.term.toString() == 'fox'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String t = token.term.toString(); return t.equals(t.toUpperCase())"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.subSequence(0, 1).toString() == 'q'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.chars().count() == 4"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.getTerm().length() == 4 && token.position > 3"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Integer.parseInt(token.term.toString()) > 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+       "java.base/java.lang.Integer.parseInt(Integer.java:529)",
+       "java.base/java.lang.Integer.parseInt(Integer.java:626)",
+       "Integer.parseInt(token.term.toString()) > 0",
+       "                           ^---- HERE"
+      ],
+      "script": "Integer.parseInt(token.term.toString()) > 0",
+      "lang": "painless",
+      "position": {
+       "offset": 27,
+       "start": 0,
+       "end": 43
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)",
+     "java.base/java.lang.Integer.parseInt(Integer.java:529)",
+     "java.base/java.lang.Integer.parseInt(Integer.java:626)",
+     "Integer.parseInt(token.term.toString()) > 0",
+     "                           ^---- HERE"
+    ],
+    "script": "Integer.parseInt(token.term.toString()) > 0",
+    "lang": "painless",
+    "position": {
+     "offset": 27,
+     "start": 0,
+     "end": 43
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"The\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.toString().contains('.')"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "CharSequence cs = token.term; cs.length() > 4"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Object o = token.term; o instanceof String"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term instanceof CharSequence"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def x = token.term; x.length() == 3"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.isEmpty()"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "token.term.isEmpty()",
+       "          ^---- HERE"
+      ],
+      "script": "token.term.isEmpty()",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 20
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "token.term.isEmpty()",
+     "          ^---- HERE"
+    ],
+    "script": "token.term.isEmpty()",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 20
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.CharSequence, isEmpty/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.codePoints().count() > 3"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Character.isDigit(token.term.charAt(0))"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.charAt(10) == (char) 'x'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+       "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+       "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+       "java.base/java.util.Objects.checkIndex(Objects.java:365)",
+       "org.apache.lucene.core@10.5.1/org.apache.lucene.analysis.tokenattributes.CharTermAttributeImpl.charAt(CharTermAttributeImpl.java:105)",
+       "token.term.charAt(10) == (char) 'x'",
+       "          ^---- HERE"
+      ],
+      "script": "token.term.charAt(10) == (char) 'x'",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 35
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.util.Preconditions.outOfBounds(Preconditions.java:100)",
+     "java.base/jdk.internal.util.Preconditions.outOfBoundsCheckIndex(Preconditions.java:106)",
+     "java.base/jdk.internal.util.Preconditions.checkIndex(Preconditions.java:302)",
+     "java.base/java.util.Objects.checkIndex(Objects.java:365)",
+     "org.apache.lucene.core@10.5.1/org.apache.lucene.analysis.tokenattributes.CharTermAttributeImpl.charAt(CharTermAttributeImpl.java:105)",
+     "token.term.charAt(10) == (char) 'x'",
+     "          ^---- HERE"
+    ],
+    "script": "token.term.charAt(10) == (char) 'x'",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 35
+    },
+    "caused_by": {
+     "type": "index_out_of_bounds_exception",
+     "reason": "Index 10 out of bounds for length 3"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.toString().hashCode() % 2 == 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.equals('fox')"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.toString().equals('fox')"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.compareTo('fox') > 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "token.term.compareTo('fox') > 0",
+       "          ^---- HERE"
+      ],
+      "script": "token.term.compareTo('fox') > 0",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 31
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "token.term.compareTo('fox') > 0",
+     "          ^---- HERE"
+    ],
+    "script": "token.term.compareTo('fox') > 0",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 31
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.CharSequence, compareTo/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "CharSequence.compare(token.term, 'fox') > 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "CharSequence.compare(token.term, 'fox ...",
+       "            ^---- HERE"
+      ],
+      "script": "CharSequence.compare(token.term, 'fox') > 0",
+      "lang": "painless",
+      "position": {
+       "offset": 12,
+       "start": 0,
+       "end": 37
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "CharSequence.compare(token.term, 'fox ...",
+     "            ^---- HERE"
+    ],
+    "script": "CharSequence.compare(token.term, 'fox') > 0",
+    "lang": "painless",
+    "position": {
+     "offset": 12,
+     "start": 0,
+     "end": 37
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.lang.CharSequence, compare/2] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term + '' == 'fox'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String.valueOf(token.term) == 'fox'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.hashCode() == 'fox'.hashCode()"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.hashCode() > 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.toString().startsWith('T')"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.length() > 3"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.getTerm() =~ /o/"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "token.getTerm() =~ /o/",
+       "     ^---- HERE"
+      ],
+      "script": "token.getTerm() =~ /o/",
+      "lang": "painless",
+      "position": {
+       "offset": 5,
+       "start": 0,
+       "end": 22
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "token.getTerm() =~ /o/",
+     "     ^---- HERE"
+    ],
+    "script": "token.getTerm() =~ /o/",
+    "lang": "painless",
+    "position": {
+     "offset": 5,
+     "start": 0,
+     "end": 22
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.CharSequence] to [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.position % 2 == 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.getPosition() > 2 && token.getPosition() < 7"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.type == '<NUM>'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.getType() != '<ALPHANUM>'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.startOffset >= 10"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.getEndOffset() - token.getStartOffset() == 3"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.positionIncrement == 1"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.getPositionLength() == 1"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.isKeyword()"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "!token.keyword"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.startsWith('T')"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "token.term.startsWith('T')",
+       "          ^---- HERE"
+      ],
+      "script": "token.term.startsWith('T')",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 26
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "token.term.startsWith('T')",
+     "          ^---- HERE"
+    ],
+    "script": "token.term.startsWith('T')",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 26
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.CharSequence, startsWith/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.toLowerCase().contains('a')"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "token.term.toLowerCase().contains(' ...",
+       "          ^---- HERE"
+      ],
+      "script": "token.term.toLowerCase().contains('a')",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 35
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "token.term.toLowerCase().contains(' ...",
+     "          ^---- HERE"
+    ],
+    "script": "token.term.toLowerCase().contains('a')",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 35
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.CharSequence, toLowerCase/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return token.term.charAt(0) <= (char) 'f'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "String t = token.term; return t.equals(t.toUpperCase())"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "String t = token.term; return t.equals(t. ...",
+       "                ^---- HERE"
+      ],
+      "script": "String t = token.term; return t.equals(t.toUpperCase())",
+      "lang": "painless",
+      "position": {
+       "offset": 16,
+       "start": 0,
+       "end": 41
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "String t = token.term; return t.equals(t. ...",
+     "                ^---- HERE"
+    ],
+    "script": "String t = token.term; return t.equals(t.toUpperCase())",
+    "lang": "painless",
+    "position": {
+     "offset": 16,
+     "start": 0,
+     "end": 41
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.CharSequence] to [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "def t = token; t.term != 'fox'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.length() == params.x"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... n.term.length() == params.x",
+       "                             ^---- HERE"
+      ],
+      "script": "token.term.length() == params.x",
+      "lang": "painless",
+      "position": {
+       "offset": 29,
+       "start": 4,
+       "end": 31
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... n.term.length() == params.x",
+     "                             ^---- HERE"
+    ],
+    "script": "token.term.length() == params.x",
+    "lang": "painless",
+    "position": {
+     "offset": 29,
+     "start": 4,
+     "end": 31
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "cannot resolve symbol [params.x]"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.substring(5) == ''"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "token.term.substring(5) == ''",
+       "          ^---- HERE"
+      ],
+      "script": "token.term.substring(5) == ''",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 29
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "token.term.substring(5) == ''",
+     "          ^---- HERE"
+    ],
+    "script": "token.term.substring(5) == ''",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 29
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.lang.CharSequence, substring/1] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term == null"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "Integer.parseInt(token.term) > 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "Integer.parseInt(token.term) > 0",
+       "                      ^---- HERE"
+      ],
+      "script": "Integer.parseInt(token.term) > 0",
+      "lang": "painless",
+      "position": {
+       "offset": 22,
+       "start": 0,
+       "end": 32
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "Integer.parseInt(token.term) > 0",
+     "                      ^---- HERE"
+    ],
+    "script": "Integer.parseInt(token.term) > 0",
+    "lang": "painless",
+    "position": {
+     "offset": 22,
+     "start": 0,
+     "end": 32
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.CharSequence] to [java.lang.String]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.getClass() == null"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "token.getClass() == null",
+       "     ^---- HERE"
+      ],
+      "script": "token.getClass() == null",
+      "lang": "painless",
+      "position": {
+       "offset": 5,
+       "start": 0,
+       "end": 24
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "token.getClass() == null",
+     "     ^---- HERE"
+    ],
+    "script": "token.getClass() == null",
+    "lang": "painless",
+    "position": {
+     "offset": 5,
+     "start": 0,
+     "end": 24
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [org.elasticsearch.analysis.common.AnalysisPredicateScript.Token, getClass/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.hashCode() % 3 == 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.toString() != null"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "quick",
+     "start_offset": 4,
+     "end_offset": 9,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "brown",
+     "start_offset": 10,
+     "end_offset": 15,
+     "type": "<ALPHANUM>",
+     "position": 2
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "lazy",
+     "start_offset": 23,
+     "end_offset": 27,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "dogs",
+     "start_offset": 28,
+     "end_offset": 32,
+     "type": "<ALPHANUM>",
+     "position": 6
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "cats",
+     "start_offset": 41,
+     "end_offset": 45,
+     "type": "<ALPHANUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "throw new IllegalArgumentException('no ' + token.term)"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "throw new IllegalArgumentException('no ' + token.term)",
+       "                                                ^---- HERE"
+      ],
+      "script": "throw new IllegalArgumentException('no ' + token.term)",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 0,
+       "end": 54
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "throw new IllegalArgumentException('no ' + token.term)",
+     "                                                ^---- HERE"
+    ],
+    "script": "throw new IllegalArgumentException('no ' + token.term)",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 0,
+     "end": 54
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "no The"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.position > 100 ? true : token.term.length() < 4"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "The",
+     "start_offset": 0,
+     "end_offset": 3,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "fox",
+     "start_offset": 16,
+     "end_offset": 19,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "2",
+     "start_offset": 21,
+     "end_offset": 22,
+     "type": "<NUM>",
+     "position": 4
+    },
+    {
+     "token": "and",
+     "start_offset": 33,
+     "end_offset": 36,
+     "type": "<ALPHANUM>",
+     "position": 7
+    },
+    {
+     "token": "3.5",
+     "start_offset": 37,
+     "end_offset": 40,
+     "type": "<NUM>",
+     "position": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "1 / (token.position - 3) > 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "1 / (token.position - 3) > 0",
+       "          ^---- HERE"
+      ],
+      "script": "1 / (token.position - 3) > 0",
+      "lang": "painless",
+      "position": {
+       "offset": 10,
+       "start": 0,
+       "end": 28
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "1 / (token.position - 3) > 0",
+     "          ^---- HERE"
+    ],
+    "script": "1 / (token.position - 3) > 0",
+    "lang": "painless",
+    "position": {
+     "offset": 10,
+     "start": 0,
+     "end": 28
+    },
+    "caused_by": {
+     "type": "arithmetic_exception",
+     "reason": "/ by zero"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.length() >= 3"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "Wi-Fi e-mail ÄÖÜ naïve 東京 123-456"
+   }
+  },
+  "tokens": [
+   {
+    "token": "Wi",
+    "start_offset": 0,
+    "end_offset": 2,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "Fi",
+    "start_offset": 3,
+    "end_offset": 5,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "e",
+    "start_offset": 6,
+    "end_offset": 7,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "mail",
+    "start_offset": 8,
+    "end_offset": 12,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "ÄÖÜ",
+    "start_offset": 13,
+    "end_offset": 16,
+    "type": "<ALPHANUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "naïve",
+    "start_offset": 17,
+    "end_offset": 22,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "東",
+    "start_offset": 23,
+    "end_offset": 24,
+    "type": "<IDEOGRAPHIC>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "京",
+    "start_offset": 24,
+    "end_offset": 25,
+    "type": "<IDEOGRAPHIC>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "123",
+    "start_offset": 26,
+    "end_offset": 29,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "456",
+    "start_offset": 30,
+    "end_offset": 33,
+    "type": "<NUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "mail",
+     "start_offset": 8,
+     "end_offset": 12,
+     "type": "<ALPHANUM>",
+     "position": 3
+    },
+    {
+     "token": "ÄÖÜ",
+     "start_offset": 13,
+     "end_offset": 16,
+     "type": "<ALPHANUM>",
+     "position": 4
+    },
+    {
+     "token": "naïve",
+     "start_offset": 17,
+     "end_offset": 22,
+     "type": "<ALPHANUM>",
+     "position": 5
+    },
+    {
+     "token": "123",
+     "start_offset": 26,
+     "end_offset": 29,
+     "type": "<NUM>",
+     "position": 8
+    },
+    {
+     "token": "456",
+     "start_offset": 30,
+     "end_offset": 33,
+     "type": "<NUM>",
+     "position": 9
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.type == '<IDEOGRAPHIC>'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "Wi-Fi e-mail ÄÖÜ naïve 東京 123-456"
+   }
+  },
+  "tokens": [
+   {
+    "token": "Wi",
+    "start_offset": 0,
+    "end_offset": 2,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "Fi",
+    "start_offset": 3,
+    "end_offset": 5,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "e",
+    "start_offset": 6,
+    "end_offset": 7,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "mail",
+    "start_offset": 8,
+    "end_offset": 12,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "ÄÖÜ",
+    "start_offset": 13,
+    "end_offset": 16,
+    "type": "<ALPHANUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "naïve",
+    "start_offset": 17,
+    "end_offset": 22,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "東",
+    "start_offset": 23,
+    "end_offset": 24,
+    "type": "<IDEOGRAPHIC>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "京",
+    "start_offset": 24,
+    "end_offset": 25,
+    "type": "<IDEOGRAPHIC>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "123",
+    "start_offset": 26,
+    "end_offset": 29,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "456",
+    "start_offset": 30,
+    "end_offset": 33,
+    "type": "<NUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "東",
+     "start_offset": 23,
+     "end_offset": 24,
+     "type": "<IDEOGRAPHIC>",
+     "position": 6
+    },
+    {
+     "token": "京",
+     "start_offset": 24,
+     "end_offset": 25,
+     "type": "<IDEOGRAPHIC>",
+     "position": 7
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.type"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+   }
+  },
+  "tokens": [
+   {
+    "token": "The",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "quick",
+    "start_offset": 4,
+    "end_offset": 9,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "brown",
+    "start_offset": 10,
+    "end_offset": 15,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "fox",
+    "start_offset": 16,
+    "end_offset": 19,
+    "type": "<ALPHANUM>",
+    "position": 3,
+    "keyword": false
+   },
+   {
+    "token": "2",
+    "start_offset": 21,
+    "end_offset": 22,
+    "type": "<NUM>",
+    "position": 4,
+    "keyword": false
+   },
+   {
+    "token": "lazy",
+    "start_offset": 23,
+    "end_offset": 27,
+    "type": "<ALPHANUM>",
+    "position": 5,
+    "keyword": false
+   },
+   {
+    "token": "dogs",
+    "start_offset": 28,
+    "end_offset": 32,
+    "type": "<ALPHANUM>",
+    "position": 6,
+    "keyword": false
+   },
+   {
+    "token": "and",
+    "start_offset": 33,
+    "end_offset": 36,
+    "type": "<ALPHANUM>",
+    "position": 7,
+    "keyword": false
+   },
+   {
+    "token": "3.5",
+    "start_offset": 37,
+    "end_offset": 40,
+    "type": "<NUM>",
+    "position": 8,
+    "keyword": false
+   },
+   {
+    "token": "cats",
+    "start_offset": 41,
+    "end_offset": 45,
+    "type": "<ALPHANUM>",
+    "position": 9,
+    "keyword": false
+   }
+  ],
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "token.type",
+       "     ^---- HERE"
+      ],
+      "script": "token.type",
+      "lang": "painless",
+      "position": {
+       "offset": 5,
+       "start": 0,
+       "end": 10
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "token.type",
+     "     ^---- HERE"
+    ],
+    "script": "token.type",
+    "lang": "painless",
+    "position": {
+     "offset": 5,
+     "start": 0,
+     "end": 10
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [java.lang.String] to [boolean]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.startOffset > 2"
+   },
+   "analyze": {
+    "tokenizer": "whitespace",
+    "filter": [],
+    "text": "a  b   c\td"
+   }
+  },
+  "tokens": [
+   {
+    "token": "a",
+    "start_offset": 0,
+    "end_offset": 1,
+    "type": "word",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "b",
+    "start_offset": 3,
+    "end_offset": 4,
+    "type": "word",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "c",
+    "start_offset": 7,
+    "end_offset": 8,
+    "type": "word",
+    "position": 2,
+    "keyword": false
+   },
+   {
+    "token": "d",
+    "start_offset": 9,
+    "end_offset": 10,
+    "type": "word",
+    "position": 3,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "b",
+     "start_offset": 3,
+     "end_offset": 4,
+     "type": "word",
+     "position": 1
+    },
+    {
+     "token": "c",
+     "start_offset": 7,
+     "end_offset": 8,
+     "type": "word",
+     "position": 2
+    },
+    {
+     "token": "d",
+     "start_offset": 9,
+     "end_offset": 10,
+     "type": "word",
+     "position": 3
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term == 'hello'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     "lowercase"
+    ],
+    "text": "Hello World hello"
+   }
+  },
+  "tokens": [
+   {
+    "token": "hello",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "world",
+    "start_offset": 6,
+    "end_offset": 11,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "hello",
+    "start_offset": 12,
+    "end_offset": 17,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": []
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.positionIncrement > 1"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     "lowercase",
+     {
+      "type": "stop",
+      "stopwords": [
+       "world"
+      ]
+     }
+    ],
+    "text": "Hello World hello"
+   }
+  },
+  "tokens": [
+   {
+    "token": "hello",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "hello",
+    "start_offset": 12,
+    "end_offset": 17,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "hello",
+     "start_offset": 12,
+     "end_offset": 17,
+     "type": "<ALPHANUM>",
+     "position": 2
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.keyword"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     {
+      "type": "keyword_marker",
+      "keywords": [
+       "World"
+      ]
+     }
+    ],
+    "text": "Hello World hello"
+   }
+  },
+  "tokens": [
+   {
+    "token": "Hello",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "World",
+    "start_offset": 6,
+    "end_offset": 11,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": true
+   },
+   {
+    "token": "hello",
+    "start_offset": 12,
+    "end_offset": 17,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "World",
+     "start_offset": 6,
+     "end_offset": 11,
+     "type": "<ALPHANUM>",
+     "position": 1
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.isKeyword() || token.position == 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     {
+      "type": "keyword_marker",
+      "keywords": [
+       "World"
+      ]
+     }
+    ],
+    "text": "Hello World hello"
+   }
+  },
+  "tokens": [
+   {
+    "token": "Hello",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "World",
+    "start_offset": 6,
+    "end_offset": 11,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": true
+   },
+   {
+    "token": "hello",
+    "start_offset": 12,
+    "end_offset": 17,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "Hello",
+     "start_offset": 0,
+     "end_offset": 5,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "World",
+     "start_offset": 6,
+     "end_offset": 11,
+     "type": "<ALPHANUM>",
+     "position": 1
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.toString().endsWith('n')"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     "porter_stem"
+    ],
+    "text": "running runs ran"
+   }
+  },
+  "tokens": [
+   {
+    "token": "run",
+    "start_offset": 0,
+    "end_offset": 7,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "run",
+    "start_offset": 8,
+    "end_offset": 12,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "ran",
+    "start_offset": 13,
+    "end_offset": 16,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "run",
+     "start_offset": 0,
+     "end_offset": 7,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "run",
+     "start_offset": 8,
+     "end_offset": 12,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "ran",
+     "start_offset": 13,
+     "end_offset": 16,
+     "type": "<ALPHANUM>",
+     "position": 2
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.term.length() == 3"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     "porter_stem"
+    ],
+    "text": "running runs ran"
+   }
+  },
+  "tokens": [
+   {
+    "token": "run",
+    "start_offset": 0,
+    "end_offset": 7,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "run",
+    "start_offset": 8,
+    "end_offset": 12,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "ran",
+    "start_offset": 13,
+    "end_offset": 16,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "run",
+     "start_offset": 0,
+     "end_offset": 7,
+     "type": "<ALPHANUM>",
+     "position": 0
+    },
+    {
+     "token": "run",
+     "start_offset": 8,
+     "end_offset": 12,
+     "type": "<ALPHANUM>",
+     "position": 1
+    },
+    {
+     "token": "ran",
+     "start_offset": 13,
+     "end_offset": 16,
+     "type": "<ALPHANUM>",
+     "position": 2
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.positionIncrement == 0"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     {
+      "type": "synonym",
+      "synonyms": [
+       "quick, fast, speedy"
+      ]
+     }
+    ],
+    "text": "quick"
+   }
+  },
+  "tokens": [
+   {
+    "token": "quick",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "fast",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "SYNONYM",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "speedy",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "SYNONYM",
+    "position": 0,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "fast",
+     "start_offset": 0,
+     "end_offset": 5,
+     "type": "SYNONYM",
+     "position": 0
+    },
+    {
+     "token": "speedy",
+     "start_offset": 0,
+     "end_offset": 5,
+     "type": "SYNONYM",
+     "position": 0
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.type == 'SYNONYM'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     {
+      "type": "synonym",
+      "synonyms": [
+       "quick, fast, speedy"
+      ]
+     }
+    ],
+    "text": "quick"
+   }
+  },
+  "tokens": [
+   {
+    "token": "quick",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "fast",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "SYNONYM",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "speedy",
+    "start_offset": 0,
+    "end_offset": 5,
+    "type": "SYNONYM",
+    "position": 0,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "fast",
+     "start_offset": 0,
+     "end_offset": 5,
+     "type": "SYNONYM",
+     "position": 0
+    },
+    {
+     "token": "speedy",
+     "start_offset": 0,
+     "end_offset": 5,
+     "type": "SYNONYM",
+     "position": 0
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.positionLength > 1"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     {
+      "type": "shingle",
+      "max_shingle_size": 3
+     }
+    ],
+    "text": "New York City"
+   }
+  },
+  "tokens": [
+   {
+    "token": "New",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "New York",
+    "start_offset": 0,
+    "end_offset": 8,
+    "type": "shingle",
+    "position": 0,
+    "positionLength": 2,
+    "keyword": false
+   },
+   {
+    "token": "New York City",
+    "start_offset": 0,
+    "end_offset": 13,
+    "type": "shingle",
+    "position": 0,
+    "positionLength": 3,
+    "keyword": false
+   },
+   {
+    "token": "York",
+    "start_offset": 4,
+    "end_offset": 8,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "York City",
+    "start_offset": 4,
+    "end_offset": 13,
+    "type": "shingle",
+    "position": 1,
+    "positionLength": 2,
+    "keyword": false
+   },
+   {
+    "token": "City",
+    "start_offset": 9,
+    "end_offset": 13,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "New York",
+     "start_offset": 0,
+     "end_offset": 8,
+     "type": "shingle",
+     "position": 0,
+     "positionLength": 2
+    },
+    {
+     "token": "New York City",
+     "start_offset": 0,
+     "end_offset": 13,
+     "type": "shingle",
+     "position": 0,
+     "positionLength": 3
+    },
+    {
+     "token": "York City",
+     "start_offset": 4,
+     "end_offset": 13,
+     "type": "shingle",
+     "position": 1,
+     "positionLength": 2
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.type == 'shingle'"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     {
+      "type": "shingle",
+      "max_shingle_size": 3
+     }
+    ],
+    "text": "New York City"
+   }
+  },
+  "tokens": [
+   {
+    "token": "New",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "New York",
+    "start_offset": 0,
+    "end_offset": 8,
+    "type": "shingle",
+    "position": 0,
+    "positionLength": 2,
+    "keyword": false
+   },
+   {
+    "token": "New York City",
+    "start_offset": 0,
+    "end_offset": 13,
+    "type": "shingle",
+    "position": 0,
+    "positionLength": 3,
+    "keyword": false
+   },
+   {
+    "token": "York",
+    "start_offset": 4,
+    "end_offset": 8,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "York City",
+    "start_offset": 4,
+    "end_offset": 13,
+    "type": "shingle",
+    "position": 1,
+    "positionLength": 2,
+    "keyword": false
+   },
+   {
+    "token": "City",
+    "start_offset": 9,
+    "end_offset": 13,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "New York",
+     "start_offset": 0,
+     "end_offset": 8,
+     "type": "shingle",
+     "position": 0,
+     "positionLength": 2
+    },
+    {
+     "token": "New York City",
+     "start_offset": 0,
+     "end_offset": 13,
+     "type": "shingle",
+     "position": 0,
+     "positionLength": 3
+    },
+    {
+     "token": "York City",
+     "start_offset": 4,
+     "end_offset": 13,
+     "type": "shingle",
+     "position": 1,
+     "positionLength": 2
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "token.positionIncrement == 0 && token.endOffset > 4"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [
+     {
+      "type": "shingle",
+      "max_shingle_size": 3
+     }
+    ],
+    "text": "New York City"
+   }
+  },
+  "tokens": [
+   {
+    "token": "New",
+    "start_offset": 0,
+    "end_offset": 3,
+    "type": "<ALPHANUM>",
+    "position": 0,
+    "keyword": false
+   },
+   {
+    "token": "New York",
+    "start_offset": 0,
+    "end_offset": 8,
+    "type": "shingle",
+    "position": 0,
+    "positionLength": 2,
+    "keyword": false
+   },
+   {
+    "token": "New York City",
+    "start_offset": 0,
+    "end_offset": 13,
+    "type": "shingle",
+    "position": 0,
+    "positionLength": 3,
+    "keyword": false
+   },
+   {
+    "token": "York",
+    "start_offset": 4,
+    "end_offset": 8,
+    "type": "<ALPHANUM>",
+    "position": 1,
+    "keyword": false
+   },
+   {
+    "token": "York City",
+    "start_offset": 4,
+    "end_offset": 13,
+    "type": "shingle",
+    "position": 1,
+    "positionLength": 2,
+    "keyword": false
+   },
+   {
+    "token": "City",
+    "start_offset": 9,
+    "end_offset": 13,
+    "type": "<ALPHANUM>",
+    "position": 2,
+    "keyword": false
+   }
+  ],
+  "status": 200,
+  "response": {
+   "tokens": [
+    {
+     "token": "New York",
+     "start_offset": 0,
+     "end_offset": 8,
+     "type": "shingle",
+     "position": 0,
+     "positionLength": 2
+    },
+    {
+     "token": "New York City",
+     "start_offset": 0,
+     "end_offset": 13,
+     "type": "shingle",
+     "position": 0,
+     "positionLength": 3
+    },
+    {
+     "token": "York City",
+     "start_offset": 4,
+     "end_offset": 13,
+     "type": "shingle",
+     "position": 1,
+     "positionLength": 2
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "true"
+   },
+   "analyze": {
+    "tokenizer": "standard",
+    "filter": [],
+    "text": "  "
+   }
+  },
+  "tokens": [],
+  "status": 200,
+  "response": {
+   "tokens": []
+  }
+ }
+]

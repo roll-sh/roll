@@ -1,0 +1,3887 @@
+[
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_freq"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params._subset_freq",
+       "      ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ params._subset_freq",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 17,
+       "end": 36
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params._subset_freq",
+        "      ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ params._subset_freq",
+       "lang": "painless",
+       "position": {
+        "offset": 23,
+        "start": 17,
+        "end": 36
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "cannot implicitly cast def [org.elasticsearch.search.aggregations.bucket.terms.heuristic.ScriptHeuristic.LongAccessor] to double"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_freq / params._superset_freq"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 1.0,
+       "bg_count": 20
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ (double) params._subset_freq / params._subset_size - (double) params._superset_freq / params._superset_size"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "(double) params._subset_freq / params._subset_size - (double) params._superset_freq / params._superset_size",
+       "               ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ (double) params._subset_freq / params._subset_size - (double) params._superset_freq / params._superset_size",
+      "lang": "painless",
+      "position": {
+       "offset": 32,
+       "start": 17,
+       "end": 124
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "(double) params._subset_freq / params._subset_size - (double) params._superset_freq / params._superset_size",
+        "               ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ (double) params._subset_freq / params._subset_size - (double) params._superset_freq / params._superset_size",
+       "lang": "painless",
+       "position": {
+        "offset": 32,
+        "start": 17,
+        "end": 124
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "cannot explicitly cast def [org.elasticsearch.search.aggregations.bucket.terms.heuristic.ScriptHeuristic.LongAccessor] to byte"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_freq * 1.0 / params._superset_freq"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 1.0,
+       "bg_count": 20
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 0.375,
+       "bg_count": 8
+      },
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 0.375,
+       "bg_count": 8
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 0.3333333333333333,
+       "bg_count": 12
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 0.3333333333333333,
+       "bg_count": 9
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 0.3333333333333333,
+       "bg_count": 9
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 0.3333333333333333,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 0.3333333333333333,
+       "bg_count": 9
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 0.3333333333333333,
+       "bg_count": 6
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 0.25,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._superset_size"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params._superset_size",
+       "      ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ params._superset_size",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 17,
+       "end": 38
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params._superset_size",
+        "      ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ params._superset_size",
+       "lang": "painless",
+       "position": {
+        "offset": 23,
+        "start": 17,
+        "end": 38
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "cannot implicitly cast def [org.elasticsearch.search.aggregations.bucket.terms.heuristic.ScriptHeuristic.LongAccessor] to double"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_size + params._superset_size * 1000"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 60020.0,
+       "bg_count": 8
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 60020.0,
+       "bg_count": 6
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 60020.0,
+       "bg_count": 8
+      },
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 60020.0,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 60020.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 60020.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 60020.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 60020.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 60020.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 60020.0,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ double p = params._subset_freq / (double) params._subset_size; double q = params._superset_freq / (double) params._superset_size; return p * Math.log(p / q);"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "p = params._subset_freq / (double) params._subset_size; double ",
+       "                                         ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ double p = params._subset_freq / (double) params._subset_size; double q = params._superset_freq / (double) params._superset_size; return p * Math.log(p / q);",
+      "lang": "painless",
+      "position": {
+       "offset": 65,
+       "start": 24,
+       "end": 87
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "p = params._subset_freq / (double) params._subset_size; double ",
+        "                                         ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ double p = params._subset_freq / (double) params._subset_size; double q = params._superset_freq / (double) params._superset_size; return p * Math.log(p / q);",
+       "lang": "painless",
+       "position": {
+        "offset": 65,
+        "start": 24,
+        "end": 87
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "cannot explicitly cast def [org.elasticsearch.search.aggregations.bucket.terms.heuristic.ScriptHeuristic.LongAccessor] to byte"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params.w * params._subset_freq",
+   "params": {
+    "w": 2.5
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 50.0,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 10.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 7.5,
+       "bg_count": 8
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 7.5,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 7.5,
+       "bg_count": 9
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 7.5,
+       "bg_count": 9
+      },
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 7.5,
+       "bg_count": 8
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 7.5,
+       "bg_count": 9
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 5.0,
+       "bg_count": 6
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 5.0,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params.containsKey('_subset_freq') ? 1 : 0"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 8
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 1.0,
+       "bg_count": 6
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 8
+      },
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 1.0,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 1.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 1.0,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params.size()"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 4.0,
+       "bg_count": 8
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 4.0,
+       "bg_count": 6
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 4.0,
+       "bg_count": 8
+      },
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 4.0,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 4.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 4.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 4.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 4.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 4.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 4.0,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params.keySet().size()",
+   "params": {
+    "a": 1
+   }
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 8
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 5.0,
+       "bg_count": 6
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 8
+      },
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 5.0,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 5.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 5.0,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_freq instanceof Long ? 1 : 0"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": []
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_freq instanceof Number ? 1 : 0"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 8
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 1.0,
+       "bg_count": 6
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 8
+      },
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 1.0,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 1.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 1.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 1.0,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ def x = params._superset_freq; x.longValue() + 0.5"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 20.5,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 12.5,
+       "bg_count": 12
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 9.5,
+       "bg_count": 9
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 9.5,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 9.5,
+       "bg_count": 9
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 9.5,
+       "bg_count": 9
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 8.5,
+       "bg_count": 8
+      },
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 8.5,
+       "bg_count": 8
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 8.5,
+       "bg_count": 8
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 6.5,
+       "bg_count": 6
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ Long.parseLong(params._subset_freq.toString())"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 20.0,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 4.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 3.0,
+       "bg_count": 8
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 3.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 3.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 3.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 3.0,
+       "bg_count": 8
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 3.0,
+       "bg_count": 9
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 2.0,
+       "bg_count": 6
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 2.0,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_freq.value"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params._subset_freq.value",
+       "                   ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ params._subset_freq.value",
+      "lang": "painless",
+      "position": {
+       "offset": 36,
+       "start": 17,
+       "end": 42
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params._subset_freq.value",
+        "                   ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ params._subset_freq.value",
+       "lang": "painless",
+       "position": {
+        "offset": 36,
+        "start": 17,
+        "end": 42
+       },
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "dynamic getter [org.elasticsearch.search.aggregations.bucket.terms.heuristic.ScriptHeuristic.LongAccessor, value] not found"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params.missing"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params.missing",
+       "      ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ params.missing",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 17,
+       "end": 31
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params.missing",
+        "      ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ params.missing",
+       "lang": "painless",
+       "position": {
+        "offset": 23,
+        "start": 17,
+        "end": 31
+       },
+       "caused_by": {
+        "type": "null_pointer_exception",
+        "reason": "Cannot invoke \"Object.getClass()\" because \"value\" is null"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params.missing + 1"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params.missing + 1",
+       "      ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ params.missing + 1",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 17,
+       "end": 35
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params.missing + 1",
+        "      ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ params.missing + 1",
+       "lang": "painless",
+       "position": {
+        "offset": 23,
+        "start": 17,
+        "end": 35
+       },
+       "caused_by": {
+        "type": "null_pointer_exception",
+        "reason": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ 1 / (params._subset_freq - params._subset_freq)"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "1 / (params._subset_freq - params._subset_freq)",
+       "                                 ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ 1 / (params._subset_freq - params._subset_freq)",
+      "lang": "painless",
+      "position": {
+       "offset": 50,
+       "start": 17,
+       "end": 64
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "1 / (params._subset_freq - params._subset_freq)",
+        "                                 ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ 1 / (params._subset_freq - params._subset_freq)",
+       "lang": "painless",
+       "position": {
+        "offset": 50,
+        "start": 17,
+        "end": 64
+       },
+       "caused_by": {
+        "type": "arithmetic_exception",
+        "reason": "/ by zero"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ throw new IllegalArgumentException('nope')"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "throw new IllegalArgumentException('nope')",
+       "      ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ throw new IllegalArgumentException('nope')",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 17,
+       "end": 59
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "throw new IllegalArgumentException('nope')",
+        "      ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ throw new IllegalArgumentException('nope')",
+       "lang": "painless",
+       "position": {
+        "offset": 23,
+        "start": 17,
+        "end": 59
+       },
+       "caused_by": {
+        "type": "illegal_argument_exception",
+        "reason": "nope"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ return 'x'"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "/* 1792584719 */ return 'x'",
+       "                        ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ return 'x'",
+      "lang": "painless",
+      "position": {
+       "offset": 24,
+       "start": 0,
+       "end": 27
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "/* 1792584719 */ return 'x'",
+        "                        ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ return 'x'",
+       "lang": "painless",
+       "position": {
+        "offset": 24,
+        "start": 0,
+        "end": 27
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "Cannot cast from [java.lang.String] to [double]."
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ -params._subset_freq"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "-params._subset_freq",
+       "       ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ -params._subset_freq",
+      "lang": "painless",
+      "position": {
+       "offset": 24,
+       "start": 17,
+       "end": 37
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "-params._subset_freq",
+        "       ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ -params._subset_freq",
+       "lang": "painless",
+       "position": {
+        "offset": 24,
+        "start": 17,
+        "end": 37
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "Cannot apply [-] operation to type [org.elasticsearch.search.aggregations.bucket.terms.heuristic.ScriptHeuristic.LongAccessor]."
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ Double.NaN"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": []
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_freq > 10 ? params._subset_freq : 0.5"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params._subset_freq > 10 ? params._subset_freq : 0.5",
+       "^---- HERE"
+      ],
+      "script": "/* 1792584719 */ params._subset_freq > 10 ? params._subset_freq : 0.5",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 17,
+       "end": 69
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params._subset_freq > 10 ? params._subset_freq : 0.5",
+        "^---- HERE"
+       ],
+       "script": "/* 1792584719 */ params._subset_freq > 10 ? params._subset_freq : 0.5",
+       "lang": "painless",
+       "position": {
+        "offset": 17,
+        "start": 17,
+        "end": 69
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "cannot implicitly cast def [org.elasticsearch.search.aggregations.bucket.terms.heuristic.ScriptHeuristic.LongAccessor] to double"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params.get('_superset_freq') - params['_subset_freq']"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 8.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 6.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 6.0,
+       "bg_count": 8
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 6.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 6.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 6.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 8
+      },
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 8
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 4.0,
+       "bg_count": 6
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ String s = ''; for (def k : new TreeSet(params.keySet())) { s += k; } return s.length()"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... ef k : new TreeSet(params.keySet())) { s += k; } r ...",
+       "                             ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ String s = ''; for (def k : new TreeSet(params.keySet())) { s += k; } return s.length()",
+      "lang": "painless",
+      "position": {
+       "offset": 63,
+       "start": 38,
+       "end": 88
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "compile error",
+       "script_stack": [
+        "... ef k : new TreeSet(params.keySet())) { s += k; } r ...",
+        "                             ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ String s = ''; for (def k : new TreeSet(params.keySet())) { s += k; } return s.length()",
+       "lang": "painless",
+       "position": {
+        "offset": 63,
+        "start": 38,
+        "end": 88
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "Cannot cast from [java.util.Set] to [java.util.Comparator]."
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params.w",
+   "params": {
+    "w": "text"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "params.w",
+       "      ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ params.w",
+      "lang": "painless",
+      "position": {
+       "offset": 23,
+       "start": 17,
+       "end": 25
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "params.w",
+        "      ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ params.w",
+       "lang": "painless",
+       "position": {
+        "offset": 23,
+        "start": 17,
+        "end": 25
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "cannot implicitly cast def [java.lang.String] to double"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ params._subset_freq = 5; params._subset_freq"
+  },
+  "status": 200,
+  "response": {
+   "timed_out": false,
+   "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 20,
+     "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+   },
+   "aggregations": {
+    "s": {
+     "doc_count": 20,
+     "bg_count": 60,
+     "buckets": [
+      {
+       "key": "t5",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 8
+      },
+      {
+       "key": "rare",
+       "doc_count": 2,
+       "score": 5.0,
+       "bg_count": 6
+      },
+      {
+       "key": "t6",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 8
+      },
+      {
+       "key": "hot",
+       "doc_count": 20,
+       "score": 5.0,
+       "bg_count": 20
+      },
+      {
+       "key": "five",
+       "doc_count": 4,
+       "score": 5.0,
+       "bg_count": 12
+      },
+      {
+       "key": "t0",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t1",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t2",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t3",
+       "doc_count": 3,
+       "score": 5.0,
+       "bg_count": 9
+      },
+      {
+       "key": "t4",
+       "doc_count": 2,
+       "score": 5.0,
+       "bg_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ },
+ {
+  "request": {
+   "script": "/* 1792584719 */ Math.sqrt(params._subset_freq) * Math.log1p(params._superset_size)"
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "Math.sqrt(params._subset_freq) * Math.log1p(params._superset_size)",
+       "                ^---- HERE"
+      ],
+      "script": "/* 1792584719 */ Math.sqrt(params._subset_freq) * Math.log1p(params._superset_size)",
+      "lang": "painless",
+      "position": {
+       "offset": 33,
+       "start": 17,
+       "end": 83
+      }
+     }
+    ],
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "phase": "query",
+    "grouped": true,
+    "failed_shards": [
+     {
+      "shard": 0,
+      "index": "painless-heur",
+      "node": "2AU6uEV5S82s9FCi0WUJKg",
+      "reason": {
+       "type": "script_exception",
+       "reason": "runtime error",
+       "script_stack": [
+        "Math.sqrt(params._subset_freq) * Math.log1p(params._superset_size)",
+        "                ^---- HERE"
+       ],
+       "script": "/* 1792584719 */ Math.sqrt(params._subset_freq) * Math.log1p(params._superset_size)",
+       "lang": "painless",
+       "position": {
+        "offset": 33,
+        "start": 17,
+        "end": 83
+       },
+       "caused_by": {
+        "type": "class_cast_exception",
+        "reason": "cannot implicitly cast def [org.elasticsearch.search.aggregations.bucket.terms.heuristic.ScriptHeuristic.LongAccessor] to double"
+       }
+      }
+     }
+    ]
+   },
+   "status": 400
+  },
+  "candidates": {
+   "doc_count": 20,
+   "bg_count": 60,
+   "buckets": [
+    {
+     "key": "t5",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "rare",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 6
+    },
+    {
+     "key": "t6",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 8
+    },
+    {
+     "key": "hot",
+     "doc_count": 20,
+     "score": 1.0,
+     "bg_count": 20
+    },
+    {
+     "key": "five",
+     "doc_count": 4,
+     "score": 1.0,
+     "bg_count": 12
+    },
+    {
+     "key": "t0",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t1",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t2",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t3",
+     "doc_count": 3,
+     "score": 1.0,
+     "bg_count": 9
+    },
+    {
+     "key": "t4",
+     "doc_count": 2,
+     "score": 1.0,
+     "bg_count": 8
+    }
+   ]
+  }
+ }
+]

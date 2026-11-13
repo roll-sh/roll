@@ -1,0 +1,317 @@
+{
+ "found": {
+  "case": 91,
+  "case_seed": 119000448,
+  "seed": 119
+ },
+ "signature": "POST _search .aggregations.date_range.buckets[].date_histogram.buckets[].top_hits.hits.hits[].sort[]",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dbl0": {
+       "type": "double"
+      },
+      "flat0": {
+       "type": "flattened"
+      },
+      "flt0": {
+       "type": "float"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kwl0": {
+       "normalizer": "lowercase",
+       "type": "keyword"
+      },
+      "long0": {
+       "type": "long"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "scaled0": {
+       "scaling_factor": 100,
+       "type": "scaled_float"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      },
+      "vec0": {
+       "dims": 3,
+       "index_options": {
+        "type": "flat"
+       },
+       "similarity": "l2_norm",
+       "type": "dense_vector"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 3,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m5-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m5-a"
+  },
+  {
+   "body": {
+    "date0": "2024-05-05T15:00:00Z",
+    "dbl0": 25.78,
+    "flat0": {
+     "a": "Alpha"
+    },
+    "flt0": null,
+    "ip0": "10.1.1.180",
+    "kw0": "x-2",
+    "kwl0": "delta",
+    "long0": 2127075866,
+    "n": [
+     {
+      "kw0": "user@example.com",
+      "long0": 68,
+      "text0": "slow of elastic cat fast score and blue"
+     }
+    ],
+    "scaled0": 84.98,
+    "text0": "score cherry data",
+    "text1": "runs data fast index of ran cats",
+    "ulong0": 73,
+    "vec0": [
+     1.23,
+     1.92,
+     -0.87
+    ]
+   },
+   "es": {
+    "body": {
+     "_id": "28",
+     "_index": "diff-m5-a",
+     "_primary_term": 1,
+     "_seq_no": 0,
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "_version": 1,
+     "forced_refresh": true,
+     "result": "created"
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 201
+   },
+   "method": "PUT",
+   "path": "/diff-m5-a/_doc/28?refresh=true"
+  },
+  {
+   "body": {
+    "aggs": {
+     "date_range_17": {
+      "aggs": {
+       "date_histogram_18": {
+        "aggs": {
+         "top_hits_19": {
+          "top_hits": {
+           "sort": [
+            {
+             "ulong0": {}
+            }
+           ]
+          }
+         }
+        },
+        "date_histogram": {
+         "calendar_interval": "week",
+         "field": "date0"
+        }
+       }
+      },
+      "date_range": {
+       "field": "date0",
+       "ranges": [
+        {
+         "from": "2024-04-01",
+         "to": "2024-09-01"
+        }
+       ]
+      }
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 3,
+      "total": 3
+     },
+     "aggregations": {
+      "date_range_17": {
+       "buckets": [
+        {
+         "date_histogram_18": {
+          "buckets": [
+           {
+            "doc_count": 1,
+            "key": 1714348800000,
+            "key_as_string": "2024-04-29T00:00:00.000Z",
+            "top_hits_19": {
+             "hits": {
+              "hits": [
+               {
+                "_id": "28",
+                "_index": "diff-m5-a",
+                "_score": null,
+                "_source": {
+                 "date0": "2024-05-05T15:00:00Z",
+                 "dbl0": 25.78,
+                 "flat0": {
+                  "a": "Alpha"
+                 },
+                 "flt0": null,
+                 "ip0": "10.1.1.180",
+                 "kw0": "x-2",
+                 "kwl0": "delta",
+                 "long0": 2127075866,
+                 "n": [
+                  {
+                   "kw0": "user@example.com",
+                   "long0": 68,
+                   "text0": "slow of elastic cat fast score and blue"
+                  }
+                 ],
+                 "scaled0": 84.98,
+                 "text0": "score cherry data",
+                 "text1": "runs data fast index of ran cats",
+                 "ulong0": 73
+                },
+                "sort": [
+                 -9223372036854775735
+                ]
+               }
+              ],
+              "max_score": null,
+              "total": {
+               "relation": "eq",
+               "value": 1
+              }
+             }
+            }
+           }
+          ]
+         },
+         "doc_count": 1,
+         "from": 1711929600000.0,
+         "from_as_string": "2024-04-01T00:00:00.000Z",
+         "key": "2024-04-01T00:00:00.000Z-2024-09-01T00:00:00.000Z",
+         "to": 1725148800000.0,
+         "to_as_string": "2024-09-01T00:00:00.000Z"
+        }
+       ]
+      }
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "28",
+        "_index": "diff-m5-a",
+        "_score": 1.0,
+        "_source": {
+         "date0": "2024-05-05T15:00:00Z",
+         "dbl0": 25.78,
+         "flat0": {
+          "a": "Alpha"
+         },
+         "flt0": null,
+         "ip0": "10.1.1.180",
+         "kw0": "x-2",
+         "kwl0": "delta",
+         "long0": 2127075866,
+         "n": [
+          {
+           "kw0": "user@example.com",
+           "long0": 68,
+           "text0": "slow of elastic cat fast score and blue"
+          }
+         ],
+         "scaled0": 84.98,
+         "text0": "score cherry data",
+         "text1": "runs data fast index of ran cats",
+         "ulong0": 73
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m5-a/_search"
+  }
+ ]
+}

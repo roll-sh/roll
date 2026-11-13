@@ -15,6 +15,7 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 mod access;
 mod accounts;
+mod apps;
 mod auth;
 mod cluster;
 mod code;
@@ -22,10 +23,12 @@ mod edge;
 mod isolation;
 mod logs;
 mod nosql;
+mod previews;
 mod products;
 mod queues;
 mod storage;
 mod redis;
+mod search;
 mod storage_events;
 mod streams;
 mod tasks;
@@ -35,7 +38,8 @@ mod workspace;
 use products::{Product, Products};
 
 /// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks,
-/// RabbitMQ-compatible queues and ScyllaDB/Cassandra-compatible nosql on your machine (or an EC2 host).
+/// RabbitMQ-compatible queues, ScyllaDB/Cassandra-compatible nosql and Elasticsearch-compatible search on your
+/// machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -169,6 +173,8 @@ struct Args {
     code_only: bool,
     #[command(flatten)]
     code: code::CodeArgs,
+    #[command(flatten)]
+    apps: apps::AppsArgs,
     /// S3-compatible storage listen address.
     #[arg(long, env = "ROLL_S3", default_value = "127.0.0.1:59000")]
     s3: SocketAddr,
@@ -276,8 +282,10 @@ struct Args {
     edge: edge::EdgeArgs,
     #[command(flatten)]
     streams: streams::StreamArgs,
+    #[command(flatten)]
+    search: search::SearchArgs,
     /// Products this node runs, comma-separated: postgres, redis, streams, tasks, storage, nosql,
-    /// queues, code (default: all). `--no-<product>` and `--<product>-only` narrow it.
+    /// queues, code, search (default: all). `--no-<product>` and `--<product>-only` narrow it.
     #[arg(long, env = "ROLL_PRODUCTS", value_enum, value_delimiter = ',')]
     products: Option<Vec<Product>>,
     /// `text`, or `json`: one JSON object per line, with an access line per HTTP request and
@@ -300,9 +308,11 @@ impl Args {
             no_storage: self.no_storage,
             no_queues: self.queues.disabled,
             no_nosql: self.nosql.nosql_disabled,
+            no_search: self.search.search_disabled,
             code_only: self.code_only,
             queues_only: self.queues_only,
             nosql_only: self.nosql.nosql_only,
+            search_only: self.search.search_only,
         })
     }
 }
@@ -417,6 +427,32 @@ async fn run() -> anyhow::Result<()> {
         false => None,
     };
 
+    // roll search: same object storage; the Elasticsearch REST listener and `/v1/search`.
+    let search = match on.on(Product::Search) {
+        true => Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, &cluster, args.code.cluster.system_database.as_deref(), args.db_budget()?.search, edge::Public::of(&args).as_ref()).await?),
+        false => None,
+    };
+
+    // Workspace projects: always on (docs/workspace.md); roll apps places its services there.
+    let workspace = workspace::open(&args, &home)?;
+    // roll apps: services built and run on this host's Docker, each on its lease's holder.
+    let apps = match on.on(Product::Apps) {
+        true => Some(
+            apps::start(
+                &args,
+                &home,
+                &storage,
+                cluster.clone(),
+                workspace.clone(),
+                code.as_ref().map(|c| c.code.clone()),
+                postgres.as_ref().map(|p| p.control.clone()),
+                redis.as_ref().map(|r| r.control.clone()),
+            )
+            .await?,
+        ),
+        false => None,
+    };
+
     // The internal API: every product's routes, and a clear 404 for the ones that are off.
     let mut router = axum::Router::new();
     if let Some(p) = &postgres {
@@ -443,9 +479,32 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
+    if let Some(s) = &search {
+        router = router.merge(s.router());
+    }
+    if let Some(a) = &apps {
+        router = router.merge(a.router());
+    }
     // Workspace projects: always on; the operator's, and each signed-in user's own.
-    let workspace = workspace::open(&args, &home)?;
     router = router.merge(roll_workspace::router(workspace.clone()));
+    // roll previews: an environment per change of a project's repos (needs roll code).
+    let preview_hosts = match &code {
+        Some(c) => {
+            let on_products = previews::Products {
+                postgres: postgres.is_some(),
+                redis: redis.is_some(),
+                nosql: nosql.is_some(),
+                storage: storage_svc.is_some(),
+                streams: streams.is_some(),
+                queues: queues.is_some(),
+                tasks: tasks.is_some(),
+            };
+            let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products)?;
+            router = router.merge(roll_previews::api::router(p.engine.clone()));
+            Some(p.runtime)
+        }
+        None => None,
+    };
     // Accounts and sign-in: always on; the gate resolves their session cookies. (Before the
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
@@ -464,6 +523,8 @@ async fn run() -> anyhow::Result<()> {
             streams: streams.as_ref().map(|s| s.broker.clone()),
             code: code.as_ref().map(|c| &c.code),
             secrets: secrets_envs.clone(),
+            search: search.as_ref().map(|s| s.control.clone()),
+            apps: apps.as_ref().map(|a| a.apps.clone()),
         },
         workspace.clone(),
     )?;
@@ -482,6 +543,11 @@ async fn run() -> anyhow::Result<()> {
     }
     router = router.merge(roll_secrets::router(secrets));
     products_api.set(router.clone());
+    // apps' deploy hooks found leaked (`rlk_`) stop working, like tokens.
+    if let Some(a) = &apps {
+        let apps = a.apps.clone();
+        access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
+    }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);
     // Approvals can be posted to a Slack channel through roll code's chat ops.
@@ -521,6 +587,9 @@ async fn run() -> anyhow::Result<()> {
     if let Some(c) = &code {
         router = c.router(router);
     }
+    if let Some(rt) = &preview_hosts {
+        router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));
+    }
     // In a cluster, requests from other nodes are verified first.
     if cluster.backend_name() != "memory" {
         router = router.layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
@@ -535,6 +604,9 @@ async fn run() -> anyhow::Result<()> {
         storage: storage_svc.as_ref().map(|s| s.s3_router()),
         nosql: nosql.as_ref(),
         queues: queues.as_ref(),
+        search: search.as_ref().map(|s| s.rest_router()),
+        apps: apps.as_ref().map(|a| a.public_router()),
+        custom_domains: apps.as_ref().map(|a| a.custom_domains()),
         auth: &auth,
     };
     // Connections other nodes splice here, on every cluster node (the edge or not).
@@ -546,6 +618,9 @@ async fn run() -> anyhow::Result<()> {
     }
     if let Some(r) = &redis {
         router = r.internal(router);
+    }
+    if let Some(s) = &search {
+        router = s.internal(router);
     }
 
     // Everything that serves until it fails; any of them ending ends the process.
@@ -581,6 +656,12 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         serving.push(Box::pin(n.serve()));
     }
+    if let Some(s) = &search {
+        serving.push(Box::pin(s.serve()));
+    }
+    if let Some(a) = &apps {
+        serving.push(Box::pin(a.serve()));
+    }
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, products = %on, "control API listening");
@@ -615,8 +696,14 @@ async fn run() -> anyhow::Result<()> {
             }
         }
     }
+    if let Some(a) = &apps {
+        a.shutdown().await;
+    }
     if let Some(n) = &nosql {
         n.shutdown().await?;
+    }
+    if let Some(s) = &search {
+        s.shutdown().await;
     }
     if let Some(q) = &queues {
         q.shutdown().await;
@@ -668,6 +755,7 @@ async fn start_postgres(args: &Args, home: &std::path::Path, storage: &StorageCo
 struct CodeNode {
     code: std::sync::Arc<code_control::Code>,
     previews: std::sync::Arc<code_preview::Previews>,
+    isolation: std::sync::Arc<dyn code_preview::Isolation>,
     _checks: tokio::task::JoinHandle<()>,
 }
 
@@ -825,10 +913,10 @@ async fn start_code(
         Some(data),
         isolation.clone(),
     );
-    let runner = code_preview::CheckRunner::new(isolation, args.code_runner_concurrency).with_secrets(std::sync::Arc::new(secrets.clone()));
+    let runner = code_preview::CheckRunner::new(isolation.clone(), args.code_runner_concurrency).with_secrets(std::sync::Arc::new(secrets.clone()));
     code.set_secret_env(std::sync::Arc::new(secrets));
     let checks = code_preview::start(&code, std::sync::Arc::new(runner), previews.clone());
-    Ok(CodeNode { code, previews, _checks: checks })
+    Ok(CodeNode { code, previews, isolation, _checks: checks })
 }
 
 

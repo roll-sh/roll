@@ -1,0 +1,2879 @@
+{
+  "description" : "Round 4: _tsid (sort, search_after, terms/composite/rare_terms keys, time_series, query and fielddata errors, routing), date sort formats (formatted and missing values, numeric_type across date and date_nanos, formatted search_after), index.disable_sequence_numbers, require_data_stream errors, bulk op_type and empty ids, dynamic templates named by bulk items, ingest index changes (set vs reroute, final pipelines, index and pipeline cycles, self-referencing documents)",
+  "steps" : [
+    {
+      "req" : "PUT /es-docs-r4ts",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "mode" : "time_series",
+            "routing_path" : [
+              "k",
+              "n"
+            ],
+            "number_of_shards" : 2,
+            "time_series" : {
+              "start_time" : "2021-04-28T00:00:00Z",
+              "end_time" : "2021-04-29T00:00:00Z"
+            }
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "@timestamp" : {
+              "type" : "date"
+            },
+            "k" : {
+              "type" : "keyword",
+              "time_series_dimension" : true
+            },
+            "n" : {
+              "type" : "long",
+              "time_series_dimension" : true
+            },
+            "v" : {
+              "type" : "long",
+              "time_series_metric" : "gauge"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4ts"
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_bulk?refresh=true",
+      "raw" : "{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:00:04.467Z\", \"k\": \"a\", \"n\": 1, \"v\": 0}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:01:04.467Z\", \"k\": \"b\", \"n\": 1, \"v\": 1}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:02:04.467Z\", \"k\": \"a\", \"n\": 2, \"v\": 2}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:03:04.467Z\", \"k\": \"a\", \"n\": 1, \"v\": 3}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:04:04.467Z\", \"k\": \"b\", \"n\": 1, \"v\": 4}\n{\"index\":{}}\n{\"@timestamp\": \"2021-04-28T18:05:04.467Z\", \"k\": \"c\", \"n\": 7, \"v\": 5}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppst___6G5lytjNHINDw",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMJ___6G5lvDLERfEq0",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8B___6G5lrYzEb4-rg",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppst___6G5lnubNHINDw",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMJ___6G5lkEDERfEq0",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX_UXkw2mzmT8APxs-gN47Lrw7UA0CZ7TgZ___6G5lgZrIkaXLY",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "size" : 10,
+        "sort" : [
+          "_tsid",
+          "@timestamp"
+        ],
+        "fields" : [
+          "_tsid"
+        ],
+        "docvalue_fields" : [
+          "_tsid"
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 223,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8B___6G5lrYzEb4-rg",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8A"
+                ]
+              },
+              "sort" : [
+                "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8A",
+                1619632924467
+              ]
+            },
+            {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppst___6G5lytjNHINDw",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss"
+                ]
+              },
+              "sort" : [
+                "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss",
+                1619632804467
+              ]
+            },
+            {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppst___6G5lnubNHINDw",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss"
+                ]
+              },
+              "sort" : [
+                "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss",
+                1619632984467
+              ]
+            },
+            {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX_UXkw2mzmT8APxs-gN47Lrw7UA0CZ7TgZ___6G5lgZrIkaXLY",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KJuEqQL0guUuBRKjjLQBFX_UXkw2mzmT8APxs-gN47Lrw7UA0CZ7TgY"
+                ]
+              },
+              "sort" : [
+                "KJuEqQL0guUuBRKjjLQBFX_UXkw2mzmT8APxs-gN47Lrw7UA0CZ7TgY",
+                1619633104467
+              ]
+            },
+            {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMJ___6G5lvDLERfEq0",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMI"
+                ]
+              },
+              "sort" : [
+                "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMI",
+                1619632864467
+              ]
+            },
+            {
+              "_index" : "es-docs-r4ts",
+              "_id" : "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMJ___6G5lkEDERfEq0",
+              "_score" : null,
+              "fields" : {
+                "_tsid" : [
+                  "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMI"
+                ]
+              },
+              "sort" : [
+                "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMI",
+                1619633044467
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "size" : 2,
+        "sort" : [
+          {
+            "_tsid" : "desc"
+          },
+          {
+            "@timestamp" : "asc"
+          }
+        ],
+        "search_after" : [
+          "JNdTdJ3Fh9qL9WuWOrfyrN_qkNJ-uEoBFnPjrnuoEfDIjEqzCw",
+          1619634004467
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "t" : {
+            "terms" : {
+              "field" : "_tsid",
+              "order" : {
+                "_key" : "asc"
+              }
+            },
+            "aggs" : {
+              "m" : {
+                "max" : {
+                  "field" : "v"
+                }
+              }
+            }
+          },
+          "c" : {
+            "composite" : {
+              "sources" : [
+                {
+                  "tsid" : {
+                    "terms" : {
+                      "field" : "_tsid"
+                    }
+                  }
+                },
+                {
+                  "h" : {
+                    "date_histogram" : {
+                      "field" : "@timestamp",
+                      "fixed_interval" : "2m"
+                    }
+                  }
+                }
+              ],
+              "size" : 3
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 338,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "t" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8A",
+                "doc_count" : 1,
+                "m" : {
+                  "value" : 2.0
+                }
+              },
+              {
+                "key" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss",
+                "doc_count" : 2,
+                "m" : {
+                  "value" : 3.0
+                }
+              },
+              {
+                "key" : "KJuEqQL0guUuBRKjjLQBFX_UXkw2mzmT8APxs-gN47Lrw7UA0CZ7TgY",
+                "doc_count" : 1,
+                "m" : {
+                  "value" : 5.0
+                }
+              },
+              {
+                "key" : "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMI",
+                "doc_count" : 2,
+                "m" : {
+                  "value" : 4.0
+                }
+              }
+            ]
+          },
+          "c" : {
+            "after_key" : {
+              "tsid" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss",
+              "h" : 1619632920000
+            },
+            "buckets" : [
+              {
+                "key" : {
+                  "tsid" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8A",
+                  "h" : 1619632920000
+                },
+                "doc_count" : 1
+              },
+              {
+                "key" : {
+                  "tsid" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss",
+                  "h" : 1619632800000
+                },
+                "doc_count" : 1
+              },
+              {
+                "key" : {
+                  "tsid" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss",
+                  "h" : 1619632920000
+                },
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search?typed_keys=true",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "f" : {
+            "filter" : {
+              "term" : {
+                "k" : "a"
+              }
+            },
+            "aggs" : {
+              "t" : {
+                "terms" : {
+                  "field" : "_tsid"
+                }
+              }
+            }
+          },
+          "keyed" : {
+            "rare_terms" : {
+              "field" : "_tsid"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 98,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "srareterms#keyed" : {
+            "buckets" : [
+              {
+                "key" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8A",
+                "doc_count" : 1
+              },
+              {
+                "key" : "KJuEqQL0guUuBRKjjLQBFX_UXkw2mzmT8APxs-gN47Lrw7UA0CZ7TgY",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "filter#f" : {
+            "doc_count" : 3,
+            "sterms#t" : {
+              "doc_count_error_upper_bound" : 0,
+              "sum_other_doc_count" : 0,
+              "buckets" : [
+                {
+                  "key" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss",
+                  "doc_count" : 2
+                },
+                {
+                  "key" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8A",
+                  "doc_count" : 1
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "c" : {
+            "composite" : {
+              "sources" : [
+                {
+                  "tsid" : {
+                    "terms" : {
+                      "field" : "_tsid"
+                    }
+                  }
+                }
+              ],
+              "after" : {
+                "tsid" : "JNdTdJ3Fh9qL9WuWOrfyrN_qkNJ-uEoBFnPjrnuoEfDIjEqzCw"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 59,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "c" : {
+            "after_key" : {
+              "tsid" : "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMI"
+            },
+            "buckets" : [
+              {
+                "key" : {
+                  "tsid" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLQ4CmHZN0QWCRrhlZw442vfpfJ8A"
+                },
+                "doc_count" : 1
+              },
+              {
+                "key" : {
+                  "tsid" : "KJuEqQL0guUuBRKjjLQBFX8RjQNLrZuNb0ixxXL5w2E1uY0qVyhppss"
+                },
+                "doc_count" : 2
+              },
+              {
+                "key" : {
+                  "tsid" : "KJuEqQL0guUuBRKjjLQBFX_UXkw2mzmT8APxs-gN47Lrw7UA0CZ7TgY"
+                },
+                "doc_count" : 1
+              },
+              {
+                "key" : {
+                  "tsid" : "KJuEqQL0guUuBRKjjLQBFX_07PgQrZuNb6gbSGM6ry2JkH6mqjsIyMI"
+                },
+                "doc_count" : 2
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "ts" : {
+            "time_series" : {
+              "keyed" : false
+            },
+            "aggs" : {
+              "last" : {
+                "max" : {
+                  "field" : "v"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 88,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "ts" : {
+            "buckets" : [
+              {
+                "key" : {
+                  "k" : "a",
+                  "n" : 1
+                },
+                "doc_count" : 2,
+                "last" : {
+                  "value" : 3.0
+                }
+              },
+              {
+                "key" : {
+                  "k" : "a",
+                  "n" : 2
+                },
+                "doc_count" : 1,
+                "last" : {
+                  "value" : 2.0
+                }
+              },
+              {
+                "key" : {
+                  "k" : "b",
+                  "n" : 1
+                },
+                "doc_count" : 2,
+                "last" : {
+                  "value" : 4.0
+                }
+              },
+              {
+                "key" : {
+                  "k" : "c",
+                  "n" : 7
+                },
+                "doc_count" : 1,
+                "last" : {
+                  "value" : 5.0
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "_tsid" : "x"
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: [_tsid] is not searchable",
+              "index_uuid" : "LTrZsMGEQmeFsCpvDr71FQ",
+              "index" : "es-docs-r4ts"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4ts",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: [_tsid] is not searchable",
+                "index_uuid" : "LTrZsMGEQmeFsCpvDr71FQ",
+                "index" : "es-docs-r4ts",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "[_tsid] is not searchable"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "query" : {
+          "exists" : {
+            "field" : "_tsid"
+          }
+        },
+        "size" : 0
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 6,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "sort" : [
+          "_id"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on [_id] field in [time_series] indices"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4ts",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on [_id] field in [time_series] indices"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on [_id] field in [time_series] indices",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on [_id] field in [time_series] indices"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "i" : {
+            "terms" : {
+              "field" : "_id"
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on [_id] field in [time_series] indices"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4ts",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is not supported on [_id] field in [time_series] indices"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on [_id] field in [time_series] indices",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is not supported on [_id] field in [time_series] indices"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4ts/_search?routing=x",
+      "body" : { },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "searching with a specified routing is not supported because the destination index [es-docs-r4ts] is in time_series mode"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "searching with a specified routing is not supported because the destination index [es-docs-r4ts] is in time_series mode"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4ts",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4d1",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "date",
+              "format" : "yyyy-MM-dd HH:mm:ss.SSS"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4d1"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4d2",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "date_nanos",
+              "format" : "dd/MM/yyyy HH:mm:ss.SSSSSS"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4d2"
+      }
+    },
+    {
+      "req" : "POST /_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_index\":\"es-docs-r4d1\",\"_id\":\"1\"}}\n{\"t\":\"2021-10-13 00:30:04.828\"}\n{\"index\":{\"_index\":\"es-docs-r4d1\",\"_id\":\"2\"}}\n{\"x\":1}\n{\"index\":{\"_index\":\"es-docs-r4d1\",\"_id\":\"3\"}}\n{\"t\":\"2021-02-11 08:30:04.828\"}\n{\"index\":{\"_index\":\"es-docs-r4d2\",\"_id\":\"4\"}}\n{\"t\":\"15/04/2021 06:30:04.821123\"}\n{\"index\":{\"_index\":\"es-docs-r4d2\",\"_id\":\"5\"}}\n{\"y\":1}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4d1",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4d1",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4d1",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4d2",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4d2",
+              "_id" : "5",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1/_search",
+      "body" : {
+        "sort" : [
+          {
+            "t" : {
+              "order" : "asc",
+              "format" : "strict_date_optional_time_nanos"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                "2021-02-11T08:30:04.828Z"
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                "2021-10-13T00:30:04.828Z"
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                null
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1/_search",
+      "body" : {
+        "sort" : [
+          {
+            "t" : {
+              "order" : "desc",
+              "format" : "epoch_millis",
+              "missing" : "_first"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                "1634085004828"
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                "1613032204828"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1/_search",
+      "body" : {
+        "size" : 1,
+        "sort" : [
+          {
+            "t" : "desc"
+          }
+        ],
+        "search_after" : [
+          "2021-10-13 00:30:04.828"
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                1613032204828
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1/_search",
+      "body" : {
+        "size" : 1,
+        "sort" : [
+          {
+            "t" : {
+              "order" : "asc",
+              "format" : "yyyy-MM-dd | HH:mm"
+            }
+          }
+        ],
+        "search_after" : [
+          "2021-02-11 | 08:30"
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 2,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 3,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                "2021-02-11 | 08:30"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1/_search",
+      "body" : {
+        "size" : 1,
+        "sort" : [
+          {
+            "t" : {
+              "order" : "asc",
+              "format" : "epoch_millis"
+            }
+          }
+        ],
+        "search_after" : [
+          "2021-02-11T08:30:04.828Z"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "failed to parse date field [2021-02-11T08:30:04.828Z] with format [epoch_millis]: [failed to parse date field [2021-02-11T08:30:04.828Z] with format [epoch_millis]]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4d1",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "parse_exception",
+                "reason" : "failed to parse date field [2021-02-11T08:30:04.828Z] with format [epoch_millis]: [failed to parse date field [2021-02-11T08:30:04.828Z] with format [epoch_millis]]",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "failed to parse date field [2021-02-11T08:30:04.828Z] with format [epoch_millis]",
+                  "caused_by" : {
+                    "type" : "date_time_parse_exception",
+                    "reason" : "Failed to parse with all enclosed parsers"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1/_search",
+      "body" : {
+        "size" : 1,
+        "sort" : [
+          {
+            "t" : "asc"
+          }
+        ],
+        "search_after" : [
+          "nope"
+        ]
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "failed to parse date field [nope] with format [yyyy-MM-dd HH:mm:ss.SSS]: [failed to parse date field [nope] with format [yyyy-MM-dd HH:mm:ss.SSS]]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4d1",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "parse_exception",
+                "reason" : "failed to parse date field [nope] with format [yyyy-MM-dd HH:mm:ss.SSS]: [failed to parse date field [nope] with format [yyyy-MM-dd HH:mm:ss.SSS]]",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "failed to parse date field [nope] with format [yyyy-MM-dd HH:mm:ss.SSS]",
+                  "caused_by" : {
+                    "type" : "date_time_parse_exception",
+                    "reason" : "Text 'nope' could not be parsed at index 0"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1,es-docs-r4d2/_search",
+      "body" : {
+        "sort" : [
+          {
+            "t" : {
+              "order" : "asc",
+              "numeric_type" : "date_nanos",
+              "format" : "strict_date_optional_time_nanos"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 6,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 5,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                "2021-02-11T08:30:04.828Z"
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d2",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                "2021-04-15T06:30:04.821123Z"
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                "2021-10-13T00:30:04.828Z"
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d2",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                null
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1,es-docs-r4d2/_search",
+      "body" : {
+        "sort" : [
+          {
+            "t" : {
+              "order" : "asc",
+              "numeric_type" : "date_nanos"
+            }
+          }
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 5,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                1613032204828000000
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d2",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                1618468204821123000
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "1",
+              "_score" : null,
+              "sort" : [
+                1634085004828000000
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d2",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4d1,es-docs-r4d2/_search",
+      "body" : {
+        "sort" : [
+          {
+            "t" : {
+              "order" : "desc",
+              "numeric_type" : "date"
+            }
+          }
+        ],
+        "search_after" : [
+          1634085004828
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 2,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 5,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4d2",
+              "_id" : "4",
+              "_score" : null,
+              "sort" : [
+                1618468204821
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "3",
+              "_score" : null,
+              "sort" : [
+                1613032204828
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d1",
+              "_id" : "2",
+              "_score" : null,
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_index" : "es-docs-r4d2",
+              "_id" : "5",
+              "_score" : null,
+              "sort" : [
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4d1,es-docs-r4d2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4nsq",
+      "body" : {
+        "settings" : {
+          "index.disable_sequence_numbers" : true,
+          "number_of_shards" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4nsq"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4nsq/_doc/1?refresh=true",
+      "body" : {
+        "a" : 1
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r4nsq",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : -2,
+        "_primary_term" : 0
+      }
+    },
+    {
+      "req" : "GET /es-docs-r4nsq/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-r4nsq",
+        "_id" : "1",
+        "_version" : 1,
+        "found" : true,
+        "_source" : {
+          "a" : 1
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4nsq/_doc/1?if_seq_no=0&if_primary_term=1",
+      "body" : {
+        "a" : 2
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "o_c_c_not_supported_exception",
+              "reason" : "Optimistic concurrency control is not supported on indices with sequence numbers disabled",
+              "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+              "shard" : "0",
+              "index" : "es-docs-r4nsq"
+            }
+          ],
+          "type" : "o_c_c_not_supported_exception",
+          "reason" : "Optimistic concurrency control is not supported on indices with sequence numbers disabled",
+          "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+          "shard" : "0",
+          "index" : "es-docs-r4nsq"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4nsq/_update/1",
+      "body" : {
+        "doc" : {
+          "a" : 2
+        }
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "update_not_supported_exception",
+              "reason" : "Updates are not supported on indices with sequence numbers disabled",
+              "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+              "shard" : "0",
+              "index" : "es-docs-r4nsq"
+            }
+          ],
+          "type" : "update_not_supported_exception",
+          "reason" : "Updates are not supported on indices with sequence numbers disabled",
+          "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+          "shard" : "0",
+          "index" : "es-docs-r4nsq"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_index\":\"es-docs-r4nsq\",\"_id\":\"2\"}}\n{\"a\":3}\n{\"update\":{\"_index\":\"es-docs-r4nsq\",\"_id\":\"1\"}}\n{\"doc\":{\"a\":4}}\n{\"delete\":{\"_index\":\"es-docs-r4nsq\",\"_id\":\"2\"}}\n",
+      "mask" : [
+        "took",
+        "index_uuid"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4nsq",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : -2,
+              "_primary_term" : 0,
+              "status" : 201
+            }
+          },
+          {
+            "update" : {
+              "_index" : "es-docs-r4nsq",
+              "_id" : "1",
+              "status" : 400,
+              "error" : {
+                "type" : "update_not_supported_exception",
+                "reason" : "Updates are not supported on indices with sequence numbers disabled",
+                "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+                "shard" : "0",
+                "index" : "es-docs-r4nsq"
+              }
+            }
+          },
+          {
+            "delete" : {
+              "_index" : "es-docs-r4nsq",
+              "_id" : "2",
+              "_version" : 2,
+              "result" : "deleted",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : -2,
+              "_primary_term" : 0,
+              "status" : 200
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4nsq/_search",
+      "body" : {
+        "seq_no_primary_term" : true
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4nsq",
+              "_id" : "1",
+              "_seq_no" : -2,
+              "_primary_term" : 0,
+              "_score" : 1.0,
+              "_source" : {
+                "a" : 1
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4nsq/_search",
+      "body" : {
+        "query" : {
+          "term" : {
+            "_seq_no" : 0
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]",
+              "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+              "index" : "es-docs-r4nsq"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4nsq",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]",
+                "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+                "index" : "es-docs-r4nsq",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4nsq/_search",
+      "body" : {
+        "query" : {
+          "range" : {
+            "_seq_no" : {
+              "gte" : 0
+            }
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]",
+              "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+              "index" : "es-docs-r4nsq"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4nsq",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]",
+                "index_uuid" : "C_qxRzulQOakdUzCLmsoxg",
+                "index" : "es-docs-r4nsq",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4nsq/_search",
+      "body" : {
+        "sort" : [
+          {
+            "_seq_no" : "asc"
+          }
+        ]
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4nsq",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot query field [_seq_no]: _seq_no cannot be queried when [index.disable_sequence_numbers] is [true]"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4nsq/_search",
+      "body" : {
+        "query" : {
+          "exists" : {
+            "field" : "_seq_no"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4nsq",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_index_template/es-docs-r4rds",
+      "body" : {
+        "index_patterns" : [
+          "es-docs-r4ds-*"
+        ],
+        "data_stream" : { },
+        "priority" : 500,
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 1
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4plain",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4plain"
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4nods/_doc?require_data_stream=true",
+      "body" : {
+        "a" : 1
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [es-docs-r4nods] and the index creation request requires a data stream, but no matching index template with data stream template was found for it",
+              "index_uuid" : "_na_",
+              "index" : "es-docs-r4nods"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [es-docs-r4nods] and the index creation request requires a data stream, but no matching index template with data stream template was found for it",
+          "index_uuid" : "_na_",
+          "index" : "es-docs-r4nods"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4plain/_doc?require_data_stream=true",
+      "body" : {
+        "a" : 1
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "resource_not_found_exception",
+              "reason" : "[require_data_stream] request flag is [true] and [es-docs-r4plain] is not a data stream"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "[require_data_stream] request flag is [true] and [es-docs-r4plain] is not a data stream"
+        },
+        "status" : 404
+      }
+    },
+    {
+      "req" : "POST /_bulk?require_data_stream=true",
+      "raw" : "{\"index\":{\"_index\":\"es-docs-r4nods2\"}}\n{\"a\":1}\n{\"index\":{\"_index\":\"es-docs-r4plain\"}}\n{\"a\":1}\n{\"index\":{\"_index\":\"es-docs-r4ds-a\",\"op_type\":\"create\"}}\n{\"@timestamp\":\"2024-01-01\"}\n{\"index\":{\"_index\":\"es-docs-r4plain\",\"_id\":\"\"}}\n{\"a\":1}\n{\"create\":{\"_index\":\"es-docs-r4plain\",\"_id\":\"\"}}\n{\"a\":1}\n",
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4nods2",
+              "_id" : null,
+              "status" : 404,
+              "error" : {
+                "type" : "index_not_found_exception",
+                "reason" : "no such index [es-docs-r4nods2] and the index creation request requires a data stream, but no matching index template with data stream template was found for it",
+                "index_uuid" : "_na_",
+                "index" : "es-docs-r4nods2"
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4plain",
+              "_id" : null,
+              "status" : 404,
+              "error" : {
+                "type" : "resource_not_found_exception",
+                "reason" : "[require_data_stream] request flag is [true] and [es-docs-r4plain] is not a data stream"
+              }
+            }
+          },
+          {
+            "create" : {
+              "_index" : ".ds-es-docs-r4ds-a-2026.10.22-000001",
+              "_id" : "HucOZKEB9DjmY5In7EbR",
+              "_version" : 1,
+              "result" : "created",
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4plain",
+              "_id" : "",
+              "status" : 404,
+              "error" : {
+                "type" : "resource_not_found_exception",
+                "reason" : "[require_data_stream] request flag is [true] and [es-docs-r4plain] is not a data stream"
+              }
+            }
+          },
+          {
+            "create" : {
+              "_index" : "es-docs-r4plain",
+              "_id" : "",
+              "status" : 404,
+              "error" : {
+                "type" : "resource_not_found_exception",
+                "reason" : "[require_data_stream] request flag is [true] and [es-docs-r4plain] is not a data stream"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4dt",
+      "body" : {
+        "mappings" : {
+          "dynamic_templates" : [
+            {
+              "location" : {
+                "mapping" : {
+                  "type" : "geo_point"
+                }
+              }
+            },
+            {
+              "kw" : {
+                "match_mapping_type" : "string",
+                "mapping" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            {
+              "bare" : {
+                "mapping" : {
+                  "type" : "long"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4dt"
+      }
+    },
+    {
+      "req" : "POST /_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_index\":\"es-docs-r4dt\",\"_id\":\"1\",\"dynamic_templates\":{\"location\":\"location\"}}}\n{\"location\":\"41.12,-71.34\",\"other\":\"x\"}\n{\"index\":{\"_index\":\"es-docs-r4dt\",\"_id\":\"2\",\"dynamic_templates\":{\"loc2\":\"location\"}}}\n{\"loc2\":[-71.34,41.12]}\n{\"index\":{\"_index\":\"es-docs-r4dt\",\"_id\":\"3\",\"dynamic_templates\":{\"a.b\":\"nope\"}}}\n{\"x\":1,\"a\":{\"b\":\"v\"}}\n{\"index\":{\"_index\":\"es-docs-r4dt\",\"_id\":\"4\"}}\n{\"num\":5}\n",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "errors" : true,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "es-docs-r4dt",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4dt",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4dt",
+              "_id" : "3",
+              "status" : 400,
+              "error" : {
+                "type" : "document_parsing_exception",
+                "reason" : "[1:17] Can't find dynamic template for dynamic template name [nope] of field [a.b]"
+              }
+            }
+          },
+          {
+            "index" : {
+              "_index" : "es-docs-r4dt",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-r4dt/_mapping",
+      "status" : 200,
+      "response" : {
+        "es-docs-r4dt" : {
+          "mappings" : {
+            "dynamic_templates" : [
+              {
+                "location" : {
+                  "mapping" : {
+                    "type" : "geo_point"
+                  }
+                }
+              },
+              {
+                "kw" : {
+                  "match_mapping_type" : "string",
+                  "mapping" : {
+                    "type" : "keyword"
+                  }
+                }
+              },
+              {
+                "bare" : {
+                  "mapping" : {
+                    "type" : "long"
+                  }
+                }
+              }
+            ],
+            "properties" : {
+              "loc2" : {
+                "type" : "geo_point"
+              },
+              "location" : {
+                "type" : "geo_point"
+              },
+              "num" : {
+                "type" : "long"
+              },
+              "other" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-r4dt/_search",
+      "body" : {
+        "query" : {
+          "geo_bounding_box" : {
+            "location" : {
+              "top_left" : {
+                "lat" : 42,
+                "lon" : -72
+              },
+              "bottom_right" : {
+                "lat" : 40,
+                "lon" : -74
+              }
+            }
+          }
+        },
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 10,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-r4dt",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4dt,es-docs-r4plain",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_data_stream/es-docs-r4ds-a",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_index_template/es-docs-r4rds",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4set",
+      "body" : {
+        "processors" : [
+          {
+            "set" : {
+              "field" : "_index",
+              "value" : "es-docs-r4dst"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4rr",
+      "body" : {
+        "processors" : [
+          {
+            "reroute" : {
+              "destination" : "es-docs-r4dst"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4back",
+      "body" : {
+        "processors" : [
+          {
+            "reroute" : {
+              "tag" : "back",
+              "destination" : "es-docs-r4src"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4mark",
+      "body" : {
+        "processors" : [
+          {
+            "set" : {
+              "field" : "marked",
+              "value" : true
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4s1",
+      "body" : {
+        "processors" : [
+          {
+            "pipeline" : {
+              "tag" : "step-1",
+              "name" : "es-docs-r4s2"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4s2",
+      "body" : {
+        "processors" : [
+          {
+            "pipeline" : {
+              "tag" : "step-2",
+              "name" : "es-docs-r4s1"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /_ingest/pipeline/es-docs-r4self",
+      "body" : {
+        "processors" : [
+          {
+            "script" : {
+              "source" : "ctx.object.data = ctx.object"
+            }
+          },
+          {
+            "set" : {
+              "field" : "after",
+              "value" : 1
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4dst",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "index.default_pipeline" : "es-docs-r4mark"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4dst"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-r4src"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src/_doc/1?pipeline=es-docs-r4set&refresh=true",
+      "body" : {
+        "a" : 1
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r4dst",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src/_doc/2?pipeline=es-docs-r4rr&refresh=true",
+      "body" : {
+        "a" : 2
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-r4dst",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-r4dst/_search",
+      "body" : {
+        "sort" : [
+          "_id"
+        ]
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "es-docs-r4dst",
+              "node" : "pC8H5mawRYGuetg8R-ZoyA",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src/_settings",
+      "body" : {
+        "index.final_pipeline" : "es-docs-r4set"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src/_doc/3",
+      "body" : {
+        "a" : 3
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_state_exception",
+              "reason" : "final pipeline [es-docs-r4set] can't change the target index (from [es-docs-r4src] to [es-docs-r4dst]) for document [3]"
+            }
+          ],
+          "type" : "illegal_state_exception",
+          "reason" : "final pipeline [es-docs-r4set] can't change the target index (from [es-docs-r4src] to [es-docs-r4dst]) for document [3]"
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src/_settings",
+      "body" : {
+        "index.final_pipeline" : null
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4dst/_settings",
+      "body" : {
+        "index.default_pipeline" : "es-docs-r4back"
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src/_doc/4?pipeline=es-docs-r4rr",
+      "body" : {
+        "a" : 4
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_state_exception",
+              "reason" : "index cycle detected while processing pipeline [es-docs-r4back] for document [4]: [es-docs-r4src, es-docs-r4dst, es-docs-r4src]"
+            }
+          ],
+          "type" : "illegal_state_exception",
+          "reason" : "index cycle detected while processing pipeline [es-docs-r4back] for document [4]: [es-docs-r4src, es-docs-r4dst, es-docs-r4src]"
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src/_doc/5?pipeline=es-docs-r4s1",
+      "body" : {
+        "a" : 5
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "graph_structure_exception",
+              "reason" : "Cycle detected for pipeline: es-docs-r4s1"
+            }
+          ],
+          "type" : "graph_structure_exception",
+          "reason" : "Cycle detected for pipeline: es-docs-r4s1"
+        },
+        "status" : 500
+      }
+    },
+    {
+      "req" : "POST /_ingest/pipeline/es-docs-r4s1/_simulate",
+      "body" : {
+        "docs" : [
+          {
+            "_source" : {
+              "a" : 1
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "docs" : [
+          {
+            "error" : {
+              "root_cause" : [
+                {
+                  "type" : "graph_structure_exception",
+                  "reason" : "Cycle detected for pipeline: es-docs-r4s1"
+                }
+              ],
+              "type" : "graph_structure_exception",
+              "reason" : "Cycle detected for pipeline: es-docs-r4s1"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "req" : "PUT /es-docs-r4src/_doc/6?pipeline=es-docs-r4self",
+      "body" : {
+        "object" : {
+          "data" : {
+            "f" : 1
+          }
+        }
+      },
+      "mask" : [
+        "_id",
+        "_index",
+        "index_name",
+        "index_uuid",
+        "took"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to generate the source document for ingest pipeline [es-docs-r4self] for document [es-docs-r4src/6]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to generate the source document for ingest pipeline [es-docs-r4self] for document [es-docs-r4src/6]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Iterable object is self-referencing itself (source document)"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /es-docs-r4src,es-docs-r4dst",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4set",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4rr",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4back",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4mark",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4s2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_ingest/pipeline/es-docs-r4self",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

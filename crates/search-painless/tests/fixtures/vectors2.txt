@@ -1,0 +1,2484 @@
+#defaults: {"context": "score", "setup": {"index": "painless-vec", "document": {"fv": [0.5, -1.25, 2, 3.5], "fvc": [0.5, -1.25, 2, 3.5], "fvb": [0.5, -1.25, 2, 3.5], "bv": [1, -2, 3, 127], "bvc": [1, -2, 3, 127], "bvb": [1, -2, 3, 127], "bit": [1, -2], "bitb": [1, -2], "bf": [1.1, -2.3, 3, 0.7]}}}
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": []}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": []}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": []}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": []}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": []}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": []}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": []}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": []}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3, 4]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [1, 2, 300, 4]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": "01020304"}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": []}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [-128, 127, 0, -1]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": "0102"}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [1, 2]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": "0fff"}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [1.5, 2.5]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3, 4]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [1, 2, 300, 4]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": "01020304"}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": []}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [-128, 127, 0, -1]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": "0102"}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [1, 2]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": "0fff"}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [1.5, 2.5]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": []}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": []}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": []}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": []}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": []}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": []}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": []}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": []}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3, 4]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [1, 2, 300, 4]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": "01020304"}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": []}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": "0102"}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [1, 2]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": "0fff"}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [1.5, 2.5]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": []}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": []}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": []}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": []}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": []}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": []}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": []}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": []}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3, 4]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [1, 2, 300, 4]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": "01020304"}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": []}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [-128, 127, 0, -1]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": "0102"}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [1, 2]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": "0fff"}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [1.5, 2.5]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'fv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'fv')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'fv')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'fv')
+----
+#params: {"q": []}
+hamming(params.q, 'fv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'fv')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'fv')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'fv')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'fv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'fv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'fv')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'fv')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": []}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'fvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": []}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'fvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'bv')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'bv')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'bv')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'bv')
+----
+#params: {"q": []}
+hamming(params.q, 'bv')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'bv')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'bv')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'bv')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'bv')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'bv')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'bv')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'bv')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": []}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'bvc')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": []}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'bit')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'bit')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'bit')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'bit')
+----
+#params: {"q": []}
+hamming(params.q, 'bit')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'bit')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'bit')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'bit')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'bit')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'bit')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'bit')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'bit')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": []}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'bitb')
+----
+#params: {"q": [1, 2, 3, 4]}
+hamming(params.q, 'bf')
+----
+#params: {"q": [0.5, 1.5, -2, 3]}
+hamming(params.q, 'bf')
+----
+#params: {"q": [1, 2, 300, 4]}
+hamming(params.q, 'bf')
+----
+#params: {"q": "01020304"}
+hamming(params.q, 'bf')
+----
+#params: {"q": [1, 2, 3]}
+hamming(params.q, 'bf')
+----
+#params: {"q": []}
+hamming(params.q, 'bf')
+----
+#params: {"q": [-128, 127, 0, -1]}
+hamming(params.q, 'bf')
+----
+#params: {"q": "0102"}
+hamming(params.q, 'bf')
+----
+#params: {"q": [1, 2]}
+hamming(params.q, 'bf')
+----
+#params: {"q": "0fff"}
+hamming(params.q, 'bf')
+----
+#params: {"q": [0.5, -1.5, 2, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 2]}
+hamming(params.q, 'bf')
+----
+#params: {"q": [1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0]}
+hamming(params.q, 'bf')
+----
+#params: {"q": [1.5, 2.5]}
+hamming(params.q, 'bf')
+----
+dotProduct(5, 'bv')
+----
+dotProduct(5, 'fv')
+----
+dotProduct(5, 'bit')
+----
+dotProduct([[1,2,3,4]], 'fv')
+----
+dotProduct([1,2,3,4], 'l')
+----
+dotProduct([1,2,3,4], 'nope')
+----
+cosineSimilarity(5, 'bv')
+----
+cosineSimilarity(5, 'fv')
+----
+cosineSimilarity(5, 'bit')
+----
+cosineSimilarity([[1,2,3,4]], 'fv')
+----
+cosineSimilarity([1,2,3,4], 'l')
+----
+cosineSimilarity([1,2,3,4], 'nope')
+----
+l1norm(5, 'bv')
+----
+l1norm(5, 'fv')
+----
+l1norm(5, 'bit')
+----
+l1norm([[1,2,3,4]], 'fv')
+----
+l1norm([1,2,3,4], 'l')
+----
+l1norm([1,2,3,4], 'nope')
+----
+l2norm(5, 'bv')
+----
+l2norm(5, 'fv')
+----
+l2norm(5, 'bit')
+----
+l2norm([[1,2,3,4]], 'fv')
+----
+l2norm([1,2,3,4], 'l')
+----
+l2norm([1,2,3,4], 'nope')
+----
+hamming(5, 'bv')
+----
+hamming(5, 'fv')
+----
+hamming(5, 'bit')
+----
+hamming([[1,2,3,4]], 'fv')
+----
+hamming([1,2,3,4], 'l')
+----
+hamming([1,2,3,4], 'nope')
+----
+doc['fv'].vectorValue
+----
+doc['fv'].magnitude
+----
+doc['fv'].size()
+----
+doc['fv'].empty
+----
+doc['fv'].getVectorValue().length
+----
+doc['fv'].value
+----
+doc['fv'][0]
+----
+doc['fv'].get(0)
+----
+field('fv').get().getVector()
+----
+field('fv').get().getDims()
+----
+field('fv').get().getMagnitude()
+----
+field('fv').get().isEmpty()
+----
+field('fv').get().size()
+----
+field('fv').get().dotProduct([1,2,3,4])
+----
+field('fv').get().dotProduct([0.5,1.5,-2,3])
+----
+field('fv').get().l1Norm([1,2,3,4])
+----
+field('fv').get().l2Norm([1,2,3,4])
+----
+field('fv').get().cosineSimilarity([1,2,3,4])
+----
+field('fv').get().hamming([1,2,3,4])
+----
+field('fv').get().dotProduct(new float[] {1,2,3,4})
+----
+field('fv').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('fv').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('fv').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('fv').get().l1Norm(new byte[] {1,2})
+----
+field('fv').get().hamming(new byte[] {1,2})
+----
+field('fv').get().dotProduct(new byte[] {1,2})
+----
+def v = field('fv').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('fv').get().dotProduct('01020304')
+----
+doc['fvc'].vectorValue
+----
+doc['fvc'].magnitude
+----
+doc['fvc'].size()
+----
+doc['fvc'].empty
+----
+doc['fvc'].getVectorValue().length
+----
+doc['fvc'].value
+----
+doc['fvc'][0]
+----
+doc['fvc'].get(0)
+----
+field('fvc').get().getVector()
+----
+field('fvc').get().getDims()
+----
+field('fvc').get().getMagnitude()
+----
+field('fvc').get().isEmpty()
+----
+field('fvc').get().size()
+----
+field('fvc').get().dotProduct([1,2,3,4])
+----
+field('fvc').get().dotProduct([0.5,1.5,-2,3])
+----
+field('fvc').get().l1Norm([1,2,3,4])
+----
+field('fvc').get().l2Norm([1,2,3,4])
+----
+field('fvc').get().cosineSimilarity([1,2,3,4])
+----
+field('fvc').get().hamming([1,2,3,4])
+----
+field('fvc').get().dotProduct(new float[] {1,2,3,4})
+----
+field('fvc').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('fvc').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('fvc').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('fvc').get().l1Norm(new byte[] {1,2})
+----
+field('fvc').get().hamming(new byte[] {1,2})
+----
+field('fvc').get().dotProduct(new byte[] {1,2})
+----
+def v = field('fvc').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('fvc').get().dotProduct('01020304')
+----
+doc['fvb'].vectorValue
+----
+doc['fvb'].magnitude
+----
+doc['fvb'].size()
+----
+doc['fvb'].empty
+----
+doc['fvb'].getVectorValue().length
+----
+doc['fvb'].value
+----
+doc['fvb'][0]
+----
+doc['fvb'].get(0)
+----
+field('fvb').get().getVector()
+----
+field('fvb').get().getDims()
+----
+field('fvb').get().getMagnitude()
+----
+field('fvb').get().isEmpty()
+----
+field('fvb').get().size()
+----
+field('fvb').get().dotProduct([1,2,3,4])
+----
+field('fvb').get().dotProduct([0.5,1.5,-2,3])
+----
+field('fvb').get().l1Norm([1,2,3,4])
+----
+field('fvb').get().l2Norm([1,2,3,4])
+----
+field('fvb').get().cosineSimilarity([1,2,3,4])
+----
+field('fvb').get().hamming([1,2,3,4])
+----
+field('fvb').get().dotProduct(new float[] {1,2,3,4})
+----
+field('fvb').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('fvb').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('fvb').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('fvb').get().l1Norm(new byte[] {1,2})
+----
+field('fvb').get().hamming(new byte[] {1,2})
+----
+field('fvb').get().dotProduct(new byte[] {1,2})
+----
+def v = field('fvb').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('fvb').get().dotProduct('01020304')
+----
+doc['bv'].vectorValue
+----
+doc['bv'].magnitude
+----
+doc['bv'].size()
+----
+doc['bv'].empty
+----
+doc['bv'].getVectorValue().length
+----
+doc['bv'].value
+----
+doc['bv'][0]
+----
+doc['bv'].get(0)
+----
+field('bv').get().getVector()
+----
+field('bv').get().getDims()
+----
+field('bv').get().getMagnitude()
+----
+field('bv').get().isEmpty()
+----
+field('bv').get().size()
+----
+field('bv').get().dotProduct([1,2,3,4])
+----
+field('bv').get().dotProduct([0.5,1.5,-2,3])
+----
+field('bv').get().l1Norm([1,2,3,4])
+----
+field('bv').get().l2Norm([1,2,3,4])
+----
+field('bv').get().cosineSimilarity([1,2,3,4])
+----
+field('bv').get().hamming([1,2,3,4])
+----
+field('bv').get().dotProduct(new float[] {1,2,3,4})
+----
+field('bv').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('bv').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('bv').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('bv').get().l1Norm(new byte[] {1,2})
+----
+field('bv').get().hamming(new byte[] {1,2})
+----
+field('bv').get().dotProduct(new byte[] {1,2})
+----
+def v = field('bv').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('bv').get().dotProduct('01020304')
+----
+doc['bvc'].vectorValue
+----
+doc['bvc'].magnitude
+----
+doc['bvc'].size()
+----
+doc['bvc'].empty
+----
+doc['bvc'].getVectorValue().length
+----
+doc['bvc'].value
+----
+doc['bvc'][0]
+----
+doc['bvc'].get(0)
+----
+field('bvc').get().getVector()
+----
+field('bvc').get().getDims()
+----
+field('bvc').get().getMagnitude()
+----
+field('bvc').get().isEmpty()
+----
+field('bvc').get().size()
+----
+field('bvc').get().dotProduct([1,2,3,4])
+----
+field('bvc').get().dotProduct([0.5,1.5,-2,3])
+----
+field('bvc').get().l1Norm([1,2,3,4])
+----
+field('bvc').get().l2Norm([1,2,3,4])
+----
+field('bvc').get().cosineSimilarity([1,2,3,4])
+----
+field('bvc').get().hamming([1,2,3,4])
+----
+field('bvc').get().dotProduct(new float[] {1,2,3,4})
+----
+field('bvc').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('bvc').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('bvc').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('bvc').get().l1Norm(new byte[] {1,2})
+----
+field('bvc').get().hamming(new byte[] {1,2})
+----
+field('bvc').get().dotProduct(new byte[] {1,2})
+----
+def v = field('bvc').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('bvc').get().dotProduct('01020304')
+----
+doc['bvb'].vectorValue
+----
+doc['bvb'].magnitude
+----
+doc['bvb'].size()
+----
+doc['bvb'].empty
+----
+doc['bvb'].getVectorValue().length
+----
+doc['bvb'].value
+----
+doc['bvb'][0]
+----
+doc['bvb'].get(0)
+----
+field('bvb').get().getVector()
+----
+field('bvb').get().getDims()
+----
+field('bvb').get().getMagnitude()
+----
+field('bvb').get().isEmpty()
+----
+field('bvb').get().size()
+----
+field('bvb').get().dotProduct([1,2,3,4])
+----
+field('bvb').get().dotProduct([0.5,1.5,-2,3])
+----
+field('bvb').get().l1Norm([1,2,3,4])
+----
+field('bvb').get().l2Norm([1,2,3,4])
+----
+field('bvb').get().cosineSimilarity([1,2,3,4])
+----
+field('bvb').get().hamming([1,2,3,4])
+----
+field('bvb').get().dotProduct(new float[] {1,2,3,4})
+----
+field('bvb').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('bvb').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('bvb').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('bvb').get().l1Norm(new byte[] {1,2})
+----
+field('bvb').get().hamming(new byte[] {1,2})
+----
+field('bvb').get().dotProduct(new byte[] {1,2})
+----
+def v = field('bvb').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('bvb').get().dotProduct('01020304')
+----
+doc['bit'].vectorValue
+----
+doc['bit'].magnitude
+----
+doc['bit'].size()
+----
+doc['bit'].empty
+----
+doc['bit'].getVectorValue().length
+----
+doc['bit'].value
+----
+doc['bit'][0]
+----
+doc['bit'].get(0)
+----
+field('bit').get().getVector()
+----
+field('bit').get().getDims()
+----
+field('bit').get().getMagnitude()
+----
+field('bit').get().isEmpty()
+----
+field('bit').get().size()
+----
+field('bit').get().dotProduct([1,2,3,4])
+----
+field('bit').get().dotProduct([0.5,1.5,-2,3])
+----
+field('bit').get().l1Norm([1,2,3,4])
+----
+field('bit').get().l2Norm([1,2,3,4])
+----
+field('bit').get().cosineSimilarity([1,2,3,4])
+----
+field('bit').get().hamming([1,2,3,4])
+----
+field('bit').get().dotProduct(new float[] {1,2,3,4})
+----
+field('bit').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('bit').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('bit').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('bit').get().l1Norm(new byte[] {1,2})
+----
+field('bit').get().hamming(new byte[] {1,2})
+----
+field('bit').get().dotProduct(new byte[] {1,2})
+----
+def v = field('bit').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('bit').get().dotProduct('01020304')
+----
+doc['bitb'].vectorValue
+----
+doc['bitb'].magnitude
+----
+doc['bitb'].size()
+----
+doc['bitb'].empty
+----
+doc['bitb'].getVectorValue().length
+----
+doc['bitb'].value
+----
+doc['bitb'][0]
+----
+doc['bitb'].get(0)
+----
+field('bitb').get().getVector()
+----
+field('bitb').get().getDims()
+----
+field('bitb').get().getMagnitude()
+----
+field('bitb').get().isEmpty()
+----
+field('bitb').get().size()
+----
+field('bitb').get().dotProduct([1,2,3,4])
+----
+field('bitb').get().dotProduct([0.5,1.5,-2,3])
+----
+field('bitb').get().l1Norm([1,2,3,4])
+----
+field('bitb').get().l2Norm([1,2,3,4])
+----
+field('bitb').get().cosineSimilarity([1,2,3,4])
+----
+field('bitb').get().hamming([1,2,3,4])
+----
+field('bitb').get().dotProduct(new float[] {1,2,3,4})
+----
+field('bitb').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('bitb').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('bitb').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('bitb').get().l1Norm(new byte[] {1,2})
+----
+field('bitb').get().hamming(new byte[] {1,2})
+----
+field('bitb').get().dotProduct(new byte[] {1,2})
+----
+def v = field('bitb').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('bitb').get().dotProduct('01020304')
+----
+doc['bf'].vectorValue
+----
+doc['bf'].magnitude
+----
+doc['bf'].size()
+----
+doc['bf'].empty
+----
+doc['bf'].getVectorValue().length
+----
+doc['bf'].value
+----
+doc['bf'][0]
+----
+doc['bf'].get(0)
+----
+field('bf').get().getVector()
+----
+field('bf').get().getDims()
+----
+field('bf').get().getMagnitude()
+----
+field('bf').get().isEmpty()
+----
+field('bf').get().size()
+----
+field('bf').get().dotProduct([1,2,3,4])
+----
+field('bf').get().dotProduct([0.5,1.5,-2,3])
+----
+field('bf').get().l1Norm([1,2,3,4])
+----
+field('bf').get().l2Norm([1,2,3,4])
+----
+field('bf').get().cosineSimilarity([1,2,3,4])
+----
+field('bf').get().hamming([1,2,3,4])
+----
+field('bf').get().dotProduct(new float[] {1,2,3,4})
+----
+field('bf').get().dotProduct(new byte[] {1,2,3,4})
+----
+field('bf').get().cosineSimilarity(new float[] {1,2,3,4}, true)
+----
+field('bf').get().cosineSimilarity(new float[] {1,2,3,4}, false)
+----
+field('bf').get().l1Norm(new byte[] {1,2})
+----
+field('bf').get().hamming(new byte[] {1,2})
+----
+field('bf').get().dotProduct(new byte[] {1,2})
+----
+def v = field('bf').get().getVector(); return [v.length, v[0], v[v.length - 1]]
+----
+field('bf').get().dotProduct('01020304')
+----
+#defaults: {"context": "score", "setup": {"index": "painless-vec", "document": {"l": 1}}}
+----
+#params: {"q": [1,2,3,4]}
+dotProduct(params.q, 'fv')
+----
+#params: {"q": [1,2,3,4]}
+dotProduct(params.q, 'bv')
+----
+#params: {"q": [1,2,3,4]}
+dotProduct(params.q, 'bit')
+----
+#params: {"q": [1,2,3,4]}
+dotProduct(params.q, 'bf')
+----
+#params: {"q": [1,2,3,4]}
+dotProduct(params.q, 'bvb')
+----
+#params: {"q": [1,2,3,4]}
+dotProduct(params.q, 'fvb')
+----
+#params: {"q": [1,2,3,4]}
+cosineSimilarity(params.q, 'fv')
+----
+#params: {"q": [1,2,3,4]}
+cosineSimilarity(params.q, 'bv')
+----
+#params: {"q": [1,2,3,4]}
+cosineSimilarity(params.q, 'bit')
+----
+#params: {"q": [1,2,3,4]}
+cosineSimilarity(params.q, 'bf')
+----
+#params: {"q": [1,2,3,4]}
+cosineSimilarity(params.q, 'bvb')
+----
+#params: {"q": [1,2,3,4]}
+cosineSimilarity(params.q, 'fvb')
+----
+#params: {"q": [1,2,3,4]}
+l1norm(params.q, 'fv')
+----
+#params: {"q": [1,2,3,4]}
+l1norm(params.q, 'bv')
+----
+#params: {"q": [1,2,3,4]}
+l1norm(params.q, 'bit')
+----
+#params: {"q": [1,2,3,4]}
+l1norm(params.q, 'bf')
+----
+#params: {"q": [1,2,3,4]}
+l1norm(params.q, 'bvb')
+----
+#params: {"q": [1,2,3,4]}
+l1norm(params.q, 'fvb')
+----
+#params: {"q": [1,2,3,4]}
+l2norm(params.q, 'fv')
+----
+#params: {"q": [1,2,3,4]}
+l2norm(params.q, 'bv')
+----
+#params: {"q": [1,2,3,4]}
+l2norm(params.q, 'bit')
+----
+#params: {"q": [1,2,3,4]}
+l2norm(params.q, 'bf')
+----
+#params: {"q": [1,2,3,4]}
+l2norm(params.q, 'bvb')
+----
+#params: {"q": [1,2,3,4]}
+l2norm(params.q, 'fvb')
+----
+#params: {"q": [1,2,3,4]}
+hamming(params.q, 'fv')
+----
+#params: {"q": [1,2,3,4]}
+hamming(params.q, 'bv')
+----
+#params: {"q": [1,2,3,4]}
+hamming(params.q, 'bit')
+----
+#params: {"q": [1,2,3,4]}
+hamming(params.q, 'bf')
+----
+#params: {"q": [1,2,3,4]}
+hamming(params.q, 'bvb')
+----
+#params: {"q": [1,2,3,4]}
+hamming(params.q, 'fvb')
+----
+doc['fv'].vectorValue
+----
+doc['fv'].magnitude
+----
+doc['fv'].size()
+----
+doc['fv'].empty
+----
+field('fv').get().isEmpty()
+----
+field('fv').get().getDims()
+----
+field('fv').get().getVector()
+----
+field('fv').get().getMagnitude()
+----
+field('fv').get().dotProduct([1,2,3,4])
+----
+doc['bv'].vectorValue
+----
+doc['bv'].magnitude
+----
+doc['bv'].size()
+----
+doc['bv'].empty
+----
+field('bv').get().isEmpty()
+----
+field('bv').get().getDims()
+----
+field('bv').get().getVector()
+----
+field('bv').get().getMagnitude()
+----
+field('bv').get().dotProduct([1,2,3,4])
+----
+doc['bit'].vectorValue
+----
+doc['bit'].magnitude
+----
+doc['bit'].size()
+----
+doc['bit'].empty
+----
+field('bit').get().isEmpty()
+----
+field('bit').get().getDims()
+----
+field('bit').get().getVector()
+----
+field('bit').get().getMagnitude()
+----
+field('bit').get().dotProduct([1,2,3,4])
+----
+doc['bvb'].vectorValue
+----
+doc['bvb'].magnitude
+----
+doc['bvb'].size()
+----
+doc['bvb'].empty
+----
+field('bvb').get().isEmpty()
+----
+field('bvb').get().getDims()
+----
+field('bvb').get().getVector()
+----
+field('bvb').get().getMagnitude()
+----
+field('bvb').get().dotProduct([1,2,3,4])

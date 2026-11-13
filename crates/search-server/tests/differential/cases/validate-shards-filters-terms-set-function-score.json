@@ -1,0 +1,688 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/hw-val?ignore_unavailable=true",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-val",
+      "body": {
+        "settings": {
+          "number_of_shards": 2
+        },
+        "mappings": {
+          "properties": {
+            "n": {
+              "type": "nested",
+              "properties": {
+                "x": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "k": {
+              "type": "keyword"
+            },
+            "v": {
+              "type": "dense_vector",
+              "dims": 2
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-val"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "hw-val",
+            "_id": "1"
+          }
+        },
+        {
+          "k": "a",
+          "v": [
+            1,
+            2
+          ],
+          "n": [
+            {
+              "x": "y"
+            }
+          ]
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "hw-val",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?rewrite=true&all_shards=true",
+      "body": {
+        "query": {
+          "exists": {
+            "field": "v"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "shard": 0,
+              "valid": true,
+              "explanation": "ConstantScore(*:*)"
+            },
+            {
+              "index": "hw-val",
+              "shard": 1,
+              "valid": true,
+              "explanation": "+ConstantScore(FieldExistsQuery [field=v]) #FieldExistsQuery [field=_primary_term]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?all_shards=true",
+      "body": {
+        "query": {
+          "term": {
+            "k": "a"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "shard": 0,
+              "valid": true,
+              "explanation": "k:a"
+            },
+            {
+              "index": "hw-val",
+              "shard": 1,
+              "valid": true,
+              "explanation": "k:a"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "match": {
+            "zz": "a"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": true,
+              "explanation": "MatchNoDocsQuery(\"unmapped fields [zz]\")"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "term": {
+            "k": "a"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": true,
+              "explanation": "k:a"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "n",
+            "query": {
+              "term": {
+                "n.x": "y"
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": true,
+              "explanation": "ToParentBlockJoinQuery (n.x:y)"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "nested": {
+            "path": "nope",
+            "query": {
+              "match_all": {}
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": false,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": false,
+              "error": "org.elasticsearch.index.query.QueryShardException: [nested] failed to find nested object under path [nope]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "terms_set": {
+            "kw1": {
+              "terms": [
+                "a",
+                "b"
+              ],
+              "minimum_should_match": 1
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": true,
+              "explanation": "+CoveringQuery(queries=[kw1:a, kw1:b], minimumNumberMatch=constant(1)) #FieldExistsQuery [field=_primary_term]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "terms_set": {
+            "k": {
+              "terms": [
+                "a"
+              ],
+              "minimum_should_match_field": "zz"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": false,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": false,
+              "error": "org.elasticsearch.index.query.QueryShardException: failed to find minimum_should_match field [zz]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "terms_set": {
+            "k": {
+              "terms": [
+                "a"
+              ]
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": false,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": false,
+              "error": "[hw-val/cEpSkU6EQ7iqx0NFPyjvKA] org.elasticsearch.index.query.QueryShardException: failed to create query: No minimum should match has been specified; java.lang.IllegalStateException: No minimum should match has been specified"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "terms_set": {
+            "k": {}
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": true,
+              "explanation": "MatchNoDocsQuery(\"No terms supplied for \"terms_set\" query.\")"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "terms_set": {
+            "k": {
+              "terms": [
+                "a"
+              ],
+              "minimum_should_match_script": {
+                "source": "Math.min(params.num_terms, 2)"
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": true,
+              "explanation": "+CoveringQuery(queries=[k:a], minimumNumberMatch=script(Script{type=inline, lang='painless', idOrCode='Math.min(params.num_terms, 2)', options={}, params={}})) #FieldExistsQuery [field=_primary_term]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_search",
+      "body": {
+        "query": {
+          "terms_set": {
+            "k": {
+              "terms": [
+                "a"
+              ]
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "failed to create query: No minimum should match has been specified",
+                "index_uuid": "cEpSkU6EQ7iqx0NFPyjvKA",
+                "index": "hw-val"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-val",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "failed to create query: No minimum should match has been specified",
+                  "index_uuid": "cEpSkU6EQ7iqx0NFPyjvKA",
+                  "index": "hw-val",
+                  "caused_by": {
+                    "type": "illegal_state_exception",
+                    "reason": "No minimum should match has been specified"
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "geo_distance": {
+            "distance": "1km",
+            "k": "1,1"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": false,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": false,
+              "error": "org.elasticsearch.index.query.QueryShardException: Field [k] is of unsupported type [keyword] for [geo_distance] query"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-val/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "function_score": {
+            "functions": [
+              {
+                "filter": {
+                  "term": {
+                    "k": "x"
+                  }
+                },
+                "weight": 2
+              },
+              {
+                "field_value_factor": {
+                  "field": "k2",
+                  "missing": 1
+                }
+              },
+              {
+                "script_score": {
+                  "script": "_score * 2"
+                }
+              },
+              {
+                "random_score": {}
+              },
+              {
+                "weight": 3
+              }
+            ],
+            "query": {
+              "match_all": {}
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": true,
+          "explanations": [
+            {
+              "index": "hw-val",
+              "valid": true,
+              "explanation": "+function score (*:*, functions: [{org.elasticsearch.common.lucene.search.function.FunctionScoreQuery$FilterScoreFunction@f2702e84}{org.elasticsearch.common.lucene.search.function.FieldValueFactorFunction@9355188b}{scriptScript{type=inline, lang='painless', idOrCode='_score * 2', options={}, params={}}}{org.elasticsearch.common.lucene.search.function.RandomScoreFunction@4f9b8499}{org.elasticsearch.common.lucene.search.function.WeightFactorFunction@1ae7a585}]) #FieldExistsQuery [field=_primary_term]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hw-val",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

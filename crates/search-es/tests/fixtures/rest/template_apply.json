@@ -1,0 +1,793 @@
+{
+  "description" : "How templates combine at index creation: priorities, composition order, request overrides, legacy merges.",
+  "steps" : [
+    {
+      "req" : "PUT /_component_template/esm-ta-c1",
+      "body" : {
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 2,
+            "index.refresh_interval" : "5s"
+          },
+          "mappings" : {
+            "dynamic" : "strict",
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              },
+              "o" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "long"
+                  }
+                }
+              }
+            }
+          },
+          "aliases" : {
+            "esm-ta-al1" : {
+              "is_hidden" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_component_template/esm-ta-c2",
+      "body" : {
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 3
+          },
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "text"
+              },
+              "o" : {
+                "properties" : {
+                  "y" : {
+                    "type" : "keyword"
+                  }
+                }
+              },
+              "b" : {
+                "type" : "long"
+              }
+            }
+          },
+          "aliases" : {
+            "esm-ta-al2" : {
+              "routing" : "1"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-ta-t1",
+      "body" : {
+        "index_patterns" : [
+          "esm-ta-*"
+        ],
+        "priority" : 7,
+        "composed_of" : [
+          "esm-ta-c1",
+          "esm-ta-c2"
+        ],
+        "template" : {
+          "settings" : {
+            "number_of_replicas" : 0
+          },
+          "mappings" : {
+            "properties" : {
+              "c" : {
+                "type" : "date"
+              },
+              "o" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "integer"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-ta-t2",
+      "body" : {
+        "index_patterns" : [
+          "esm-ta-x*"
+        ],
+        "priority" : 3,
+        "template" : {
+          "settings" : {
+            "number_of_shards" : 9
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ta-1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ta-1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ta-1",
+      "status" : 200,
+      "response" : {
+        "esm-ta-1" : {
+          "aliases" : {
+            "esm-ta-al1" : {
+              "is_hidden" : false
+            },
+            "esm-ta-al2" : {
+              "index_routing" : "1",
+              "search_routing" : "1"
+            }
+          },
+          "mappings" : {
+            "dynamic" : "strict",
+            "properties" : {
+              "a" : {
+                "type" : "text"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "c" : {
+                "type" : "date"
+              },
+              "o" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "integer"
+                  },
+                  "y" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          },
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "refresh_interval" : "5s",
+              "number_of_shards" : "3",
+              "provided_name" : "esm-ta-1",
+              "creation_date" : "1792523937121",
+              "number_of_replicas" : "0",
+              "uuid" : "7wmSngopQLObXzN5u5LXGA",
+              "version" : {
+                "created" : "9111000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ta-2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "refresh_interval" : null
+        },
+        "mappings" : {
+          "dynamic" : true,
+          "properties" : {
+            "a" : {
+              "type" : "wildcard"
+            },
+            "d" : {
+              "type" : "boolean"
+            }
+          }
+        },
+        "aliases" : {
+          "esm-ta-al3" : { }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ta-2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ta-2",
+      "status" : 200,
+      "response" : {
+        "esm-ta-2" : {
+          "aliases" : {
+            "esm-ta-al1" : {
+              "is_hidden" : false
+            },
+            "esm-ta-al2" : {
+              "index_routing" : "1",
+              "search_routing" : "1"
+            },
+            "esm-ta-al3" : { }
+          },
+          "mappings" : {
+            "dynamic" : "true",
+            "properties" : {
+              "a" : {
+                "type" : "wildcard"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "c" : {
+                "type" : "date"
+              },
+              "d" : {
+                "type" : "boolean"
+              },
+              "o" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "integer"
+                  },
+                  "y" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          },
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "refresh_interval" : null,
+              "number_of_shards" : "1",
+              "provided_name" : "esm-ta-2",
+              "creation_date" : "1792523937229",
+              "number_of_replicas" : "0",
+              "uuid" : "TcZXOK1HShSfchJexJGMpA",
+              "version" : {
+                "created" : "9111000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ta-x1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ta-x1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ta-x1/_settings/index.number_of_shards,index.refresh_interval?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-ta-x1" : {
+          "settings" : {
+            "index.number_of_shards" : "3",
+            "index.refresh_interval" : "5s"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ta-3",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "o" : {
+              "type" : "nested"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ta-3"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ta-4",
+      "body" : {
+        "settings" : {
+          "index.hidden" : true
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ta-4"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ta-4/_settings/index.number_of_shards,index.hidden?flat_settings",
+      "status" : 200,
+      "response" : {
+        "esm-ta-4" : {
+          "settings" : {
+            "index.hidden" : "true",
+            "index.number_of_shards" : "3"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_index_template/esm-ta-all",
+      "body" : {
+        "index_patterns" : [
+          "*"
+        ],
+        "priority" : 0,
+        "template" : {
+          "settings" : {
+            "index.hidden" : true
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: global composable templates may not specify the setting index.hidden;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: global composable templates may not specify the setting index.hidden;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-ta-l1",
+      "body" : {
+        "index_patterns" : [
+          "esm-tl-*"
+        ],
+        "order" : 1,
+        "settings" : {
+          "number_of_shards" : 2,
+          "index.refresh_interval" : "7s"
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "keyword"
+            },
+            "o" : {
+              "properties" : {
+                "x" : {
+                  "type" : "long"
+                }
+              }
+            }
+          }
+        },
+        "aliases" : {
+          "esm-tl-al" : { }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-ta-l2",
+      "body" : {
+        "index_patterns" : [
+          "esm-tl-a*"
+        ],
+        "order" : 2,
+        "settings" : {
+          "number_of_shards" : 4
+        },
+        "mappings" : {
+          "properties" : {
+            "b" : {
+              "type" : "long"
+            },
+            "o" : {
+              "properties" : {
+                "y" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /_template/esm-ta-l3",
+      "body" : {
+        "index_patterns" : [
+          "esm-tl-*"
+        ],
+        "order" : 0,
+        "settings" : {
+          "number_of_shards" : 6,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"Legacy index templates are deprecated in favor of composable templates.\""
+        ]
+      }
+    },
+    {
+      "req" : "PUT /esm-tl-a1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-tl-a1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"index [esm-tl-a1] matches multiple legacy templates [esm-ta-l1, esm-ta-l2, esm-ta-l3], composable templates will only match a single template\""
+        ]
+      }
+    },
+    {
+      "req" : "GET /esm-tl-a1",
+      "status" : 200,
+      "response" : {
+        "esm-tl-a1" : {
+          "aliases" : {
+            "esm-tl-al" : { }
+          },
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "keyword"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "o" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "long"
+                  },
+                  "y" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          },
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "refresh_interval" : "7s",
+              "number_of_shards" : "4",
+              "provided_name" : "esm-tl-a1",
+              "creation_date" : "1792523937680",
+              "number_of_replicas" : "0",
+              "uuid" : "D1tCt8HZT6WZ5CJOWDr9Eg",
+              "version" : {
+                "created" : "9111000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-tl-b1",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-tl-b1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json",
+        "warning" : [
+          "299 Elasticsearch-9.5.5-48acba663b09e70b115dd879329141506c377890 \"index [esm-tl-b1] matches multiple legacy templates [esm-ta-l1, esm-ta-l3], composable templates will only match a single template\""
+        ]
+      }
+    },
+    {
+      "req" : "GET /esm-tl-b1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-tl-b1" : {
+          "mappings" : {
+            "properties" : {
+              "a" : {
+                "type" : "long"
+              },
+              "o" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "long"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-ta-9",
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "refresh_interval" : "5s",
+              "number_of_shards" : "3",
+              "number_of_replicas" : "0"
+            }
+          },
+          "mappings" : {
+            "dynamic" : "strict",
+            "properties" : {
+              "a" : {
+                "type" : "text"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "c" : {
+                "type" : "date"
+              },
+              "o" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "integer"
+                  },
+                  "y" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          },
+          "aliases" : {
+            "esm-ta-al2" : {
+              "index_routing" : "1",
+              "search_routing" : "1"
+            },
+            "esm-ta-al1" : {
+              "is_hidden" : false
+            }
+          }
+        },
+        "overlapping" : [
+          {
+            "name" : "esm-ta-t2",
+            "index_patterns" : [
+              "esm-ta-x*"
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate_index/esm-tl-a2",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_index_template/_simulate/esm-ta-t1",
+      "status" : 200,
+      "response" : {
+        "template" : {
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "refresh_interval" : "5s",
+              "number_of_shards" : "3",
+              "number_of_replicas" : "0"
+            }
+          },
+          "mappings" : {
+            "dynamic" : "strict",
+            "properties" : {
+              "a" : {
+                "type" : "text"
+              },
+              "b" : {
+                "type" : "long"
+              },
+              "c" : {
+                "type" : "date"
+              },
+              "o" : {
+                "properties" : {
+                  "x" : {
+                    "type" : "integer"
+                  },
+                  "y" : {
+                    "type" : "keyword"
+                  }
+                }
+              }
+            }
+          },
+          "aliases" : {
+            "esm-ta-al2" : {
+              "index_routing" : "1",
+              "search_routing" : "1"
+            },
+            "esm-ta-al1" : {
+              "is_hidden" : false
+            }
+          }
+        },
+        "overlapping" : [
+          {
+            "name" : "esm-ta-t2",
+            "index_patterns" : [
+              "esm-ta-x*"
+            ]
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

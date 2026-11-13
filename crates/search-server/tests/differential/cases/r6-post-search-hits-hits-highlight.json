@@ -1,0 +1,285 @@
+{
+ "found": {
+  "case": 12,
+  "case_seed": 102000318,
+  "seed": 102
+ },
+ "signature": "POST _search .hits.hits[].highlight",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "dnanos0": {
+       "type": "date_nanos"
+      },
+      "flat0": {
+       "type": "flattened"
+      },
+      "flt0": {
+       "type": "float"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "kw1": {
+       "type": "keyword"
+      },
+      "mot0": {
+       "type": "match_only_text"
+      },
+      "n": {
+       "properties": {
+        "kw0": {
+         "type": "keyword"
+        },
+        "long0": {
+         "type": "long"
+        },
+        "text0": {
+         "analyzer": "simple",
+         "fields": {
+          "raw": {
+           "ignore_above": 32,
+           "type": "keyword"
+          }
+         },
+         "type": "text"
+        }
+       },
+       "type": "nested"
+      },
+      "o": {
+       "properties": {
+        "int0": {
+         "type": "integer"
+        },
+        "kw0": {
+         "type": "keyword"
+        }
+       }
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "ulong0": {
+       "type": "unsigned_long"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m11-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m11-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "17",
+        "_index": "diff-m11-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "17",
+      "_index": "diff-m11-a"
+     }
+    },
+    {
+     "comp0": "red",
+     "date0": "2024-05-07T09:00:00Z",
+     "dnanos0": 1730102400000,
+     "flat0": {
+      "a": "x-2",
+      "b": {
+       "c": "Alpha"
+      }
+     },
+     "flt0": -2.64,
+     "int0": -48,
+     "ip0": "10.1.3.182",
+     "kw0": "pi",
+     "kw1": "x-2",
+     "mot0": "engine",
+     "o": {
+      "int0": 114,
+      "kw0": "x-1"
+     },
+     "text0": "cats over green running fast",
+     "ulong0": 82
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 1,
+      "total": 1
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m11-a/_refresh"
+  },
+  {
+   "body": {
+    "highlight": {
+     "fields": {
+      "text0": {
+       "type": "plain"
+      }
+     }
+    },
+    "query": {
+     "dis_max": {
+      "queries": [
+       {
+        "intervals": {
+         "text0": {
+          "any_of": {
+           "intervals": [
+            {
+             "wildcard": {
+              "pattern": "gr*"
+             }
+            }
+           ]
+          }
+         }
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 1,
+      "total": 1
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "17",
+        "_index": "diff-m11-a",
+        "_score": 0.5,
+        "_source": {
+         "comp0": "red",
+         "date0": "2024-05-07T09:00:00Z",
+         "dnanos0": 1730102400000,
+         "flat0": {
+          "a": "x-2",
+          "b": {
+           "c": "Alpha"
+          }
+         },
+         "flt0": -2.64,
+         "int0": -48,
+         "ip0": "10.1.3.182",
+         "kw0": "pi",
+         "kw1": "x-2",
+         "mot0": "engine",
+         "o": {
+          "int0": 114,
+          "kw0": "x-1"
+         },
+         "text0": "cats over green running fast",
+         "ulong0": 82
+        }
+       }
+      ],
+      "max_score": 0.5,
+      "total": {
+       "relation": "eq",
+       "value": 1
+      }
+     },
+     "timed_out": false,
+     "took": 1
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m11-a/_search"
+  }
+ ]
+}

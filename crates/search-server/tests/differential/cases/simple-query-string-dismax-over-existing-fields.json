@@ -1,0 +1,559 @@
+{
+  "diff": {
+    "es": "weight(FunctionScoreQuery(kw1:, scored by boost(queryboost(score(#((n.kw0:red | MatchNoDocsQuery(\"failed [int0] query, caused by number_format_exception:[For input string: \"red\"]\") | text0:red | kw1:red | n.text0.raw:red | kw0:red | comp0:red | MatchNoDocsQuery(\"failed [n.long0] query, caused by number_format_exception:[For input string: \"red\"]\") | text0.raw:red | n.text0:red | MatchNoDocsQuery(\"failed [date0] query, caused by parse_exception:[failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]]]\"))~1.0 (n.kw0:Quick | MatchNoDocsQuery(\"failed [int0] query, caused by number_format_exception:[For input string: \"Quick\"]\") | text0:quick | kw1:Quick | n.text0.raw:Quick | kw0:Quick | comp0:quick | MatchNoDocsQuery(\"failed [n.long0] query, caused by number_format_exception:[For input string: \"Quick\"]\") | text0.raw:Quick | n.text0:quick | MatchNoDocsQuery(\"failed [date0] query, caused by parse_exception:[failed to parse date field [Quick] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [Quick] with format [strict_date_optional_time||epoch_millis]]]\"))~1.0)))^0.2))), result of:",
+    "path": ".hits.hits[0]._explanation.details[0].details[0].description",
+    "roll": "weight(FunctionScoreQuery(kw1:, scored by boost(queryboost(score(#((MatchNoDocsQuery(\"failed [bool0] query, caused by illegal_argument_exception:[Can't parse boolean value [red], expected [true] or [false]]\") comp0:red MatchNoDocsQuery(\"failed [date0] query, caused by parse_exception:[failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]]]\") MatchNoDocsQuery(\"failed [int0] query, caused by number_format_exception:[For input string: \"red\"]\") kw0:red kw1:red n.kw0:red MatchNoDocsQuery(\"failed [n.long0] query, caused by number_format_exception:[For input string: \"red\"]\") n.text0:red n.text0.raw:red text0:red text0.raw:red) (MatchNoDocsQuery(\"failed [bool0] query, caused by illegal_argument_exception:[Can't parse boolean value [Quick], expected [true] or [false]]\") comp0:quick MatchNoDocsQuery(\"failed [date0] query, caused by parse_exception:[failed to parse date field [Quick] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [Quick] with format [strict_date_optional_time||epoch_millis]]]\") MatchNoDocsQuery(\"failed [int0] query, caused by number_format_exception:[For input string: \"Quick\"]\") kw0:Quick kw1:Quick n.kw0:Quick MatchNoDocsQuery(\"failed [n.long0] query, caused by number_format_exception:[For input string: \"Quick\"]\") n.text0:quick n.text0.raw:Quick text0:quick text0.raw:Quick))))^0.2))), result of:"
+  },
+  "found": {
+    "case": 74,
+    "case_seed": 10000104,
+    "seed": 10
+  },
+  "roll": {
+    "body": {
+      "_shards": {
+        "failed": 0,
+        "skipped": 0,
+        "successful": 1,
+        "total": 1
+      },
+      "hits": {
+        "hits": [
+          {
+            "_explanation": {
+              "description": "sum of:",
+              "details": [
+                {
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "description": "weight(FunctionScoreQuery(kw1:, scored by boost(queryboost(score(#((MatchNoDocsQuery(\"failed [bool0] query, caused by illegal_argument_exception:[Can't parse boolean value [red], expected [true] or [false]]\") comp0:red MatchNoDocsQuery(\"failed [date0] query, caused by parse_exception:[failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]]]\") MatchNoDocsQuery(\"failed [int0] query, caused by number_format_exception:[For input string: \"red\"]\") kw0:red kw1:red n.kw0:red MatchNoDocsQuery(\"failed [n.long0] query, caused by number_format_exception:[For input string: \"red\"]\") n.text0:red n.text0.raw:red text0:red text0.raw:red) (MatchNoDocsQuery(\"failed [bool0] query, caused by illegal_argument_exception:[Can't parse boolean value [Quick], expected [true] or [false]]\") comp0:quick MatchNoDocsQuery(\"failed [date0] query, caused by parse_exception:[failed to parse date field [Quick] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [Quick] with format [strict_date_optional_time||epoch_millis]]]\") MatchNoDocsQuery(\"failed [int0] query, caused by number_format_exception:[For input string: \"Quick\"]\") kw0:Quick kw1:Quick n.kw0:Quick MatchNoDocsQuery(\"failed [n.long0] query, caused by number_format_exception:[For input string: \"Quick\"]\") n.text0:quick n.text0.raw:Quick text0:quick text0.raw:Quick))))^0.2))), result of:",
+                      "details": [
+                        {
+                          "description": "weight(kw1: in 2) [PerFieldSimilarity], result of:",
+                          "details": [
+                            {
+                              "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                              "details": [
+                                {
+                                  "description": "boost",
+                                  "details": [],
+                                  "value": 2.2
+                                },
+                                {
+                                  "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                  "details": [
+                                    {
+                                      "description": "n, number of documents containing term",
+                                      "details": [],
+                                      "value": 1
+                                    },
+                                    {
+                                      "description": "N, total number of documents with field",
+                                      "details": [],
+                                      "value": 1
+                                    }
+                                  ],
+                                  "value": 0.2876821
+                                },
+                                {
+                                  "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                  "details": [
+                                    {
+                                      "description": "freq, occurrences of term within document",
+                                      "details": [],
+                                      "value": 1.0
+                                    },
+                                    {
+                                      "description": "k1, term saturation parameter",
+                                      "details": [],
+                                      "value": 1.2
+                                    },
+                                    {
+                                      "description": "b, length normalization parameter",
+                                      "details": [],
+                                      "value": 0.75
+                                    },
+                                    {
+                                      "description": "dl, length of field",
+                                      "details": [],
+                                      "value": 1.0
+                                    },
+                                    {
+                                      "description": "avgdl, average length of field",
+                                      "details": [],
+                                      "value": 1.0
+                                    }
+                                  ],
+                                  "value": 0.45454544
+                                }
+                              ],
+                              "value": 0.2876821
+                            }
+                          ],
+                          "value": 0.2876821
+                        }
+                      ],
+                      "value": 0.2876821
+                    }
+                  ],
+                  "value": 0.2876821
+                },
+                {
+                  "description": "match on required clause, product of:",
+                  "details": [
+                    {
+                      "description": "# clause",
+                      "details": [],
+                      "value": 0.0
+                    },
+                    {
+                      "description": "FieldExistsQuery [field=_primary_term]",
+                      "details": [],
+                      "value": 1.0
+                    }
+                  ],
+                  "value": 0.0
+                }
+              ],
+              "value": 0.2876821
+            },
+            "_id": "24",
+            "_index": "diff-m4-a",
+            "_node": "0Zr0L-l4THmSU_MWbe51EQ",
+            "_routing": "r2",
+            "_score": 0.2876821,
+            "_shard": "[diff-m4-a][0]",
+            "_source": {
+              "comp0": "fast quick stream",
+              "date0": "2024-01-30",
+              "geo0": {
+                "lat": -20.49,
+                "lon": 3.88
+              },
+              "int0": 93,
+              "kw0": [
+                "alpha",
+                "pi"
+              ],
+              "kw1": "",
+              "n": [
+                {
+                  "kw0": "Alpha",
+                  "long0": -718651419,
+                  "text0": "and red over fox blue cat query"
+                },
+                {
+                  "kw0": "beta",
+                  "long0": 91,
+                  "text0": "blue engine"
+                }
+              ],
+              "text0": "and stream"
+            }
+          }
+        ],
+        "max_score": 0.2876821,
+        "total": {
+          "relation": "eq",
+          "value": 1
+        }
+      },
+      "timed_out": false,
+      "took": 4
+    },
+    "headers": {
+      "content-type": "application/json",
+      "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+  },
+  "signature": "POST _search .hits.hits[]._explanation.details[].details[].description",
+  "steps": [
+    {
+      "body": {
+        "mappings": {
+          "properties": {
+            "bool0": {
+              "type": "boolean"
+            },
+            "comp0": {
+              "type": "completion"
+            },
+            "date0": {
+              "format": "strict_date_optional_time||epoch_millis",
+              "type": "date"
+            },
+            "geo0": {
+              "type": "geo_point"
+            },
+            "int0": {
+              "type": "integer"
+            },
+            "kw0": {
+              "type": "keyword"
+            },
+            "kw1": {
+              "type": "keyword"
+            },
+            "n": {
+              "properties": {
+                "kw0": {
+                  "type": "keyword"
+                },
+                "long0": {
+                  "type": "long"
+                },
+                "text0": {
+                  "analyzer": "simple",
+                  "fields": {
+                    "raw": {
+                      "ignore_above": 32,
+                      "type": "keyword"
+                    }
+                  },
+                  "type": "text"
+                }
+              },
+              "type": "nested"
+            },
+            "text0": {
+              "analyzer": "simple",
+              "fields": {
+                "raw": {
+                  "ignore_above": 32,
+                  "type": "keyword"
+                }
+              },
+              "type": "text"
+            }
+          }
+        },
+        "settings": {
+          "number_of_replicas": 0,
+          "number_of_shards": 1,
+          "refresh_interval": -1
+        }
+      },
+      "es": {
+        "body": {
+          "acknowledged": true,
+          "index": "diff-m4-a",
+          "shards_acknowledged": true
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "PUT",
+      "path": "diff-m4-a"
+    },
+    {
+      "es": {
+        "body": {
+          "errors": false,
+          "items": [
+            {
+              "index": {
+                "_id": "24",
+                "_index": "diff-m4-a",
+                "_primary_term": 1,
+                "_seq_no": 0,
+                "_shards": {
+                  "failed": 0,
+                  "successful": 1,
+                  "total": 1
+                },
+                "_version": 1,
+                "result": "created",
+                "status": 201
+              }
+            }
+          ],
+          "took": 0
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "lines": [
+        {
+          "index": {
+            "_id": "24",
+            "_index": "diff-m4-a",
+            "routing": "r2"
+          }
+        },
+        {
+          "comp0": "fast quick stream",
+          "date0": "2024-01-30",
+          "geo0": {
+            "lat": -20.49,
+            "lon": 3.88
+          },
+          "int0": 93,
+          "kw0": [
+            "alpha",
+            "pi"
+          ],
+          "kw1": "",
+          "n": [
+            {
+              "kw0": "Alpha",
+              "long0": -718651419,
+              "text0": "and red over fox blue cat query"
+            },
+            {
+              "kw0": "beta",
+              "long0": 91,
+              "text0": "blue engine"
+            }
+          ],
+          "text0": "and stream"
+        }
+      ],
+      "method": "POST",
+      "path": "/_bulk"
+    },
+    {
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "successful": 1,
+            "total": 1
+          }
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m4-a/_refresh"
+    },
+    {
+      "body": {
+        "explain": true,
+        "query": {
+          "bool": {
+            "must": {
+              "boosting": {
+                "negative": {
+                  "bool": {
+                    "filter": [
+                      {
+                        "simple_query_string": {
+                          "query": "red Quick"
+                        }
+                      }
+                    ]
+                  }
+                },
+                "negative_boost": 0.2,
+                "positive": {
+                  "term": {
+                    "kw1": ""
+                  }
+                }
+              }
+            },
+            "should": [
+              {
+                "function_score": {
+                  "boost_mode": "multiply",
+                  "functions": [
+                    {
+                      "field_value_factor": {
+                        "factor": 1.2,
+                        "field": "int0",
+                        "missing": 1,
+                        "modifier": "none"
+                      }
+                    }
+                  ],
+                  "query": {
+                    "ids": {
+                      "values": [
+                        "5",
+                        "11",
+                        "18"
+                      ]
+                    }
+                  },
+                  "score_mode": "min"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "body": {
+          "_shards": {
+            "failed": 0,
+            "skipped": 0,
+            "successful": 1,
+            "total": 1
+          },
+          "hits": {
+            "hits": [
+              {
+                "_explanation": {
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "description": "sum of:",
+                      "details": [
+                        {
+                          "description": "weight(FunctionScoreQuery(kw1:, scored by boost(queryboost(score(#((n.kw0:red | MatchNoDocsQuery(\"failed [int0] query, caused by number_format_exception:[For input string: \"red\"]\") | text0:red | kw1:red | n.text0.raw:red | kw0:red | comp0:red | MatchNoDocsQuery(\"failed [n.long0] query, caused by number_format_exception:[For input string: \"red\"]\") | text0.raw:red | n.text0:red | MatchNoDocsQuery(\"failed [date0] query, caused by parse_exception:[failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [red] with format [strict_date_optional_time||epoch_millis]]]\"))~1.0 (n.kw0:Quick | MatchNoDocsQuery(\"failed [int0] query, caused by number_format_exception:[For input string: \"Quick\"]\") | text0:quick | kw1:Quick | n.text0.raw:Quick | kw0:Quick | comp0:quick | MatchNoDocsQuery(\"failed [n.long0] query, caused by number_format_exception:[For input string: \"Quick\"]\") | text0.raw:Quick | n.text0:quick | MatchNoDocsQuery(\"failed [date0] query, caused by parse_exception:[failed to parse date field [Quick] with format [strict_date_optional_time||epoch_millis]: [failed to parse date field [Quick] with format [strict_date_optional_time||epoch_millis]]]\"))~1.0)))^0.2))), result of:",
+                          "details": [
+                            {
+                              "description": "weight(kw1: in 2) [PerFieldSimilarity], result of:",
+                              "details": [
+                                {
+                                  "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                                  "details": [
+                                    {
+                                      "description": "boost",
+                                      "details": [],
+                                      "value": 2.2
+                                    },
+                                    {
+                                      "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                                      "details": [
+                                        {
+                                          "description": "n, number of documents containing term",
+                                          "details": [],
+                                          "value": 1
+                                        },
+                                        {
+                                          "description": "N, total number of documents with field",
+                                          "details": [],
+                                          "value": 1
+                                        }
+                                      ],
+                                      "value": 0.2876821
+                                    },
+                                    {
+                                      "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                                      "details": [
+                                        {
+                                          "description": "freq, occurrences of term within document",
+                                          "details": [],
+                                          "value": 1.0
+                                        },
+                                        {
+                                          "description": "k1, term saturation parameter",
+                                          "details": [],
+                                          "value": 1.2
+                                        },
+                                        {
+                                          "description": "b, length normalization parameter",
+                                          "details": [],
+                                          "value": 0.75
+                                        },
+                                        {
+                                          "description": "dl, length of field",
+                                          "details": [],
+                                          "value": 1.0
+                                        },
+                                        {
+                                          "description": "avgdl, average length of field",
+                                          "details": [],
+                                          "value": 1.0
+                                        }
+                                      ],
+                                      "value": 0.45454544
+                                    }
+                                  ],
+                                  "value": 0.2876821
+                                }
+                              ],
+                              "value": 0.2876821
+                            }
+                          ],
+                          "value": 0.2876821
+                        }
+                      ],
+                      "value": 0.2876821
+                    },
+                    {
+                      "description": "match on required clause, product of:",
+                      "details": [
+                        {
+                          "description": "# clause",
+                          "details": [],
+                          "value": 0.0
+                        },
+                        {
+                          "description": "FieldExistsQuery [field=_primary_term]",
+                          "details": [],
+                          "value": 1.0
+                        }
+                      ],
+                      "value": 0.0
+                    }
+                  ],
+                  "value": 0.2876821
+                },
+                "_id": "24",
+                "_index": "diff-m4-a",
+                "_node": "xqZfRgQFS4Sv_ATEGUgOpQ",
+                "_routing": "r2",
+                "_score": 0.2876821,
+                "_shard": "[diff-m4-a][0]",
+                "_source": {
+                  "comp0": "fast quick stream",
+                  "date0": "2024-01-30",
+                  "geo0": {
+                    "lat": -20.49,
+                    "lon": 3.88
+                  },
+                  "int0": 93,
+                  "kw0": [
+                    "alpha",
+                    "pi"
+                  ],
+                  "kw1": "",
+                  "n": [
+                    {
+                      "kw0": "Alpha",
+                      "long0": -718651419,
+                      "text0": "and red over fox blue cat query"
+                    },
+                    {
+                      "kw0": "beta",
+                      "long0": 91,
+                      "text0": "blue engine"
+                    }
+                  ],
+                  "text0": "and stream"
+                }
+              }
+            ],
+            "max_score": 0.2876821,
+            "total": {
+              "relation": "eq",
+              "value": 1
+            }
+          },
+          "timed_out": false,
+          "took": 2
+        },
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "status": 200
+      },
+      "method": "POST",
+      "path": "/diff-m4-a/_search"
+    }
+  ]
+}

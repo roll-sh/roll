@@ -1,0 +1,361 @@
+{
+  "description" : "watcher: put/get/execute/ack/activate/deactivate/delete watches, stats shape, validation",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-s",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "user" : {
+              "type" : "keyword"
+            },
+            "tags" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "integer"
+            },
+            "msg" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-s"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-s/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"user\": \"alice\", \"tags\": [\"a\", \"b\"], \"n\": 1, \"msg\": \"quick brown fox\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"user\": \"bob\", \"tags\": [\"b\", \"c\"], \"n\": 2, \"msg\": \"lazy dog\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"user\": \"alice\", \"tags\": [\"a\", \"c\"], \"n\": 3, \"msg\": \"quick dog\"}\n{\"index\": {\"_id\": \"4\"}}\n{\"user\": \"carol\", \"tags\": [\"a\"], \"n\": 4, \"msg\": \"brown cow\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /_watcher/watch/compat-xpack-w",
+      "body" : {
+        "trigger" : {
+          "schedule" : {
+            "interval" : "1h"
+          }
+        },
+        "input" : {
+          "simple" : {
+            "x" : 1
+          }
+        },
+        "condition" : {
+          "always" : { }
+        },
+        "actions" : {
+          "log" : {
+            "logging" : {
+              "text" : "hi {{ctx.payload.x}}"
+            }
+          }
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "_id" : "compat-xpack-w",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "created" : true
+      }
+    },
+    {
+      "req" : "PUT /_watcher/watch/compat-xpack-w?active=false",
+      "body" : {
+        "trigger" : {
+          "schedule" : {
+            "interval" : "1h"
+          }
+        },
+        "input" : {
+          "simple" : {
+            "x" : 2
+          }
+        },
+        "actions" : {
+          "log" : {
+            "logging" : {
+              "text" : "hi"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_id" : "compat-xpack-w",
+        "_version" : 2,
+        "_seq_no" : 1,
+        "_primary_term" : 1,
+        "created" : false
+      }
+    },
+    {
+      "req" : "GET /_watcher/watch/compat-xpack-w?filter_path=found,_id,_version,_seq_no,_primary_term,watch,status.state.active,status.actions",
+      "mask" : [
+        "timestamp"
+      ],
+      "status" : 200,
+      "response" : {
+        "found" : true,
+        "_id" : "compat-xpack-w",
+        "_version" : 2,
+        "_seq_no" : 1,
+        "_primary_term" : 1,
+        "status" : {
+          "state" : {
+            "active" : false
+          },
+          "actions" : {
+            "log" : {
+              "ack" : {
+                "timestamp" : "2026-10-23T11:12:57.313Z",
+                "state" : "awaits_successful_execution"
+              }
+            }
+          }
+        },
+        "watch" : {
+          "trigger" : {
+            "schedule" : {
+              "interval" : "1h"
+            }
+          },
+          "input" : {
+            "simple" : {
+              "x" : 2
+            }
+          },
+          "condition" : {
+            "always" : { }
+          },
+          "actions" : {
+            "log" : {
+              "logging" : {
+                "level" : "info",
+                "text" : "hi"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_watcher/watch/compat-xpack-nope",
+      "status" : 404,
+      "response" : {
+        "found" : false,
+        "_id" : "compat-xpack-nope"
+      }
+    },
+    {
+      "req" : "PUT /_watcher/watch/compat-xpack-bad",
+      "body" : {
+        "input" : {
+          "simple" : { }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "could not parse watch [compat-xpack-bad]. missing required field [trigger]"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "could not parse watch [compat-xpack-bad]. missing required field [trigger]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_watcher/watch/compat-xpack-bad2",
+      "body" : {
+        "trigger" : {
+          "schedule" : {
+            "interval" : "1h"
+          }
+        },
+        "bogus" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parse_exception",
+              "reason" : "could not parse watch [compat-xpack-bad2]. unexpected field [bogus]"
+            }
+          ],
+          "type" : "parse_exception",
+          "reason" : "could not parse watch [compat-xpack-bad2]. unexpected field [bogus]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "PUT /_watcher/watch/compat-xpack-w/_activate?filter_path=status.state.active",
+      "status" : 200,
+      "response" : {
+        "status" : {
+          "state" : {
+            "active" : true
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_watcher/watch/compat-xpack-w/_execute?filter_path=watch_record.state,watch_record.result.condition,watch_record.result.input,watch_record.result.actions.id,watch_record.result.actions.type,watch_record.result.actions.status,watch_record.result.actions.logging",
+      "body" : {
+        "record_execution" : false
+      },
+      "status" : 200,
+      "response" : {
+        "watch_record" : {
+          "state" : "executed",
+          "result" : {
+            "input" : {
+              "type" : "simple",
+              "status" : "success",
+              "payload" : {
+                "x" : 2
+              }
+            },
+            "condition" : {
+              "type" : "always",
+              "status" : "success",
+              "met" : true
+            },
+            "actions" : [
+              {
+                "id" : "log",
+                "type" : "logging",
+                "status" : "success",
+                "logging" : {
+                  "logged_text" : "hi"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /_watcher/watch/_execute?filter_path=watch_record.state,watch_record.result.condition,watch_record.result.input.payload",
+      "body" : {
+        "watch" : {
+          "trigger" : {
+            "schedule" : {
+              "interval" : "1h"
+            }
+          },
+          "input" : {
+            "simple" : {
+              "y" : "z"
+            }
+          },
+          "condition" : {
+            "compare" : {
+              "ctx.payload.y" : {
+                "eq" : "z"
+              }
+            }
+          },
+          "actions" : { }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "watch_record" : {
+          "state" : "executed",
+          "result" : {
+            "input" : {
+              "payload" : {
+                "y" : "z"
+              }
+            },
+            "condition" : {
+              "type" : "compare",
+              "status" : "success",
+              "met" : true,
+              "compare" : {
+                "resolved_values" : {
+                  "ctx.payload.y" : "z"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "PUT /_watcher/watch/compat-xpack-w/_ack/log?filter_path=status.actions.log.ack.state",
+      "status" : 200,
+      "response" : {
+        "status" : {
+          "actions" : {
+            "log" : {
+              "ack" : {
+                "state" : "awaits_successful_execution"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "PUT /_watcher/watch/compat-xpack-w/_deactivate?filter_path=status.state.active",
+      "status" : 200,
+      "response" : {
+        "status" : {
+          "state" : {
+            "active" : false
+          }
+        }
+      }
+    },
+    {
+      "req" : "GET /_watcher/_query/watches?filter_path=count",
+      "status" : 200,
+      "response" : {
+        "count" : 1
+      }
+    },
+    {
+      "req" : "DELETE /_watcher/watch/compat-xpack-w",
+      "status" : 200,
+      "response" : {
+        "_id" : "compat-xpack-w",
+        "_version" : 5,
+        "found" : true
+      }
+    },
+    {
+      "req" : "DELETE /_watcher/watch/compat-xpack-w",
+      "status" : 404,
+      "response" : {
+        "_id" : "compat-xpack-w",
+        "_version" : 6,
+        "found" : false
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-s",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

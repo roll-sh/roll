@@ -1,0 +1,2534 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; l.subList(1, 3).clear(); return l",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 4, 5]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); s.add(9); s.set(0, 7); return [l, s, s.size()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[[1, 7, 3, 9, 4, 5], [7, 3, 9], 3]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 4); s.remove(0); s.removeIf(x -> x == 3); return [l, s]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[[1, 4, 5], [4]]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [5, 4, 3, 2, 1]; Collections.sort(l.subList(1, 4)); return l",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[5, 2, 3, 4, 1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [5, 4, 3, 2, 1]; l.subList(0, 3).sort(null); return l",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[3, 4, 5, 2, 1]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.set(1, 20); return [s, s.get(0)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[[20, 3], 20]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.size()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+       "return s.size()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.size()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 77
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+     "return s.size()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.size()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 77
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.get(ArrayList.java:1241)",
+       "return s.get(0)",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 77
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.get(ArrayList.java:1241)",
+     "return s.get(0)",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 77
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toString()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+       "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+       "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+       "java.base/java.util.AbstractCollection.toString(AbstractCollection.java:451)",
+       "return s.toString()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toString()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+     "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+     "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+     "java.base/java.util.AbstractCollection.toString(AbstractCollection.java:451)",
+     "return s.toString()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toString()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.remove(0); return s",
+    "lang": "painless"
+   }
+  },
+  "status": 500,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "concurrent_modification_exception",
+      "reason": null
+     }
+    ],
+    "type": "concurrent_modification_exception",
+    "reason": null
+   },
+   "status": 500
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); for (def x : s) {} return 1",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... subList(1, 3); l.add(6); for (def x : s) {} return ...",
+       "                             ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); for (def x : s) {} return 1",
+      "lang": "painless",
+      "position": {
+       "offset": 62,
+       "start": 37,
+       "end": 87
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... subList(1, 3); l.add(6); for (def x : s) {} return ...",
+     "                             ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); for (def x : s) {} return 1",
+    "lang": "painless",
+    "position": {
+     "offset": 62,
+     "start": 37,
+     "end": 87
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "extraneous foreach loop"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); s.add(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+       "java.base/java.util.AbstractList.add(AbstractList.java:113)",
+       "s.add(1)",
+       "      ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); s.add(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 68,
+       "start": 62,
+       "end": 70
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+     "java.base/java.util.AbstractList.add(AbstractList.java:113)",
+     "s.add(1)",
+     "      ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); s.add(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 68,
+     "start": 62,
+     "end": 70
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 4); List t = s.subList(1, 2); t.clear(); return [l, s, t]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[[1, 2, 4, 5], [2, 4], []]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 4); Iterator it = s.iterator(); it.next(); it.remove(); return [l, s]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[[1, 3, 4, 5], [3, 4]]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 4); s.replaceAll(x -> x * 10); return l",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 20, 30, 40, 5]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 4); s.addAll([7, 8]); return [l, s]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[[1, 2, 3, 4, 7, 8, 5], [2, 3, 4, 7, 8]]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 4); s.retainAll([3]); return [l, s]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[[1, 3, 5], [3]]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; def s = l.subList(1, 4); s[0] = 99; s.add(0, 42); return [l, s, s[0]]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[[1, 42, 99, 3, 4, 5], [42, 99, 3, 4], 42]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = new LinkedList([1, 2, 3, 4]); l.subList(1, 3).clear(); return l",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 4]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3]; List s = l.subList(0, 2); return [s.getClass() == null, s instanceof RandomAccess, s.equals([1, 2]), s.hashCode(), s.indexOf(2), s.contains(3), s.stream().count()]",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... .subList(0, 2); return [s.getClass() == null, s in ...",
+       "                             ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3]; List s = l.subList(0, 2); return [s.getClass() == null, s instanceof RandomAccess, s.equals([1, 2]), s.hashCode(), s.indexOf(2), s.contains(3), s.stream().count()]",
+      "lang": "painless",
+      "position": {
+       "offset": 55,
+       "start": 30,
+       "end": 80
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... .subList(0, 2); return [s.getClass() == null, s in ...",
+     "                             ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3]; List s = l.subList(0, 2); return [s.getClass() == null, s instanceof RandomAccess, s.equals([1, 2]), s.hashCode(), s.indexOf(2), s.contains(3), s.stream().count()]",
+    "lang": "painless",
+    "position": {
+     "offset": 55,
+     "start": 30,
+     "end": 80
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "member method [java.util.List, getClass/0] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4]; List s = l.subList(1, 3); Collections.reverse(s); Collections.swap(s, 0, 1); Collections.fill(s, 0); return l",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 0, 0, 4]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4]; List s = l.subList(1, 3); l.clear(); return s.isEmpty()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+       "java.base/java.util.AbstractCollection.isEmpty(AbstractCollection.java:91)",
+       "return s.isEmpty()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4]; List s = l.subList(1, 3); l.clear(); return s.isEmpty()",
+      "lang": "painless",
+      "position": {
+       "offset": 68,
+       "start": 60,
+       "end": 78
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+     "java.base/java.util.AbstractCollection.isEmpty(AbstractCollection.java:91)",
+     "return s.isEmpty()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4]; List s = l.subList(1, 3); l.clear(); return s.isEmpty()",
+    "lang": "painless",
+    "position": {
+     "offset": 68,
+     "start": 60,
+     "end": 78
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.size()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+       "return s.size()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.size()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 77
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+     "return s.size()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.size()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 77
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.get(ArrayList.java:1241)",
+       "return s.get(0)",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 77
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.get(ArrayList.java:1241)",
+     "return s.get(0)",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 77
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.set(0, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.set(ArrayList.java:1233)",
+       "return s.set(0, 1)",
+       "                ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.set(0, 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 78,
+       "start": 62,
+       "end": 80
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.set(ArrayList.java:1233)",
+     "return s.set(0, 1)",
+     "                ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.set(0, 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 78,
+     "start": 62,
+     "end": 80
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.add(1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+       "java.base/java.util.AbstractList.add(AbstractList.java:113)",
+       "return s.add(1)",
+       "             ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.add(1)",
+      "lang": "painless",
+      "position": {
+       "offset": 75,
+       "start": 62,
+       "end": 77
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+     "java.base/java.util.AbstractList.add(AbstractList.java:113)",
+     "return s.add(1)",
+     "             ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.add(1)",
+    "lang": "painless",
+    "position": {
+     "offset": 75,
+     "start": 62,
+     "end": 77
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.add(0, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... 1, 3); l.add(6); return s.add(0, 1)",
+       "                             ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.add(0, 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 45,
+       "end": 80
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... 1, 3); l.add(6); return s.add(0, 1)",
+     "                             ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.add(0, 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 45,
+     "end": 80
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [void] to [def]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.remove(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.remove(ArrayList.java:1259)",
+       "return s.remove(0)",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.remove(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 80
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.remove(ArrayList.java:1259)",
+     "return s.remove(0)",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.remove(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 80
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.remove((Object) 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... return s.remove((Object) 1)",
+       "                             ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.remove((Object) 1)",
+      "lang": "painless",
+      "position": {
+       "offset": 87,
+       "start": 62,
+       "end": 89
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... return s.remove((Object) 1)",
+     "                             ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.remove((Object) 1)",
+    "lang": "painless",
+    "position": {
+     "offset": 87,
+     "start": 62,
+     "end": 89
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [int] to [java.lang.Object]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.isEmpty()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+       "java.base/java.util.AbstractCollection.isEmpty(AbstractCollection.java:91)",
+       "return s.isEmpty()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.isEmpty()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 80
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.size(ArrayList.java:1246)",
+     "java.base/java.util.AbstractCollection.isEmpty(AbstractCollection.java:91)",
+     "return s.isEmpty()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.isEmpty()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 80
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.contains(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.indexOf(ArrayList.java:1356)",
+       "java.base/java.util.ArrayList$SubList.contains(ArrayList.java:1367)",
+       "return s.contains(2)",
+       "                  ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.contains(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 80,
+       "start": 62,
+       "end": 82
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.indexOf(ArrayList.java:1356)",
+     "java.base/java.util.ArrayList$SubList.contains(ArrayList.java:1367)",
+     "return s.contains(2)",
+     "                  ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.contains(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 80,
+     "start": 62,
+     "end": 82
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.indexOf(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.indexOf(ArrayList.java:1356)",
+       "return s.indexOf(2)",
+       "                 ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.indexOf(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 79,
+       "start": 62,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.indexOf(ArrayList.java:1356)",
+     "return s.indexOf(2)",
+     "                 ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.indexOf(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 79,
+     "start": 62,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.lastIndexOf(2)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.lastIndexOf(ArrayList.java:1362)",
+       "return s.lastIndexOf(2)",
+       "                     ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.lastIndexOf(2)",
+      "lang": "painless",
+      "position": {
+       "offset": 83,
+       "start": 62,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.lastIndexOf(ArrayList.java:1362)",
+     "return s.lastIndexOf(2)",
+     "                     ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.lastIndexOf(2)",
+    "lang": "painless",
+    "position": {
+     "offset": 83,
+     "start": 62,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.clear()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... 1, 3); l.add(6); return s.clear()",
+       "                             ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.clear()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 45,
+       "end": 78
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... 1, 3); l.add(6); return s.clear()",
+     "                             ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.clear()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 45,
+     "end": 78
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [void] to [def]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.iterator()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+       "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+       "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+       "return s.iterator()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.iterator()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+     "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+     "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+     "return s.iterator()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.iterator()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.listIterator()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+       "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+       "return s.listIterator()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.listIterator()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+     "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+     "return s.listIterator()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.listIterator()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.listIterator(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+       "return s.listIterator(0)",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.listIterator(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 86
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+     "return s.listIterator(0)",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.listIterator(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 86
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toString()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+       "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+       "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+       "java.base/java.util.AbstractCollection.toString(AbstractCollection.java:451)",
+       "return s.toString()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toString()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+     "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+     "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+     "java.base/java.util.AbstractCollection.toString(AbstractCollection.java:451)",
+     "return s.toString()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toString()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.hashCode()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.hashCode(ArrayList.java:1350)",
+       "return s.hashCode()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.hashCode()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.hashCode(ArrayList.java:1350)",
+     "return s.hashCode()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.hashCode()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.equals([2, 3])",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.equals(ArrayList.java:1344)",
+       "return s.equals([2, 3])",
+       "                ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.equals([2, 3])",
+      "lang": "painless",
+      "position": {
+       "offset": 78,
+       "start": 62,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.equals(ArrayList.java:1344)",
+     "return s.equals([2, 3])",
+     "                ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.equals([2, 3])",
+    "lang": "painless",
+    "position": {
+     "offset": 78,
+     "start": 62,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.addAll([1])",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.addAll(ArrayList.java:1280)",
+       "java.base/java.util.ArrayList$SubList.addAll(ArrayList.java:1272)",
+       "return s.addAll([1])",
+       "                ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.addAll([1])",
+      "lang": "painless",
+      "position": {
+       "offset": 78,
+       "start": 62,
+       "end": 82
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.addAll(ArrayList.java:1280)",
+     "java.base/java.util.ArrayList$SubList.addAll(ArrayList.java:1272)",
+     "return s.addAll([1])",
+     "                ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.addAll([1])",
+    "lang": "painless",
+    "position": {
+     "offset": 78,
+     "start": 62,
+     "end": 82
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.addAll(0, [1])",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.addAll(ArrayList.java:1280)",
+       "return s.addAll(0, [1])",
+       "                   ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.addAll(0, [1])",
+      "lang": "painless",
+      "position": {
+       "offset": 81,
+       "start": 62,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.addAll(ArrayList.java:1280)",
+     "return s.addAll(0, [1])",
+     "                   ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.addAll(0, [1])",
+    "lang": "painless",
+    "position": {
+     "offset": 81,
+     "start": 62,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.removeAll([1])",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.batchRemove(ArrayList.java:1299)",
+       "java.base/java.util.ArrayList$SubList.removeAll(ArrayList.java:1291)",
+       "return s.removeAll([1])",
+       "                   ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.removeAll([1])",
+      "lang": "painless",
+      "position": {
+       "offset": 81,
+       "start": 62,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.batchRemove(ArrayList.java:1299)",
+     "java.base/java.util.ArrayList$SubList.removeAll(ArrayList.java:1291)",
+     "return s.removeAll([1])",
+     "                   ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.removeAll([1])",
+    "lang": "painless",
+    "position": {
+     "offset": 81,
+     "start": 62,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.retainAll([1])",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.batchRemove(ArrayList.java:1299)",
+       "java.base/java.util.ArrayList$SubList.retainAll(ArrayList.java:1295)",
+       "return s.retainAll([1])",
+       "                   ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.retainAll([1])",
+      "lang": "painless",
+      "position": {
+       "offset": 81,
+       "start": 62,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.batchRemove(ArrayList.java:1299)",
+     "java.base/java.util.ArrayList$SubList.retainAll(ArrayList.java:1295)",
+     "return s.retainAll([1])",
+     "                   ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.retainAll([1])",
+    "lang": "painless",
+    "position": {
+     "offset": 81,
+     "start": 62,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.removeIf(x -> true)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.removeIf(ArrayList.java:1309)",
+       "x -> true)",
+       "^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.removeIf(x -> true)",
+      "lang": "painless",
+      "position": {
+       "offset": 80,
+       "start": 80,
+       "end": 90
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.removeIf(ArrayList.java:1309)",
+     "x -> true)",
+     "^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.removeIf(x -> true)",
+    "lang": "painless",
+    "position": {
+     "offset": 80,
+     "start": 80,
+     "end": 90
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.replaceAll(x -> x)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... 1, 3); l.add(6); return s.replaceAll(x -> x)",
+       "                             ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.replaceAll(x -> x)",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 45,
+       "end": 89
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... 1, 3); l.add(6); return s.replaceAll(x -> x)",
+     "                             ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.replaceAll(x -> x)",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 45,
+     "end": 89
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [void] to [def]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.sort(null)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "... 1, 3); l.add(6); return s.sort(null)",
+       "                             ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.sort(null)",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 45,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "... 1, 3); l.add(6); return s.sort(null)",
+     "                             ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.sort(null)",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 45,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "class_cast_exception",
+     "reason": "Cannot cast from [void] to [def]."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.subList(0, 1)",
+    "lang": "painless"
+   }
+  },
+  "status": 500,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "concurrent_modification_exception",
+      "reason": null
+     }
+    ],
+    "type": "concurrent_modification_exception",
+    "reason": null
+   },
+   "status": 500
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.stream()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.spliterator(ArrayList.java:1519)",
+       "java.base/java.util.Collection.stream(Collection.java:748)",
+       "return s.stream()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.stream()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 79
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.spliterator(ArrayList.java:1519)",
+     "java.base/java.util.Collection.stream(Collection.java:748)",
+     "return s.stream()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.stream()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 79
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.forEach(x -> {})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.forEach(x -> {})",
+      "lang": "painless"
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.forEach(x -> {})",
+    "lang": "painless",
+    "caused_by": {
+     "type": "null_pointer_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toArray()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.toArray(ArrayList.java:1318)",
+       "return s.toArray()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toArray()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 80
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.toArray(ArrayList.java:1318)",
+     "return s.toArray()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.toArray()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 80
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.containsAll([2])",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.indexOf(ArrayList.java:1356)",
+       "java.base/java.util.ArrayList$SubList.contains(ArrayList.java:1367)",
+       "java.base/java.util.AbstractCollection.containsAll(AbstractCollection.java:311)",
+       "return s.containsAll([2])",
+       "                     ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.containsAll([2])",
+      "lang": "painless",
+      "position": {
+       "offset": 83,
+       "start": 62,
+       "end": 87
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.indexOf(ArrayList.java:1356)",
+     "java.base/java.util.ArrayList$SubList.contains(ArrayList.java:1367)",
+     "java.base/java.util.AbstractCollection.containsAll(AbstractCollection.java:311)",
+     "return s.containsAll([2])",
+     "                     ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.containsAll([2])",
+    "lang": "painless",
+    "position": {
+     "offset": 83,
+     "start": 62,
+     "end": 87
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.spliterator()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.spliterator(ArrayList.java:1519)",
+       "return s.spliterator()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.spliterator()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 84
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.spliterator(ArrayList.java:1519)",
+     "return s.spliterator()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.spliterator()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 84
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return String.valueOf(s)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+       "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+       "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+       "java.base/java.util.AbstractCollection.toString(AbstractCollection.java:451)",
+       "java.base/java.lang.String.valueOf(String.java:4905)",
+       "return String.valueOf(s)",
+       "                      ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return String.valueOf(s)",
+      "lang": "painless",
+      "position": {
+       "offset": 84,
+       "start": 62,
+       "end": 86
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+     "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+     "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+     "java.base/java.util.AbstractCollection.toString(AbstractCollection.java:451)",
+     "java.base/java.lang.String.valueOf(String.java:4905)",
+     "return String.valueOf(s)",
+     "                      ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return String.valueOf(s)",
+    "lang": "painless",
+    "position": {
+     "offset": 84,
+     "start": 62,
+     "end": 86
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return [s]",
+    "lang": "painless"
+   }
+  },
+  "status": 500,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "concurrent_modification_exception",
+      "reason": null
+     }
+    ],
+    "type": "concurrent_modification_exception",
+    "reason": null
+   },
+   "status": 500
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); Collections.sort(s)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.sort(ArrayList.java:1596)",
+       "java.base/java.util.Collections.sort(Collections.java:147)",
+       "Collections.sort(s)",
+       "           ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); Collections.sort(s)",
+      "lang": "painless",
+      "position": {
+       "offset": 73,
+       "start": 62,
+       "end": 81
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.sort(ArrayList.java:1596)",
+     "java.base/java.util.Collections.sort(Collections.java:147)",
+     "Collections.sort(s)",
+     "           ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); Collections.sort(s)",
+    "lang": "painless",
+    "position": {
+     "offset": 73,
+     "start": 62,
+     "end": 81
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return new ArrayList(s)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.toArray(ArrayList.java:1318)",
+       "java.base/java.util.ArrayList.<init>(ArrayList.java:182)",
+       "return new ArrayList(s)",
+       "                     ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return new ArrayList(s)",
+      "lang": "painless",
+      "position": {
+       "offset": 83,
+       "start": 62,
+       "end": 85
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.toArray(ArrayList.java:1318)",
+     "java.base/java.util.ArrayList.<init>(ArrayList.java:182)",
+     "return new ArrayList(s)",
+     "                     ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return new ArrayList(s)",
+    "lang": "painless",
+    "position": {
+     "offset": 83,
+     "start": 62,
+     "end": 85
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.stream().count()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.spliterator(ArrayList.java:1519)",
+       "java.base/java.util.Collection.stream(Collection.java:748)",
+       "return s.stream().count()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.stream().count()",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 62,
+       "end": 87
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.spliterator(ArrayList.java:1519)",
+     "java.base/java.util.Collection.stream(Collection.java:748)",
+     "return s.stream().count()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); return s.stream().count()",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 62,
+     "end": 87
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); int n = 0; for (def x : s) { n++ } return n",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+       "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+       "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+       "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+       "l.add(6); int ",
+       "      ^---- HERE"
+      ],
+      "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); int n = 0; for (def x : s) { n++ } return n",
+      "lang": "painless",
+      "position": {
+       "offset": 58,
+       "start": 52,
+       "end": 66
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.ArrayList$SubList.checkForComodification(ArrayList.java:1506)",
+     "java.base/java.util.ArrayList$SubList.listIterator(ArrayList.java:1375)",
+     "java.base/java.util.AbstractList.listIterator(AbstractList.java:313)",
+     "java.base/java.util.ArrayList$SubList.iterator(ArrayList.java:1371)",
+     "l.add(6); int ",
+     "      ^---- HERE"
+    ],
+    "script": "List l = [1, 2, 3, 4, 5]; List s = l.subList(1, 3); l.add(6); int n = 0; for (def x : s) { n++ } return n",
+    "lang": "painless",
+    "position": {
+     "offset": 58,
+     "start": 52,
+     "end": 66
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = new LinkedList([1, 2, 3, 4, 5]); List s = l.subList(1, 3); l.add(6); return s.size()",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.AbstractList$SubList.checkForComodification(AbstractList.java:906)",
+       "java.base/java.util.AbstractList$SubList.size(AbstractList.java:792)",
+       "return s.size()",
+       "        ^---- HERE"
+      ],
+      "script": "List l = new LinkedList([1, 2, 3, 4, 5]); List s = l.subList(1, 3); l.add(6); return s.size()",
+      "lang": "painless",
+      "position": {
+       "offset": 86,
+       "start": 78,
+       "end": 93
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.AbstractList$SubList.checkForComodification(AbstractList.java:906)",
+     "java.base/java.util.AbstractList$SubList.size(AbstractList.java:792)",
+     "return s.size()",
+     "        ^---- HERE"
+    ],
+    "script": "List l = new LinkedList([1, 2, 3, 4, 5]); List s = l.subList(1, 3); l.add(6); return s.size()",
+    "lang": "painless",
+    "position": {
+     "offset": 86,
+     "start": 78,
+     "end": 93
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "List l = new LinkedList([1, 2, 3, 4, 5]); List s = l.subList(1, 3); l.add(6); return s.get(0)",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.util.AbstractList$SubList.checkForComodification(AbstractList.java:906)",
+       "java.base/java.util.AbstractList$SubList.get(AbstractList.java:787)",
+       "return s.get(0)",
+       "        ^---- HERE"
+      ],
+      "script": "List l = new LinkedList([1, 2, 3, 4, 5]); List s = l.subList(1, 3); l.add(6); return s.get(0)",
+      "lang": "painless",
+      "position": {
+       "offset": 86,
+       "start": 78,
+       "end": 93
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.util.AbstractList$SubList.checkForComodification(AbstractList.java:906)",
+     "java.base/java.util.AbstractList$SubList.get(AbstractList.java:787)",
+     "return s.get(0)",
+     "        ^---- HERE"
+    ],
+    "script": "List l = new LinkedList([1, 2, 3, 4, 5]); List s = l.subList(1, 3); l.add(6); return s.get(0)",
+    "lang": "painless",
+    "position": {
+     "offset": 86,
+     "start": 78,
+     "end": 93
+    },
+    "caused_by": {
+     "type": "concurrent_modification_exception",
+     "reason": null
+    }
+   },
+   "status": 400
+  }
+ }
+]
