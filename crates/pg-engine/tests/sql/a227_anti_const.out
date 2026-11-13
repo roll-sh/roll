@@ -1,0 +1,78 @@
+> create table a227_ao (ok int primary key, st char(1))
+-- CREATE TABLE
+
+> create table a227_al (ok int, ln int, sk int, primary key (ok, ln))
+-- CREATE TABLE
+
+> insert into a227_ao select g, case when g % 2 = 0 then 'F' else 'O' end from generate_series(1, 7000) g
+-- INSERT 0 7000
+
+> insert into a227_al select o, ln, (o * 7 + ln * 13) % 1000 + 1 from generate_series(1, 7000) o, generate_series(1, 4) ln
+-- INSERT 0 28000
+
+> analyze a227_ao, a227_al
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> explain (costs off) select * from a227_ao o
+>   where o.ok = 5 and not exists (select 1 from a227_al l3 where l3.ok = o.ok and l3.sk = 1)
+QUERY PLAN:text
+Nested Loop Anti Join
+  ->  Index Scan using a227_ao_pkey on a227_ao o
+        Index Cond: (ok = 5)
+  ->  Bitmap Heap Scan on a227_al l3
+        Recheck Cond: (ok = 5)
+        Filter: (sk = 1)
+        ->  Bitmap Index Scan on a227_al_pkey
+              Index Cond: (ok = 5)
+-- EXPLAIN
+
+> select * from a227_ao o
+>   where o.ok = 5 and not exists (select 1 from a227_al l3 where l3.ok = o.ok and l3.sk = 1)
+ok:int4 | st:bpchar
+5 | O
+-- SELECT 1
+
+> select * from a227_ao o
+>   where o.ok = 6 and not exists (select 1 from a227_al l3 where l3.ok = o.ok and l3.sk = 56)
+ok:int4 | st:bpchar
+-- SELECT 0
+
+> explain (costs off) select * from a227_ao o left join a227_al l3 on l3.ok = o.ok where o.ok = 5
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Index Scan using a227_ao_pkey on a227_ao o
+        Index Cond: (ok = 5)
+  ->  Bitmap Heap Scan on a227_al l3
+        Recheck Cond: (ok = 5)
+        ->  Bitmap Index Scan on a227_al_pkey
+              Index Cond: (ok = 5)
+-- EXPLAIN
+
+> select * from a227_ao o left join a227_al l3 on l3.ok = o.ok where o.ok = 5 order by l3.ln
+ok:int4 | st:bpchar | ok:int4 | ln:int4 | sk:int4
+5 | O | 5 | 1 | 49
+5 | O | 5 | 2 | 62
+5 | O | 5 | 3 | 75
+5 | O | 5 | 4 | 88
+-- SELECT 4
+
+> explain (costs off) select * from a227_ao o
+>   where o.st = 'F' and not exists (select 1 from a227_al l3 where l3.ok = o.ok and l3.ok = 6)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (o.ok = l3.ok)
+  ->  Seq Scan on a227_ao o
+        Filter: (st = 'F'::bpchar)
+  ->  Hash
+        ->  Bitmap Heap Scan on a227_al l3
+              Recheck Cond: (ok = 6)
+              ->  Bitmap Index Scan on a227_al_pkey
+                    Index Cond: (ok = 6)
+-- EXPLAIN
+
+> reset max_parallel_workers_per_gather
+-- RESET
+

@@ -796,6 +796,11 @@ impl Search<'_, '_, '_> {
     /// outer join's condition moved to its outer side, nor a clause that must see nulls
     /// the leaf would be on the nullable side of.
     pub(super) fn movable_to(&self, c: usize, l: usize) -> bool {
+        // (A clause reconsider_outer_join_clauses replaced by a constant TRUE, its sides'
+        // restrictions equating both columns with the constant, parameterizes nothing.)
+        if self.oj_const_dropped(c) {
+            return false;
+        }
         if !self.general {
             return true;
         }

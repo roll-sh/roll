@@ -1584,6 +1584,17 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         fresh(*xl) && fresh(*yl)
     }
 
+    /// `oj_const_redundant` of clause `ci` at its own outer join (its syntactic sides):
+    /// reconsider_outer_join_clauses dropped it from every RestrictInfo list it would
+    /// parameterize a path from.
+    pub(super) fn oj_const_dropped(&self, ci: usize) -> bool {
+        let (a, b) = match self.clauses[ci].sj {
+            Some(t) => self.sjs.get(t).map_or((0, 0), |j| (j.syn_l, j.syn_r)),
+            None => (0, 0),
+        };
+        self.oj_const_redundant(ci, a, b)
+    }
+
     fn crossing_all(&self, a: u32, b: u32) -> Vec<usize> {
         // (In a group with outer joins: its clauses as written; with semi joins only,
         // theirs are in classes too, one per class, below.)
