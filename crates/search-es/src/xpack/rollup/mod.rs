@@ -13,7 +13,9 @@
 //! indices, then creates the rollup index (its `_meta` and dynamic templates) or adds the job
 //! to an existing rollup index's `_meta`.
 //!
-//! **The indexer** ([`indexer`]) runs on the cluster's job scheduler
+//! **The indexer** ([`indexer`]) runs as the job's creator (kept with the job, as a watch keeps
+//! its user; [`internal::as_principal`]), so it reads only the documents and fields that user
+//! may read and writes only where it may write. It runs on the cluster's job scheduler
 //! ([`crate::opensearch::jobs`]): a started job's next cron time (Quartz syntax, UTC) is kept
 //! in its stored state, so a sleeping cluster is woken for it. Each trigger reads the source
 //! indices with a paged composite aggregation from the stored position up to the current
@@ -159,7 +161,9 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     drop(st);
     let fields = cfg.all_fields();
     let uri = format!("/{}/_field_caps?fields={}", enc(&cfg.indices().join(",")), enc(&fields.join(",")));
-    let caps = internal::call(ctx.cluster, "GET", &uri, None).await?;
+    // As the caller: a job reads only what its creator may read (Elasticsearch runs the field
+    // caps in the request's context, and the indexer with the creator's stored headers).
+    let caps = internal::as_caller(internal::Caller::of(ctx), internal::call(ctx.cluster, "GET", &uri, None)).await?;
     let errors = cfg.validate_mappings(caps.get("fields").and_then(Value::as_object).unwrap_or(&Map::new()));
     if !errors.is_empty() {
         let mut e = EsError::action_request_validation(&errors);
@@ -167,6 +171,7 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
         return Err(e);
     }
     create_or_update_index(ctx.cluster, &cfg).await?;
+    let user = internal::stored_user(crate::xpack::security::principal(ctx));
     let job_id = cfg.id.clone();
     let now = ctx.now_ms;
     ctx.cluster
@@ -175,7 +180,10 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 return Err(EsError::new(409, "status_exception", format!("Cannot create job [{job_id}] because it has already been created (task exists)")));
             }
             let task_id = st.metadata.xpack.iter(JOBS).filter_map(|(_, j)| j.get("task_id").and_then(Value::as_i64)).max().unwrap_or(0) + 1;
-            let job = obj! { "config" => cfg.to_value(), "task_id" => task_id, "state" => "stopped" };
+            let mut job = obj! { "config" => cfg.to_value(), "task_id" => task_id, "state" => "stopped" };
+            if let (Some(u), Value::Obj(m)) = (user, &mut job) {
+                m.insert("user".into(), u);
+            }
             store::put(st, JOBS, &job_id, job, now).map(|_| ())
         })
         .await?;

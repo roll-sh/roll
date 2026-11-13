@@ -35,7 +35,6 @@ use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
-use crate::xpack::security::{AuthKind, Principal};
 use crate::xpack::{enc, internal, store};
 use exec::fmt_ms;
 
@@ -159,51 +158,6 @@ fn next_seq(st: &mut crate::meta::ClusterState, now: i64) -> EsResult<i64> {
     Ok(seq)
 }
 
-// --- the watch's user ---------------------------------------------------------------------------
-
-/// The user a watch runs as, kept with it: `None` for a superuser (the watch runs with the
-/// cluster's authority).
-fn stored_user(p: &Principal) -> Option<Value> {
-    if p.is_superuser() {
-        return None;
-    }
-    let mut m = Map::new();
-    m.insert("username".into(), p.username.clone().into());
-    m.insert("roles".into(), Value::Arr(p.roles.iter().map(Value::from).collect()));
-    m.insert("realm_name".into(), p.realm_name.into());
-    m.insert("realm_type".into(), p.realm_type.into());
-    if let AuthKind::ApiKey(a) = &p.kind {
-        m.insert("api_key".into(), obj! { "id" => a.id.clone(), "name" => a.name.clone(), "role_descriptors" => a.role_descriptors.clone(), "limited_by" => a.limited_by.clone(), "cross_cluster" => a.cross_cluster });
-    }
-    Some(Value::Obj(m))
-}
-
-fn principal_of(u: &Value) -> Option<Principal> {
-    const REALMS: [&str; 8] = ["reserved", "default_native", "native", "default_file", "file", "_es_api_key", "_service_account", "__attach"];
-    let known = |s: Option<&str>, d: &'static str| -> &'static str { s.and_then(|s| REALMS.iter().find(|r| **r == s).copied()).unwrap_or(d) };
-    let kind = match u.get("api_key") {
-        Some(a) => AuthKind::ApiKey(Box::new(crate::xpack::security::ApiKeyAuth {
-            id: a.get("id").map(Value::to_es_string).unwrap_or_default(),
-            name: a.get("name").cloned().unwrap_or(Value::Null),
-            role_descriptors: a.get("role_descriptors").cloned().unwrap_or(Value::Null),
-            limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
-            cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
-        })),
-        None => AuthKind::Realm,
-    };
-    // Built from the owner's defaults, so fields this doesn't keep stay neutral.
-    let mut p = Principal::owner();
-    p.username = u.get("username")?.to_es_string();
-    p.roles = u.get("roles").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
-    p.full_name = Value::Null;
-    p.email = Value::Null;
-    p.metadata = Value::object();
-    p.realm_name = known(u.get("realm_name").and_then(Value::as_str), "default_native");
-    p.realm_type = known(u.get("realm_type").and_then(Value::as_str), "native");
-    p.kind = kind;
-    Some(p)
-}
-
 // --- CRUD ------------------------------------------------------------------------------------
 
 /// When an active watch next fires, from its activation.
@@ -235,7 +189,7 @@ pub async fn put_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if parse::uses_ignore_throttled(&Value::Obj(raw)) {
         ctx.warn(parse::IGNORE_THROTTLED);
     }
-    let user = stored_user(crate::xpack::security::principal(ctx));
+    let user = internal::stored_user(crate::xpack::security::principal(ctx));
     let now = ctx.now_ms;
     let (version, seq, created) = ctx
         .cluster
@@ -660,14 +614,14 @@ pub async fn execute_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if parse::uses_ignore_throttled(&watch) {
                 ctx.warn(parse::IGNORE_THROTTLED);
             }
-            let owner = w.pointer(&["_roll", "user"]).and_then(principal_of);
+            let owner = w.pointer(&["_roll", "user"]).and_then(internal::principal_of);
             (id.to_string(), watch, stored_status(w), w.get("_version").cloned().unwrap_or(Value::from(1)), owner)
         }
         None => {
             let Some(Value::Obj(w)) = body.get("watch") else { return Err(EsError::action_request_validation(&["a watch execution request must either have a watch id or an inline watch source, but both are missing".into()])) };
             let watch = parse::normalize_watch(ctx.cluster, "_inlined_", w, None)?;
             let status = initial_status(&watch, true, now);
-            let owner = stored_user(crate::xpack::security::principal(ctx)).as_ref().and_then(principal_of);
+            let owner = internal::stored_user(crate::xpack::security::principal(ctx)).as_ref().and_then(internal::principal_of);
             ("_inlined_".to_string(), Value::Obj(watch), status, Value::from(-1), owner)
         }
     };
@@ -824,7 +778,7 @@ async fn trigger(cluster: &Cluster, id: &str, scheduled_ms: i64) {
     let watch = w.get("watch").cloned().unwrap_or(Value::Null);
     let version = w.get("_version").and_then(Value::as_i64);
     let user = w.pointer(&["_roll", "user"]).cloned();
-    let owner = user.as_ref().and_then(principal_of);
+    let owner = user.as_ref().and_then(internal::principal_of);
     let execution = now_instant();
     let now = execution.millis();
     let record_id = format!("{id}_{}-{}", uuid_like(), crate::time::java_instant_string_nanos(execution));
@@ -882,6 +836,68 @@ mod tests {
         assert_eq!(w.get("_version").and_then(Value::as_i64), Some(1));
     }
 
+    /// With a sealing key: a sealed `Authorization` header is opened only where the watch
+    /// stored it (before rendering, so its templates still render), never when a value merely
+    /// renders to sealed text; nobody can store a sealed value of their own; and an email
+    /// attachment's password is sealed and printed redacted like a webhook's.
+    #[tokio::test]
+    async fn sealed_secrets_open_only_where_stored() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&buf).to_ascii_lowercase());
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+            }
+        });
+        let mut cfg = crate::cluster::ClusterConfig::new("w");
+        cfg.sealer = crate::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-k");
+        cfg.node_settings.push((http::ALLOW_PRIVATE.into(), "true".into()));
+        let c = Cluster::open(cfg, std::sync::Arc::new(crate::cluster::MemoryStore::new())).await.unwrap();
+        let call = |method: &str, uri: &str, body: String| crate::rest::handle(&c, crate::rest::EsRequest::json(method, uri, body));
+        let watch = |auth: &str, metadata: &str| {
+            format!(
+                r#"{{"trigger":{{"schedule":{{"interval":"1h"}}}},"input":{{"simple":{{}}}},"metadata":{metadata},"actions":{{"hook":{{"webhook":{{"scheme":"http","host":"127.0.0.1","port":{port},"method":"post","path":"/x","headers":{{"Authorization":"{auth}"}},"body":"b"}}}}}}}}"#
+            )
+        };
+        assert_eq!(call("PUT", "/_watcher/watch/w1?active=false", watch("Bearer tok-secret", "{}")).await.status, 201);
+        let sealed = c.state().metadata.xpack.get(WATCHES, "w1").and_then(|w| w.pointer(&["watch", "actions", "hook", "webhook", "headers", "Authorization"]).map(Value::to_es_string)).unwrap();
+        assert!(crate::seal::is_sealed(&sealed));
+        let mut sent = |r: crate::rest::EsResponse| {
+            assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+            rx.try_recv().unwrap_or_default()
+        };
+        // The stored header opens where it was stored.
+        let head = sent(call("POST", "/_watcher/watch/w1/_execute", "{}".into()).await);
+        assert!(head.contains("authorization: bearer tok-secret"), "{head}");
+        // A value that renders to the sealed text is sent as it is.
+        let inline = format!(r#"{{"watch":{}}}"#, watch("{{{ctx.metadata.h}}}", &format!(r#"{{"h":"{sealed}"}}"#)));
+        let head = sent(call("POST", "/_watcher/watch/_execute", inline).await);
+        assert!(!head.contains("tok-secret"), "a rendered value was opened: {head}");
+        // Nobody stores a sealed value of their own.
+        assert_eq!(call("PUT", "/_watcher/watch/w2?active=false", watch(&sealed, "{}")).await.status, 400);
+        // Templates in a sealed header still render.
+        assert_eq!(call("PUT", "/_watcher/watch/w3?active=false", watch("Bearer {{ctx.metadata.t}}", r#"{"t":"abc"}"#)).await.status, 201);
+        let head = sent(call("POST", "/_watcher/watch/w3/_execute", "{}".into()).await);
+        assert!(head.contains("authorization: bearer abc"), "{head}");
+        // An email attachment's password.
+        let mail = r#"{"trigger":{"schedule":{"interval":"1h"}},"input":{"simple":{}},"actions":{"mail":{"email":{"to":"a@b.example","attachments":{"f":{"http":{"request":{"url":"http://h.example/f","auth":{"basic":{"username":"u","password":"att-pw-5"}}}}}}}}}}"#;
+        assert_eq!(call("PUT", "/_watcher/watch/m?active=false", mail.into()).await.status, 201);
+        assert!(!format!("{:?}", c.state().metadata.xpack).contains("att-pw-5"), "stored in the clear");
+        let shown = call("GET", "/_watcher/watch/m", String::new()).await;
+        assert!(!String::from_utf8_lossy(&shown.body).contains("att-pw-5"), "printed in the clear");
+    }
+
     #[test]
     fn cron_shapes() {
         assert!(check_cron("0 0 0 1 * ? 2099").is_ok());
@@ -902,18 +918,5 @@ mod tests {
         ] {
             assert_eq!(cron_problem(expr).as_deref(), msg, "{expr}");
         }
-    }
-
-    #[test]
-    fn stored_users_round_trip() {
-        let mut p = Principal::owner();
-        p.username = "watcher_manager".into();
-        p.roles = vec!["watcher_manager".into()];
-        p.realm_name = "default_file";
-        p.realm_type = "file";
-        let back = principal_of(&stored_user(&p).unwrap()).unwrap();
-        assert_eq!((back.username.as_str(), back.roles.clone(), back.realm_name, back.kind), ("watcher_manager", p.roles.clone(), "default_file", AuthKind::Realm));
-        // A superuser's watch runs with the cluster's authority.
-        assert!(stored_user(&Principal::owner()).is_none());
     }
 }

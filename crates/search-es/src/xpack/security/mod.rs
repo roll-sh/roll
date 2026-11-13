@@ -914,8 +914,10 @@ pub fn authorize_search(ctx: &Ctx, exprs: &[String], opts: &crate::meta::resolve
 fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec<String>, opts: &crate::meta::resolve::IndicesOptions) -> EsResult<()> {
     let st = ctx.state();
     let mut names: Vec<String> = Vec::new();
+    // No index: every index the request reads, as its wildcard resolves (dot-prefixed ones too).
     if exprs.iter().all(|e| e.starts_with('-')) {
-        names.extend(st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned());
+        let list: Vec<String> = std::iter::once("*".to_string()).chain(exprs.iter().cloned()).collect();
+        names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms).unwrap_or_default());
     }
     for e in exprs.iter().filter(|e| !e.starts_with('-')) {
         if e.contains('*') || e == "_all" {

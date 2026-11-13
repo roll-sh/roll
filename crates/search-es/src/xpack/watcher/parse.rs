@@ -328,7 +328,8 @@ fn map_input(input: &Value, f: &dyn Fn(&Value) -> Value) -> Value {
     }
 }
 
-/// A watch with `f` applied to each HTTP request template (its `http` inputs and webhooks).
+/// A watch with `f` applied to each HTTP request template (its `http` inputs, webhooks and
+/// email attachments fetched over HTTP).
 fn map_requests(w: &Value, f: &dyn Fn(&Value) -> Value) -> Value {
     let mut w = w.clone();
     if let Value::Obj(m) = &mut w {
@@ -337,10 +338,17 @@ fn map_requests(w: &Value, f: &dyn Fn(&Value) -> Value) -> Value {
         }
         if let Some(Value::Obj(actions)) = m.get_mut("actions") {
             for a in actions.values_mut() {
-                if let Value::Obj(am) = a
-                    && let Some(wh) = am.get("webhook").map(f)
-                {
+                let Value::Obj(am) = a else { continue };
+                if let Some(wh) = am.get("webhook").map(f) {
                     am.insert("webhook".into(), wh);
+                }
+                let attachments = am.get_mut("email").and_then(Value::as_object_mut).and_then(|e| e.get_mut("attachments")).and_then(Value::as_object_mut);
+                for att in attachments.into_iter().flat_map(|m| m.values_mut()) {
+                    if let Some(Value::Obj(h)) = att.as_object_mut().and_then(|m| m.get_mut("http"))
+                        && let Some(r) = h.get("request").map(f)
+                    {
+                        h.insert("request".into(), r);
+                    }
                 }
             }
         }

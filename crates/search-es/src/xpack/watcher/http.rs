@@ -81,11 +81,20 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
         }
     }
     out.insert("params".into(), Value::Obj(params));
+    // Only the cluster seals values: one given sealed would be opened when the watch runs.
+    if let Some(Value::Obj(h)) = r.get("headers")
+        && h.iter().any(|(k, v)| k.eq_ignore_ascii_case("authorization") && crate::seal::is_sealed(&v.to_es_string()))
+    {
+        return Err(parse_err("found a sealed value in header [Authorization]"));
+    }
     out.insert("headers".into(), r.get("headers").cloned().unwrap_or_else(Value::object));
     if let Some(a) = r.get("auth") {
         let user = a.pointer(&["basic", "username"]).map(Value::to_es_string);
         let pass = a.pointer(&["basic", "password"]).map(Value::to_es_string);
         let (Some(user), Some(mut pass)) = (user, pass) else { return Err(parse_err("could not parse http request template. unknown auth type")) };
+        if crate::seal::is_sealed(&pass) {
+            return Err(parse_err("found a sealed value in field [password]"));
+        }
         if pass == REDACTED {
             match previous.and_then(|p| p.pointer(&["auth", "basic", "password"])).map(Value::to_es_string) {
                 Some(old) => pass = old,
@@ -152,8 +161,8 @@ pub fn redact(stored: &Value) -> Value {
     v
 }
 
-/// A request ready to send.
-#[derive(Debug, Clone)]
+/// A request ready to send (its secrets in the clear: `Debug` prints them redacted).
+#[derive(Clone)]
 pub struct Request {
     pub scheme: String,
     pub host: String,
@@ -168,12 +177,24 @@ pub struct Request {
     pub read_timeout_ms: i64,
 }
 
-/// Renders a stored template with the execution model (`render`: one text template).
-pub fn render(stored: &Map, render: &dyn Fn(&Value) -> EsResult<(String, bool)>) -> EsResult<Request> {
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_record().to_json())
+    }
+}
+
+/// Renders a stored template with the execution model (`render`: one text template). Its
+/// sealed `Authorization` headers and password are opened first: a value that only renders to
+/// sealed text (from the payload) is sent as it is, never opened.
+pub fn render(cluster: &Cluster, stored: &Map, render: &dyn Fn(&Value) -> EsResult<(String, bool)>) -> EsResult<Request> {
     let text = |k: &str| -> EsResult<Option<String>> { stored.get(k).map(|v| render(v).map(|r| r.0)).transpose() };
     let mut headers = Vec::new();
     for (k, v) in stored.get("headers").and_then(Value::as_object).into_iter().flatten() {
-        headers.push((k.clone(), render(v)?.0));
+        let v = match v {
+            Value::Str(t) if k.eq_ignore_ascii_case("authorization") => Value::from(crate::seal::open(cluster, AUTH_HEADER, t)?),
+            other => other.clone(),
+        };
+        headers.push((k.clone(), render(&v)?.0));
     }
     let mut params = Vec::new();
     for (k, v) in stored.get("params").and_then(Value::as_object).into_iter().flatten() {
@@ -190,9 +211,10 @@ pub fn render(stored: &Map, render: &dyn Fn(&Value) -> EsResult<(String, bool)>)
             Some(s)
         }
     };
-    let auth = stored.get("auth").and_then(|a| a.get("basic")).map(|b| {
-        (b.get("username").map(Value::to_es_string).unwrap_or_default(), b.get("password").map(Value::to_es_string).unwrap_or_default())
-    });
+    let auth = match stored.get("auth").and_then(|a| a.get("basic")) {
+        Some(b) => Some((b.get("username").map(Value::to_es_string).unwrap_or_default(), crate::seal::open(cluster, PASSWORD, &b.get("password").map(Value::to_es_string).unwrap_or_default())?)),
+        None => None,
+    };
     Ok(Request {
         scheme: stored.get("scheme").map(Value::to_es_string).unwrap_or_else(|| "http".into()),
         host: text("host")?.unwrap_or_default(),
@@ -346,11 +368,10 @@ pub async fn send(cluster: &Cluster, req: &Request) -> EsResult<Response> {
     let method = reqwest::Method::from_bytes(req.method.to_ascii_uppercase().as_bytes()).map_err(|_| EsError::illegal_argument(format!("unsupported http method [{}]", req.method)))?;
     let mut rb = client.request(method, parsed).header("Accept-Charset", "UTF-8");
     for (k, v) in &req.headers {
-        let v = if k.eq_ignore_ascii_case("authorization") { crate::seal::open(cluster, AUTH_HEADER, v)? } else { v.clone() };
-        rb = rb.header(k.as_str(), v);
+        rb = rb.header(k.as_str(), v.as_str());
     }
     if let Some((u, p)) = &req.auth {
-        rb = rb.basic_auth(u, Some(crate::seal::open(cluster, PASSWORD, p)?));
+        rb = rb.basic_auth(u, Some(p));
     }
     if let Some(body) = &req.body {
         if !req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {

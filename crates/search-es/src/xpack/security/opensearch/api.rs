@@ -86,14 +86,18 @@ fn protected(v: &Value, name: &str) -> Option<Reply> {
     Some(message(403, "FORBIDDEN", format!("Resource '{name}' is {what}.")))
 }
 
-/// The configuration API's access check (`RestApiAdminPrivilegesEvaluator`).
+/// The configuration API's access check (`RestApiAdminPrivilegesEvaluator`): the owner, a role
+/// of `roles_enabled`, or a role that grants `restapi:admin/<type>` explicitly
+/// (`hasExplicitClusterPrivilege`: a role whose cluster permissions are `*` doesn't count).
 fn access(ctx: &Ctx, kind: Kind) -> Option<Reply> {
     let p = principal(ctx);
     if p.os().is_some_and(|id| id.owner) || p.roles.iter().any(|r| r == "all_access" || r == "security_rest_api_access") {
         return None;
     }
     let st = ctx.state();
-    let eff = super::super::effective(&super::super::file_roles(ctx.cluster), &st, &p);
+    let mut explicit = p.clone();
+    explicit.roles.retain(|r| entry(&st, Kind::Roles, r).is_some_and(|role| !super::expand(&st, &strs(role.get("cluster_permissions"))).iter().any(|a| a == "*:*")));
+    let eff = super::super::effective(&super::super::file_roles(ctx.cluster), &st, &explicit);
     if eff.allows_cluster(&format!("restapi:admin/{}", kind.endpoint())) {
         return None;
     }

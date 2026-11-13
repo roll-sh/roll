@@ -36,8 +36,9 @@ pub(super) async fn trigger(cluster: &Cluster, id: &str) {
     if let Some(job) = cluster.state().metadata.xpack.get(JOBS, id).cloned()
         && state_of(&job) == "started"
     {
+        let owner = job.get("user").and_then(internal::principal_of);
         let outcome = match job_config(&job) {
-            Some(cfg) => run(cluster, &cfg, job.get("position").filter(|p| p.as_object().is_some()).cloned()).await,
+            Some(cfg) => internal::as_principal(owner, run(cluster, &cfg, job.get("position").filter(|p| p.as_object().is_some()).cloned())).await,
             None => Err(EsError::illegal_state(format!("the configuration of rollup job [{id}] can't be read"))),
         };
         // A store refusing the write (a cluster unloading) leaves the trigger due: the
@@ -317,6 +318,51 @@ mod tests {
 
     fn job(c: &Cluster, path: &[&str]) -> Option<Value> {
         c.state().metadata.xpack.get(super::JOBS, "j")?.pointer(path).cloned()
+    }
+
+    /// A job reads as its creator: a user's job rolls up only the documents its role's query
+    /// lets it read, and a user that can't read an index can't roll it up.
+    #[tokio::test]
+    async fn jobs_run_as_their_creator() {
+        let c = Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap();
+        call(&c, "PUT", "/src", r#"{"mappings":{"properties":{"t":{"type":"date"},"p":{"type":"keyword"},"v":{"type":"integer"}}}}"#).await;
+        call(&c, "PUT", "/secret", r#"{"mappings":{"properties":{"t":{"type":"date"},"p":{"type":"keyword"},"v":{"type":"integer"}}}}"#).await;
+        call(&c, "PUT", "/seed", r#"{"mappings":{"_meta":{"_rollup":{"x":{}}}}}"#).await;
+        for (i, p) in ["a", "b", "a"].iter().enumerate() {
+            for index in ["src", "secret"] {
+                call(&c, "PUT", &format!("/{index}/_doc/{i}?refresh=true"), &format!(r#"{{"t":"2020-01-01T00:1{i}:00Z","p":"{p}","v":{i}}}"#)).await;
+            }
+        }
+        let role = r#"{"cluster":["manage_rollup"],"indices":[{"names":["src"],"privileges":["read","view_index_metadata"],"query":{"term":{"p":"a"}}},{"names":["src_rollup","secret_rollup"],"privileges":["all"]}]}"#;
+        assert_eq!(call(&c, "PUT", "/_security/role/roller", role).await.0, 200);
+        assert_eq!(call(&c, "PUT", "/_security/user/roller", r#"{"password":"roller-pass-1","roles":["roller"]}"#).await.0, 200);
+        let as_roller = |method: &str, uri: &str, body: &str| {
+            use base64::Engine;
+            let mut req = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
+            req.headers.push(("Authorization".into(), format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("roller:roller-pass-1"))));
+            crate::rest::handle(&c, req)
+        };
+        let job = |index: &str| {
+            format!(
+                r#"{{"index_pattern":"{index}","rollup_index":"{index}_rollup","cron":"0 0 0 1 1 ? 2099","page_size":10,"groups":{{"date_histogram":{{"field":"t","fixed_interval":"1h"}},"terms":{{"fields":["p"]}}}},"metrics":[{{"field":"v","metrics":["max"]}}]}}"#
+            )
+        };
+        assert_eq!(as_roller("PUT", "/_rollup/job/s", &job("secret")).await.status, 403, "the creator can't read secret");
+        assert_eq!(as_roller("PUT", "/_rollup/job/j", &job("src")).await.status, 200);
+        assert_eq!(as_roller("POST", "/_rollup/job/j/_start", "").await.status, 200);
+        super::trigger(&c, "j").await;
+        assert_eq!(job_of(&c, "j", &["stats", "rollups_indexed"]).and_then(|v| v.as_i64()), Some(1), "one bucket: (00:00, a)");
+        let (_, hits) = call(&c, "POST", "/src_rollup/_search", r#"{"query":{"term":{"p.terms.value":"b"}}}"#).await;
+        assert_eq!(hits.pointer(&["hits", "total", "value"]).and_then(Value::as_i64), Some(0), "rolled up a document its creator can't read");
+        // `_rollup_search` searches as its caller too, also on live indices.
+        let r = as_roller("POST", "/src/_rollup_search", r#"{"size":0,"aggs":{"p":{"terms":{"field":"p"}}}}"#).await;
+        let v = crate::json::parse(&r.body).ok().flatten().unwrap_or_default();
+        let keys: Vec<String> = v.pointer(&["aggregations", "p", "buckets"]).and_then(Value::as_array).into_iter().flatten().filter_map(|b| b.get("key").map(Value::to_es_string)).collect();
+        assert_eq!((r.status, keys), (200, vec!["a".to_string()]), "_rollup_search read documents its caller can't");
+    }
+
+    fn job_of(c: &Cluster, id: &str, path: &[&str]) -> Option<Value> {
+        c.state().metadata.xpack.get(super::JOBS, id)?.pointer(path).cloned()
     }
 
     /// A started job runs on the cluster's job scheduler at its cron times, keeps its next
