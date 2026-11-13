@@ -38,6 +38,14 @@ resource "roll_secrets_identity" "ci" {
   actions      = ["read", "reveal"]
 }
 
+# A token for a service: a roll token with one rule on the project (revoked on destroy).
+resource "roll_secrets_token" "web" {
+  name         = "web"
+  environments = ["production"]
+  actions      = ["read", "reveal"]
+  expires_at   = "2027-01-01T00:00:00Z"
+}
+
 resource "roll_secrets_sync" "vercel" {
   environment = "production"
   kind        = "vercel"
@@ -49,7 +57,7 @@ data "roll_secrets_values" "production" {
 }
 ```
 
-- Identities and syncs don't change in place: every attribute replaces them.
+- Identities, syncs and tokens don't change in place: every attribute replaces them.
 
 - A key's value is read back on refresh, references as written, so a change made outside
   Terraform shows in the plan (the token needs `reveal`).

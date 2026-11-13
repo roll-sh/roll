@@ -23,6 +23,28 @@ type fakeRolld struct {
 	keys       map[string]map[string]any // env:path/key → {value|link, comment, version}
 	identities map[string]map[string]any
 	syncs      map[string]map[string]any
+	tokens     map[string]map[string]any // roll-access's grants, kept when revoked
+}
+
+// grants serves roll-access's tokens: made with their rules, read, revoked.
+func (f *fakeRolld) grants(r *http.Request, write func(int, any)) {
+	id := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/v1/access/tokens"), "/")
+	switch {
+	case r.Method == http.MethodPost && id == "":
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		b["id"] = fmt.Sprintf("tok_%d", len(f.tokens)+1)
+		b["revoked_at"] = nil
+		f.tokens[b["id"].(string)] = b
+		write(201, map[string]any{"grant": b, "token": "rlt_made_" + b["id"].(string)})
+	case f.tokens[id] == nil:
+		write(404, map[string]string{"error": "no token " + id})
+	case r.Method == http.MethodDelete:
+		f.tokens[id]["revoked_at"] = 1
+		write(200, f.tokens[id])
+	default:
+		write(200, f.tokens[id])
+	}
 }
 
 // rest serves identities and syncs (create, list, delete), as roll keeps them.
@@ -75,6 +97,10 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Header.Get("Authorization") != "Bearer rlt_terraform" {
 		write(401, map[string]string{"error": "no token"})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/access/tokens") {
+		f.grants(r, write)
 		return
 	}
 	for _, kind := range []string{"identities", "syncs"} {
@@ -156,7 +182,7 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestEnvironmentsAndKeysAsCode(t *testing.T) {
-	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}}
+	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	config := fmt.Sprintf(`
@@ -187,6 +213,13 @@ resource "roll_secrets_identity" "ci" {
   environments = [roll_secrets_environment.production.slug]
   actions      = ["read", "reveal"]
 }
+resource "roll_secrets_token" "deploy" {
+  name         = "deploy"
+  environments = [roll_secrets_environment.production.slug]
+  paths        = ["/api"]
+  actions      = ["read", "reveal"]
+  expires_at   = "2030-01-01T00:00:00Z"
+}
 resource "roll_secrets_sync" "deploys" {
   environment = roll_secrets_environment.production.slug
   kind        = "webhook"
@@ -212,6 +245,16 @@ resource "roll_secrets_sync" "deploys" {
 					resource.TestCheckResourceAttr("data.roll_secrets_values.production", "values.DB_URL", "postgres://db/shop"),
 					resource.TestCheckResourceAttr("roll_secrets_identity.ci", "ttl_minutes", "15"),
 					resource.TestCheckResourceAttr("roll_secrets_sync.deploys", "signing_secret", "whsec_once"),
+					resource.TestCheckResourceAttr("roll_secrets_token.deploy", "token", "rlt_made_tok_1"),
+					func(*terraform.State) error {
+						f.mu.Lock()
+						defer f.mu.Unlock()
+						rule := f.tokens["tok_1"]["rules"].([]any)[0].(map[string]any)
+						if fmt.Sprint(rule["resources"], rule["environments"], rule["paths"], rule["actions"]) != "[map[project:prj_a]] [production] [/api] map[read:allow reveal:allow]" || f.tokens["tok_1"]["expires_at"] != float64(1893456000000) {
+							return fmt.Errorf("the token's rule: %v", f.tokens["tok_1"])
+						}
+						return nil
+					},
 				),
 			},
 			{
@@ -233,6 +276,11 @@ resource "roll_secrets_sync" "deploys" {
 			defer f.mu.Unlock()
 			if len(f.envs)+len(f.keys)+len(f.identities)+len(f.syncs) != 0 {
 				return fmt.Errorf("left behind: %v %v %v %v", f.envs, f.keys, f.identities, f.syncs)
+			}
+			for id, t := range f.tokens {
+				if t["revoked_at"] == nil {
+					return fmt.Errorf("token %s wasn't revoked", id)
+				}
 			}
 			return nil
 		},

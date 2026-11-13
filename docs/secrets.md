@@ -104,6 +104,9 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   identities for people and the operator only, never for a token. A sync's target is listed by host
   only, so a target changed outside Terraform isn't seen; its signing secret (webhooks) is shown
   once and kept, sensitive, in the state.
+- **`roll_secrets_token`** is a token for CI or a service: a roll token with one rule on the
+  project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
+  secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
 
 Values land in Terraform's state, as with every provider: keep the state as private as the values.
