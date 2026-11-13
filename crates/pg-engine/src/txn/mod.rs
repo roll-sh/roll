@@ -3011,6 +3011,22 @@ impl Txn {
         self.get_many_snap_with(keys, s, false)
     }
 
+    /// `get_many_snap` (`resolve`) or `get_many_snap_raw` of one key, without their vectors
+    /// (a unique key's row fetch).
+    pub fn get_one_snap(&self, key: &[u8], s: &Snap, resolve: bool) -> Result<Option<Bytes>> {
+        self.catch_up(s);
+        let st = s.st.borrow();
+        match self.snap_get(key, &st)? {
+            Some(v) if resolve => self.resolve_own(key, v, Some(&st), st.ts),
+            Some(v) => Ok(v),
+            None => {
+                let store = &self.db.store;
+                let mut r = store.point_reader(st.ts, false);
+                Ok(store.get_with(&mut r, key, resolve)?.and_then(|(_, v)| v))
+            }
+        }
+    }
+
     fn get_many_snap_with(&self, keys: &[Vec<u8>], s: &Snap, resolve: bool) -> Result<Vec<Option<Bytes>>> {
         self.catch_up(s);
         let st = s.st.borrow();
