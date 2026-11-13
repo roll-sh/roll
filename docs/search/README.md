@@ -208,11 +208,13 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    geonames `decay_geo_gauss_script_score` (78 against ES 71). Then: `so`, a full rerun of every
    track with variance, and one allocator policy (rolld's against search-dev's purge governor,
    by a matched benchmark).
-2. **Fleet under load**: `rolld/tests/search_cluster_e2e.rs` (two real `rolld` processes,
-   Postgres leases, MinIO; `ROLL_E2E=1`) passes: writes through both nodes, a SIGTERM handover,
-   a restart, and a SIGKILL of the owner under a running writer (every acknowledged write
-   replayed from S3 on the new owner). Next: the edge's hostnames in the same run, and search in
-   `deploy/cloud`'s fleet test (`rolld/tests/fleet_e2e.rs`).
+2. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
+   leases, MinIO) and roll cloud's fleet test (`rolld/tests/fleet_e2e.rs`, `pnpm test:fleet`:
+   three nodes from the fleet image behind HAProxy, DynamoDB leases, every product under load)
+   both pass with search: through the edge's `<cluster>.search.…` hostname, 7,116 documents
+   written, acknowledged and verified across a SIGKILL, a rolling restart and a scale-out (4 ×
+   502, 3 × 503, the longest stall 11.1 s at the SIGKILL). Next there: shorten that stall (the
+   lease takeover after a SIGKILL).
 3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`, `logsdb`,
    `otel-data`, transforms, ES|QL, watcher, downsampling. Runtime fields' last 5:
    `geo_bounds` on a geo_point runtime field (a hook in `search-aggs`' parser), ip terms tie
