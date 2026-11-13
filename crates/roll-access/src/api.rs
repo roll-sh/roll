@@ -337,7 +337,7 @@ struct ApprovalsQuery {
 }
 
 async fn approvals(State(a): S, Query(q): Query<ApprovalsQuery>) -> crate::Result<Json<Value>> {
-    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), q.grant.as_deref(), q.limit.unwrap_or(100))).await?;
+    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), q.grant.map(|g| vec![g]).as_deref(), q.limit.unwrap_or(100))).await?;
     Ok(Json(json!(list)))
 }
 
