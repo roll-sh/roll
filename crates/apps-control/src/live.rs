@@ -238,6 +238,20 @@ pub fn client_ip(client: Option<&str>) -> Option<std::net::IpAddr> {
     })
 }
 
+/// Whether a TCP app listens behind `addr`: Docker's proxy on a published port accepts the
+/// connection whatever the app does, and closes it at once when nothing listens inside, so a
+/// connection still open a moment later (or one that already said something) is the app.
+async fn tcp_answers(addr: SocketAddr) -> bool {
+    use tokio::io::AsyncReadExt;
+    let Ok(Ok(mut c)) = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr)).await else { return false };
+    let mut b = [0u8; 1];
+    match tokio::time::timeout(Duration::from_millis(100), c.read(&mut b)).await {
+        Err(_) => true,
+        Ok(Ok(n)) => n > 0,
+        Ok(Err(_)) => false,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveConfig {
     pub wake_timeout: Duration,
@@ -530,7 +544,7 @@ impl EnvLive {
             (RunType::Web, Some(a)) => loop {
                 // A TCP service is up when its port accepts; anything else answers HTTP.
                 let up = if run.tcp {
-                    tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(a)).await.is_ok_and(|c| c.is_ok())
+                    tcp_answers(a).await
                 } else {
                     self.answers(a, health, run.h2c).await
                 };
@@ -842,9 +856,13 @@ impl EnvLive {
             // Full ones first: they're the same as no entry. Then the longest unseen, never
             // everyone's (a flood of new addresses mustn't reset the limited ones).
             b.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < burst);
-            while b.len() >= MAX_BUCKETS {
-                let Some(oldest) = b.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k) else { break };
-                b.remove(&oldest);
+            // Still full: the longest unseen tenth goes at once (one pass, not one per client).
+            if b.len() >= MAX_BUCKETS {
+                let mut ats: Vec<Instant> = b.values().map(|(_, at)| *at).collect();
+                let cut = ats.len() / 10;
+                let (_, nth, _) = ats.select_nth_unstable(cut);
+                let nth = *nth;
+                b.retain(|_, (_, at)| *at > nth);
             }
         }
         let (tokens, at) = b.entry(client).or_insert((burst, now));

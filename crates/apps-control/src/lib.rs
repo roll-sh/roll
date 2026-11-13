@@ -929,6 +929,37 @@ impl Apps {
             let p = svc.project.clone();
             tokio::task::spawn_blocking(move || this.project_name(&p)).await.map_err(|e| Error::Internal(e.to_string()))??
         };
+        // The rest checked before anything is written too (a 400 changes nothing): run, the
+        // switches, against the environment as it is (or will be made).
+        let (sid, e) = (service.to_string(), env.to_string());
+        let existing = self.db(move |s| s.environment(&sid, &e)).await.ok();
+        if let Some(patch) = o.get("run") {
+            let Value::Object(p) = patch else { return Err(Error::BadRequest("run is an object".into())) };
+            if let Some(k) = p.keys().find(|k| !crate::model::ENV_RUN_FIELDS.contains(&k.as_str())) {
+                return Err(Error::BadRequest(format!("run.{k} is the service's; an environment sets {}", crate::model::ENV_RUN_FIELDS.join(", "))));
+            }
+            if let Some(mut row) = existing.clone() {
+                for (k, v) in p {
+                    if v.is_null() {
+                        row.run.remove(k);
+                    } else {
+                        row.run.insert(k.clone(), v.clone());
+                    }
+                }
+                svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
+            }
+        }
+        for k in ["feedback", "follow_tag", "wait_for_ci"] {
+            if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
+                return Err(Error::BadRequest(format!("{k} is a boolean")));
+            }
+        }
+        if o.get("feedback") == Some(&Value::Bool(true)) && !ephemeral.unwrap_or(existing.as_ref().is_some_and(|r| r.ephemeral)) {
+            return Err(Error::BadRequest("feedback is for a preview environment (ephemeral)".into()));
+        }
+        if o.get("follow_tag") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Image { image } if !image.contains('@')) {
+            return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
+        }
         self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
         if let Some(vars) = copied.filter(|v| !v.is_empty()) {
             let (sid, e) = (service.to_string(), env.to_string());

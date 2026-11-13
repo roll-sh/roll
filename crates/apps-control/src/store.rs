@@ -652,8 +652,9 @@ impl Store {
         Ok(self.db.query(&format!("SELECT {ENV_COLS} FROM environments WHERE service = ? ORDER BY created_at, name"), [service], env_row)?)
     }
 
-    /// An environment's TCP port: the one it has, else the lowest free in `range` (None: all
-    /// taken).
+    /// An environment's TCP port: the one it has, else the next free in `range` after the last
+    /// one given (a cursor that goes round, so a port just freed isn't handed to the next
+    /// environment, another tenant's, while old clients still dial it). None: all taken.
     pub fn assign_tcp_port(&self, service: &str, env: &str, range: (u16, u16)) -> Result<Option<u16>> {
         self.db.write(|c| {
             let had: Option<i64> = c.query_row("SELECT tcp_port FROM environments WHERE service = ? AND name = ?", [service, env], |r| r.get(0)).optional()?.flatten();
@@ -661,9 +662,14 @@ impl Store {
                 return Ok(Some(p as u16));
             }
             let used: std::collections::HashSet<i64> = c.query("SELECT tcp_port FROM environments WHERE tcp_port IS NOT NULL", (), |r| r.get(0))?.into_iter().collect();
-            let Some(p) = (range.0..=range.1).find(|p| !used.contains(&(*p as i64))) else { return Ok(None) };
-            c.execute("UPDATE environments SET tcp_port = ? WHERE service = ? AND name = ?", params![p as i64, service, env])?;
-            Ok(Some(p))
+            let last: Option<i64> = c.query_row("SELECT value FROM state WHERE key = 'apps.tcp.last'", (), |r| r.get::<_, String>(0)).optional()?.and_then(|v| v.parse().ok());
+            let (lo, hi) = (range.0 as i64, range.1 as i64);
+            let start = last.filter(|l| (lo..=hi).contains(l)).map_or(lo, |l| l + 1);
+            let span = hi - lo + 1;
+            let Some(p) = (0..span).map(|i| lo + (start - lo + i).rem_euclid(span)).find(|p| !used.contains(p)) else { return Ok(None) };
+            c.execute("UPDATE environments SET tcp_port = ? WHERE service = ? AND name = ?", params![p, service, env])?;
+            c.execute("INSERT INTO state (key, value) VALUES ('apps.tcp.last', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [p.to_string()])?;
+            Ok(Some(p as u16))
         })
     }
 

@@ -2352,7 +2352,7 @@ async fn a_tcp_service_answers_on_its_own_port() {
     // Private, it has no public port (TCP carries no token): the private network reaches it.
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"public": false}}))).await;
     assert!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["tcp"].is_null());
-    assert!(w.apps.tcp_endpoints().await.is_empty());
+    assert!(w.apps.tcp_endpoints().await.unwrap().is_empty());
 }
 
 /// An environment's metrics as a scraper reads them (Prometheus' text format).
@@ -2449,7 +2449,14 @@ async fn a_log_alert_is_an_event_once() {
     w.apps.judge_alerts(&live).await;
     assert!(alerts().await.is_empty(), "one of its own lines, and roll's doesn't count");
     w.apps.logs.sink(key.clone(), Stream::Stderr).line("panic again");
-    w.apps.judge_alerts(&live).await;
+    // Lines reach the log a moment after they're written: judged until it fires, then again.
+    for _ in 0..100 {
+        w.apps.judge_alerts(&live).await;
+        if !alerts().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     w.apps.judge_alerts(&live).await;
     let fired = alerts().await;
     assert_eq!(fired.len(), 1, "once while it lasts: {fired:?}");

@@ -970,11 +970,15 @@ else does, with a scoped token that may `read` the service (`roll token create`)
 
 A service whose port isn't HTTP (a game server, MQTT, Redis of its own) sets `run.tcp` (Railway's
 TCP proxy, Fly's raw TCP; Settings' "Protocol", `roll apps set --tcp true`). Each of its
-environments gets a port from the node's range (`ROLL_APPS_TCP_PORTS=40000-40999`, kept with the
+environments gets a port from the node's range (`ROLL_APPS_TCP_PORTS=20000-20999`, kept with the
 environment, `Environment.tcp` the `host:port` clients use at `ROLL_PUBLIC_HOST`). A connection
 there is let in by the environment's allow list (its peer) and refused in maintenance, wakes an
 instance and holds it (a lease, as a request does, so it doesn't sleep while connected), and is
-spliced to the app's port, half-closes included. A deploy's health check is the port accepting;
+spliced to the app's port, half-closes included. Ports go round the range (one just freed
+isn't handed straight to another environment, which old clients may still dial), closing a
+port ends its connections, and a range inside the kernel's ephemeral ports (where instances'
+host ports come from) is warned about at start. A deploy's health check is the port accepting
+and the connection staying open (Docker's proxy accepts whatever the app does, then closes);
 its HTTP names are 404s. One node for now: on a fleet the edge doesn't carry TCP (`## Next`). Checked live
 against rolld on Docker: a busybox echo server, asleep, echoed the first connection in 170 ms
 (the wake) and the next in 5 ms; `a_tcp_service_and_a_tunnel_reach_a_sleeping_port` (`pnpm
