@@ -203,10 +203,40 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
 }
 
 /// Grants, newest first, each with its last day's requests (`activity`: allowed, denied, asked).
-async fn list(State(a): S) -> crate::Result<Json<Value>> {
+/// `GET /v1/access/tokens?product=&resource=`: only the tokens made for one product resource.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListFilter {
+    product: Option<String>,
+    resource: Option<String>,
+}
+
+/// Whether a rule of `g`'s is about `product` (by name, not `*`) and, with `resource`, names it
+/// (`{id}` or `{project}`): the tokens a product's page lists as its own (roll secrets' project
+/// tokens), not every token that happens to reach it.
+fn made_for(g: &crate::store::Grant, product: &str, resource: Option<&str>) -> bool {
+    use roll_auth::scope::{Resources, Selector};
+    g.rules.0.iter().any(|r| {
+        r.product == product
+            && match (resource, &r.resources) {
+                (None, _) => true,
+                (Some(_), Resources::All) => false,
+                (Some(want), Resources::Some(sel)) => sel.iter().any(|s| match s {
+                    Selector::Project { project } => project == want,
+                    Selector::Id { id, .. } => id == want,
+                }),
+            }
+    })
+}
+
+async fn list(State(a): S, Query(f): Query<ListFilter>) -> crate::Result<Json<Value>> {
+    if f.resource.is_some() && f.product.is_none() {
+        return Err(Error::BadRequest("resource needs product".into()));
+    }
     let (grants, activity) = blocking(a, |a| Ok((a.store.list()?, a.store.activity()?))).await?;
     let out: Vec<Value> = grants
         .into_iter()
+        .filter(|g| f.product.as_deref().is_none_or(|p| made_for(g, p, f.resource.as_deref())))
         .map(|g| {
             let (allowed, denied, asked) = activity.get(&g.id).copied().unwrap_or_default();
             let mut v = json!(g);
@@ -306,16 +336,26 @@ async fn apply_tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Jso
 
 async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {
     let new: NewGrant = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
-    let by = match who(&a, &ext)? {
-        Who::Operator => actor(&ext),
-        Who::Grant(g) => {
-            check_within(&a, &g, &Shape { rules: &new.rules, expires_at: new.expires_at, ip_allow: &new.ip_allow, rate: new.rate_per_minute, ask_otherwise: new.ask_otherwise }).await?;
-            g.id.to_string()
-        }
-    };
-    a.check_policy(new.expires_at)?;
-    let (grant, token) = blocking(a, move |a| a.store.create(&new, GrantKind::Token, &by, None)).await?;
+    let (grant, token) = a.create_grant(&ext, new).await?;
     Ok((StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response())
+}
+
+impl Access {
+    /// Make a token for the request `ext` belongs to, as `POST /v1/access/tokens` does (it's this
+    /// function): its owner is the caller, a grant makes only what it covers, then the token
+    /// policy and the caps. For a product making one of its own tokens for its caller (roll
+    /// secrets' project tokens), never for someone else. The secret is returned once.
+    pub async fn create_grant(self: &Arc<Self>, ext: &Extensions, new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
+        let by = match who(self, ext)? {
+            Who::Operator => actor(ext),
+            Who::Grant(g) => {
+                check_within(self, &g, &Shape { rules: &new.rules, expires_at: new.expires_at, ip_allow: &new.ip_allow, rate: new.rate_per_minute, ask_otherwise: new.ask_otherwise }).await?;
+                g.id.to_string()
+            }
+        };
+        self.check_policy(new.expires_at)?;
+        blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None)).await
+    }
 }
 
 /// What a grant would be: what a maker must cover.

@@ -534,6 +534,10 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
   made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
   most every 10 seconds, so a change reaches every node within that.
 - The secret is shown once, at creation. The store keeps its SHA-256.
+- A product that makes tokens of its own for its caller (roll secrets' project tokens) makes them
+  with `Access::create_grant` and the caller's request: the function `POST /v1/access/tokens` is,
+  with the same owner, coverage, policy and caps, never a second way in. Its page lists them with
+  `GET /v1/access/tokens?product=&resource=`.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
 ### Tighten to what it used
@@ -665,7 +669,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
-| `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}` |
+| `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
