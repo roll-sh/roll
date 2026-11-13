@@ -8,6 +8,7 @@
 //! with a [`ViaEdge`] extension. Every response, the listener's own included, passes through
 //! [`HttpsConfig::observe`] (access logs, metrics).
 
+use crate::acme::Http01;
 use crate::drain::Drain;
 use crate::hosts::{Host, Hostnames};
 use crate::listener::{self, Accepted, ListenOptions};
@@ -119,6 +120,66 @@ pub async fn serve(listener: TcpListener, tls: Arc<ServerConfig>, cfg: Arc<Https
         }
     })
     .await
+}
+
+/// Where ACME HTTP-01 tokens are asked for.
+pub const ACME_CHALLENGE_PATH: &str = "/.well-known/acme-challenge/";
+
+/// The plain-HTTP listener (port 80 on a node alone): `GET /.well-known/acme-challenge/<token>`
+/// is answered from `challenges` for any host, before anything else routes (an unknown token, or
+/// anything else under that path, is a 404); every other request is redirected to HTTPS. Nothing
+/// is served in the clear.
+pub async fn serve_plain(listener: TcpListener, opts: ListenOptions, challenges: Arc<Http01>, drain: Drain) -> std::io::Result<()> {
+    listener::serve_tcp(listener, opts, drain.clone(), move |sock, peer| {
+        let (challenges, drain) = (challenges.clone(), drain.clone());
+        async move {
+            let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
+                let challenges = challenges.clone();
+                async move { Ok::<_, Infallible>(plain(&req, &challenges)) }
+            });
+            let conn = hyper::server::conn::http1::Builder::new().timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10)).serve_connection(TokioIo::new(sock), svc);
+            tokio::pin!(conn);
+            let result = tokio::select! {
+                r = conn.as_mut() => r,
+                _ = drain.refusing() => {
+                    conn.as_mut().graceful_shutdown();
+                    conn.await
+                }
+            };
+            if let Err(e) = result {
+                debug!(%peer, error = %e, "edge: plain HTTP connection ended with an error");
+            }
+        }
+    })
+    .await
+}
+
+/// One request on the plain-HTTP listener.
+pub fn plain<B>(req: &Request<B>, challenges: &Http01) -> Response<Body> {
+    if let Some(token) = req.uri().path().strip_prefix(ACME_CHALLENGE_PATH) {
+        let well_formed = (1..=256).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        let answer = well_formed.then(|| challenges.answer(token)).flatten();
+        return match (req.method(), answer) {
+            (&Method::GET | &Method::HEAD, Some(key_authorization)) => {
+                let mut r = Response::new(Body::from(key_authorization));
+                r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+                r
+            }
+            _ => text(StatusCode::NOT_FOUND, "no such challenge\n"),
+        };
+    }
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(crate::hosts::normalize);
+    let host = host.filter(|h| !h.is_empty() && h.len() <= 253 && h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'));
+    let Some(host) = host else { return text(StatusCode::BAD_REQUEST, "no Host header\n") };
+    let pq = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    match HeaderValue::from_str(&format!("https://{host}{pq}")) {
+        Ok(location) => {
+            let mut r = text(StatusCode::PERMANENT_REDIRECT, "");
+            r.headers_mut().insert(header::LOCATION, location);
+            r
+        }
+        Err(_) => text(StatusCode::BAD_REQUEST, "bad path\n"),
+    }
 }
 
 /// The client's address for a request (see the module docs).
