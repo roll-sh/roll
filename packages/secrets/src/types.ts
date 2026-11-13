@@ -112,7 +112,8 @@ export type Compare = { from: string; to: string; path: string; rows: CompareRow
 export type RequestState = "open" | "approved" | "rejected" | "applied" | "closed" | "stale";
 export type Review = { by: string; verdict: "approve" | "reject"; comment: string; at: number };
 /** One item of a change request with its values: `now` is null for a new key or a live/dynamic link. */
-export type RequestValue = { key: string; path: string; type: "shared" | "personal"; delete: boolean; now: string | null; now_link: Link | null; proposed: string | null; proposed_link: Link | null };
+/** `proposed_weak`: why the proposed credential is easy to guess. */
+export type RequestValue = { key: string; path: string; type: "shared" | "personal"; delete: boolean; now: string | null; now_link: Link | null; proposed: string | null; proposed_link: Link | null; proposed_weak?: string };
 
 export type KeyInsight = { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean; expires_at: number | null; expiring: boolean;
   /** In a protected environment: unprotected environments holding the very same value. */

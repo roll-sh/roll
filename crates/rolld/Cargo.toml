@@ -55,6 +55,7 @@ code-sql.workspace = true
 redis-server.workspace = true
 roll-edge.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
+ring.workspace = true
 roll-auth.workspace = true
 roll-workspace.workspace = true
 roll-secrets.workspace = true
@@ -99,8 +100,11 @@ lapin.workspace = true
 rabbitmq-stream-client.workspace = true
 nosql-proto = { workspace = true, features = ["client"] }
 parking_lot.workspace = true
+rand.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
+# The Google Secret Manager sync's test signs with a key made then (no key in the repo).
+rsa = { workspace = true, features = ["sha2"] }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

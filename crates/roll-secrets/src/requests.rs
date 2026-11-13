@@ -65,6 +65,10 @@ pub struct RequestValue {
     /// What it proposes (`None`: a deletion, a link, or the value kept).
     pub proposed: Option<Value>,
     pub proposed_link: Option<Link>,
+    /// Why the proposed value is easy to guess, for a credential (strength.rs): a reviewer sees
+    /// it before approving.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposed_weak: Option<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,7 +227,9 @@ impl Secrets {
                 Some(b) => Some(dek.open(&request_aad(id, n), &STANDARD.decode(b).map_err(|_| Error::Internal("a pending value isn't base64".into()))?)?),
                 None => None,
             };
+            let proposed_weak = proposed.as_ref().and_then(|v| crate::strength::weakness(&o.key, v.expose()));
             out.push(RequestValue {
+                proposed_weak,
                 key: o.key.clone(),
                 path: o.path.clone(),
                 kind: if o.owner.is_empty() { SecretType::Shared } else { SecretType::Personal },

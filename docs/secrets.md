@@ -390,7 +390,9 @@ judged when it's written, from the plaintext then: a common password, its own ke
 were drawn from its classes). Only the reason is kept (`weak`, never anything of the value), on
 `Secret` and in insights, and only a caller who may reveal the value sees it: that it's weak says
 something about it. Values with references aren't judged; a value written before this is judged at
-its next write. The environment's list marks it "weak", and `roll secrets insights` prints `WEAK`. The add and edit forms' "Generate" fills in 48 random
+its next write. The environment's list marks it "weak", and `roll secrets insights` prints `WEAK`. A change request's values (`…/requests/{id}/values`, for
+reviewers who may reveal them) carry `proposed_weak` too, so a guessable credential is caught before
+it's approved. The add and edit forms' "Generate" fills in 48 random
 letters and digits made in the browser (rejection-sampled, like the CLI's `--generate`), so the fix
 is one click.
 
@@ -798,7 +800,7 @@ open it.
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
 they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
-Railway, Cloudflare Workers, AWS Parameter Store, a Kubernetes Secret, an endpoint
+Railway, Heroku, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -861,6 +863,9 @@ last_synced_at, error}`:
 | `vercel` | `{project: "<id or name>", team?: "<team id>", target: ["production" \| "preview" \| "development", …], token_key: "VERCEL_TOKEN"}` | A Vercel project's environment variables (`type: "encrypted"`) for those environments |
 | `cloudflare` | `{account: "<account id>", script: "<worker>", token_key: "CLOUDFLARE_API_TOKEN"}` | A Worker's secrets (`secret_text`) |
 | `aws-ssm` | `{region, prefix: "/shop/production/", access_key_id_key, secret_access_key_key, kms_key_id?}` | Parameter Store `SecureString`s named `<prefix><name>` |
+| `google-secret-manager` | `{project, prefix?, service_account_key}` | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
+| `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
+| `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
 
 ### `github`
 
@@ -876,7 +881,7 @@ last_synced_at, error}`:
 - GitHub's names are `[A-Za-z_][A-Za-z0-9_]*` and may not start with `GITHUB_`; a key that would is
   an error naming it (rename it or use `keys`/`prefix`).
 
-### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`)
+### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`, `aws-secrets-manager`, `google-secret-manager`, `azure-key-vault`)
 
 A platform's own credential is never in the sync. The target names **keys of the sync's own
 environment and folder** that hold it (`token_key`; for AWS `access_key_id_key` and
@@ -902,8 +907,29 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   signed with SigV4 by hand from s3-proto's primitives (no AWS SDK in rolld). `prefix` is a path
   that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
   it.
+- **`google-secret-manager`**: `service_account_key` names the key holding a service account's JSON
+  key file. rolld signs a JWT with its private key (RS256, `ring`) and trades it at Google's token
+  endpoint (`oauth2.googleapis.com`, never the `token_uri` the file names) for an access token, then
+  per changed key: `GET` the secret, create it when missing (labelled `managed-by=roll-secrets`,
+  automatic replication), and `addVersion` with the value; per removed key, delete the secret only
+  when it carries that label. A secret that exists without the label is someone else's: roll never
+  writes to it. Errors carry Google's `error.status`, never an answer.
+- **`azure-key-vault`**: rolld signs in as the app registration (client credentials at
+  `login.microsoftonline.com`, scope `vault.azure.net`), with its client secret from the key
+  `client_secret_key` names, then per changed key: `GET` the secret (a name's `_` becomes `-`, since
+  Key Vault allows only letters, digits and `-`, and roll's keys never hold a `-`), and `PUT` the
+  value with the tag `managed-by=roll-secrets`; per removed key, delete it only when it carries the
+  tag. A secret roll deleted earlier is kept by the vault's soft delete: setting it again recovers it
+  first. One that exists without the tag is someone else's, never written. Errors carry Key Vault's
+  `error.code`, never an answer.
+- **`aws-secrets-manager`**: one secret holding the environment's values as a JSON object (what an
+  app reads with one `GetSecretValue`), sent whole on each push, so a removed key is simply gone
+  from it. `DescribeSecret`, then `PutSecretValue` on a secret roll created (tagged
+  `managed-by=roll-secrets`) or `CreateSecret` (with that tag, and `KmsKeyId` when set); a secret
+  that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
+  leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
 
-### `render`, `netlify`, `fly` and `railway`
+### `render`, `netlify`, `fly`, `railway` and `heroku`
 
 - **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
   environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
@@ -921,6 +947,9 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   variables in one environment (the environment's shared variables without `service`), through its
   public GraphQL API (`variableCollectionUpsert`, `variableDelete`). The token is a project token
   (`Project-Access-Token`) by default, or an account token with `token_kind: "account"`.
+- **`heroku`**, `{app, token_key}`: a Heroku app's config vars, in one `PATCH /apps/{app}/config-vars`
+  per push (changed names with their values, removed ones as `null`). A failure names Heroku's error
+  `id`, never the answer, which echoes the vars.
 
 Like Vercel's, they use the platforms' fixed API hosts, and a GraphQL answer's `errors` fail the
 push by code, never with a value.
@@ -1400,8 +1429,8 @@ Done and in PR #20:
   outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
-- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
-  Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
+- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Heroku, Cloudflare Workers, AWS
+  Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
   identities pinned to client addresses; encrypted project backup and restore;
 - the dashboard's Secrets surface, with the deployment key's source and a rotation's progress,
