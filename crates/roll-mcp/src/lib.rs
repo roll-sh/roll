@@ -51,6 +51,9 @@ const URL_ELICITATION_REQUIRED: i64 = -32042;
 /// Protocol versions spoken, newest first.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often a call that asked for progress (`_meta.progressToken`) hears it's still running (it
+/// may be waiting on a person's approval), so a client doesn't give up on it.
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// An answer read at most.
 const MAX_ANSWER: usize = 32 << 20;
 /// Text returned to the model at most; longer answers are cut (the structured content stays whole).
@@ -223,10 +226,12 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
     let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, toolsets, readonly, client });
-    let mut resp = if wants_sse(&ctx.headers) {
-        let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {
-            futures::stream::iter(responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))))
-        });
+    // A call that asked for progress, from a client that takes a stream: answered as one, with
+    // progress until the answer (MCP's `notifications/progress`).
+    let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
+    let mut resp = if wants_sse(&ctx.headers) || progress.is_some() {
+        let stream = progress_stream(Box::pin(async move { process(&ctx, messages).await }), progress, PROGRESS_EVERY)
+            .map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string())));
         Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
     } else {
         let mut responses = process(&ctx, messages).await;
@@ -251,9 +256,44 @@ fn session_client(id: &str) -> Option<String> {
     roll_access::evaluate::client_name(&String::from_utf8_lossy(&bytes))
 }
 
+fn accept(h: &HeaderMap) -> String {
+    h.get_all(header::ACCEPT).iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>().join(",").to_ascii_lowercase()
+}
+
 fn wants_sse(h: &HeaderMap) -> bool {
-    let accept = h.get_all(header::ACCEPT).iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>().join(",").to_ascii_lowercase();
+    let accept = accept(h);
     accept.contains("text/event-stream") && !accept.contains("application/json")
+}
+
+fn accepts_sse(h: &HeaderMap) -> bool {
+    accept(h).contains("text/event-stream")
+}
+
+type Work = Pin<Box<dyn Future<Output = Vec<Value>> + Send>>;
+
+/// `work`'s responses as a stream, with a progress notification for `token` every `every` until
+/// they come. The work is the stream's: a client that goes away drops it, as a plain answer would.
+fn progress_stream(work: Work, token: Option<Value>, every: std::time::Duration) -> impl futures::Stream<Item = Value> + Send {
+    let tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    futures::stream::unfold((Some(work), tick, 0u64, std::collections::VecDeque::<Value>::new(), token), |(mut work, mut tick, mut n, mut ready, token)| async move {
+        loop {
+            if let Some(r) = ready.pop_front() {
+                return Some((r, (work, tick, n, ready, token)));
+            }
+            let w = work.as_mut()?;
+            tokio::select! {
+                done = w => {
+                    ready.extend(done);
+                    work = None;
+                }
+                _ = tick.tick(), if token.is_some() => {
+                    n += 1;
+                    let note = json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": { "progressToken": token, "progress": n, "message": "still running (it may be waiting for a person to approve it)" } });
+                    return Some((note, (work, tick, n, ready, token)));
+                }
+            }
+        }
+    })
 }
 
 struct Ctx {
@@ -617,4 +657,30 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         },
     };
     json!({ "content": [{ "type": "text", "text": text }], "structuredContent": structured, "isError": false })
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use futures::StreamExt;
+    use serde_json::json;
+
+    /// A call that asked for progress hears it's still running until its answer, then the answer;
+    /// one that didn't gets only the answer.
+    #[tokio::test]
+    async fn a_slow_call_reports_progress_until_it_answers() {
+        let every = std::time::Duration::from_millis(50);
+        let slow = || -> super::Work {
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(130)).await;
+                vec![json!({ "jsonrpc": "2.0", "id": 1, "result": {} })]
+            })
+        };
+        let got: Vec<serde_json::Value> = super::progress_stream(slow(), Some(json!("t1")), every).collect().await;
+        let notes = got.iter().filter(|m| m["method"] == "notifications/progress").count();
+        assert_eq!(notes, 2, "{got:?}");
+        assert_eq!(got[0]["params"]["progressToken"], "t1");
+        assert_eq!(got.last().unwrap()["id"], 1, "the answer comes last");
+        let plain: Vec<serde_json::Value> = super::progress_stream(slow(), None, every).collect().await;
+        assert_eq!(plain.len(), 1);
+    }
 }
