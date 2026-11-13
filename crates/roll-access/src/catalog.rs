@@ -897,6 +897,11 @@ static ROWS: &[Row] = &[
         .env(EnvFrom::Param("env"))
         .path_query("path")
         .copies_from(CopyFrom::Query("from")),
+    // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
+    // names and hosts; adding one answers its signing secret once; both changes are admin.
+    row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
     // whole project. Both are admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
