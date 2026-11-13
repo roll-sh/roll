@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS secrets (
     UNIQUE (env_id, path, key, owner)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS secrets_project ON secrets (project_id);
+-- The same value elsewhere in a project (insights' exposed_in), and a key in every project (find).
+CREATE INDEX IF NOT EXISTS secrets_fp ON secrets (project_id, fp);
+CREATE INDEX IF NOT EXISTS secrets_key ON secrets (key, project_id);
 CREATE TABLE IF NOT EXISTS versions (
     secret_id TEXT NOT NULL,
     version INTEGER NOT NULL,

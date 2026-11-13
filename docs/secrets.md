@@ -469,7 +469,8 @@ Each call is a POST from rolld's guarded client (HTTPS, a public address, no red
 every roll webhook is (`X-Roll-Signature-256`, `X-Roll-Timestamp`, `X-Roll-Delivery`), with
 `X-Roll-Rotator: <id>`:
 - `{"action": "issue", "rotator", "label"}`: mint a new value; answer `{"value": "…", "handle": …}`
-  (at most 96 KiB). `handle` is anything the endpoint needs to revoke that value later.
+  (at most 96 KiB). `handle` is anything the endpoint needs to revoke that value later; it's kept
+  as given (not sealed, like a product's credential handle), so it names the value, never holds it.
 - `{"action": "revoke", "rotator", "handle"}`: retire it; any 2xx.
 
 The URL (which may carry a token) and the signing secret are sealed with the project's data key;
