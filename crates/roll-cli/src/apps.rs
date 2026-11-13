@@ -396,6 +396,9 @@ pub enum AppsCmd {
         /// `sleep_after_s`); `field=` goes back to the service's. Repeatable.
         #[arg(long = "run", value_name = "FIELD=VALUE")]
         run: Vec<String>,
+        /// An image service: deploy when its tag points at a new image (`true`), or not.
+        #[arg(long)]
+        follow_tag: Option<bool>,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -1469,7 +1472,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -1483,6 +1486,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(w) = wait_for_ci {
                 body.insert("wait_for_ci".into(), json!(w));
+            }
+            if let Some(f) = follow_tag {
+                body.insert("follow_tag".into(), json!(f));
             }
             if !run.is_empty() {
                 let mut r = serde_json::Map::new();

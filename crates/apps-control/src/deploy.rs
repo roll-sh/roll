@@ -625,7 +625,7 @@ impl Apps {
     /// `apps-build`, the Dockerfile written in when the plan made one.
     /// An image's registry, by name, must be a public address: dockerd resolves it itself, and
     /// speaks plain HTTP to loopback (`127.0.0.1.nip.io:5000/x` passes [`Source::check`]).
-    async fn check_registry(&self, image: &str) -> anyhow::Result<()> {
+    pub(crate) async fn check_registry(&self, image: &str) -> anyhow::Result<()> {
         let Some(host) = registry_host(image) else { return Ok(()) };
         if self.cfg.allow_private {
             return Ok(());
@@ -1075,6 +1075,13 @@ impl Apps {
                 for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
                     self.judge_alerts(&l).await;
                 }
+            }
+            if n.is_multiple_of(300) && !self.watching.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.watch_tags().await;
+                    this.watching.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
             }
             if n.is_multiple_of(3600) && !self.backing_up.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 // A volume's tar can take minutes: never on the reaper's own loop.

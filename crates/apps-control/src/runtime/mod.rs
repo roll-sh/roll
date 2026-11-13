@@ -115,6 +115,11 @@ pub trait Runtime: Send + Sync {
     /// Pull an image (with `login` for a private registry) and answer it pinned by digest
     /// (`repo@sha256:…`).
     async fn pull(&self, image: &str, log: &LogSink, login: Option<&RegistryLogin>) -> anyhow::Result<String>;
+    /// What `image`'s tag points at now in its registry (`repo@sha256:…`), without pulling it:
+    /// a manifest `HEAD` (watching a tag).
+    async fn remote_digest(&self, image: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
+        crate::registry::Registry::new(None)?.digest(image, login).await
+    }
     /// Make the instance, ready to start; nothing runs yet.
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()>;
     /// Start a created (or stopped) instance and say where its port answers. Its output goes

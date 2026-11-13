@@ -15,6 +15,7 @@
 pub mod api;
 pub mod backups;
 pub mod hooks;
+pub mod tags;
 pub mod registry;
 pub mod config;
 pub mod cron;
@@ -179,6 +180,8 @@ pub struct Apps {
     changes: tokio::sync::broadcast::Sender<String>,
     /// The hourly volume backups are running (on their own task).
     backing_up: std::sync::atomic::AtomicBool,
+    /// Watched tags are being checked (on their own task).
+    watching: std::sync::atomic::AtomicBool,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
@@ -250,6 +253,7 @@ impl Apps {
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,
             backing_up: std::sync::atomic::AtomicBool::new(false),
+            watching: std::sync::atomic::AtomicBool::new(false),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
@@ -712,6 +716,7 @@ impl Apps {
             canary,
             run: r.run.clone(),
             hook: r.hook_hash.is_some(),
+            follow_tag: r.follow_tag,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
             created_at: r.created_at,
@@ -723,7 +728,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -808,6 +813,17 @@ impl Apps {
             let (sid, e, run) = (service.to_string(), env.to_string(), row.run);
             self.db(move |s| s.set_env_run(&sid, &e, &run)).await?;
             self.settings_changed();
+        }
+        match o.get("follow_tag") {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(on)) => {
+                if *on && !matches!(&svc.source, Source::Image { image } if !image.contains('@')) {
+                    return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
+                }
+                let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+                self.db(move |s| s.set_follow_tag(&sid, &e, on)).await?;
+            }
+            Some(_) => return Err(Error::BadRequest("follow_tag is a boolean".into())),
         }
         match o.get("wait_for_ci") {
             None | Some(Value::Null) => {}

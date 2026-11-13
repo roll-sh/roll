@@ -475,6 +475,10 @@ impl Runtime for Fargate {
         self.registry.digest(image, login).await
     }
 
+    async fn remote_digest(&self, image: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
+        self.registry.digest(image, login).await
+    }
+
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
         if spec.volume.is_some() {
             bail!("volumes aren't on the fleet yet");

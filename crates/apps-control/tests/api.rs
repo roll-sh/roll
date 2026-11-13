@@ -1391,3 +1391,24 @@ async fn a_deploy_hook_deploys_with_its_url_alone() {
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/hook"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(call(&hooks, "POST", &path, None).await.0, StatusCode::NOT_FOUND, "removed, it's gone");
 }
+
+/// An environment that follows its image's tag deploys when the tag moves, once, and not while
+/// it stays put.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_followed_tag_that_moves_deploys_once() {
+    let w = world().await;
+    let (svc, d1) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"follow_tag": true}))).await;
+    assert_eq!((st, env["follow_tag"].clone()), (StatusCode::OK, json!(true)), "{env}");
+    assert!(w.apps.watch_tags().await.is_empty(), "the tag still points at what runs");
+    let moved = format!("sha256:{}", "1".repeat(64));
+    w.fake.move_tag("nginx:1.27", &moved);
+    let started = w.apps.watch_tags().await;
+    assert_eq!(started.len(), 1, "one deploy for the move");
+    let d2 = settled(&w, &id, "production", &started[0]).await;
+    assert_eq!((d2["status"].as_str(), d2["actor"].as_str()), (Some("active"), Some("tag watch")), "{d2}");
+    assert!(d2["image"].as_str().unwrap().ends_with(&moved) && d2["id"] != d1["id"], "{d2}");
+    assert!(w.apps.watch_tags().await.is_empty(), "deployed: nothing more to do");
+}

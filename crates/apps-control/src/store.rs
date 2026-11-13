@@ -311,6 +311,8 @@ pub struct EnvRow {
     pub run: serde_json::Map<String, serde_json::Value>,
     /// Its deploy hook's token, hashed ([`crate::public::token_hash`]).
     pub hook_hash: Option<String>,
+    /// An image service's tag is watched: it deploys when the tag moves.
+    pub follow_tag: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -391,7 +393,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag";
 const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
@@ -442,6 +444,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         wait_for_ci: r.get::<_, i64>(8)? != 0,
         run: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
         hook_hash: r.get(10)?,
+        follow_tag: r.get::<_, i64>(11)? != 0,
     })
 }
 
@@ -511,6 +514,7 @@ impl Store {
         db.add_column("environments", "wait_for_ci", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "run", "TEXT NOT NULL DEFAULT '{}'")?;
         db.add_column("environments", "hook_hash", "TEXT")?;
+        db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -651,7 +655,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1436,6 +1440,11 @@ impl Store {
     }
 
     // ── pushes waiting for their checks ──
+
+    pub fn set_follow_tag(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET follow_tag = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
 
     pub fn set_hook(&self, service: &str, env: &str, hash: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET hook_hash = ? WHERE service = ? AND name = ?", params![hash, service, env])?;

@@ -157,6 +157,8 @@ export interface EnvironmentPut {
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
+  /** Deploy when the image's tag moves (an image service with a tag). */
+  follow_tag?: boolean;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -212,6 +214,8 @@ export interface Environment extends EnvironmentSummary {
   run?: Partial<Record<EnvRunField, number>>;
   /** It has a deploy hook. */
   hook?: boolean;
+  /** An image service's tag is watched: a new digest behind it deploys. */
+  follow_tag?: boolean;
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */

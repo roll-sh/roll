@@ -81,6 +81,22 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        {service.source.kind === "image" && !service.source.image.includes("@") && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Follow the tag</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.follow_tag
+                  ? `When ${service.source.image} points at a new image, ${env.name} deploys it (checked every 5 minutes).`
+                  : `${env.name} runs the digest it pinned until someone deploys; a push to the tag changes nothing.`}
+              </p>
+            </div>
+            <button className={btn} disabled={busy} aria-pressed={!!env.follow_tag} onClick={() => runner.run("follow", () => appsApi.putEnvironment(service.id, env.name, { follow_tag: !env.follow_tag }))}>
+              {env.follow_tag ? "Stop following" : "Follow the tag"}
+            </button>
+          </div>
+        )}
+
         <OwnRun service={service} env={env} runner={runner} />
 
         <div className="space-y-3 px-5 py-4">

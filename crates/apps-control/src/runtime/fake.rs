@@ -59,6 +59,8 @@ pub struct Fake {
     oom: Mutex<std::collections::HashSet<String>>,
     /// Volumes' contents (what a backup reads and a restore writes).
     volumes: Mutex<HashMap<String, Vec<u8>>>,
+    /// What a tag points at in its registry ([`Fake::move_tag`]); zeros when unset.
+    tags: Mutex<HashMap<String, String>>,
 }
 
 impl Fake {
@@ -80,6 +82,16 @@ impl Fake {
     /// The app breaks while it runs: every path answers 500 from now on, its port still open.
     pub fn sicken(&self, name: &str) {
         self.sick.lock().insert(name.to_string());
+    }
+
+    /// Someone pushed `image`'s tag again: it points at `digest` (`sha256:…`) now.
+    pub fn move_tag(&self, image: &str, digest: &str) {
+        self.tags.lock().insert(image.to_string(), digest.to_string());
+    }
+
+    fn pinned(&self, image: &str) -> String {
+        let digest = self.tags.lock().get(image).cloned().unwrap_or_else(|| format!("sha256:{}", "0".repeat(64)));
+        format!("{image}@{digest}")
     }
 
     /// What a volume holds, as the app wrote it.
@@ -167,7 +179,11 @@ impl Runtime for Fake {
         *self.pulled_as.lock() = login.map(|l| l.username.clone());
         self.counts.pulls.fetch_add(1, Ordering::SeqCst);
         log.line(format!("pulled {image}"));
-        Ok(format!("{image}@sha256:{}", "0".repeat(64)))
+        Ok(self.pinned(image))
+    }
+
+    async fn remote_digest(&self, image: &str, _login: Option<&super::RegistryLogin>) -> anyhow::Result<String> {
+        Ok(self.pinned(image))
     }
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {

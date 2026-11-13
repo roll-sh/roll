@@ -703,6 +703,20 @@ find a leaked URL. Making or removing one is admin in roll MCP's catalogue: it's
 credential. rolld's gate lets `/v1/apps/hooks` through to the hook's own check (its `RULES`);
 access lines log the route pattern, never the token; it runs on the service's owner.
 
+## Following a tag
+
+An image service's environment can follow its tag (`follow_tag`; "Follow the tag" in the
+environment panel; `roll apps env --follow-tag true`), as Railway's image auto updates do:
+every five minutes the owner asks the registry what the tag points at (a manifest `HEAD`
+through `Runtime::remote_digest`, no pull, with the service's registry login when it's that
+registry's, after the same public-address check a deploy makes) and compares it with the digest
+its live deployment pinned. A new one deploys (actor `tag watch`, "nginx:1.27 moved to
+…"), through everything a deploy does: pulled and pinned again, health-checked, a gradual
+rollout when the service has one. A deploy already on its way is left alone, and a registry
+that doesn't answer is a line in the environment's log. Off by default: a deployment runs the
+digest it pinned until someone deploys, so a push to a tag never changes production by
+itself unless asked.
+
 ## Volume backups
 
 A volume is backed up to object storage as a tar (`apps/volumes/<service>/<env>/<unix ms>.tar`),
@@ -909,41 +923,38 @@ Ranked; the top item not marked *waiting* is what's being worked on. A product r
 2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
 earlier security, product and integration reviews).
 
-1. **Image tag watching**: an opt-in watch that redeploys an image service when its tag moves
-   (Railway's Image Auto Updates), resolving the digest on the owner every few minutes. (Done:
-   deploy hooks.)
-2. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
+1. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
    environment's access token, and `no_traffic` deploys promoted later (Cloud Run's revision
    tags, Vercel's deployment URLs).
-3. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
+2. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
    bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
    (Render's and Vercel's static sites).
-4. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
+3. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
    (Cloud Run's `--use-http2`, Fly's `h2_backend`); then TCP services.
-5. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
+4. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
    by `roll up --all` with the plan shown first (Render's Blueprints), then importing a Compose
    file's image services (Railway's).
-6. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
+5. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-7. **Region**: the region shown on the overview and each environment, defaulting to the project's
+6. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+7. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-9. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+8. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+9. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-11. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+10. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-13. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+12. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-14. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-15. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
+13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+14. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
     (`/__roll/feedback.js` before `</body>` of HTML a visitor reached through roll; the rules in
     `roll-previews/src/runtime.rs` `add_feedback`), in the proxy.

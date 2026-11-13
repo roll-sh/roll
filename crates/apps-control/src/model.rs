@@ -645,6 +645,9 @@ pub struct Environment {
     pub run: serde_json::Map<String, serde_json::Value>,
     /// It has a deploy hook (`POST …/hook`).
     pub hook: bool,
+    /// An image service's tag is watched: a new digest behind it deploys (Railway's image auto
+    /// updates).
+    pub follow_tag: bool,
     /// A push deploys only once its commit's checks pass (Railway's "Wait for CI").
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.

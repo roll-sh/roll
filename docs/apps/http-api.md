@@ -220,6 +220,9 @@ type EnvironmentPut = {
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
    *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it. */
   wait_for_ci?: boolean;
+  /** An image service whose image has a tag: deploy when the tag points at a new digest
+   *  (checked every 5 minutes on the owner; actor `tag watch`). 400 otherwise. */
+  follow_tag?: boolean;
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
    *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
    *  service's, null goes back to it; checked with the service's settings as one run. */
@@ -240,6 +243,7 @@ type Environment = EnvironmentSummary & {
   canary: { deployment: string; share: number } | null; // a gradual rollout under way: the percent of requests the new deployment takes
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   hook: boolean;              // it has a deploy hook
+  follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
   created_at: number;
