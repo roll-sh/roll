@@ -135,7 +135,7 @@ pub(super) struct Hot {
     /// `ranges`' lock, which every worker's point read took (a shared line's
     /// compare-exchange). A reader seeing a bit late only reads the store, which holds every
     /// version a kept range does for any live snapshot.
-    mask: [AtomicU64; MASK_WORDS],
+    mask: PrefixBits,
     ranges: RwLock<HashMap<Prefix, Arc<Mutex<Chains>>>>,
     /// Scans in ranges not kept (negative: refused, counting up to a retry), and how often
     /// each was refused.
@@ -144,11 +144,50 @@ pub(super) struct Hot {
 
 const MASK_WORDS: usize = 4;
 
-/// A prefix's word and bit in `Hot::mask`.
+/// A prefix's word and bit in a `PrefixBits`.
 #[inline]
 fn bit(p: &Prefix) -> (usize, u64) {
     let h = (u64::from_ne_bytes(*p).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize;
     (h / 64 % MASK_WORDS, 1 << (h % 64))
+}
+
+/// Relation prefixes as bits, read without a lock: a prefix whose bit is clear is not in the
+/// set (a set bit: it may be; 256 bits, so a few prefixes rarely share one).
+#[derive(Default)]
+pub(super) struct PrefixBits([AtomicU64; MASK_WORDS]);
+
+impl PrefixBits {
+    /// Whether the relation of key `k` (its first `PREFIX` bytes) may be in the set: true for
+    /// a key shorter than a prefix.
+    #[inline]
+    pub(super) fn may_hold(&self, k: &[u8]) -> bool {
+        let Some(p) = k.get(..PREFIX).and_then(|p| Prefix::try_from(p).ok()) else { return true };
+        let (w, b) = bit(&p);
+        self.0[w].load(Ordering::Acquire) & b != 0
+    }
+
+    /// Add the relation of key `k` (none for a key shorter than a prefix).
+    #[inline]
+    pub(super) fn add(&self, k: &[u8]) {
+        if let Some(p) = k.get(..PREFIX).and_then(|p| Prefix::try_from(p).ok()) {
+            let (w, b) = bit(&p);
+            if self.0[w].load(Ordering::Relaxed) & b == 0 {
+                self.0[w].fetch_or(b, Ordering::Release);
+            }
+        }
+    }
+
+    /// The set made `prefixes`, whatever it held.
+    fn set<'a>(&self, prefixes: impl Iterator<Item = &'a Prefix>) {
+        let mut m = [0u64; MASK_WORDS];
+        for p in prefixes {
+            let (w, b) = bit(p);
+            m[w] |= b;
+        }
+        for (a, v) in self.0.iter().zip(m) {
+            a.store(v, Ordering::Release);
+        }
+    }
 }
 
 /// The prefix of a scan of [start, end) that reads one whole relation's range.
@@ -169,20 +208,12 @@ impl Hot {
     /// Whether `p`'s range may be kept (its bit set: `mask`).
     #[inline]
     fn may_keep(&self, p: &Prefix) -> bool {
-        let (w, b) = bit(p);
-        self.mask[w].load(Ordering::Acquire) & b != 0
+        self.mask.may_hold(p)
     }
 
     /// `mask` made again from `ranges` (under its write lock, after a change).
     fn publish(&self, ranges: &HashMap<Prefix, Arc<Mutex<Chains>>>) {
-        let mut m = [0u64; MASK_WORDS];
-        for p in ranges.keys() {
-            let (w, b) = bit(p);
-            m[w] |= b;
-        }
-        for (a, v) in self.mask.iter().zip(m) {
-            a.store(v, Ordering::Release);
-        }
+        self.mask.set(ranges.keys());
     }
 
     /// The rows of [start, end) visible at `ts`, when a kept range holds them.
