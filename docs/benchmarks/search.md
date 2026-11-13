@@ -547,6 +547,16 @@ Elasticsearch 2,636-2,782 MiB, OpenSearch 2,803-2,910 MiB.
 | index-append | median throughput (docs/s) | 39002.58 (38599.08-39406.08) | 26216.47 (18442.19-33990.76) | 24262.65 (22516.97-26008.34) |
 | index-append | p50 service time (ms) | 1161.04 (1132.77-1189.31) | 1270.47 (1111.49-1429.46) | 1486.34 (1453.36-1519.31) |
 
+**Rally on the latest binary** (roll only, two rounds each; with the geo-point Painless read and
+the `auto_date_histogram` fast loop; the host was loaded by builds, so the indexing throughputs
+and `distance_amount_agg`, which spread 93-161 ms, are noisy): nyc_taxis `autohisto_agg` 29.6 ms
+(Elasticsearch 32.2, OpenSearch 13.0), `date_histogram_agg` 6.6 (10.8, 8.9); http_logs
+`hourly_agg` 6.8 (121.1, 14.0), indexing 160k docs/s (94k, 95k); geonames
+`decay_geo_gauss_script_score` 70.1 (70.7, 88.6), `painless_static` 58.3 (89.9, 91.9),
+`field_value_script_score` 34.7 (41.3, 42.1), indexing 67k docs/s (28k, 29k). Left behind the
+best of the two: `autohisto_agg` against OpenSearch's points counting (the opensearch dialect
+can count it the same way) and http_logs `terms_enum` against OpenSearch (1.12 against 0.57 ms).
+
 ## Round 6: every Rally track, indexing, memory and cold start (perf-bench lane, 2026-10-28)
 
 A busy host this time (1-minute load 30–58 on 36 threads, other lanes building): Rally ran
