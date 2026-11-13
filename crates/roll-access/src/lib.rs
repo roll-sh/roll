@@ -290,6 +290,18 @@ impl Resolvers {
         self.workspace.as_ref().map(|w| w.projects_of(workspace_kind, r#ref)).unwrap_or_default()
     }
 
+    /// Register what a `kind`'s id is checked under: `f(id)` answers the canonical id (a name to its
+    /// id, a replica to its database), or `None` to keep it. One line per product in rolld.
+    pub fn by_fn(&mut self, kind: &'static str, f: impl Fn(&str) -> Option<String> + Send + Sync + 'static) {
+        self.by_kind.insert(kind, Arc::new(Fns { id: Some(Box::new(f)), env: None }));
+    }
+
+    /// Register what an environment named in `product`'s paths is: `f(id, env)` answers what rules
+    /// see (`"preview"` for a preview's own), or `None` to keep the name.
+    pub fn environment_fn(&mut self, product: &'static str, f: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static) {
+        self.environments.insert(product, Arc::new(Fns { id: None, env: Some(Box::new(f)) }));
+    }
+
     /// `env` (named in a path) of `product`'s resource `id`, as rules see it.
     pub fn environment(&self, product: &str, id: &str, env: &str) -> String {
         self.environments.get(product).and_then(|r| r.environment(id, env)).unwrap_or_else(|| env.to_string())
@@ -307,6 +319,25 @@ pub trait ApprovalChat: Send + Sync + 'static {
     fn notice(&self, install: String, channel: String, text: String) -> futures::future::BoxFuture<'static, std::result::Result<(), String>> {
         let _ = (install, channel, text);
         Box::pin(async { Ok(()) })
+    }
+}
+
+type IdFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+type EnvFn = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
+/// A resolver from closures ([`Resolvers::by_fn`], [`Resolvers::environment_fn`]).
+struct Fns {
+    id: Option<IdFn>,
+    env: Option<EnvFn>,
+}
+
+impl Resolver for Fns {
+    fn resolve(&self, _kind: &str, id: &str) -> Option<Resolved> {
+        self.id.as_ref()?(id).map(|id| Resolved { id, environment: None })
+    }
+
+    fn environment(&self, id: &str, env: &str) -> Option<String> {
+        self.env.as_ref()?(id, env)
     }
 }
 
