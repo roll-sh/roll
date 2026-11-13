@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI } from "@roll/secrets/types";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
@@ -93,6 +93,7 @@ export function secretsApi(project: string) {
 
     environments: () => req<Environment[]>("GET", `${P}/environments`),
     createEnvironment: (e: NewEnvironment) => req<Environment>("POST", `${P}/environments`, e),
+    ensureEnvironment: (slug: string, e: Ensure) => req<Ensured>("PUT", `${P}/environments/${enc(slug)}`, e),
     deleteByLabel: (label: string) => req<{ deleted: string[] }>("DELETE", `${P}/environments${qs({ label })}`),
     order: (order: string[]) => req<Environment[]>("PUT", `${P}/environments/order`, { order }),
     environment: (env: string) => req<Environment>("GET", E(env)),

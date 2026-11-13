@@ -352,6 +352,24 @@ async fn ephemeral_environments_inherit_their_base_and_go_by_label_or_expiry() {
     api.ok(Method::PATCH, "/environments/pr-118", Some(json!({ "expires_at": 1 }))).await;
     assert_eq!(api.secrets.sweep().unwrap().expired, 1);
     assert_eq!(slugs(&api.ok(Method::GET, "/environments", None).await), ["development", "staging", "production"]);
+
+    // Ensuring one: created, then unchanged, then brought up to date in one change.
+    let want = |db: &str, extra: bool| {
+        let mut ops = vec![json!({ "op": "set", "key": "DATABASE_URL", "value": db })];
+        if extra {
+            ops.push(json!({ "op": "set", "key": "EXTRA", "value": "x" }));
+        }
+        json!({ "base": "staging", "labels": { "preview": "pv-1" }, "ttl_minutes": 60, "secrets": ops, "replace": true })
+    };
+    let (s, first) = api.call(Method::PUT, "/environments/pv-1", Some(want("postgres://pv-1", true))).await;
+    assert_eq!((s, first["created"].as_bool()), (StatusCode::CREATED, Some(true)));
+    let again = api.ok(Method::PUT, "/environments/pv-1", Some(want("postgres://pv-1", true))).await;
+    assert_eq!((again["created"].as_bool(), again["change"].clone()), (Some(false), Value::Null), "ensuring what's there is no change");
+    let moved = api.ok(Method::PUT, "/environments/pv-1", Some(want("postgres://pv-1b", false))).await;
+    assert_eq!(moved["change"]["keys"], 2, "one change: the new value, and EXTRA gone");
+    assert_eq!(api.values("pv-1", "/").await["values"], json!({ "API": "https://staging-2", "DATABASE_URL": "postgres://pv-1b" }));
+    let (s, e) = api.call(Method::PUT, "/environments/pv-1", Some(json!({ "base": "production" }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("mismatch")));
 }
 
 #[tokio::test]
