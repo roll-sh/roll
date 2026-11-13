@@ -174,6 +174,44 @@ export interface IpRule {
   description?: string;
 }
 
+export interface FirewallRule {
+  action: "allow" | "deny";
+  /** A path, or a prefix ending in `*`. */
+  path?: string;
+  methods?: string[];
+  /** Text the User-Agent contains. */
+  user_agent?: string;
+}
+
+/** Firewall rules as typed, one a line: `deny /admin/*`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
+export function parseFirewall(text: string): FirewallRule[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"))
+    .map((l) => {
+      const [action, ...rest] = l.split(/\s+/);
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : "deny" };
+      for (let i = 0; i < rest.length; i++) {
+        const t = rest[i];
+        if (t.startsWith("ua=")) {
+          rule.user_agent = [t.slice(3), ...rest.slice(i + 1)].join(" ");
+          break;
+        }
+        if (t.startsWith("method=")) rule.methods = t.slice(7).split(",").filter(Boolean);
+        else if (t.startsWith("/")) rule.path = t;
+      }
+      return rule;
+    });
+}
+
+/** The rules as one line each, as `parseFirewall` reads them. */
+export function formatFirewall(rules: FirewallRule[]): string {
+  return rules
+    .map((r) => [r.action, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
+    .join("\n");
+}
+
 /** An allow list as typed, one network per line with an optional description after it. */
 export function parseAllowList(text: string): IpRule[] {
   return text
@@ -203,6 +241,8 @@ export interface EnvironmentPut {
   allow_ips?: (string | IpRule)[] | null;
   /** Each client's requests a minute through its public names, with a burst; null: no limit. */
   rate_limit?: { per_minute: number; burst?: number } | null;
+  /** Its firewall rules, in order (the first match decides); null or [] for none. */
+  firewall?: FirewallRule[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -274,6 +314,8 @@ export interface Environment extends EnvironmentSummary {
   allow_ips?: IpRule[];
   /** Each client's requests a minute through its public names (null: no limit). */
   rate_limit?: { per_minute: number; burst?: number | null } | null;
+  /** Its firewall rules, in order. */
+  firewall?: FirewallRule[];
   created_at: number;
 }
 

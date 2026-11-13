@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deployChange, parseEnv, stepDurations, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, formatFirewall, parseEnv, parseFirewall, stepDurations, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -72,3 +72,18 @@ describe("a deployment's steps", () => {
     expect(stepDurations({ created_at: 0, steps: [{ step: "build", at: 10 }] }, 110).at(-1)).toEqual({ label: "Build", ms: 100 });
   });
 });
+
+describe("firewall rules as typed", () => {
+  it("read one a line and come back the same", () => {
+    const text = "allow /admin/health\ndeny /admin/*\ndeny method=DELETE,PUT\n# a note\ndeny ua=Bad Bot/2";
+    const rules = parseFirewall(text);
+    expect(rules).toEqual([
+      { action: "allow", path: "/admin/health" },
+      { action: "deny", path: "/admin/*" },
+      { action: "deny", methods: ["DELETE", "PUT"] },
+      { action: "deny", user_agent: "Bad Bot/2" },
+    ]);
+    expect(formatFirewall(rules)).toBe(text.replace("# a note\n", ""));
+  });
+});
+

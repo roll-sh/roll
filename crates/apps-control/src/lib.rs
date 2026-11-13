@@ -779,6 +779,7 @@ impl Apps {
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
+            firewall: r.firewall.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
@@ -791,7 +792,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback", "maintenance", "allow_ips", "rate_limit"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback", "maintenance", "allow_ips", "rate_limit", "firewall"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -829,6 +830,16 @@ impl Apps {
                 l.check()?;
                 Some(Some(l))
             }
+        };
+        let firewall = match o.get("firewall") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= crate::model::MAX_FIREWALL_RULES => Some(
+                a.iter()
+                    .map(|r| serde_json::from_value::<crate::model::FirewallRule>(r.clone()).map_err(|e| Error::BadRequest(format!("firewall: {e}"))).and_then(crate::model::FirewallRule::check))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Some(_) => return Err(Error::BadRequest(format!("firewall is at most {} rules, or null", crate::model::MAX_FIREWALL_RULES))),
         };
         let branch = match o.get("branch") {
             None => None,
@@ -934,6 +945,12 @@ impl Apps {
         if let Some(rules) = allow_ips {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_allow_ips(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(rules) = firewall {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_firewall(&sid, &e, &rules)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -1617,7 +1634,7 @@ impl Apps {
         let (sid, e) = (live.service.clone(), live.env.clone());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

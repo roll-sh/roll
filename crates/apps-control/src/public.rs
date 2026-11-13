@@ -422,6 +422,11 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     if !gate.admits(client.as_deref()) {
         return page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed.");
     }
+    // Its firewall rules (a 403 that says nothing of them).
+    let ua = req.headers().get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !gate.firewall.is_empty() && !gate.firewall_allows(req.method().as_str(), &crate::model::normal_path(req.uri().path()), ua) {
+        return page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request.");
+    }
     // Its rate limit per client, before anything wakes.
     if let Some(limit) = &gate.rate
         && let Err(wait) = apps.live(service, env).take_token(crate::live::client_ip(client.as_deref()), limit)

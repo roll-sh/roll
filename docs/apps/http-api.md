@@ -279,6 +279,12 @@ type EnvironmentPut = {
    *  bucket per address the fleet vouches for: `burst` at once (default per_minute), then the
    *  rate; more is a 429 with Retry-After, before anything wakes. 1–100000 each; null: none. */
   rate_limit?: { per_minute: number; burst?: number } | null;
+  /** Firewall rules (Vercel's), at most 50, in order: the first whose given fields all match
+   *  decides (`allow` lets it in, `deny` is a 403 naming nothing); none matching lets it in.
+   *  `path` exact or a prefix ending in `*`, matched on the path as an app reads it (decoded,
+   *  `//` and dot segments resolved); `methods` any of; `user_agent` contained, case aside.
+   *  Checked after allow_ips, before the rate limit and any wake; HTTP only. null: none. */
+  firewall?: { action: "allow" | "deny"; path?: string; methods?: string[]; user_agent?: string }[] | null;
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
    *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
    *  service's, null goes back to it; checked with the service's settings as one run. */
@@ -305,6 +311,7 @@ type Environment = EnvironmentSummary & {
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
   rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)
+  firewall: { action: "allow" | "deny"; path?: string; methods?: string[]; user_agent?: string }[]; // its rules, in order
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks

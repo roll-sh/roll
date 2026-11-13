@@ -2362,3 +2362,37 @@ async fn metrics_come_in_prometheus_text_too() {
     assert!(text.contains(&format!(r#"roll_apps_latency_ms{{{labels},quantile="0.95"}}"#)), "{text}");
 }
 
+
+/// Firewall rules: the first that matches a request decides (allow or deny), on its path (one
+/// an app would read the same way included), methods and user agent, before anything wakes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn firewall_rules_decide_in_order() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny"}]}))).await.0, StatusCode::BAD_REQUEST, "a rule matches on something");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/a*b"}]}))).await.0, StatusCode::BAD_REQUEST);
+    let rules = json!([
+        {"action": "allow", "path": "/admin/health"},
+        {"action": "deny", "path": "/admin/*"},
+        {"action": "deny", "methods": ["delete"]},
+        {"action": "deny", "user_agent": "BadBot"},
+    ]);
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"firewall": rules}))).await;
+    assert_eq!((st, env["firewall"][2]["methods"].clone()), (StatusCode::OK, json!(["DELETE"])), "{env}");
+    let req = |method: &str, path: &str, ua: &str| {
+        let r = Request::builder().method(method).uri(path).header("host", h.as_str()).header("user-agent", ua).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move { public.oneshot(r).await.unwrap().status() }
+    };
+    assert_eq!(req("GET", "/admin/health", "curl").await, StatusCode::OK, "the first match lets it in");
+    assert_eq!(req("GET", "/admin/users", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/%61dmin/users", "curl").await, StatusCode::FORBIDDEN, "as the app would read it");
+    assert_eq!(req("GET", "/x/../admin/users", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("DELETE", "/cart", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/", "Mozilla badbot/2").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/", "Mozilla").await, StatusCode::OK, "nothing matching lets it in");
+    call(&w.api, "PUT", &base, Some(json!({"firewall": null}))).await;
+    assert_eq!(req("GET", "/admin/users", "curl").await, StatusCode::OK);
+}

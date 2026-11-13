@@ -532,6 +532,14 @@ pub enum AppsCmd {
         /// No limit per client.
         #[arg(long)]
         no_rate_limit: bool,
+        /// A firewall rule, in order (the first match decides): `deny /admin/*`,
+        /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot`. Repeatable; the
+        /// rules replace the ones it has.
+        #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
+        firewall: Vec<String>,
+        /// No firewall rules.
+        #[arg(long)]
+        no_firewall: bool,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -2197,7 +2205,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open, maintenance, serve, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2235,6 +2243,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("rate_limit".into(), l);
             } else if no_rate_limit {
                 body.insert("rate_limit".into(), Value::Null);
+            }
+            if !firewall.is_empty() {
+                body.insert("firewall".into(), Value::Array(firewall.iter().map(|r| firewall_rule(r)).collect::<anyhow::Result<_>>()?));
+            } else if no_firewall {
+                body.insert("firewall".into(), Value::Null);
             }
             // A new access token, made here: only its link shows it, once.
             let token = private.then(new_token);
@@ -2286,6 +2299,28 @@ pub(crate) fn new_token() -> String {
     getrandom::fill(&mut b).expect("system randomness");
     b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect()
 }
+
+/// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
+fn firewall_rule(line: &str) -> anyhow::Result<Value> {
+    let mut words = line.split_whitespace();
+    let action = words.next().filter(|a| *a == "allow" || *a == "deny").ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow or deny: {line:?}"))?;
+    let mut rule = json!({ "action": action });
+    let rest: Vec<&str> = words.collect();
+    for (i, w) in rest.iter().enumerate() {
+        if let Some(ua) = w.strip_prefix("ua=") {
+            rule["user_agent"] = json!(std::iter::once(ua).chain(rest[i + 1..].iter().copied()).collect::<Vec<_>>().join(" "));
+            break;
+        } else if let Some(m) = w.strip_prefix("method=") {
+            rule["methods"] = json!(m.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>());
+        } else if w.starts_with('/') {
+            rule["path"] = json!(w);
+        } else {
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, or ua=…");
+        }
+    }
+    Ok(rule)
+}
+
 
 #[cfg(test)]
 mod tests {

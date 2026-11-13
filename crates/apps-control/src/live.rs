@@ -205,12 +205,20 @@ pub struct Gate {
     pub allow: Vec<ipnet::IpNet>,
     /// Each client's requests a minute.
     pub rate: Option<crate::model::RateLimit>,
+    /// Its firewall rules, in order.
+    pub firewall: Vec<crate::model::FirewallRule>,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
 const MAX_BUCKETS: usize = 100_000;
 
 impl Gate {
+    /// Whether its firewall lets the request in: the first rule that matches decides; none
+    /// matching, it does.
+    pub fn firewall_allows(&self, method: &str, path: &str, user_agent: &str) -> bool {
+        self.firewall.iter().find(|r| r.matches(method, path, user_agent)).is_none_or(|r| r.action == crate::model::FirewallAction::Allow)
+    }
+
     /// Whether `client` (the address the fleet vouches for) gets in. None, with a list: no.
     pub fn admits(&self, client: Option<&str>) -> bool {
         if self.allow.is_empty() {

@@ -823,6 +823,8 @@ pub struct Environment {
     pub allow_ips: Vec<IpRule>,
     /// Each client's requests a minute through its public names (null: no limit).
     pub rate_limit: Option<RateLimit>,
+    /// Its firewall rules, in order ([]: none).
+    pub firewall: Vec<FirewallRule>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -840,6 +842,91 @@ pub struct IpRule {
     pub cidr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// One firewall rule (Vercel's firewall rules): what it matches, and whether it lets in or
+/// keeps out. Every field given must match; the first rule that does decides.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallRule {
+    pub action: FirewallAction,
+    /// A path, or a prefix ending in `*` (`/admin/*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Methods (`GET`, `POST`…); empty: any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
+    /// Text the `User-Agent` contains (case aside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FirewallAction {
+    Allow,
+    Deny,
+}
+
+/// The most rules an environment has.
+pub const MAX_FIREWALL_RULES: usize = 50;
+
+/// A request's path as an app is likely to read it, for matching rules: percent-decoded, `//`
+/// one `/`, and `.`/`..` resolved (so `/%61dmin` and `/x/../admin` are `/admin`).
+pub fn normal_path(raw: &str) -> String {
+    let decoded = percent_encoding::percent_decode_str(raw).decode_utf8_lossy();
+    let mut out: Vec<&str> = Vec::new();
+    for seg in decoded.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    let mut p = format!("/{}", out.join("/"));
+    if decoded.ends_with('/') && p.len() > 1 {
+        p.push('/');
+    }
+    p
+}
+
+impl FirewallRule {
+    /// Checked as given, and kept in the form it's matched in (methods upper case, the user
+    /// agent lower case).
+    pub fn check(mut self) -> Result<FirewallRule> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("firewall: {m}")));
+        if let Some(p) = &self.path
+            && (!p.starts_with('/') || p.len() > 512 || p[..p.len() - 1].contains('*'))
+        {
+            return bad("a path starts with / (at most 512 characters, `*` only at its end)");
+        }
+        if self.methods.len() > 9 || self.methods.iter().any(|m| m.is_empty() || m.len() > 16 || !m.bytes().all(|b| b.is_ascii_alphabetic())) {
+            return bad("methods are HTTP methods (GET, POST…)");
+        }
+        self.methods = self.methods.iter().map(|m| m.to_ascii_uppercase()).collect();
+        if let Some(ua) = &self.user_agent {
+            if ua.trim().is_empty() || ua.len() > 200 {
+                return bad("user_agent is 1–200 characters");
+            }
+            self.user_agent = Some(ua.trim().to_ascii_lowercase());
+        }
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
+            return bad("a rule matches on a path, methods or a user agent");
+        }
+        Ok(self)
+    }
+
+    pub fn matches(&self, method: &str, path: &str, user_agent: &str) -> bool {
+        let path_ok = self.path.as_deref().is_none_or(|p| match p.strip_suffix('*') {
+            Some(prefix) => path.starts_with(prefix),
+            None => path == p,
+        });
+        let method_ok = self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
+        let ua_ok = self.user_agent.as_deref().is_none_or(|u| user_agent.to_ascii_lowercase().contains(u));
+        path_ok && method_ok && ua_ok
+    }
 }
 
 /// Requests a minute each client may make through an environment's public names, with a burst

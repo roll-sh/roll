@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, parseAllowList, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { appsApi, formatFirewall, parseAllowList, parseFirewall, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { CPU, MEMORY, mb, SureButton, type Runner } from "./shared";
@@ -34,6 +34,9 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const allowText = (env.allow_ips ?? []).map((r) => (r.description ? `${r.cidr} ${r.description}` : r.cidr)).join("\n");
   const [allow, setAllow] = useState(allowText);
   useEffect(() => setAllow(allowText), [allowText]);
+  const fwText = formatFirewall(env.firewall ?? []);
+  const [fw, setFw] = useState(fwText);
+  useEffect(() => setFw(fwText), [fwText]);
   const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
   const [rate, setRate] = useState(rateText);
   useEffect(() => setRate(rateText), [rateText]);
@@ -249,6 +252,33 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               placeholder={"203.0.113.0/24 office\n2001:db8::/32"}
               spellCheck={false}
               aria-label="Allowed networks, one per line"
+              className={`${input} mt-2 w-full font-mono text-[12px]`}
+            />
+          </div>
+        )}
+
+        {service.run.type === "web" && service.run.public !== false && !service.run.tcp && (
+          <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium">Firewall</p>
+                <p className="mt-1 text-[12px] text-muted">
+                  {env.firewall?.length
+                    ? `${env.firewall.length} ${env.firewall.length === 1 ? "rule" : "rules"}, in order: the first that matches a request decides.`
+                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot."}
+                </p>
+              </div>
+              <button className={btn} disabled={busy || fw === fwText} onClick={() => runner.run("firewall", () => appsApi.putEnvironment(service.id, env.name, { firewall: parseFirewall(fw) }))}>
+                Save
+              </button>
+            </div>
+            <textarea
+              value={fw}
+              onChange={(e) => setFw(e.target.value)}
+              rows={Math.min(8, Math.max(2, fw.split("\n").length))}
+              placeholder={"allow /admin/health\ndeny /admin/*"}
+              spellCheck={false}
+              aria-label="Firewall rules, one a line"
               className={`${input} mt-2 w-full font-mono text-[12px]`}
             />
           </div>
