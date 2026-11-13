@@ -158,6 +158,55 @@ impl roll_secrets::aws::Sts for RollSts {
             })
         })
     }
+
+    fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
+        let iam = self.iam(role_arn, external_id)?;
+        Self::wait(async move {
+            let out = iam.list_access_keys().user_name(user).send().await.map_err(|e| aws_code(&e))?;
+            Ok(out.access_key_metadata.into_iter().filter_map(|k| k.access_key_id).collect())
+        })
+    }
+
+    fn iam_create_key(&self, role_arn: &str, external_id: &str, user: &str) -> Result<(Value, Value), String> {
+        let iam = self.iam(role_arn, external_id)?;
+        Self::wait(async move {
+            let k = iam.create_access_key().user_name(user).send().await.map_err(|e| aws_code(&e))?.access_key.ok_or("IAM answered without a key")?;
+            Ok((Value::new(k.access_key_id), Value::new(k.secret_access_key)))
+        })
+    }
+
+    fn iam_delete_key(&self, role_arn: &str, external_id: &str, user: &str, key_id: &str) -> Result<(), String> {
+        let iam = self.iam(role_arn, external_id)?;
+        Self::wait(async move {
+            match iam.delete_access_key().user_name(user).access_key_id(key_id).send().await {
+                Ok(_) => Ok(()),
+                Err(e) if aws_code(&e) == "NoSuchEntity" => Ok(()),
+                Err(e) => Err(aws_code(&e)),
+            }
+        })
+    }
+}
+
+impl RollSts {
+    /// The store calls from its blocking threads (and nothing else may): wait for AWS there.
+    fn wait<T>(f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+    }
+
+    /// IAM as `role_arn`, assumed for a quarter of an hour with the project's ExternalId (IAM is
+    /// global: us-east-1).
+    fn iam(&self, role_arn: &str, external_id: &str) -> Result<aws_sdk_iam::Client, String> {
+        use roll_secrets::aws::Sts;
+        let s = self.assume(role_arn, external_id, "roll-iam", 900)?;
+        let conf = Self::wait(async { Ok(self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await.clone()) })?;
+        let creds = aws_sdk_iam::config::Credentials::new(s.access_key_id.expose(), s.secret_access_key.expose(), Some(s.session_token.expose().to_string()), None, "roll-secrets");
+        Ok(aws_sdk_iam::Client::from_conf(aws_sdk_iam::config::Builder::from(&conf).credentials_provider(creds).region(aws_sdk_iam::config::Region::new("us-east-1")).build()))
+    }
+}
+
+/// AWS's error code, never the request (it may hold a key).
+fn aws_code<E: aws_sdk_iam::error::ProvideErrorMetadata>(e: &E) -> String {
+    e.code().unwrap_or("no answer").to_string()
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {

@@ -104,6 +104,22 @@ the lease's TTL plus five minutes (15 minutes to 12 hours, within the role's own
   role's older sessions in IAM. A session can't be renewed: resolve again for a new one.
 - A role keys still link to can't be deleted (409 `in_use`); deleting the project deletes its roles.
 
+**IAM users' access keys**, rotated by roll as Infisical's AWS IAM rotation does, for what can't
+use a role's sessions (a vendor that takes only a key pair, an old CI). A project registers an IAM
+user next to one of its roles (`POST …/aws-users {name, role, user}`, `roll secrets aws-users add
+NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (with the project's
+ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
+`iam:DeleteAccessKey` on the user, and registering lists the user's keys to check. It's the link kind
+`aws_iam_user`, `managed` (`access_key_id` and `secret_access_key`, one credential `key`).
+
+- **Two key slots take turns.** Each issue (linking, every `rotate_days`, `…/rotate`) creates a key,
+  and the key it replaces is deleted when its grace period ends.
+- **Nothing is pruned to make room.** A user that already holds two keys is refused (409 `in_use`,
+  naming both): one may be in use (a key of the customer's, the previous one still in its grace,
+  another environment's). Rotating twice within one grace period is refused the same way.
+- A user keys still link to, or with a retired key still to delete, can't be deleted, nor a role
+  that users act as.
+
 ## Where it runs
 
 roll secrets is always on, like workspace projects: it is not a product in `ROLL_PRODUCTS`.
@@ -601,6 +617,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
+roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1437,6 +1454,9 @@ isn't in the workspace is 404.
 | `GET /aws-roles` | | `AwsRole[]` (`read` on the project) |
 | `POST /aws-roles` | `{name, role_arn}` | 201 `AwsRole` after assuming it (admin; 400 when its trust policy doesn't pin `sts:ExternalId`) |
 | `DELETE /aws-roles/{id}` | | 204 (admin; 409 `in_use` while a key links to it) |
+| `GET /aws-users` | | `AwsUser[]` (`read` on the project) |
+| `POST /aws-users` | `{name, role, user}` | 201 `AwsUser` (`admin`; lists the user's keys as the role first: 400 with AWS's code) |
+| `DELETE /aws-users/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |

@@ -187,6 +187,8 @@ impl roll_workspace::Owners for People {
 struct FakeSts {
     pinned: Mutex<Option<String>>,
     sessions: Mutex<u32>,
+    /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
+    keys: Mutex<(Vec<String>, u32)>,
 }
 
 impl roll_secrets::aws::Sts for FakeSts {
@@ -202,6 +204,28 @@ impl roll_secrets::aws::Sts for FakeSts {
             session_token: Secret::new(format!("token-{n}")),
             expires_at: i64::from(seconds) * 1000,
         })
+    }
+    fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
+        self.assume(role_arn, external_id, "iam", 900)?;
+        if user != "legacy-ci" {
+            return Err("NoSuchEntity".into());
+        }
+        Ok(self.keys.lock().unwrap().0.clone())
+    }
+    fn iam_create_key(&self, role_arn: &str, external_id: &str, user: &str) -> Result<(Secret, Secret), String> {
+        if self.iam_keys(role_arn, external_id, user)?.len() >= 2 {
+            return Err("LimitExceeded".into());
+        }
+        let mut k = self.keys.lock().unwrap();
+        k.1 += 1;
+        let id = format!("AKIA{}", k.1);
+        k.0.push(id.clone());
+        Ok((Secret::new(id), Secret::new(format!("iam-secret-{}", k.1))))
+    }
+    fn iam_delete_key(&self, role_arn: &str, external_id: &str, user: &str, key_id: &str) -> Result<(), String> {
+        self.iam_keys(role_arn, external_id, user)?;
+        self.keys.lock().unwrap().0.retain(|k| k != key_id);
+        Ok(())
     }
 }
 
@@ -1191,6 +1215,39 @@ async fn an_aws_role_gives_each_lease_a_short_lived_session() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     // A role keys still link to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/aws-roles/{id}"), None).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_iam_users_access_keys_take_turns() {
+    let api = Api::new().await;
+    *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    let role = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "keys", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
+    let (s, _) = api.call(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "nobody" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a user the role can't see is refused");
+    let user = api.ok(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "legacy-ci" }))).await;
+    let link = |field: &str| json!({ "kind": "aws_iam_user", "ref": user["id"], "field": field, "mode": "managed" });
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "AWS_ACCESS_KEY_ID", "link": link("access_key_id") }, { "op": "set", "key": "AWS_SECRET_ACCESS_KEY", "link": link("secret_access_key") }] }))).await;
+    let key = || async { api.values("production", "/").await["values"]["AWS_ACCESS_KEY_ID"].as_str().unwrap().to_string() };
+    let keys = || api.sts.keys.lock().unwrap().0.clone();
+    assert_eq!(key().await, "AKIA1");
+    // A rotation makes the second key; the first works through its grace.
+    api.ok(Method::POST, "/environments/production/secrets/AWS_ACCESS_KEY_ID/rotate", None).await;
+    assert_eq!((key().await, keys()), ("AKIA2".to_string(), vec!["AKIA1".to_string(), "AKIA2".to_string()]));
+    // Both slots are taken: another rotation is refused, and nothing is deleted to make room.
+    let (s, e) = api.call(Method::POST, "/environments/production/secrets/AWS_ACCESS_KEY_ID/rotate", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert_eq!((key().await, keys().len()), ("AKIA2".to_string(), 2));
+    // The grace ends: the old key goes, and the slot is free again.
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    assert_eq!(keys(), ["AKIA2"]);
+    api.ok(Method::POST, "/environments/production/secrets/AWS_ACCESS_KEY_ID/rotate", None).await;
+    assert_eq!(key().await, "AKIA3");
+    // What's in use stays.
+    assert_eq!(api.call(Method::DELETE, &format!("/aws-roles/{}", role["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+    assert_eq!(api.call(Method::DELETE, &format!("/aws-users/{}", user["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }
 
 #[tokio::test]
