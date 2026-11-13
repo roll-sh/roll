@@ -879,6 +879,14 @@ async fn a_scan_finds_values_only_its_caller_may_reveal() {
     let token = api.ok(Method::POST, "/tokens", Some(json!({ "name": "lint", "actions": ["read"] }))).await;
     let (s, v) = api.req(Method::POST, "/leaks", Some(text), token["token"].as_str()).await;
     assert_eq!((s, v), (StatusCode::OK, json!([])));
+    // Nor someone else's personal value, even to a caller who may reveal the folder: only its owner
+    // ever sees it.
+    api.ok(Method::PUT, "/environments/production/secrets/DB_PASSWORD", Some(json!({ "value": "mine-only-7f3k2", "type": "personal" }))).await;
+    let mine = json!({ "candidates": ["mine-only-7f3k2"] });
+    let reveal = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "actions": ["read", "reveal"] }))).await;
+    let (_, v) = api.req(Method::POST, "/leaks", Some(mine.clone()), reveal["token"].as_str()).await;
+    assert_eq!(v, json!([]));
+    assert_eq!(api.ok(Method::POST, "/leaks", Some(mine)).await[0]["key"], "DB_PASSWORD", "its owner finds it");
 }
 
 #[tokio::test]

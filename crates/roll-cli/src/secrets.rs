@@ -1906,9 +1906,10 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
     use std::io::Write;
     let target = std::path::Path::new(path);
     let name = target.file_name().with_context(|| format!("{path}: not a file name"))?.to_string_lossy();
-    let tmp = target.with_file_name(format!(".{name}.roll-{}", std::process::id()));
+    // A fresh, unguessable name, created new: never one someone else made (or a link to one).
+    let tmp = target.with_file_name(format!(".{name}.roll-{}", random_value(16)?));
     let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
+    o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
     let written = o.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all())).and_then(|_| std::fs::rename(&tmp, target));

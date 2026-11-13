@@ -535,7 +535,8 @@ every roll webhook is (`X-Roll-Signature-256`, `X-Roll-Timestamp`, `X-Roll-Deliv
 
 The URL (which may carry a token) and the signing secret are sealed with the project's data key;
 only the host is shown. An answer is read once, never logged, and never part of an error. A rotator
-a key still links to can't be deleted.
+a key still links to can't be deleted, nor one with a retired credential still waiting out its
+grace period (its revocation goes through the rotator).
 
 ## Consumption
 
@@ -704,8 +705,8 @@ non-zero when it found one, so it works as a hook:
 exec roll secrets scan --staged
 ```
 
-A scan only names values its caller may reveal: otherwise it would confirm guesses at values the
-caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
+A scan only names values its caller may reveal, and among personal values only the caller's own:
+otherwise it would confirm guesses at values the caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
 
 ### Moving from another manager
 
@@ -920,7 +921,8 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   Key Vault allows only letters, digits and `-`, and roll's keys never hold a `-`), and `PUT` the
   value with the tag `managed-by=roll-secrets`; per removed key, delete it only when it carries the
   tag. A secret roll deleted earlier is kept by the vault's soft delete: setting it again recovers it
-  first. One that exists without the tag is someone else's, never written. Errors carry Key Vault's
+  first, once the deleted secret's tag shows it was roll's. Whether a secret is roll's must be known
+  before anything is written or deleted: a refused read stops the push. One that exists without the tag is someone else's, never written. Errors carry Key Vault's
   `error.code`, never an answer.
 - **`aws-secrets-manager`**: one secret holding the environment's values as a JSON object (what an
   app reads with one `GetSecretValue`), sent whole on each push, so a removed key is simply gone

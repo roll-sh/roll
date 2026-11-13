@@ -662,9 +662,12 @@ impl SyncTarget for GoogleSecrets {
             for name in p.removed {
                 let id = format!("{}{name}", t.prefix);
                 let (status, got) = self.0.send(self.0.client.get(format!("{base}/{id}")).bearer_auth(&token), &what).await?;
-                // Gone already, or someone else's: nothing of roll's to delete.
+                // Gone already, or someone else's: nothing of roll's to delete. Unknown: stop.
                 if status == reqwest::StatusCode::NOT_FOUND || (status.is_success() && !ours(&got)) {
                     continue;
+                }
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: reading {id}: {status} {}", status_of(&got))));
                 }
                 let (status, got) = self.0.send(self.0.client.delete(format!("{base}/{id}")).bearer_auth(&token), &what).await?;
                 if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
@@ -762,10 +765,18 @@ impl SyncTarget for AzureKeyVault {
                 if status.is_success() && !ours(&got) {
                     return Err(Error::Link(format!("{what}: {name} exists and roll didn't create it (no managed-by=roll-secrets tag): roll never writes to it")));
                 }
+                // Whether it's roll's must be known before writing: a refused read stops here.
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: reading {name}: {status} {}", code_of(&got))));
+                }
                 let body = json!({ "value": v.expose(), "tags": { "managed-by": "roll-secrets" }, "contentType": "roll-secrets" });
                 let mut put = self.0.send(self.0.client.put(url(name, "/secrets")).bearer_auth(&token).json(&body), &what).await?;
-                // Deleted by roll before, and kept by the vault's soft delete: recover, then set.
+                // Deleted before, and kept by the vault's soft delete: recover it only if it was roll's.
                 if put.0 == reqwest::StatusCode::CONFLICT && code_of(&put.1) == "Conflict" {
+                    let (status, deleted) = self.0.send(self.0.client.get(format!("{vault}/deletedsecrets/{}?{AKV_API}", name.replace('_', "-"))).bearer_auth(&token), &what).await?;
+                    if !status.is_success() || !ours(&deleted) {
+                        return Err(Error::Link(format!("{what}: {name} is soft-deleted and roll can't tell it was its own ({status}): roll never recovers it")));
+                    }
                     let (status, got) = self.0.send(self.0.client.post(format!("{vault}/deletedsecrets/{}/recover?{AKV_API}", name.replace('_', "-"))).bearer_auth(&token), &what).await?;
                     if !status.is_success() {
                         return Err(Error::Link(format!("{what}: recovering {name}: {status} {}", code_of(&got))));
@@ -780,6 +791,9 @@ impl SyncTarget for AzureKeyVault {
                 let (status, got) = self.0.send(self.0.client.get(url(name, "/secrets")).bearer_auth(&token), &what).await?;
                 if status == reqwest::StatusCode::NOT_FOUND || (status.is_success() && !ours(&got)) {
                     continue;
+                }
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: reading {name}: {status} {}", code_of(&got))));
                 }
                 let (status, got) = self.0.send(self.0.client.delete(url(name, "/secrets")).bearer_auth(&token), &what).await?;
                 if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
