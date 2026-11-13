@@ -301,8 +301,15 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     let client = roll_cluster::client_addr(&req)
         .or_else(|| req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string()));
     *req.uri_mut() = uri;
-    *req.version_mut() = axum::http::Version::HTTP_11;
+    // An h2c app (gRPC) gets HTTP/2, with `te: trailers` kept (gRPC needs it); an upgrade
+    // (a WebSocket) is HTTP/1.1 whatever the app says.
+    let h2 = lease.h2c && !upgrade;
+    let te_trailers = h2 && req.headers().get("te").and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("trailers")));
+    *req.version_mut() = if h2 { axum::http::Version::HTTP_2 } else { axum::http::Version::HTTP_11 };
     strip_hop_by_hop(req.headers_mut(), upgrade);
+    if te_trailers {
+        req.headers_mut().insert("te", HeaderValue::from_static("trailers"));
+    }
     // Nothing a client sends may look like it came from roll.
     let roll_headers: Vec<HeaderName> = req.headers().keys().filter(|k| k.as_str().starts_with("x-roll-")).cloned().collect();
     for k in roll_headers {
@@ -324,7 +331,8 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     }
     let request_id = h.get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or("").chars().take(64).collect::<String>();
     let (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
-    let mut resp = match apps.client.request(req).await {
+    let sent = if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await };
+    let mut resp = match sent {
         Ok(r) => r,
         Err(e) if e.is_connect() => {
             // Nothing listens any more (killed, out of memory): the next request starts a
@@ -391,24 +399,19 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     let counted = Arc::new(AtomicU64::new(0));
     let (parts, body) = resp.into_parts();
     let c = counted.clone();
-    let stream = http_body_util::BodyStream::new(body).filter_map(move |frame| {
-        let c = c.clone();
-        async move {
-            match frame {
-                Ok(f) => f.into_data().ok().map(|d| {
-                    c.fetch_add(d.len() as u64, Ordering::Relaxed);
-                    Ok::<_, hyper::Error>(d)
-                }),
-                Err(e) => Some(Err(e)),
-            }
-        }
-    });
+    // Every frame goes through as it came, trailers too (gRPC's status is one); the lease, the
+    // meter's request and the access line go when the body does.
     let done = Done { live: live.clone(), began, status, counted, access: Some((access, instance, request_id, cold, waited_ms)), lease };
-    let stream = stream.chain(futures::stream::once(async move {
-        drop(done);
-        Ok(bytes::Bytes::new())
-    }));
-    Response::from_parts(parts, Body::from_stream(stream))
+    let frames = http_body_util::BodyStream::new(body).map(move |frame| {
+        let _until_sent = &done;
+        if let Ok(f) = &frame
+            && let Some(d) = f.data_ref()
+        {
+            c.fetch_add(d.len() as u64, Ordering::Relaxed);
+        }
+        frame
+    });
+    Response::from_parts(parts, Body::new(http_body_util::StreamBody::new(frames)))
 }
 
 /// Meters a request when its body is sent (or the client went away).

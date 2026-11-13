@@ -703,6 +703,17 @@ find a leaked URL. Making or removing one is admin in roll MCP's catalogue: it's
 credential. rolld's gate lets `/v1/apps/hooks` through to the hook's own check (its `RULES`);
 access lines log the route pattern, never the token; it runs on the service's owner.
 
+## HTTP/2 and gRPC
+
+`run.h2c` says the app speaks HTTP/2 without TLS, as gRPC servers do (Cloud Run's
+`--use-http2`, Fly's `h2_backend`): the proxy forwards to it over an HTTP/2-only client (prior
+knowledge), keeps `te: trailers` (gRPC refuses requests without it), and its health checks are
+h2c too. Every response's frames pass as they came, so trailers (gRPC's `grpc-status`) reach the
+client; this was true of no response before, since the proxy only copied data frames. A
+WebSocket upgrade stays HTTP/1.1. Clients reach it over HTTP/2 on rolld's own apps listener (h2c
+or HTTP/1.1); on the fleet the edge's HTTPS listener offers only `http/1.1` today, so gRPC from the
+internet waits for it to offer `h2` (in `## Next`).
+
 ## A deployment's own URL
 
 Every built deployment of a web service without a volume answers on its own hostname,
@@ -940,11 +951,13 @@ Ranked; the top item not marked *waiting* is what's being worked on. A product r
 2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
 earlier security, product and integration reviews).
 
-1. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
+1. **gRPC from the internet**: the edge's HTTPS listener offering `h2` (hyper's auto
+   builder), so Cloudflare's gRPC reaches h2c apps (done: `run.h2c` to the app, trailers
+   through the proxy); then TCP services.
+2. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
    bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
-   (Render's and Vercel's static sites).
-2. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
-   (Cloud Run's `--use-http2`, Fly's `h2_backend`); then TCP services.
+   (Render's and Vercel's static sites). Exporting the files needs the built image: easy on
+   Docker, through CodeBuild on the fleet, so it's tested with the first AWS run.
 3. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
    by `roll up --all` with the plan shown first (Render's Blueprints), then importing a Compose
    file's image services (Railway's).

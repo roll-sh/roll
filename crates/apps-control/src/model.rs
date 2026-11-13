@@ -374,6 +374,10 @@ pub struct Run {
     pub alerts: Alerts,
     /// How a new deployment takes over: at once, or a share of requests at a time.
     pub rollout: Rollout,
+    /// The app speaks HTTP/2 without TLS (h2c, prior knowledge), as a gRPC server does: the
+    /// proxy and its health checks talk HTTP/2 to it (Cloud Run's `--use-http2`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub h2c: bool,
 }
 
 /// The run settings an environment may set for itself (Railway's per-environment settings):
@@ -443,6 +447,7 @@ impl Default for Run {
             volume: None,
             alerts: Alerts::default(),
             rollout: Rollout::default(),
+            h2c: false,
         }
     }
 }

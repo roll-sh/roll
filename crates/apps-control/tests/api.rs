@@ -1440,3 +1440,22 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
     assert_eq!((d3["status"].as_str(), &d3["image"]), (Some("active"), &d2["image"]), "{d3}");
     assert_eq!(visit(&w, &h, "/").await.1["deployment"], d3["id"]);
 }
+
+/// An h2c app (a gRPC server) is spoken HTTP/2 to, with `te: trailers`, and its trailers reach
+/// the client; an HTTP/1 app still gets HTTP/1.1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_h2c_app_gets_http2_and_its_trailers_pass() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "grpc", json!({"port": 80, "h2c": true})).await;
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap()), None).await;
+    let h = host(&env["url"]);
+    let req = Request::builder().uri("/").header("host", &h).header("te", "trailers").body(Body::empty()).unwrap();
+    let v: Value = serde_json::from_slice(&w.public.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!((v["version"].as_str(), v["te"].as_str()), (Some("HTTP/2.0"), Some("trailers")), "{v}");
+    let req = Request::builder().uri("/trailers").header("host", &h).body(Body::empty()).unwrap();
+    let got = w.public.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap();
+    assert_eq!(got.trailers().and_then(|t| t.get("grpc-status")).map(|v| v.to_str().unwrap()), Some("0"), "the status trailer reached the client");
+    let (plain, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", plain["id"].as_str().unwrap()), None).await;
+    assert_eq!(visit(&w, &host(&env["url"]), "/").await.1["version"], "HTTP/1.1");
+}

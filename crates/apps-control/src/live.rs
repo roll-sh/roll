@@ -113,6 +113,8 @@ pub struct Lease {
     /// How long the request waited for a wake (0 when an instance was up).
     pub waited: Duration,
     pub cold: bool,
+    /// Its deployment speaks HTTP/2 without TLS ([`crate::model::Run::h2c`]).
+    pub h2c: bool,
 }
 
 impl Drop for Lease {
@@ -250,6 +252,8 @@ pub struct EnvLive {
     last_tick: Mutex<Option<Instant>>,
     last_health: Mutex<Option<Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
+    /// HTTP/2 without TLS, for an h2c app's health checks.
+    client_h2: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
 }
 
 fn now_ms() -> i64 {
@@ -284,6 +288,7 @@ impl EnvLive {
             last_tick: Mutex::new(None),
             last_health: Mutex::new(None),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
+            client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).http2_only(true).build_http(),
         })
     }
 
@@ -388,10 +393,12 @@ impl EnvLive {
 
     /// Whether something answers HTTP at `addr` (`path`: a 2xx or 3xx there; none: any answer,
     /// since a published port accepts connections before the app listens).
-    async fn answers(&self, addr: SocketAddr, path: Option<&str>) -> bool {
+    async fn answers(&self, addr: SocketAddr, path: Option<&str>, h2c: bool) -> bool {
         let uri = format!("http://{addr}{}", path.unwrap_or("/"));
-        let Ok(req) = axum::http::Request::get(uri).header("user-agent", "roll-apps-health").body(axum::body::Body::empty()) else { return false };
-        match tokio::time::timeout(Duration::from_secs(5), self.client.request(req)).await {
+        let version = if h2c { axum::http::Version::HTTP_2 } else { axum::http::Version::HTTP_11 };
+        let Ok(req) = axum::http::Request::get(uri).version(version).header("user-agent", "roll-apps-health").body(axum::body::Body::empty()) else { return false };
+        let client = if h2c { &self.client_h2 } else { &self.client };
+        match tokio::time::timeout(Duration::from_secs(5), client.request(req)).await {
             Ok(Ok(resp)) => path.is_none() || resp.status().is_success() || resp.status().is_redirection(),
             _ => false,
         }
@@ -417,7 +424,7 @@ impl EnvLive {
         *inst.cpu_seen.lock() = None;
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
-                if self.answers(a, health).await {
+                if self.answers(a, health, run.h2c).await {
                     break;
                 }
                 if Instant::now() >= deadline {
@@ -461,7 +468,7 @@ impl EnvLive {
             .filter(|(i, _)| over || i.in_flight() < concurrency)
             .min_by_key(|(i, _)| i.in_flight())?;
         best.0.in_flight.fetch_add(1, Ordering::SeqCst);
-        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false })
+        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false })
     }
 
     /// Take an idle instance out of rotation before stopping or suspending it: under the lock
@@ -534,6 +541,14 @@ impl EnvLive {
     }
 
     async fn acquire_tpl(self: &Arc<Self>, tpl: Arc<Template>) -> Result<Lease, WakeError> {
+        let h2c = tpl.run.h2c;
+        self.acquire_inner(tpl).await.map(|mut l| {
+            l.h2c = h2c;
+            l
+        })
+    }
+
+    async fn acquire_inner(self: &Arc<Self>, tpl: Arc<Template>) -> Result<Lease, WakeError> {
         let began = Instant::now();
         if tpl.run.kind != RunType::Web {
             return Err(WakeError::NotWeb);
@@ -1052,7 +1067,7 @@ impl EnvLive {
                 && let Some(path) = tpl.run.health_path.as_deref()
             {
                 let mine: Vec<Arc<Inst>> = insts.iter().filter(|i| i.deployment == tpl.deployment).cloned().collect();
-                self.check_health(&mine, path, tpl.run.concurrency).await;
+                self.check_health(&mine, path, tpl.run.concurrency, tpl.run.h2c).await;
             }
         }
         if self.held.load(Ordering::SeqCst) {
@@ -1104,7 +1119,7 @@ impl EnvLive {
     /// answers errors with its port still open) replace it: it's out of rotation and stopped
     /// as a crash (counted toward a crash loop), and the next request or the floor starts a
     /// fresh one.
-    async fn check_health(&self, insts: &[Arc<Inst>], path: &str, concurrency: u32) {
+    async fn check_health(&self, insts: &[Arc<Inst>], path: &str, concurrency: u32, h2c: bool) {
         // An instance with as many requests as it takes is busy, not broken: a probe that queues
         // behind them proves nothing, so it isn't checked until it has room.
         let running: Vec<(&Arc<Inst>, SocketAddr)> = insts
@@ -1115,7 +1130,7 @@ impl EnvLive {
                 _ => None,
             })
             .collect();
-        let probes = running.iter().map(|(i, a)| async move { (*i, *a, self.answers(*a, Some(path)).await) });
+        let probes = running.iter().map(|(i, a)| async move { (*i, *a, self.answers(*a, Some(path), h2c).await) });
         for (i, addr, ok) in futures::future::join_all(probes).await {
             if ok {
                 i.health_fails.store(0, Ordering::SeqCst);

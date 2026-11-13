@@ -191,6 +191,8 @@ pub struct Apps {
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
     ws_shells: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
     pub(crate) client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
+    /// HTTP/2 without TLS (prior knowledge), for h2c apps ([`model::Run::h2c`]).
+    pub(crate) client_h2: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     stop: CancellationToken,
 }
 
@@ -259,6 +261,7 @@ impl Apps {
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
+            client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).http2_only(true).build_http(),
             stop: CancellationToken::new(),
         })
     }

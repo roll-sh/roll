@@ -176,6 +176,9 @@ type Run = {
    *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
    *  back. Web services only; refused with a volume. */
   rollout: { steps: number[]; step_s: number; error_pct: number };
+  /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
+   *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
+  h2c?: boolean;
 };
 
 type Service = {

@@ -149,8 +149,16 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     let app = axum::Router::new().fallback(move |req: Request| {
         let (name, dep, echo, sick, missing) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone());
         async move {
+            use axum::response::IntoResponse;
             if missing.as_deref().is_some_and(|m| req.uri().path().starts_with(m)) {
-                return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() })));
+                return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() }))).into_response();
+            }
+            // As a gRPC server answers: data, then its status in a trailer.
+            if req.uri().path() == "/trailers" {
+                let mut t = axum::http::HeaderMap::new();
+                t.insert("grpc-status", axum::http::HeaderValue::from_static("0"));
+                let frames = futures::stream::iter([Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(bytes::Bytes::from_static(b"ok"))), Ok(hyper::body::Frame::trailers(t))]);
+                return axum::response::Response::new(axum::body::Body::new(http_body_util::StreamBody::new(frames)));
             }
             if let Some(s) = slow {
                 tokio::time::sleep(s).await;
@@ -159,7 +167,9 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let vars: serde_json::Map<String, serde_json::Value> = echo.into_iter().map(|(k, v)| (k, v.into())).collect();
             let host = req.headers().get("x-forwarded-host").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let cookie = req.headers().get("cookie").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
-            (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie })))
+            let version = format!("{:?}", req.version());
+            let te = req.headers().get("te").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+            (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te }))).into_response()
         }
     });
     let _ = axum::serve(listener, app).await;
