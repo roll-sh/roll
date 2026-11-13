@@ -121,7 +121,17 @@ export interface Catalog {
   api_url: string;
 }
 
-export type Me = { kind: "operator"; locked: boolean } | { kind: "token" | "oauth"; grant: Grant; locked: boolean };
+export type Me =
+  | { kind: "operator"; locked: boolean }
+  | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
+  /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
+  | { kind: "user"; user: { id: string; handle: string }; reach: string[]; locked: boolean };
+
+/** The catalogue as `me` may use it: a user's tokens reach only what their account does. */
+export function catalogFor(c: Catalog, me: Me | null): Catalog {
+  if (me?.kind !== "user") return c;
+  return { ...c, products: c.products.filter((p) => me.reach.includes(p)) };
+}
 
 export interface Policy {
   max_days?: number | null;

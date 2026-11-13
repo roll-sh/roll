@@ -231,6 +231,31 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             return deny(StatusCode::FORBIDDEN, "ip_not_allowed", format!("this token can't be used from {shown}"), json!({}));
         }
     }
+    // A user's own token acts as them (docs/permissions.md, "Users' own tokens"): as they are now
+    // (disabled or gone, the token is dead), and only where their session reaches.
+    let person = match ctx.grant.user.clone() {
+        None => None,
+        Some(user) => {
+            let Some(people) = access.people.get().cloned() else { return invalid_token(&access) };
+            match people.person(&user).await {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => return invalid_token(&access),
+                Err(e) => {
+                    tracing::warn!(error = %e, "looking up a token's user");
+                    return deny(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "accounts are unavailable; try again".into(), json!({}));
+                }
+            }
+        }
+    };
+    let as_user = person.as_ref().is_some_and(|p| !p.admin);
+    let reachable = matches!(
+        req.extensions().get::<roll_auth::RouteAccess>(),
+        Some(roll_auth::RouteAccess(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_)))
+    );
+    if as_user && !reachable {
+        ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
+        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
+    }
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
     // A signed hop to an owner or leader: the request it carries is the one to decide.
@@ -366,7 +391,13 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if let Ok(v) = axum::http::HeaderValue::from_str(&reviewer_name(&ctx.grant)) {
         parts.headers.insert("x-roll-agent", v);
     }
-    parts.extensions.insert(roll_auth::Operator);
+    // As the operator, narrowed; a user's token as that user (an admin also as the operator).
+    if !as_user {
+        parts.extensions.insert(roll_auth::Operator);
+    }
+    if let Some(p) = &person {
+        parts.extensions.insert(roll_auth::SignedIn { session: ctx.grant.id.clone(), ..p.clone() });
+    }
     if let Some(ip) = ctx.ip {
         parts.extensions.insert(roll_auth::ClientIp(ip));
         parts.extensions.insert(roll_cluster::ClientAddr(ip.to_string()));
@@ -378,6 +409,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         name: ctx.grant.name.as_str().into(),
         kind: ctx.grant.kind(),
         scope: scope.clone(),
+        user: ctx.grant.user.as_deref().map(Into::into),
     });
     // A list filtered, an answer's credentials redacted, a create placed: the answer is read.
     let filter_list = matches!(row.target, Tgt::List { .. }) && narrowed(&scope, row.product, action);

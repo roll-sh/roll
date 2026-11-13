@@ -446,7 +446,8 @@ async fn run() -> anyhow::Result<()> {
     // Accounts and sign-in: always on; the gate resolves their session cookies. (Before the
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
-    auth.sessions(accounts.sessions(), &accounts.config().api_url);
+    let people = accounts.sessions();
+    auth.sessions(people.clone(), &accounts.config().api_url);
     router = router.merge(roll_accounts::router(accounts));
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
     let access = access::open(
@@ -463,6 +464,8 @@ async fn run() -> anyhow::Result<()> {
         workspace,
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
+    let _ = access.people.set(people);
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);
     // Approvals can be posted to a Slack channel through roll code's chat ops.

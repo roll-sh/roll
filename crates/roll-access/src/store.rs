@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS grants (
     last_used_ip TEXT,
     revoked_at INTEGER,
     client_id TEXT,
-    rate_per_minute INTEGER
+    rate_per_minute INTEGER,
+    user_id TEXT
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grant_secrets (
     hash TEXT PRIMARY KEY,
@@ -133,6 +134,9 @@ pub struct Grant {
     /// Requests a minute it may make, per node (`None`: no limit).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_per_minute: Option<u32>,
+    /// A signed-in user's own token (`usr_…`): it acts as them. `None`: the operator's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 impl Grant {
@@ -155,6 +159,13 @@ pub struct Client {
     pub redirect_uris: Vec<String>,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+}
+
+/// Who connects an OAuth client: who consented, and whose own grant it is (`None`: the operator's).
+#[derive(Clone, Copy, Debug)]
+pub struct Issuer<'a> {
+    pub created_by: &'a str,
+    pub user: Option<&'a str>,
 }
 
 /// What a new grant is.
@@ -262,6 +273,9 @@ pub struct AuditQuery {
     pub source: Option<String>,
     pub before: Option<i64>,
     pub limit: Option<usize>,
+    /// Only these grants' rows (a user's own tokens); set by the route, never from the query.
+    #[serde(skip)]
+    pub grants: Option<Vec<String>>,
 }
 
 pub struct Store {
@@ -270,9 +284,9 @@ pub struct Store {
     touched: std::sync::Mutex<std::collections::HashMap<String, i64>>,
 }
 
-/// A grant's columns, as `grant_row` reads them (18 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (19 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
@@ -303,6 +317,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         revoked_at: r.get(10)?,
         client,
         rate_per_minute: r.get::<_, Option<i64>>(17)?.and_then(|n| u32::try_from(n).ok()),
+        user: r.get(18)?,
     })
 }
 
@@ -403,6 +418,9 @@ impl Store {
         if !db.has_column("grants", "rate_per_minute")? {
             db.add_column("grants", "rate_per_minute", "INTEGER")?;
         }
+        if !db.has_column("grants", "user_id")? {
+            db.add_column("grants", "user_id", "TEXT")?;
+        }
         Ok(Store { db, touched: Default::default() })
     }
 
@@ -435,7 +453,8 @@ impl Store {
     // ── grants ──
 
     /// Store a new grant; the token is returned this once.
-    pub fn create(&self, new: &NewGrant, kind: GrantKind, created_by: &str, client_id: Option<&str>) -> Result<(Grant, String)> {
+    /// A new grant; `user`: whose own token it is (it acts as them), `None` for the operator's.
+    pub fn create(&self, new: &NewGrant, kind: GrantKind, created_by: &str, client_id: Option<&str>, user: Option<&str>) -> Result<(Grant, String)> {
         check_name(&new.name)?;
         check_rules(&new.rules)?;
         parse_ip_allow(&new.ip_allow)?;
@@ -459,8 +478,8 @@ impl Store {
                 return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
             }
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from)],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user],
             )?;
             c.execute(
                 "INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -490,7 +509,7 @@ impl Store {
             c.query_row(
                 &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(18)?, r.get::<_, Option<i64>>(19)?)),
+                |r| Ok((grant_row(r)?, r.get::<_, String>(19)?, r.get::<_, Option<i64>>(20)?)),
             )
             .optional()
         })?;
@@ -736,6 +755,13 @@ impl Store {
                 args.push(code_sql::Value::Text(v.to_string()));
             }
         }
+        if let Some(ids) = &q.grants {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            sql.push_str(&format!(" AND grant_id IN ({})", vec!["?"; ids.len()].join(", ")));
+            args.extend(ids.iter().map(|i| code_sql::Value::Text(i.clone())));
+        }
         sql.push_str(" ORDER BY at DESC, id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
         Ok(self.db.read(|c| c.query(&sql, args.as_slice(), audit_row))?)
@@ -829,7 +855,8 @@ impl Store {
     }
 
     /// The consent screen's grant, waiting for its code to be exchanged: stored without secrets.
-    pub fn issue_code(&self, client: &Client, new: &NewGrant, created_by: &str, redirect_uri: &str, challenge: &str, resource: Option<&str>) -> Result<String> {
+    pub fn issue_code(&self, client: &Client, new: &NewGrant, by: Issuer<'_>, redirect_uri: &str, challenge: &str, resource: Option<&str>) -> Result<String> {
+        let Issuer { created_by, user } = by;
         check_name(&new.name)?;
         check_rules(&new.rules)?;
         parse_ip_allow(&new.ip_allow)?;
@@ -842,8 +869,8 @@ impl Store {
         self.db.write(|c| {
             // The grant exists from now, unusable (no secret) until the code is exchanged.
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?)",
-                params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from)],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), user],
             )?;
             c.execute(
                 "INSERT INTO oauth_codes (hash, client_id, grant_id, redirect_uri, challenge, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

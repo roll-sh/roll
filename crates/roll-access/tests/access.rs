@@ -31,9 +31,38 @@ impl Resolver for DefaultBranch {
     }
 }
 
+/// Signed-in people: a cookie `rls_<user>` is that user's session; a user taken out is disabled.
+#[derive(Default)]
+struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>);
+
+impl People {
+    fn add(&self, user: &str, handle: &str) {
+        let p = roll_auth::SignedIn { user: user.into(), handle: handle.into(), admin: false, code_owner: None, session: String::new() };
+        self.0.lock().unwrap().insert(user.into(), p);
+    }
+    fn remove(&self, user: &str) {
+        self.0.lock().unwrap().remove(user);
+    }
+}
+
+impl roll_auth::Sessions for People {
+    fn cookie(&self) -> &str {
+        "roll_session"
+    }
+    fn resolve<'a>(&'a self, token: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::Session>, String>> {
+        let p = token.strip_prefix("rls_").and_then(|u| self.0.lock().unwrap().get(u).cloned());
+        Box::pin(async move { Ok(p.map(|p| roll_auth::Session::Full(roll_auth::SignedIn { session: "ses_1".into(), ..p }))) })
+    }
+    fn person<'a>(&'a self, user: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
+        let p = self.0.lock().unwrap().get(user).cloned();
+        Box::pin(async move { Ok(p) })
+    }
+}
+
 struct Daemon {
     router: Router,
     access: Arc<Access>,
+    people: Arc<People>,
     workspace: Arc<roll_workspace::Workspace>,
     _dir: tempfile::TempDir,
 }
@@ -78,8 +107,14 @@ impl Daemon {
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, resolvers).unwrap();
-        let public = roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") };
-        let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![public]);
+        let rules = vec![
+            roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") },
+            roll_auth::Rule { route: "/v1/workspace", access: roll_auth::Access::User("a user's own projects") },
+            roll_auth::Rule { route: "/v1/access", access: roll_auth::Access::User("a user's own tokens") },
+        ];
+        let people = Arc::new(People::default());
+        let _ = access.people.set(people.clone());
+        let gate = roll_auth::Gate::with_sessions(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), rules, people.clone(), roll_auth::Origins::Local, "http://localhost:3000");
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
         let gated = postgres()
             .merge(roll_workspace::router(workspace.clone()))
@@ -87,7 +122,7 @@ impl Daemon {
             .layer(axum::middleware::from_fn_with_state(gate, roll_auth::check));
         let router = roll_access::oauth::public_router(access.clone()).merge(gated);
         let access = access.clone();
-        Daemon { router, access, workspace, _dir: dir }
+        Daemon { router, access, people, workspace, _dir: dir }
     }
 
     async fn call(&self, token: &str, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -97,6 +132,14 @@ impl Daemon {
     async fn send(&self, token: &str, method: Method, path: &str, body: Option<Value>, headers: &[(&str, &str)]) -> (StatusCode, Value) {
         let body = body.map_or(Body::empty(), |b| Body::from(b.to_string()));
         self.raw(token, method, path, body, headers, None).await
+    }
+
+    /// As a signed-in user (their session cookie, and the CSRF header a write needs).
+    async fn as_user(&self, user: &str, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let token = format!("rls_{user}");
+        let (cookie, csrf) = (format!("roll_session={token}"), roll_auth::csrf_token(&token));
+        let body = body.map_or(Body::empty(), |b| Body::from(b.to_string()));
+        self.raw("", method, path, body, &[("cookie", &cookie), ("x-roll-csrf", &csrf)], None).await
     }
 
     /// A request with any body, and (a signed hop from another node) a `Forwarded` extension.
@@ -650,4 +693,51 @@ async fn the_audit_log_streams_to_a_sink() {
     let sent: Value = serde_json::from_slice(&fake.sent.lock().unwrap()[1].1).unwrap();
     assert_eq!(ids(&sent["events"]), vec!["aud_003"]);
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await.0, StatusCode::NO_CONTENT);
+}
+
+/// A signed-in user's own token acts as them (docs/permissions.md, "Users' own tokens"): it
+/// reaches only what their account does, whatever its rules say; they see and manage only their
+/// own tokens and decide their own token's approvals; and it stops when their account does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_token_acts_as_them() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    d.people.add("usr_bob", "bob");
+    d.workspace.create("usr_bob", "bobs", "", None).unwrap();
+    let rules = json!([
+        { "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "ask" } },
+        { "product": "postgres", "resources": "*", "actions": { "read": "allow" } }
+    ]);
+    let (s, made) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "cursor", "rules": rules }))).await;
+    assert_eq!((s, made["grant"]["user"].as_str()), (StatusCode::CREATED, Some("usr_alice")), "{made}");
+    let (token, id) = (made["token"].as_str().unwrap().to_string(), made["grant"]["id"].as_str().unwrap().to_string());
+
+    // As alice: what it makes is hers, and it sees her projects, not bob's.
+    let (s, p) = d.call(&token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "agent-made" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{p}");
+    let (_, list) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
+    let names: Vec<&str> = list.as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["agent-made"]);
+    // Never more than her account: an operator's route is refused though the rules name it.
+    let (s, e) = d.call(&token, Method::GET, "/v1/projects", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("operator_only")));
+
+    // She sees and manages only her own tokens; bob can't touch hers.
+    let (_, op_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (_, mine) = d.as_user("usr_alice", Method::GET, "/v1/access/tokens", None).await;
+    assert_eq!(ids(&mine), vec![id.as_str()]);
+    assert_eq!(d.as_user("usr_alice", Method::DELETE, &format!("/v1/access/tokens/{op_id}"), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(d.as_user("usr_bob", Method::DELETE, &format!("/v1/access/tokens/{id}"), None).await.0, StatusCode::NOT_FOUND);
+
+    // Her token's `ask` is hers to decide (bob can't); approved, it runs once.
+    let path = format!("/v1/workspace/projects/{}", p["id"].as_str().unwrap());
+    let (_, pending) = d.call(&token, Method::DELETE, &path, None).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    assert_eq!(d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
+    assert!(d.send(&token, Method::DELETE, &path, None, &[("x-roll-approval", &apr)]).await.0.is_success());
+
+    // Her account turned off: the token stops on its next request.
+    d.people.remove("usr_alice");
+    assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
 }

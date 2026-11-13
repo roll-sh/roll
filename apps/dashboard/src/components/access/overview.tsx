@@ -37,7 +37,13 @@ export function AccessOverview() {
           </p>
         )}
         <ConnectPanel />
-        <PolicyPanel />
+        {me?.kind === "operator" && <PolicyPanel />}
+        {me?.kind === "user" && (
+          <p className="text-[12px] text-muted">
+            Your tokens and connections act as you: they reach what your account does (roll code, agents and your projects), never
+            more, and their approvals come to you.
+          </p>
+        )}
         <ErrorNote error={error} />
         {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}
       </div>

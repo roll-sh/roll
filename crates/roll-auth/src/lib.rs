@@ -123,6 +123,9 @@ pub struct Grant {
     pub name: Arc<str>,
     pub kind: GrantKind,
     pub scope: Arc<scope::Scope>,
+    /// A signed-in user's own token (`usr_…`): it acts as that user (docs/permissions.md, "Users'
+    /// own tokens"), never as more. `None`: the operator's (or an admin's from before).
+    pub user: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +147,7 @@ impl Grant {
 
 impl fmt::Debug for Grant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).finish()
+        f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).field("user", &self.user).finish()
     }
 }
 
@@ -216,7 +219,18 @@ pub trait Sessions: Send + Sync + 'static {
     /// The cookie's name: `__Host-roll_session`, or `roll_session` on plain-HTTP local setups.
     fn cookie(&self) -> &str;
     fn resolve<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Session>, String>>;
+    /// A user as they are now (`session` left empty), for a token of theirs: `None` once they're
+    /// disabled or gone. Never cached.
+    fn person<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Option<SignedIn>, String>> {
+        let _ = user;
+        Box::pin(async { Ok(None) })
+    }
 }
+
+/// In the request an [`Authorizer`] decides: who the gate's rules let call its route, so a user's
+/// token reaches only what that user's session would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteAccess(pub Access);
 
 /// The CSRF header a write with a session cookie carries (docs/accounts.md, "CSRF").
 pub const CSRF_HEADER: &str = "x-roll-csrf";
@@ -333,6 +347,8 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         && let (Some(a), Some(p)) = (gate.authorizer.get(), grant_credential(req.headers()))
         && a.claims(&p)
     {
+        let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
+        req.extensions_mut().insert(RouteAccess(access));
         return a.handle(req, next).await;
     }
     // A request with an `Authorization` header is judged by it alone: the cookie is ignored.

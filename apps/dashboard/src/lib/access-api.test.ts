@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { denyRedirect, draftOf, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, type Preset } from "./access-api";
+import { catalogFor, denyRedirect, draftOf, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -31,6 +31,13 @@ describe("access", () => {
 });
 
 describe("the builder", () => {
+  it("offers a signed-in user only the products their account reaches", () => {
+    const c = { products: ["workspace", "postgres", "code", "agents"], actions: [], presets, routes: [], operator_only: [], api_url: "" };
+    const user = { kind: "user" as const, user: { id: "usr_a", handle: "a" }, reach: ["code", "agents", "workspace"], locked: true };
+    expect(catalogFor(c, user).products).toEqual(["workspace", "code", "agents"]);
+    expect(catalogFor(c, { kind: "operator", locked: true }).products).toEqual(c.products);
+  });
+
   it("round-trips rules through its matrix, and leaves rules it can't show as they are", () => {
     const rules = [
       { product: "postgres", resources: [{ project: "prj_a" }], environments: ["development"], actions: { read: "allow", delete: "ask" } },

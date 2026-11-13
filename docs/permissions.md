@@ -368,6 +368,26 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
   sent again 5 minutes later, or at once with "Retry now" (`POST …/sinks/{id}/retry`). Rows the
   log prunes before a sink catches up are gone. At most 10 sinks.
 
+## Users' own tokens
+
+With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
+MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
+
+- `POST /v1/access/tokens` with their session makes a grant with `user: "usr_…"`, and so does the
+  consent screen. A token theirs makes is theirs too.
+- **It acts as them, never as more.** On every request the evaluator looks the person up as they
+  are now (`roll_auth::Sessions::person`, never cached): disabled or gone, the token answers 401.
+  An admin's token runs as the operator's, narrowed. Anyone else's token runs as their session
+  would: only routes their session may call (the gate's `User`, `Product` and `Public` rules, which
+  it hands the evaluator as `roll_auth::RouteAccess`), as them (`roll_auth::SignedIn`, no
+  `Operator`), then narrowed again by its rules. So roll code sees their own owner (git checks the
+  repo as them before it takes the gate's word), projects are their own, and every other product
+  answers `403 operator_only`, whatever the rules say.
+- They see and manage only their own tokens, connections, approvals and audit rows, and **they
+  decide their own token's approvals** (a token never decides one). The operator sees everyone's.
+- The builder and the consent screen offer only what they reach (`GET /v1/access` answers
+  `{kind: "user", reach: ["code", "agents", "workspace"]}`).
+
 ## Managing grants
 
 - The operator manages grants. A grant may too when it has `admin` on product `access`, and then

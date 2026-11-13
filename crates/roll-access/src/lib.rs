@@ -213,7 +213,13 @@ pub struct Access {
     pub limiter: rate::Limiter,
     /// Delivers audit sinks, when rolld can (it needs `ROLL_SECRET_KEY`).
     pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
+    /// Users as they are now, for their own tokens (rolld: roll-accounts' sessions).
+    pub people: std::sync::OnceLock<Arc<dyn roll_auth::Sessions>>,
 }
+
+/// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
+/// session can reach").
+pub const USER_REACH: [&str; 3] = ["code", "agents", "workspace"];
 
 impl Access {
     pub fn open(target: &code_sql::Target, pg: code_sql::PgOptions, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
@@ -221,7 +227,7 @@ impl Access {
             code_sql::Target::Sqlite(path) => code_sql::Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
             code_sql::Target::Postgres { url, schema } => code_sql::Db::connect(url, schema, pg)?,
         };
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -349,7 +355,7 @@ impl Access {
 impl roll_auth::Grants for Access {
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
-        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.rules) })
+        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.rules), user: g.user.as_deref().map(Into::into) })
     }
 }
 
