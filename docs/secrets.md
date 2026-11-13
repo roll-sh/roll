@@ -1590,11 +1590,14 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **`roll_secrets_token` in Terraform** once #30 lands (a project's token as a roll-access grant).
-2. **A Kubernetes operator** (pull, not push): a `RollSecret` resource names a project and
-   environment, and the operator keeps a Secret in step, logging in with the pod's own service
-   account token (a workload identity), as Infisical's and Doppler's operators do. Today the
-   `kubernetes` sync pushes from roll instead.
+1. **A Kubernetes operator** (`sdk/kubernetes-operator`; pull, not push): a `RollSecret` resource
+   names a project, an environment and a folder, and the operator keeps a Secret beside it in
+   step, logging in with its own service account token through a workload identity, as
+   Infisical's and Doppler's operators do. roll then holds no cluster credential (the `kubernetes`
+   sync pushes from roll, with one). The Kubernetes API over plain HTTP, the Go standard library
+   only, tested against a fake API server.
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+   and the deploy notice when apps reads secrets (#31), refreshed once those land.
 3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
    Waits on products serving signed-in people (today they're the operator's).
@@ -1612,7 +1615,7 @@ Open pull requests after this one:
   #31's `caller_of` split.
 - **#32, Go and Python clients** (after #20): `sdk/go/secrets`, `sdk/python/roll_secrets`.
 - **#33, a Terraform provider** (after #20): environments, keys (a value or a link), identities,
-  syncs and values.
+  syncs, tokens and values.
 - **#34, a GitHub Action** (after #20): a job's environment through its own OIDC token, masked.
 - **#35, `roll run --fallback`** (after #20): an encrypted copy of the last values, used through an
   outage.
