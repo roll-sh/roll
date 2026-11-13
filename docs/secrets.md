@@ -745,6 +745,18 @@ otherwise it would confirm guesses at values the caller can't read. Each scan is
 as their text) or an array of `{key, value, comment?}`. Export from the old manager, then import
 into each environment:
 
+Or straight from its API, with your own token in its usual variable, read on your machine (never
+through roll's server) and imported as one change:
+
+```
+DOPPLER_TOKEN=dp.st…  roll secrets import --from doppler --source shop/prd -e production
+VAULT_ADDR=https://vault.example VAULT_TOKEN=hvs…  roll secrets import --from vault --source secret/shop -e production
+INFISICAL_TOKEN=…  roll secrets import --from infisical --source <workspace id>/prod/api -e production
+```
+
+Doppler's own `DOPPLER_*` keys are left out; numbers and booleans come in as their text. Hosts
+come from the managers' own settings (`DOPPLER_API_HOST`, `VAULT_ADDR`, `INFISICAL_API_URL`).
+
 ```
 infisical export --env=prod --format=json > prod.json   &&  roll secrets import prod.json -e production
 doppler secrets download --no-file --format json > prod.json  &&  roll secrets import prod.json -e production
@@ -1507,9 +1519,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Import straight from another manager**: `roll secrets import --from doppler|vault|infisical`
-   reads an environment through that product's API with the user's own token (on their machine,
-   never through roll's server), then imports it as one change, as `import` does with a file.
 
 Waiting on other pull requests:
 
