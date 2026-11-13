@@ -76,7 +76,8 @@ pub struct Peek {
 
 impl Secrets {
     pub fn create_share(&self, project: &str, n: NewShare, caller: &Caller) -> Result<Share> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        // How a value leaves roll: as roll-access classifies it, `reveal`.
+        caller.need(Action::Reveal, &Scope::project(project))?;
         let raw = URL_SAFE_NO_PAD.decode(n.ciphertext.trim()).map_err(|_| Error::BadRequest("ciphertext is base64url".into()))?;
         if raw.len() < 12 + 16 || n.ciphertext.len() > CIPHERTEXT_MAX {
             return Err(Error::BadRequest(format!("ciphertext is a nonce, a value of at most {} KiB and a tag", names::VALUE_MAX / 1024)));

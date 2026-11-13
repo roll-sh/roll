@@ -44,11 +44,13 @@ pub(crate) struct EnvRow {
     pub max_age_days: Option<i64>,
     /// The host change requests are announced to (the URL itself is sealed).
     pub notify: Option<String>,
+    /// An ephemeral environment whose readers may see a protected base (its code was vetted).
+    pub trusted: bool,
 }
 
 const ENV_COLUMNS: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at";
 /// What reads select: the columns above, and the ones added since.
-const ENV_SELECT: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at, max_age_days, notify_host";
+const ENV_SELECT: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at, max_age_days, notify_host, COALESCE(trusted, 0)";
 
 fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
     let kind: String = r.get(5)?;
@@ -68,6 +70,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         created_at: r.get(12)?,
         max_age_days: r.get(13)?,
         notify: r.get(14)?,
+        trusted: r.get::<_, i64>(15)? != 0,
     })
 }
 
@@ -92,6 +95,9 @@ pub struct Environment {
     pub notify: Option<String>,
     /// Shared secrets in every folder.
     pub secrets: i64,
+    /// An ephemeral environment that may read a protected base (else it reads it as an untrusted
+    /// consumer would: not at all).
+    pub trusted: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -110,6 +116,10 @@ pub struct NewEnvironment {
     pub secrets: Vec<crate::Op>,
     /// The folder `secrets` are written to (default `/`).
     pub path: Option<String>,
+    /// An ephemeral environment running vetted code (a same-repo change): it may read a protected
+    /// base. Needs `admin` on that base. Default: untrusted.
+    #[serde(default)]
+    pub trusted: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -196,6 +206,7 @@ pub(crate) fn insert(
         created_at: now,
         max_age_days: None,
         notify: None,
+        trusted: false,
     })
 }
 
@@ -240,6 +251,7 @@ fn view(c: &Conn<'_>, rows: Vec<EnvRow>) -> Result<Vec<Environment>> {
             created_at: e.created_at,
             max_age_days: e.max_age_days,
             notify: e.notify,
+            trusted: e.trusted,
         })
         .collect())
 }
@@ -257,6 +269,14 @@ impl Secrets {
             let rows = all(c, project)?.into_iter().filter(|e| caller.allows(Action::Read, &Scope::env(project, &e.slug))).collect();
             view(c, rows)
         })
+    }
+
+    /// The caller a read of `slug` runs as: an ephemeral environment that isn't trusted never reads
+    /// a protected one (its base, an import or a reference), whoever reads it, since the code
+    /// running with it wasn't vetted.
+    pub(crate) fn caller_for(&self, project: &str, slug: &str, caller: &Caller) -> Result<Caller> {
+        let env = self.db.read(|c| by_slug(c, project, slug))?;
+        if env.kind == Kind::Ephemeral && !env.trusted { self.untrusted(project, caller) } else { Ok(caller.clone()) }
     }
 
     /// `caller` as a consumer running code nobody vetted (a check, a sandbox, a preview): kept out
@@ -302,6 +322,12 @@ impl Secrets {
         // read them.
         if let Some(b) = &new.base {
             caller.need(Action::Reveal, &Scope::at(project, b, &path))?;
+            if new.trusted {
+                caller.need(Action::Admin, &Scope::at(project, b, &path))?;
+            }
+        }
+        if new.trusted && kind != Kind::Ephemeral {
+            return Err(Error::BadRequest("trusted is for ephemeral environments (a standard one reads what its readers may)".into()));
         }
         let items = crate::write::items(&path, &new.secrets, caller)?;
         self.check_items(project, &new.slug, &items, caller)?;
@@ -325,7 +351,11 @@ impl Secrets {
                 Kind::Standard => c.query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM environments WHERE project_id = ? AND kind = 'standard'", [project], |r| r.get(0))?,
                 Kind::Ephemeral => 1_000_000,
             };
-            let env = insert(c, project, &new.slug, &name, position, kind, base.as_deref(), &new.labels, expires_at, now)?;
+            let mut env = insert(c, project, &new.slug, &name, position, kind, base.as_deref(), &new.labels, expires_at, now)?;
+            if new.trusted {
+                c.execute("UPDATE environments SET trusted = 1 WHERE id = ?", [&env.id])?;
+                env.trusted = true;
+            }
             audit::record(c, project, caller, "environment.create", Some(&env.slug), None, &[], &format!("created {} environment {}", kind.as_str(), env.slug), now)?;
             if !items.is_empty() {
                 crate::write::apply(c, &dek, &env, &items.items, "write", "created with the environment", caller, now)?;

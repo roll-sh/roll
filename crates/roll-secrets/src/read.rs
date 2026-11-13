@@ -131,6 +131,9 @@ pub struct Values {
     /// Keys whose value is a dynamic link's short-lived credential (it ends with its lease: a
     /// consumer that can't renew it, such as a service that scales to zero, should refuse them).
     pub dynamic: Vec<String>,
+    /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
+    /// resources another way (a container on a private network) knows which addresses to rewrite.
+    pub linked: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -321,6 +324,8 @@ impl Secrets {
     pub fn reveal(&self, project: &str, slug: &str, path: &str, key: &str, resolve: bool, caller: &Caller) -> Result<(Value, Vec<Problem>)> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        let narrowed = self.caller_for(project, slug, caller)?;
+        let caller = &narrowed;
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let e = entries.iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
@@ -336,6 +341,8 @@ impl Secrets {
     pub fn values(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, caller: &Caller) -> Result<Values> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        let narrowed = self.caller_for(project, slug, caller)?;
+        let caller = &narrowed;
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let who = consumer.unwrap_or(&caller.principal).to_string();
@@ -366,7 +373,8 @@ impl Secrets {
         };
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
         let dynamic = entries.iter().filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic })
+        let linked = entries.iter().filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
+        Ok(Values { values, problems, leases, dynamic, linked })
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
@@ -377,6 +385,10 @@ impl Secrets {
         use sha2::{Digest, Sha256};
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
+        // As the values are read: an untrusted ephemeral environment's digest leaves its protected
+        // base out, so a deploy compares like with like.
+        let narrowed = self.caller_for(project, slug, caller)?;
+        let caller = &narrowed;
         self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let dek = self.project(project)?;

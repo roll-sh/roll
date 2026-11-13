@@ -583,6 +583,11 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     assert!(staging["values"].get("DB_PASSWORD").is_none() && preview["values"].get("DB_PASSWORD").is_none());
     let (s, _) = api.call(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "check:x", "untrusted": true }))).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+    // A preview's environment is untrusted itself: whoever reads it (an app's deploy as the
+    // operator here) gets nothing from a protected base, unless it was made trusted.
+    assert!(api.values("pr-1", "/").await["values"].get("DB_PASSWORD").is_none());
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-2", "base": "production", "trusted": true }))).await;
+    assert_eq!(api.values("pr-2", "/").await["values"]["DB_PASSWORD"], "prod-pw");
 
     // A token for development can't make development an overlay of production, nor link a
     // resource (that's an admin's), nor see the fingerprint of what it can't reveal.

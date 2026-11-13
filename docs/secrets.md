@@ -181,6 +181,10 @@ environment is a first-class kind, built to be cheap:
   the preview's branched resources: the preview's Postgres branch, its Redis branch.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
+- It is **untrusted** unless made with `"trusted": true` (which needs `admin` on its base): it
+  runs a change's code, so reading it never reaches a protected environment (its base, an import, a
+  reference), whoever reads it. A preview of a same-repo change in a project that allows it is made
+  trusted; a fork's never is. `Environment.trusted` says which.
 
 ### Folders
 
@@ -451,9 +455,18 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 roll apps (docs/apps/) deploys a service into an environment and injects that environment's
 secrets when the service starts. It uses one call:
 
-- **In process** (`Secrets::resolve`): `resolve(project, env, path, &Consumer::App { service })`
-  returns an `Env` map of `Value`s (redacted in `Debug`, zeroized on drop). Dynamic links issue
-  leases owned by the consumer, and the call is audited as `resolve` by `app:<service>`.
+- **In process**: `Secrets::values(project, env, path, true, Some("app:<service>"), &caller)`
+  returns `Values`: a map of `Value`s (redacted in `Debug`, zeroized on drop), `problems` (fail a
+  deploy on any), `dynamic` (keys holding a short-lived credential: refuse them for a service that
+  scales to zero) and `linked` (keys from links, whose addresses a container network may need
+  rewritten). The caller is `Caller::consumer("app:<service>")`, or `Secrets::untrusted(project,
+  &caller)` for code nobody vetted. Dynamic links issue leases owned by the consumer, and the call
+  is audited as `resolve` by `app:<service>`. `Secrets::digest(project, env, path, &caller)` (no
+  decryption, unaudited) moves whenever the values would: compare it to decide a redeploy.
+- **Preview environments are untrusted themselves.** An ephemeral environment that wasn't made
+  `trusted` never reads a protected environment, whoever resolves it: an app deployed into a
+  preview's environment as `app:<service>` gets its overrides and the unprotected rest, never
+  production's values. Its digest leaves the protected base out the same way.
 - **Over HTTP** (another node or process): `POST …/environments/{env}/resolve`
   `{"path": "/", "consumer": "app:<service>", "seal_to": "<X25519 public key>"}`. With `seal_to`
   the answer is one `roll-seal-v1` box (the same box as docs/code/agents.md, "Endpoints"; associated
@@ -749,11 +762,14 @@ action:
 
 | Action | Routes |
 | --- | --- |
-| `read` | names, metadata, versions, history, compare, folders, imports, requests, links, leases, audit, required keys, listing syncs |
-| `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/requests/{id}/values`, `…/resolve` |
-| `write` | set, batch changes, rotate, rollback, promote, folders, imports, create an environment, open or apply a request |
+| `read` | names, metadata, versions, history, compare, folders, imports, exports (listing), what's shared with the project, requests, links, leases, required keys, listing syncs, insights, the audit log |
+| `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/requests/{id}/values`, `…/resolve`, renewing a lease (whoever could read the credential), creating a one-time share (how a value leaves roll) |
+| `write` | set, batch changes, rotate, rollback, promote, folders, imports (a project's own), create an environment, open or apply a request |
 | `delete` | a secret, an environment, ephemeral environments by label, a lease |
-| `admin` | rename or reorder environments, protection and approval policy, reviewing a request, syncs (create, delete, run) |
+| `admin` | rename or reorder environments, protection and approval policy, reviewing a request, syncs (create, delete, run), tokens and identities (listing too), audit sinks, revoking another's one-time share, exports (sharing a folder with another project), imports from another project, purge and retention, required keys (setting), making a trusted preview |
+
+`POST /v1/secrets/login` (workload identities) and the one-time share links (`/v1/secrets/shares/…`)
+are public: the OIDC token, or the key in the link, is the credential.
 
 Values are returned only by the `reveal` routes, so the gate can classify a request without reading
 its body. A route that touches a second resource (the source of a promote, a reference into another
@@ -933,7 +949,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases}` |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
@@ -991,10 +1007,12 @@ type Environment = {
   id: string; slug: string; name: string; position: number; kind: "standard" | "ephemeral";
   base: string | null; labels: Record<string, string>; expires_at: number | null;
   protected: boolean; approvals: number; approvers: string[]; created_at: number; secrets: number;
+  max_age_days: number | null; notify: string | null; trusted: boolean; // trusted: an ephemeral one that may read a protected base
 };
 type NewEnvironment = {
   slug: string; name?: string; kind?: "standard" | "ephemeral"; base?: string; labels?: Record<string, string>;
   expires_at?: number; ttl_minutes?: number; secrets?: Op[]; // ephemeral: created in one call with its overrides
+  trusted?: boolean; // ephemeral: may read a protected base (admin on it)
 };
 type Folder = { path: string; name: string; secrets: number; folders: number };
 type Import = { project?: string; environment: string; path: string }; // project: another project's shared folder
@@ -1019,7 +1037,7 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };

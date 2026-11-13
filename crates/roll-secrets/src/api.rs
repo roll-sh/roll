@@ -441,7 +441,7 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
             let plain = zeroize::Zeroizing::new(serde_json::to_vec(&v.values).expect("JSON"));
             let context = format!("roll-secrets:{project}:{env}:{consumer}");
             let sealed = crate::crypto::seal_to(&to, &context, &plain).map_err(|e| Error::BadRequest(e.to_string()))?;
-            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases }))
+            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases, "dynamic": v.dynamic, "linked": v.linked }))
         }
     };
     Ok(secret_response(out))
