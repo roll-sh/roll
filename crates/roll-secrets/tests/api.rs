@@ -1037,7 +1037,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
         paths: None,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
     };
-    let grant = roll_auth::Grant { ask_otherwise: false, id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
+    let grant = roll_auth::Grant { ask_otherwise: false, user: None, id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
     // As rolld's gate passes a grant's request on: the operator marker and the grant.
     let call = |path: String| {
         let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}{path}", api.project)).body(Body::empty()).unwrap();
@@ -1087,7 +1087,7 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
         paths: None,
         actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
     };
-    let grant = roll_auth::Grant { ask_otherwise: false, id: "tok_ada".into(), name: "ada".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![everything])) };
+    let grant = roll_auth::Grant { ask_otherwise: false, user: None, id: "tok_ada".into(), name: "ada".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![everything])) };
     for (project, want) in [(&mine, StatusCode::OK), (&api.project, StatusCode::NOT_FOUND)] {
         let mut req = Request::builder().uri(at(project, "/environments")).body(Body::empty()).unwrap();
         req.extensions_mut().insert(grant.clone());
