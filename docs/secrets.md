@@ -1522,6 +1522,9 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **A local `.env` against the environment**: `roll secrets diff --file .env` names the keys the file
+   adds, changes and lacks compared with the environment (values compared on the machine, never
+   printed), so a stale local copy shows before it misleads.
 
 Waiting on other pull requests:
 
