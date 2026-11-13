@@ -256,7 +256,6 @@ impl Secrets {
 
     /// Open a request for `items` (a batch's, or a promotion's into a protected environment).
     pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, caller: &Caller) -> Result<Request> {
-        self.check_types(project, &items)?;
         let path = path.to_string();
         for i in &items {
             caller.need(if matches!(i.action, ItemAction::Delete) { Action::Delete } else { Action::Write }, &Scope::at(project, slug, &i.path))?;
@@ -267,6 +266,7 @@ impl Secrets {
         if items.is_empty() {
             return Err(Error::BadRequest("a request changes at least one key".into()));
         }
+        self.check_types(project, &items)?;
         let dek = self.project(project)?;
         let id = names::new_id("req", 12);
         let ops: Vec<StoredOp> = items

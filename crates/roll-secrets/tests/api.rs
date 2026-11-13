@@ -802,9 +802,18 @@ async fn a_folder_shared_by_another_project_reads_as_its_own_until_the_share_end
     let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
     let (s, v) = api.req(Method::GET, "/environments/staging/values", None, t["token"].as_str()).await;
     assert_eq!((s, v["values"].clone()), (StatusCode::OK, json!({ "SENTRY_DSN": "https://key@sentry.example/1" })));
+    // The same environment, folder and key in this project stays this project's own.
+    api.ok(Method::PUT, "/environments/production/secrets/SENTRY_DSN?path=/shared", Some(json!({ "value": "ours" }))).await;
+    api.set("staging", "REF", "${production.shared.SENTRY_DSN}").await;
+    let v = api.values("staging", "/").await;
+    assert_eq!((v["values"]["REF"].as_str(), v["values"]["SENTRY_DSN"].as_str()), (Some("ours"), Some("https://key@sentry.example/1")));
+    // A protected environment never reaches an untrusted consumer, shared or not.
+    api.ok(Method::PUT, &theirs("/environments/production/policy"), Some(json!({ "protected": true }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "preview:pr-1", "untrusted": true }))).await;
+    assert!(r["values"].get("SENTRY_DSN").is_none(), "{r}");
     // The share ends: so does the import, at once.
     api.ok(Method::PUT, &theirs("/environments/production/exports?path=/shared"), Some(json!([]))).await;
-    assert_eq!(api.values("staging", "/").await["values"], json!({}));
+    assert_eq!(api.values("staging", "/").await["values"]["SENTRY_DSN"], json!(null));
     let audit = api.ok(Method::GET, &theirs("/audit"), None).await;
     assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "exports.set"));
 }

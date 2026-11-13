@@ -275,6 +275,11 @@ resolve against the other project's environments and resources).
 In the dashboard the imports panel has "From another project" and, under it, "Shared with other
 projects" for the folder's own exports; an imported key names the project it comes from.
 
+A protected environment's shared folder never reaches an untrusted consumer (a check, sandbox or
+preview), as its own never does. Promotion copies only the folder's own keys (a shared one is the
+target's to import, or not). A shared value's fingerprint is its own project's, so compare and the
+grid show it apart from a copy of the same value here, and its cell has no fingerprint here.
+
 ### Required keys
 
 A project can list keys every standard environment must define, each in a folder
@@ -504,6 +509,11 @@ the change`. The blocker names keys and environments, never the value or the lin
   `?history=N` (at most 1,000) it also reads what each of the last N first-parent commits added
   and lists the commits that added a value, `{key, environment, folder, changeset, path}`: a value removed
   since is still in the history anyone with the repo can read, so it's out and needs rotating.
+- **Bounds.** A scan reads at most 256 MiB (files for the head, patches for history) and keeps at
+  most 32 MiB of candidates, then says `truncated`; two scans run at once per server. It names
+  keys and environments of the projects with the repo on their canvas to the repo's managers, as
+  a blocker does on a change; values shared from another project are checked only by projects that
+  have the repo on their canvas.
 - **What it tells.** A blocker says a value is a secret's, so a writer of the repo could confirm a
   guess at a value they may not reveal by pushing it. That's accepted: they confirm a guess they
   already hold (never learn a value), only credential-like guesses count, every guess is a pushed
@@ -743,14 +753,19 @@ long-lived sits in a CI system's settings, and a leaked log or fork can't reuse 
 minutes.
 
 - **An identity** (`…/identities`, admin) names an `issuer` (the token's `iss`), an `audience`
-  (`aud`, default `roll` from the CLI), a `subject` (`sub`, or a pattern of it where `*` stands for
+  (`aud`, default this server's URL from the CLI and the dashboard, so a token minted for one roll
+  server isn't good at another), a `subject` (`sub`, or a pattern of it where `*` stands for
   any run of characters), up to ten other `claims` that must match (`ref`, `environment`,
   `repository_owner_id`…), and the scope of what a login gets: environments, folders and actions
   like a token's (never more than its creator has) for `ttl_minutes`, 5–60 (default 15).
-- **Shared issuers.** GitHub Actions (`https://token.actions.githubusercontent.com`) and GitLab
-  (`https://gitlab.com`) sign for every repo they host, so an identity of theirs must name one repo
-  in its subject (`repo:acme/web:…`, `project_path:group/project:…`): `repo:*` would let anyone's
-  workflow in. Narrow further with claims (`ref=refs/heads/main`, or GitHub's `environment`).
+- **Shared issuers.** GitHub Actions, GitLab.com, Terraform Cloud, Buildkite and Google sign for
+  every tenant they host, so an identity of theirs must name one tenant literally in its subject
+  (`repo:acme/web:…`, `project_path:group/project:…`, `organization:acme:…`, a Google service
+  account's numeric id exactly): `repo:*` would let anyone's job in. Narrow further with claims
+  (`ref=refs/heads/main`, or GitHub's `environment`). A token that lives longer than a day is
+  refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
+- **Who makes them.** Identities are made by people (or the operator), never by a token or a
+  login; a login can't create tokens either, so nothing it makes outlives it.
 - **Login.** `POST /v1/secrets/login {identity, token}` (public: the token is the credential)
   checks the signature against the issuer's keys (RS256 or ES256; its discovery document's
   `jwks_uri`, fetched over the guarded client: HTTPS, public addresses, no redirects, bounded reads;
@@ -764,7 +779,7 @@ minutes.
 - **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
   in by themselves, with the token from `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes
   projected service account token) or GitHub Actions' own endpoint (`permissions: id-token: write`;
-  audience `ROLL_OIDC_AUDIENCE`, default `roll`):
+  audience `ROLL_OIDC_AUDIENCE`, default the server's URL):
 
   ```sh
   roll secrets identities add deploy --github acme/web --claim ref=refs/heads/main --for-env production

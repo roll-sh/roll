@@ -479,9 +479,10 @@ pub enum Identities {
         /// The token's `sub`, or a pattern of it with `*`.
         #[arg(long)]
         subject: Option<String>,
-        /// The token's audience (`aud`).
-        #[arg(long, default_value = "roll")]
-        audience: String,
+        /// The token's audience (`aud`; default: this server's URL, which the CLI also asks GitHub
+        /// Actions for).
+        #[arg(long)]
+        audience: Option<String>,
         /// Another claim that must match, `name=value` (`*` for any run of characters).
         #[arg(long = "claim")]
         claims: Vec<String>,
@@ -996,6 +997,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
                     .collect::<anyhow::Result<_>>()?;
                 let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
+                let audience = audience.unwrap_or_else(|| c.api.base.clone());
                 let mut body = json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions });
                 if !envs.is_empty() {
                     body["environments"] = json!(envs);
@@ -1397,7 +1399,8 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<String>
     } else if let Some(f) = env("ROLL_OIDC_TOKEN_FILE") {
         std::fs::read_to_string(&f).with_context(|| format!("reading ROLL_OIDC_TOKEN_FILE {f}"))?
     } else if let (Some(url), Some(bearer)) = (env("ACTIONS_ID_TOKEN_REQUEST_URL"), env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")) {
-        let audience = env("ROLL_OIDC_AUDIENCE").unwrap_or_else(|| "roll".into());
+        // The server's own URL by default: a token minted for one roll server isn't good at another.
+        let audience = env("ROLL_OIDC_AUDIENCE").unwrap_or_else(|| api.base.clone());
         let sep = if url.contains('?') { '&' } else { '?' };
         let r = reqwest::Client::new().get(format!("{url}{sep}audience={}", enc(&audience))).bearer_auth(bearer).send().await.context("asking GitHub Actions for its OIDC token")?;
         anyhow::ensure!(r.status().is_success(), "GitHub Actions answered {} for its OIDC token (does the job have `permissions: id-token: write`?)", r.status());

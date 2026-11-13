@@ -189,7 +189,8 @@ type Through<'a> = &'a dyn Fn(&str, &str) -> bool;
 /// The effective entries of `env`/`path` for `principal` (`None`: shared values only). Imports
 /// and the base count only where `through(environment, path)` allows: a caller never reads an
 /// environment through another that it couldn't read itself.
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+#[allow(clippy::too_many_arguments)]
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, untrusted: bool, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
@@ -215,14 +216,15 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if !through(&from.slug, &imp.path) {
                     continue;
                 }
-                view_in(c, &from, &imp.path, principal, through, depth + 1, seen)?
+                view_in(c, &from, &imp.path, principal, through, untrusted, depth + 1, seen)?
             }
             // Another project's folder, while it's shared with this one: its own stored values
             // (no personal ones, nothing it imports, no reference or live link, which would
             // resolve against that project). The share stands in for the caller's access there.
             Some(p) => {
                 let Ok(from) = envs::by_slug(c, p, &imp.environment) else { continue };
-                if !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
+                // An untrusted consumer never reads a protected environment, shared or not.
+                if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
                     continue;
                 }
                 c.query(&format!("SELECT {ROW_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
@@ -243,7 +245,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, depth + 1, seen)? } else { vec![] };
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, untrusted, depth + 1, seen)? } else { vec![] };
         for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
@@ -265,7 +267,7 @@ impl Secrets {
         let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, &through, 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, caller.grants.untrusted(), 0, &mut HashSet::new())
         })
     }
 
@@ -498,7 +500,7 @@ impl Secrets {
             let mut folders = BTreeSet::new();
             for e in &envs {
                 let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
-                views.push(view_in(c, e, &path, principal, &through, 0, &mut HashSet::new())?);
+                views.push(view_in(c, e, &path, principal, &through, caller.grants.untrusted(), 0, &mut HashSet::new())?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);
@@ -513,7 +515,7 @@ impl Secrets {
         }
         let all_required: Vec<crate::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path).collect();
         let required: BTreeSet<String> = all_required.iter().map(|r| r.key.clone()).collect();
-        let typed: HashMap<&str, &crate::Required> = all_required.iter().filter(|r| r.kind.is_some() || r.pattern.is_some()).map(|r| (r.key.as_str(), r)).collect();
+        let typed: HashMap<&str, crate::required::Rule<'_>> = all_required.iter().filter(|r| r.kind.is_some() || r.pattern.is_some()).map(|r| (r.key.as_str(), r.rule())).collect();
         // Each environment's entries by key: a row looks each environment up once, not by scanning.
         let by_key: Vec<HashMap<&str, &Entry>> = views.iter().map(|v| v.iter().map(|e| (e.row.key.as_str(), e)).collect()).collect();
         keys.extend(required.iter().cloned());
@@ -528,7 +530,9 @@ impl Secrets {
                     let found = view.get(key.as_str()).copied();
                     fps.push(found.map(|e| e.row.fp.as_str()));
                     let cell = found.map(|e| {
-                        let reveal = caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
+                        // A row another project shares: its fingerprint is that project's, and its
+                        // value its key's, so neither shows here.
+                        let reveal = e.row.project_id == project && caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
                         let refs = e.row.references(&dek, project);
                         let misfit = match (typed.get(key.as_str()), &e.row.value) {
                             (Some(r), Some(ct)) if reveal && e.row.link.is_none() && refs.is_empty() => {
@@ -689,7 +693,9 @@ impl<'a> Resolver<'a> {
     /// An entry's value and the first problem resolving it (the value then keeps the
     /// unresolved reference's text).
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
-        let id = format!("{}:{}:{}", e.env, e.row.path, e.row.key);
+        // By the environment's id, not its slug: a folder another project shares may have the same
+        // slug and path as one of this project's.
+        let id = format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key);
         if let Some(d) = self.done.get(&id) {
             return d.clone();
         }

@@ -81,19 +81,31 @@ fn compile(pattern: &str) -> Result<regex::Regex> {
     regex::RegexBuilder::new(&format!("^(?:{pattern})$")).size_limit(PATTERN_SIZE).build().map_err(|e| Error::BadRequest(format!("pattern: {e}")))
 }
 
-impl Required {
+/// A typed key with its pattern compiled once (a batch or a grid checks many values).
+pub(crate) struct Rule<'a> {
+    pub required: &'a Required,
+    pattern: Option<regex::Regex>,
+}
+
+impl Rule<'_> {
     /// Why `v` doesn't fit, if it doesn't. Never quotes the value.
     pub(crate) fn misfit(&self, v: &str) -> Option<String> {
-        if let Some(t) = self.kind
+        let r = self.required;
+        if let Some(t) = r.kind
             && !t.fits(v)
         {
-            return Some(format!("{} must be {}", self.key, t.name()));
+            return Some(format!("{} must be {}", r.key, t.name()));
         }
-        let p = self.pattern.as_deref()?;
-        match compile(p) {
-            Ok(re) if !re.is_match(v) => Some(format!("{} must match {p}", self.key)),
+        match (&self.pattern, &r.pattern) {
+            (Some(re), Some(p)) if !re.is_match(v) => Some(format!("{} must match {p}", r.key)),
             _ => None,
         }
+    }
+}
+
+impl Required {
+    pub(crate) fn rule(&self) -> Rule<'_> {
+        Rule { required: self, pattern: self.pattern.as_deref().and_then(|p| compile(p).ok()) }
     }
 
     fn typed(&self) -> bool {
@@ -159,10 +171,11 @@ impl Secrets {
         if all.is_empty() {
             return Ok(());
         }
+        let rules: Vec<Rule<'_>> = all.iter().map(Required::rule).collect();
         let misfits: Vec<String> = items
             .iter()
             .filter_map(|i| match &i.action {
-                ItemAction::Set { value: Some(v), .. } if crate::refs::refs(v.expose()).is_empty() => all.iter().find(|r| r.path == i.path && r.key == i.key)?.misfit(v.expose()),
+                ItemAction::Set { value: Some(v), .. } if crate::refs::refs(v.expose()).is_empty() => rules.iter().find(|r| r.required.path == i.path && r.required.key == i.key)?.misfit(v.expose()),
                 _ => None,
             })
             .collect();
@@ -172,7 +185,7 @@ impl Secrets {
     /// The resolved values of `path` that don't fit their typed keys, as problems.
     pub(crate) fn type_problems(&self, project: &str, path: &str, values: &std::collections::BTreeMap<String, Value>) -> Result<Vec<crate::Problem>> {
         let all = self.db.read(|c| of(c, project))?;
-        Ok(all.iter().filter(|r| r.path == path && r.typed()).filter_map(|r| Some(crate::Problem { key: r.key.clone(), problem: r.misfit(values.get(&r.key)?.expose())? })).collect())
+        Ok(all.iter().filter(|r| r.path == path && r.typed()).filter_map(|r| Some(crate::Problem { key: r.key.clone(), problem: r.rule().misfit(values.get(&r.key)?.expose())? })).collect())
     }
 
     /// The keys `path` requires that `have` lacks.

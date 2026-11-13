@@ -620,12 +620,16 @@ impl Secrets {
             let env = by_slug(c, project, slug)?;
             c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, &path])?;
             for (n, i) in list.iter().enumerate() {
-                let from = by_slug(c, i.project.as_deref().unwrap_or(project), &i.environment)?;
-                if let Some(p) = &i.project
-                    && !crate::exports::exported(c, &from.id, &i.path, project)?
-                {
-                    return Err(Error::Forbidden(format!("{p} doesn't share {}:{} with this project", i.environment, i.path)));
-                }
+                // Another project's environment that's missing and one that isn't shared answer
+                // alike: no probing its slugs.
+                let not_shared = |p: &str| Error::Forbidden(format!("{p} doesn't share {}:{} with this project", i.environment, i.path));
+                let from = match &i.project {
+                    None => by_slug(c, project, &i.environment)?,
+                    Some(p) => match by_slug(c, p, &i.environment) {
+                        Ok(f) if crate::exports::exported(c, &f.id, &i.path, project)? => f,
+                        _ => return Err(not_shared(p)),
+                    },
+                };
                 c.execute(
                     "INSERT INTO imports (env_id, path, position, from_env_id, from_path) VALUES (?, ?, ?, ?, ?)",
                     params![env.id, path, n as i64, from.id, i.path],

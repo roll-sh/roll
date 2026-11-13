@@ -65,6 +65,11 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     fn project(&self) -> Option<&str> {
         None
     }
+    /// A consumer running code nobody vetted (`Secrets::untrusted`): not even a folder another
+    /// project shares reaches it from a protected environment.
+    fn untrusted(&self) -> bool {
+        false
+    }
 }
 
 /// The operator: everything.
@@ -98,6 +103,9 @@ impl Grants for Narrowed {
     }
     fn project(&self) -> Option<&str> {
         self.0.project()
+    }
+    fn untrusted(&self) -> bool {
+        true
     }
 }
 

@@ -36,13 +36,27 @@ CREATE TABLE IF NOT EXISTS identities (
 CREATE INDEX IF NOT EXISTS identities_project ON identities (project_id);
 ";
 
-/// Issuers every tenant of theirs shares (every GitHub repo's Actions sign with GitHub's), and
-/// the subject prefix that pins one repo: an identity of theirs names the repo, or another
-/// project's workflow could log in as it.
-const SHARED: &[(&str, &str, &str)] = &[
-    ("https://token.actions.githubusercontent.com", "repo:", "repo:<owner>/<repo>:… (GitHub Actions' sub)"),
-    ("https://gitlab.com", "project_path:", "project_path:<group>/<project>:… (GitLab CI's sub)"),
+/// Issuers every tenant of theirs shares (every GitHub repo's Actions sign with GitHub's): an
+/// identity of theirs names one tenant in its subject, literally, or anyone's job could log in as
+/// it. (issuer, subject prefix, whether the tenant is `owner/name`, the shape to show.) A prefix of
+/// "" means the whole subject is literal (Google's `sub` is an account's number).
+const SHARED: &[(&str, &str, bool, &str)] = &[
+    ("https://token.actions.githubusercontent.com", "repo:", true, "repo:<owner>/<repo>:… (GitHub Actions' sub)"),
+    ("https://gitlab.com", "project_path:", true, "project_path:<group>/<project>:… (GitLab CI's sub)"),
+    ("https://app.terraform.io", "organization:", false, "organization:<org>:… (Terraform Cloud's sub)"),
+    ("https://agent.buildkite.com", "organization:", false, "organization:<org>:… (Buildkite's sub)"),
+    ("https://accounts.google.com", "", false, "the service account's numeric id, exactly (Google's sub)"),
 ];
+
+/// Whether `subject` names one tenant of a shared issuer literally.
+fn pinned(subject: &str, prefix: &str, owner_name: bool) -> bool {
+    if prefix.is_empty() {
+        return !subject.contains('*');
+    }
+    let Some((tenant, _)) = subject.strip_prefix(prefix).and_then(|r| r.split_once(':')) else { return false };
+    let shaped = if owner_name { tenant.split_once('/').is_some_and(|(o, n)| !o.is_empty() && !n.is_empty()) } else { !tenant.is_empty() };
+    shaped && !tenant.contains('*')
+}
 
 const IDENTITIES_MAX: i64 = 50;
 const CLAIMS_MAX: usize = 10;
@@ -131,6 +145,11 @@ impl Secrets {
 
     pub fn create_identity(&self, project: &str, n: NewIdentity, caller: &Caller) -> Result<Identity> {
         caller.need(Action::Admin, &Scope::project(project))?;
+        // An identity mints tokens for as long as it exists: made by a person (or the operator),
+        // never by a token or a login that could outlive its own revocation through it.
+        if caller.principal.starts_with("identity:") || caller.principal.starts_with("token:") {
+            return Err(Error::Forbidden("identities are made by people, not tokens or logins".into()));
+        }
         let name = n.name.trim().to_string();
         if name.is_empty() || name.chars().count() > 64 {
             return Err(bad("an identity's name is 1–64 characters"));
@@ -146,12 +165,10 @@ impl Secrets {
         if subject.is_empty() || subject.len() > 512 || subject.chars().all(|c| c == '*') {
             return Err(bad("subject is the token's sub, or a pattern of it with * (never * alone)"));
         }
-        if let Some((_, prefix, shape)) = SHARED.iter().find(|(i, _, _)| *i == issuer) {
-            // `repo:acme/web:…`: the owner and the repo are literal, up to the second `:`.
-            let pinned = subject.strip_prefix(prefix).and_then(|r| r.split_once(':')).is_some_and(|(repo, _)| repo.split_once('/').is_some_and(|(o, r)| !o.is_empty() && !r.is_empty()) && !repo.contains('*'));
-            if !pinned {
-                return Err(bad(format!("{issuer} signs for everyone: subject names one repo, {shape}")));
-            }
+        if let Some((_, prefix, owner_name, shape)) = SHARED.iter().find(|(i, ..)| *i == issuer)
+            && !pinned(&subject, prefix, *owner_name)
+        {
+            return Err(bad(format!("{issuer} signs for everyone: the subject names one of its tenants, {shape}")));
         }
         if n.claims.len() > CLAIMS_MAX || n.claims.iter().any(|(k, v)| k.is_empty() || k.len() > 64 || v.is_empty() || v.len() > 256 || ["iss", "aud", "sub", "exp", "nbf", "iat"].contains(&k.as_str())) {
             return Err(bad(format!("claims are at most {CLAIMS_MAX} other string claims (not iss, aud, sub or the times), each a value or a pattern")));
