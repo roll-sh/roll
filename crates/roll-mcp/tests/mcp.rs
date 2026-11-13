@@ -94,6 +94,12 @@ async fn tools_follow_the_tokens_rules() {
     let all = names(&d.rpc(OPERATOR, "tools/list", json!({})).await);
     assert!(all.contains(&"postgres_delete_project".into()) && all.contains(&"workspace_list_projects".into()));
     assert!(!all.iter().any(|n| n.starts_with("redis_")), "products that are off have no tools");
+    // A toolset narrows the list to those products' tools (approvals always there); an unknown one is refused.
+    let (_, _, some) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=workspace", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    let some = names(&some["result"]);
+    assert!(some.contains(&"workspace_list_projects".into()) && some.contains(&"access_wait_approval".into()) && !some.iter().any(|n| n.starts_with("postgres_")), "{some:?}");
+    let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=nope", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 
     // A read-only token sees only tools it can use, and its calls are decided by its rules.
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;

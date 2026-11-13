@@ -8,6 +8,8 @@ import {
   describeRule,
   expiringSoon,
   mcpConfig,
+  productName,
+  withToolsets,
   mcpUrl,
   reach,
   statusOf,
@@ -50,7 +52,16 @@ export function AccessOverview() {
 export function ConnectPanel({ token }: { token?: string }) {
   const [client, setClient] = useState<McpClient>("claude-code");
   const { copied, copy } = useCopy();
-  const url = mcpUrl();
+  // Toolsets: only some products' tools, so the agent's context isn't spent on the rest.
+  const [products, setProducts] = useState<string[]>([]);
+  const [picked, setPicked] = useState<string[]>([]);
+  useEffect(() => {
+    accessApi
+      .catalog()
+      .then((c) => setProducts(c.products.filter((p) => p !== "access")))
+      .catch(() => {});
+  }, []);
+  const url = withToolsets(mcpUrl(), picked);
   const cfg = mcpConfig(client, url, token);
   return (
     <Panel
@@ -82,6 +93,30 @@ export function ConnectPanel({ token }: { token?: string }) {
         ))}
       </div>
       <div className="space-y-3 p-5">
+        {products.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-[12px] text-subtle">
+              Tools for {picked.length ? "these products only" : "every product"}: each product's tools take part of the agent's context, so
+              pick the ones it needs.
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {products.map((p) => {
+                const on = picked.includes(p);
+                return (
+                  <button
+                    key={p}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => setPicked(on ? picked.filter((x) => x !== p) : [...picked, p])}
+                    className={`rounded-full border px-2.5 py-0.5 text-[12px] transition-colors duration-150 ${on ? "border-fg text-fg" : "border-line text-muted hover:border-line-2"}`}
+                  >
+                    {productName(p)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <p className="text-[13px] text-muted">{CLIENT_WHERE[client]}</p>
         <div className="relative rounded-lg border border-line bg-bg">
           <pre className="overflow-x-auto p-3 pr-10 font-mono text-[12px] leading-relaxed">{cfg.text}</pre>
