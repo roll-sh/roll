@@ -224,6 +224,8 @@ pub struct LiveConfig {
     pub health_every: Duration,
     /// Failed health checks in a row that replace an instance.
     pub health_failures: u32,
+    /// How long CPU is averaged over before `run.cpu_target` scales.
+    pub cpu_window: Duration,
 }
 
 impl Default for LiveConfig {
@@ -238,6 +240,7 @@ impl Default for LiveConfig {
             max_waiters: 1000,
             health_every: Duration::from_secs(10),
             health_failures: 3,
+            cpu_window: Duration::from_secs(60),
         }
     }
 }
@@ -293,6 +296,12 @@ pub struct EnvLive {
     answering: std::sync::atomic::AtomicBool,
     /// What its public names let through, as last read (None: read it again).
     gate: Mutex<Option<Arc<Gate>>>,
+    /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
+    /// the runtime measures).
+    cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
+    /// The instances CPU last asked for: kept while the window fills again after a scale-out,
+    /// so the new instance isn't taken straight back in.
+    cpu_need: AtomicU32,
     last_tick: Mutex<Option<Instant>>,
     last_health: Mutex<Option<Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -335,6 +344,8 @@ impl EnvLive {
             ticking: std::sync::atomic::AtomicBool::new(false),
             answering: std::sync::atomic::AtomicBool::new(false),
             gate: Mutex::new(None),
+            cpu_samples: Mutex::new(std::collections::VecDeque::new()),
+            cpu_need: AtomicU32::new(0),
             last_tick: Mutex::new(None),
             last_health: Mutex::new(None),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
@@ -1255,6 +1266,8 @@ impl EnvLive {
         };
         let insts = self.instances();
         let (mut cpu, mut mem, mut up) = (0.0, 0u64, 0usize);
+        // What was measured, and what those instances could have used (`run.cpu` each).
+        let (mut used, mut capacity) = (0.0, 0.0);
         for i in &insts {
             if !matches!(i.phase(), Phase::Running(_)) {
                 continue;
@@ -1264,7 +1277,12 @@ impl EnvLive {
                 Some(u) => {
                     let mut seen = i.cpu_seen.lock();
                     if let Some(prev) = *seen {
-                        cpu += u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                        let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                        cpu += d;
+                        if let Some(tpl) = self.serving(&i.deployment) {
+                            used += d;
+                            capacity += tpl.run.cpu * elapsed;
+                        }
                     }
                     *seen = Some(u.cpu_ns);
                     mem += u.memory_bytes;
@@ -1282,7 +1300,26 @@ impl EnvLive {
         if up > 0 || elapsed > 0.0 {
             self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
         }
+        let mut s = self.cpu_samples.lock();
+        if capacity > 0.0 {
+            s.push_back((now, used, capacity));
+        }
+        while s.front().is_some_and(|(at, ..)| now.duration_since(*at) > self.cfg.cpu_window) {
+            s.pop_front();
+        }
         insts
+    }
+
+    /// Its awake instances' CPU over the last `cpu_window`, in percent of what they could use;
+    /// None until the window is nearly full of measurements.
+    fn cpu_load(&self) -> Option<f64> {
+        let s = self.cpu_samples.lock();
+        let span = s.back()?.0.duration_since(s.front()?.0);
+        if span < self.cfg.cpu_window.mul_f64(0.8) {
+            return None;
+        }
+        let (used, cap) = s.iter().fold((0.0, 0.0), |(u, c), (_, du, dc)| (u + du, c + dc));
+        (cap > 0.0).then(|| used / cap * 100.0)
     }
 
     /// Instances of deployments asked for by their own URL go a minute after their last
@@ -1347,7 +1384,28 @@ impl EnvLive {
         let mut awake = insts.iter().filter(|i| i.awake()).count() as u32;
         // Fewer than needed by the requests in flight for a while → one goes.
         let in_flight: u32 = insts.iter().map(|i| i.in_flight()).sum();
-        let needed = in_flight.div_ceil(run.concurrency).max(run.min_instances).max(1);
+        let mut needed = in_flight.div_ceil(run.concurrency).max(run.min_instances).max(1);
+        // On CPU too: as many as would bring the average under the target.
+        if let (Some(target), Some(load)) = (run.cpu_target, self.cpu_load().filter(|_| awake > 0)) {
+            let by_cpu = ((awake as f64 * load / target as f64).ceil() as u32).min(run.max_instances.max(1));
+            self.cpu_need.store(by_cpu, Ordering::SeqCst);
+            if by_cpu > awake && awake < run.max_instances {
+                // One more at a time, then a fresh window to judge it by.
+                if let Ok(inst) = self.make(tpl).await {
+                    self.insts.lock().push(inst.clone());
+                    let deadline = Instant::now() + self.cfg.wake_timeout;
+                    if self.start(&inst, run, None, deadline).await.is_ok() {
+                        awake += 1;
+                        self.cpu_samples.lock().clear();
+                        self.cpu_need.store(awake, Ordering::SeqCst);
+                        self.log.stream(Stream::System).line(format!("scaled out: CPU at {load:.0}% of the {target}% target, {awake} instances"));
+                    }
+                }
+            }
+            needed = needed.max(by_cpu);
+        } else if run.cpu_target.is_some() {
+            needed = needed.max(self.cpu_need.load(Ordering::SeqCst));
+        }
         let over = awake > needed;
         let scale_down = {
             let mut s = self.over_since.lock();

@@ -192,6 +192,11 @@ type Run = {
   /** A replaced or scaled-in instance's time to finish: its requests in flight, then SIGTERM,
    *  SIGKILL when it's up (Render's maxShutdownDelaySeconds). 1–300; unset (or null) 30. */
   drain_s?: number;
+  /** A web service also scales on CPU (Render's target CPU): while its awake instances
+   *  average over this percent of their CPU for a minute another starts (one at a time, up
+   *  to max_instances), and fewer stay once they'd be under it. 10–100; unset, requests only.
+   *  Only what the runtime measures counts (Docker's cgroup; not Fargate, which bills by size). */
+  cpu_target?: number;
 };
 
 type Service = {

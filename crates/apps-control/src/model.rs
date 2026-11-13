@@ -392,6 +392,11 @@ pub struct Run {
     /// unset, 30.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drain_s: Option<u32>,
+    /// A web service also scales on CPU (Render's target CPU): while its awake instances
+    /// average over this percent of their CPU for a minute another starts (up to
+    /// `max_instances`), and fewer stay once they'd be under it. 10–100; unset, requests only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_target: Option<u32>,
 }
 
 fn yes() -> bool {
@@ -495,6 +500,7 @@ impl Default for Run {
             scale: None,
             public: true,
             drain_s: None,
+            cpu_target: None,
         }
     }
 }
@@ -550,6 +556,14 @@ impl Run {
         }
         if self.drain_s.is_some_and(|d| !(1..=300).contains(&d)) {
             return bad("drain_s is 1–300");
+        }
+        if let Some(t) = self.cpu_target {
+            if !(10..=100).contains(&t) {
+                return bad("cpu_target is 10–100 (percent of an instance's CPU)");
+            }
+            if self.kind != RunType::Web {
+                return bad("cpu_target is for a web service (a worker follows its work with scale)");
+            }
         }
         if self.port == Some(0) {
             return bad("port is 1–65535");

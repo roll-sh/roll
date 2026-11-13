@@ -2064,3 +2064,39 @@ async fn an_allow_list_lets_only_its_networks_in() {
     call(&w.api, "PUT", &base, Some(json!({"allow_ips": null}))).await;
     assert_eq!(from(Some("198.51.100.1:5000")).await, StatusCode::OK);
 }
+
+/// `run.cpu_target`: a web service whose instances stay over the target for the window gets
+/// another (one at a time), and goes back down once they'd be under it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_web_service_scales_on_its_cpu() {
+    let w = world_with(|c| {
+        c.live.cpu_window = Duration::from_millis(300);
+        c.live.scale_down_after = Duration::ZERO;
+    })
+    .await;
+    let (svc, d) = image_service(&w, "render", json!({"port": 80, "min_instances": 1, "max_instances": 3, "cpu_target": 50})).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"cpu_target": 5}}))).await.0, StatusCode::BAD_REQUEST);
+    fn running(w: &World, id: &str) -> Vec<String> {
+        w.fake.instances(id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).map(|(n, _, _)| n).collect()
+    }
+    async fn until(w: &World, id: &str, n: usize) {
+        let live = w.apps.live(id, "production");
+        for _ in 0..100 {
+            live.tick().await;
+            if running(w, id).len() == n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("never {n} running: {:?}", w.fake.instances(id));
+    }
+    until(&w, &id, 1).await;
+    w.fake.set_busy(&running(&w, &id)[0], 0.9);
+    until(&w, &id, 2).await;
+    for n in running(&w, &id) {
+        w.fake.set_busy(&n, 0.05);
+    }
+    until(&w, &id, 1).await;
+}

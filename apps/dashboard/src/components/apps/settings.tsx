@@ -41,6 +41,7 @@ interface Form {
   healthPath: string;
   healthTimeout: string;
   drain: string;
+  cpuTarget: string;
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
@@ -87,6 +88,7 @@ export function formOf(s: Service): Form {
     healthPath: str(s.run.health_path),
     healthTimeout: str(s.run.health_timeout_s),
     drain: str(s.run.drain_s),
+    cpuTarget: str(s.run.cpu_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
@@ -145,6 +147,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
+  if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95)
     run.alerts = { memory_pct: Number(f.alertMemory) || 0, error_pct: Number(f.alertErrors) || 0, p95_ms: Number(f.alertP95) || 0 };
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors)
@@ -161,7 +164,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -354,6 +357,9 @@ export function SettingsTab({
               <Field label="Health timeout (s)">{t("healthTimeout", "60")}</Field>
               <Field label="Drain (s)" hint="a replaced instance finishes its requests, then gets SIGTERM; killed when it's up">
                 {t("drain", "30")}
+              </Field>
+              <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
+                {t("cpuTarget", "70")}
               </Field>
               <Field label="Suspend after (s)" hint="idle; 0 never suspends">
                 {t("suspendAfter", "30")}
