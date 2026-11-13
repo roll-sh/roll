@@ -1590,9 +1590,12 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **A Helm chart for the operator** (#36), the way most clusters install one.
+1. **Customer-managed keys in the dashboard** (#37): the project's settings show which key wraps
+   its data key and set or remove one, saying what revoking it does; the deployment key's card
+   counts the projects that bring their own.
 2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
-   and the deploy notice when apps reads secrets (#31), refreshed once those land.
+   customer-managed keys, and the deploy notice when apps reads secrets (#31), refreshed once those
+   land.
 3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
    Waits on products serving signed-in people (today they're the operator's).
@@ -1614,7 +1617,8 @@ Open pull requests after this one:
   `scan: true` fails a pull request that adds a stored value.
 - **#35, `roll run --fallback`** (after #20): an encrypted copy of the last values, used through an
   outage.
-- **#36, a Kubernetes operator** (after #32): RollSecrets pulled with the cluster's own identity.
+- **#36, a Kubernetes operator** (after #32): RollSecrets pulled with the cluster's own identity,
+  and its Helm chart.
 - **#37, customer-managed keys** (after #20): a project's data key wrapped by the customer's KMS key.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
