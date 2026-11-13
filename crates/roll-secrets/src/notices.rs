@@ -86,7 +86,7 @@ impl Secrets {
             let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?view=health", w.trim_end_matches('/')));
             let mut parts = vec![];
             for issue in [Issue::Expired, Issue::Missing, Issue::Exposed, Issue::Expiring, Issue::Stale] {
-                let these: Vec<String> = findings.iter().filter(|f| f.issue == issue).map(|f| format!("{} ({})", f.key, f.detail)).collect();
+                let these: Vec<String> = findings.iter().filter(|f| f.issue == issue).map(|f| format!("{} ({}{})", f.key, f.detail, f.owner.as_ref().map(|o| format!("; ask {o}")).unwrap_or_default())).collect();
                 if these.is_empty() {
                     continue;
                 }

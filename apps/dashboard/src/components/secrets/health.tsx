@@ -1,7 +1,7 @@
 import { CircleCheck, Dices, FileSearch } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
-import { needsApproval, type Finding, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
+import { needsApproval, type Finding, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
 import { generateValue } from "@/lib/secrets-generate";
 import { secretsHref, useSecrets } from "./secrets-page";
 import { card, errorText, ErrorNote, ghost, Section, sized, useLoad } from "./ui";
@@ -39,6 +39,26 @@ export function HealthView() {
     }
   };
   const name = (slug: string) => standard.find((e) => e.slug === slug)?.name ?? slug;
+  // Every weak key of one environment, a new random value each: one change, or one request.
+  const fixAll = async (env: string, rows: Finding[]) => {
+    setError(null);
+    const ops: Op[] = rows.map((f) => ({ op: "set", key: f.key, path: f.path, value: generateValue() }));
+    const message = `new random values for ${rows.length} weak ${rows.length === 1 ? "key" : "keys"} (from Health)`;
+    try {
+      try {
+        await api.batch(env, { path: "/", message, ops });
+        setNote(`${name(env)}: ${rows.length} weak ${rows.length === 1 ? "key has" : "keys have"} new values`);
+      } catch (e) {
+        if (!needsApproval(e)) throw e;
+        await api.openRequest(env, { path: "/", message, ops });
+        setNote(`${name(env)}: a change request is open for ${rows.length} new ${rows.length === 1 ? "value" : "values"} (the environment is protected)`);
+      }
+      found.reload();
+      reloadEnvs();
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
   if (found.error) return <ErrorNote error={found.error} className="m-4" />;
   if (!found.data) return null;
   return (
@@ -73,6 +93,18 @@ export function HealthView() {
             }
           >
             <p className="mb-2 text-[11.5px] text-muted">{what}</p>
+            {issue === "weak" && (
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {[...new Set(rows.map((f) => f.environment))].map((env) => {
+                  const these = rows.filter((f) => f.environment === env);
+                  return (
+                    <button key={env} className={ghost} onClick={() => fixAll(env, these)} title="A random value for each, made here: one change, or one change request where protected">
+                      <Dices className="size-3.5" /> New values for all {these.length} in {name(env)}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <div className={`${card} divide-y divide-line`}>
               {rows.map((f) => (
                 <div key={`${f.environment}/${f.path}/${f.key}`} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5 text-[12.5px]">
@@ -83,6 +115,7 @@ export function HealthView() {
                       {f.path !== "/" && <span className="font-mono"> {f.path}</span>}
                     </span>
                   </Link>
+                  {f.owner && <span className="text-[11.5px] text-muted" title="Who supplies it (the required key's owner)">ask {f.owner}</span>}
                   <span className={`ml-auto text-[11.5px] ${serious ? "text-danger" : "text-muted"}`}>{f.detail}</span>
                   {f.issue === "weak" && (
                     <button className={`${ghost} h-6`} onClick={() => fix(f, { value: generateValue() }, "a new random value")} title="48 random letters and digits, made here; a change request where the environment is protected">

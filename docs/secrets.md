@@ -331,6 +331,14 @@ that doesn't fit (`misfit` on its cell, the rule it breaks), for a caller who ma
 The dashboard's add and edit forms check a typed key's value as it's typed, with the same rules
 and messages (`apps/dashboard/src/lib/secrets-required.ts`).
 
+### Owners
+
+A required key can name its `owner` (`roll secrets required add STRIPE_KEY --owner @payments`, the
+Environments view's Owner field): the person or team who supplies it. Health's findings about that
+key carry it (`owner`, "ask @payments" in the view), and so does the daily notice, so whoever sees
+an expired or missing key knows who decides its new value. The key's rule in its own folder
+counts first, else its rule anywhere.
+
 ### Insights
 
 `GET …/environments/{env}/insights?path=` shows, for each key of a folder, when it last changed
@@ -420,7 +428,9 @@ anyone else gets a 403 that doesn't name it (that would tell a caller who can't 
 the repository is there). In the
 dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
 made in the browser) and an expired or expiring key's new date, each one change, or a change
-request where the environment is protected. The Health tab and the sidebar's Secrets entry carry
+request where the environment is protected. "New values for all N in Staging" does every weak key
+of one environment at once: one change (or one change request) with a random value for each. The
+Health tab and the sidebar's Secrets entry carry
 the count of findings to fix now (expired, missing, exposed), and Home lists them across every
 project (`GET /v1/secrets/findings`, `roll secrets health --all`).
 
@@ -577,7 +587,8 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   project.
 - `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
   the project it's bound to), the directory's project and environment and how many keys it can
-  read there, the keys a `.env.example` names that it lacks, and whether staged files hold any of
+  read there, anything there that needs fixing now (expired, missing or exposed keys, from health),
+  the keys a `.env.example` names that it lacks, and whether staged files hold any of
   the project's values (the scan, names only). It fails when a check does: a first step when
   `roll run` doesn't see what it should.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
@@ -1374,7 +1385,7 @@ type Version = { version: number; seq: number; op: "set" | "delete"; what: strin
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
-type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
+type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
@@ -1496,6 +1507,9 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Import straight from another manager**: `roll secrets import --from doppler|vault|infisical`
+   reads an environment through that product's API with the user's own token (on their machine,
+   never through roll's server), then imports it as one change, as `import` does with a file.
 
 Waiting on other pull requests:
 

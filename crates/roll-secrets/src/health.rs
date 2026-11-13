@@ -56,6 +56,9 @@ pub struct Finding {
     pub key: String,
     /// What exactly (the other environments, the reason, the date).
     pub detail: String,
+    /// Who supplies the key, when a required key names them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// One project's findings, for health across projects.
@@ -149,7 +152,7 @@ impl Secrets {
             if !caller.allows(Action::Read, &Scope::at(project, &e.slug, path)) {
                 continue;
             }
-            let mut add = |issue: Issue, detail: String| out.push(Finding { issue, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail });
+            let mut add = |issue: Issue, detail: String| out.push(Finding { issue, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail, owner: None });
             let day = |ms: i64| chrono_day(ms);
             if let Some(t) = expires_at {
                 if *t <= now {
@@ -193,7 +196,7 @@ impl Secrets {
                 }
                 let seen = self.view(project, &e.slug, &r.path, caller, false, Action::Read)?.iter().any(|x| x.row.key == r.key);
                 if !seen {
-                    out.push(Finding { issue: Issue::Missing, environment: e.slug.clone(), path: r.path.clone(), key: r.key.clone(), detail: "required".into() });
+                    out.push(Finding { issue: Issue::Missing, environment: e.slug.clone(), path: r.path.clone(), key: r.key.clone(), detail: "required".into(), owner: None });
                 }
             }
         }
@@ -214,10 +217,15 @@ impl Secrets {
                 for (env_id, path, key, ..) in &rows {
                     let Some(e) = slug.get(env_id.as_str()) else { continue };
                     if unread_by_code.contains(key) && caller.allows(Action::Read, &Scope::at(project, &e.slug, path)) {
-                        out.push(Finding { issue: Issue::Unreferenced, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail: format!("not in {}", repos.join(", ")) });
+                        out.push(Finding { issue: Issue::Unreferenced, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail: format!("not in {}", repos.join(", ")), owner: None });
                     }
                 }
             }
+        }
+        // Who to ask: the required key's owner, its folder's rule first, else the key's anywhere.
+        let owners: Vec<crate::required::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.owner.is_some()).collect();
+        for f in &mut out {
+            f.owner = owners.iter().find(|r| r.key == f.key && r.path == f.path).or_else(|| owners.iter().find(|r| r.key == f.key)).and_then(|r| r.owner.clone());
         }
         let position: HashMap<&str, i64> = envs.iter().map(|e| (e.slug.as_str(), e.position)).collect();
         out.sort_by(|a, b| (a.issue, position.get(a.environment.as_str()), &a.path, &a.key).cmp(&(b.issue, position.get(b.environment.as_str()), &b.path, &b.key)));

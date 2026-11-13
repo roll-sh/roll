@@ -280,6 +280,7 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
               {r.type && <span className="rounded border border-line-2 px-1 text-[10.5px] text-muted">{TYPE_LABEL[r.type]}</span>}
               {r.pattern && <code className="truncate rounded border border-line-2 px-1 font-mono text-[10.5px] text-muted" title="The whole value must match">/{r.pattern}/</code>}
               {r.comment && <span className="truncate text-[11.5px] text-subtle">{r.comment}</span>}
+              {r.owner && <span className="truncate text-[11.5px] text-muted" title="Who supplies it">{r.owner}</span>}
               <button className={`${ghost} ml-auto`} disabled={busy} onClick={() => save(rows.filter((x) => x !== r))}>
                 Remove
               </button>
@@ -292,7 +293,7 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
         onSubmit={async (ev) => {
           ev.preventDefault();
           if (!keyOk) return;
-          const next = { ...adding, key: adding.key.trim(), ...(adding.pattern?.trim() ? { pattern: adding.pattern.trim() } : { pattern: undefined }) };
+          const next = { ...adding, key: adding.key.trim(), ...(adding.pattern?.trim() ? { pattern: adding.pattern.trim() } : { pattern: undefined }), ...(adding.owner?.trim() ? { owner: adding.owner.trim() } : { owner: undefined }) };
           if (await save([...rows.filter((x) => !(x.key === next.key && x.path === next.path)), next])) setAdding({ key: "", path: adding.path, comment: "" });
         }}
       >
@@ -311,6 +312,10 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
         <label className="min-w-40 flex-1">
           <span className={label}>Pattern (optional)</span>
           <input value={adding.pattern ?? ""} onChange={(e) => setAdding({ ...adding, pattern: e.target.value })} placeholder="[a-z]{2}-[a-z]+-[0-9]" spellCheck={false} className={`${field} h-7 font-mono text-[12px]`} />
+        </label>
+        <label className="w-36">
+          <span className={label}>Owner (optional)</span>
+          <input value={adding.owner ?? ""} onChange={(e) => setAdding({ ...adding, owner: e.target.value })} placeholder="@payments" maxLength={64} spellCheck={false} className={`${field} h-7 text-[12px]`} />
         </label>
         <button type="submit" className={button} disabled={!keyOk || busy}>
           <Plus className="size-3.5" /> Require
