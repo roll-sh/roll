@@ -11,6 +11,9 @@ API, once, in front of every route, so no surface can do more than another.
   `crates/rolld/src/access.rs`. The MCP server is `crates/roll-mcp` ([mcp.md](mcp.md)).
 - Client: `apps/dashboard/src/lib/access-api.ts`. Change it and the [HTTP API](#http-api) together.
 - Dashboard: `/dashboard/access` ("MCP & access") and the consent screen at `/oauth/authorize`.
+  Each token has a page, `/dashboard/access/tokens/<id>`: what it may do in words (resources by
+  name), what approvals allow it for a while and until when, the approvals it asked for, its recent
+  requests, and edit, rotate and revoke.
 - CLI: `roll token …` and `roll mcp …`.
 - Tests: `crates/roll-access/tests/access.rs` (scoped tokens, ask, tokens making tokens, OAuth end
   to end), `crates/roll-mcp/tests/mcp.rs`, and `crates/rolld/tests/auth.rs` (every route a real
