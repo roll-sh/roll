@@ -93,6 +93,12 @@ async fn tools_follow_the_tokens_rules() {
     let listed = names(&d.rpc(&reader, "tools/list", json!({})).await);
     assert!(listed.contains(&"postgres_list_projects".into()) && listed.contains(&"postgres_query".into()));
     assert!(!listed.contains(&"postgres_delete_project".into()) && !listed.contains(&"postgres_execute".into()) && !listed.contains(&"workspace_list_projects".into()));
+    // It can read what it may do, in words, before trying.
+    let listed = d.rpc(&reader, "resources/list", json!({})).await;
+    assert!(listed["resources"].as_array().unwrap().iter().any(|r| r["uri"] == "roll://access/me"), "{listed}");
+    let me = d.rpc(&reader, "resources/read", json!({ "uri": "roll://access/me" })).await;
+    let text = me["contents"][0]["text"].as_str().unwrap();
+    assert!(text.contains("postgres: read, on every resource") && text.contains("Anything else is refused"), "{text}");
     let ok = d.tool(&reader, "postgres_list_projects", json!({})).await;
     assert_eq!((ok["isError"].as_bool(), &ok["structuredContent"]["items"][0]["id"]), (Some(false), &json!("pa")));
     let refused = d.tool(&reader, "postgres_delete_project", json!({ "project": "pa" })).await;
