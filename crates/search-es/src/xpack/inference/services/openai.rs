@@ -244,7 +244,7 @@ pub fn embeddings(v: &Value, expected: usize) -> EsResult<Results> {
                 if raw.len() % 4 != 0 {
                     return Err(EsError::java(500, "illegal_state_exception", "A base64 embedding in the OpenAI embeddings response isn't a whole number of floats"));
                 }
-                raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+                raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
             }
             Value::Arr(a) => a.iter().map(|x| x.as_f64().map(|f| f as f32)).collect::<Option<Vec<f32>>>().ok_or_else(|| missing_field("embedding", "OpenAI embeddings"))?,
             _ => return Err(missing_field("embedding", "OpenAI embeddings")),

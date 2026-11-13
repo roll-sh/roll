@@ -169,7 +169,7 @@ pub fn check(id: &str, url: &str, answer: &Answer) -> EsResult<()> {
         return Ok(());
     }
     let prefix = match answer.status {
-        500 | 501..=599 => "Received a server error status code",
+        500..=599 => "Received a server error status code",
         429 => "Received a rate limit status code",
         413 => "Received a content too large status code",
         401 => "Received an authentication error status code",
