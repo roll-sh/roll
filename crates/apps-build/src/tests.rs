@@ -616,3 +616,25 @@ fn dir_tree_refuses_symlinks_and_escapes() {
         Err(Error::NothingDetected)
     ));
 }
+
+#[test]
+fn an_app_in_a_js_workspace_builds_from_the_repo_root() {
+    let files = [
+        ("package.json", r#"{"name":"acme","private":true,"packageManager":"pnpm@9.12.0"}"#),
+        ("pnpm-workspace.yaml", "packages:\n  - apps/*\n  - packages/*\n"),
+        ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+        ("apps/web/package.json", r#"{"name":"@acme/web","scripts":{"build":"next build","start":"next start"}}"#),
+        ("packages/ui/package.json", r#"{"name":"@acme/ui"}"#),
+    ];
+    let app = crate::workspace_app(&tree(&files), "apps/web").unwrap();
+    assert_eq!(app.build.as_deref(), Some("pnpm --filter @acme/web run build"));
+    assert_eq!(app.start.as_deref(), Some("cd apps/web && exec npm run start"));
+    // With those as the service's commands, the repo root plans as one Node build that installs
+    // the workspace (the whole tree, frozen) and starts in the app's directory.
+    let plan = plan(&tree(&files), &Overrides { build: app.build.clone(), start: app.start.clone(), ..Default::default() }).unwrap();
+    assert!(plan.dockerfile.contains("pnpm install --frozen-lockfile") && plan.dockerfile.contains("cd apps/web && exec npm run start"), "{}", plan.dockerfile);
+    // Not a workspace: nothing changes.
+    assert_eq!(crate::workspace_app(&tree(&[("apps/web/package.json", r#"{"name":"web"}"#)]), "apps/web"), None);
+    let npm = [("package.json", r#"{"workspaces":["apps/*"]}"#), ("package-lock.json", "{}"), ("apps/api/package.json", r#"{"name":"api","scripts":{"build":"tsc"}}"#)];
+    assert_eq!(crate::workspace_app(&tree(&npm), "apps/api").unwrap().build.as_deref(), Some("npm run build --workspace apps/api"));
+}

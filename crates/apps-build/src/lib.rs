@@ -24,6 +24,7 @@ mod version;
 use serde::{Deserialize, Serialize};
 
 pub use tree::{DirTree, MapTree, Tree};
+pub use node::{WorkspaceApp, workspace_app};
 
 /// The port a generated image listens on. The image sets `PORT` to it.
 pub const DEFAULT_PORT: u16 = 8080;

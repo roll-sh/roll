@@ -554,12 +554,12 @@ impl Apps {
             (Source::Upload, _) => anyhow::bail!("this service deploys uploads"),
             (Source::Image { .. }, _) => unreachable!("images aren't built"),
         };
-        let context: PathBuf = match &root {
+        let mut context: PathBuf = match &root {
             Some(r) => crate::model::in_tree(&tree, "the root directory", r, true)?,
             None => tree.clone(),
         };
         // roll.toml `[app]` in the root: config as code, over the service's settings.
-        let (build_cfg, mut run) = match crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))? {
+        let (mut build_cfg, mut run) = match crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))? {
             Some(app) => {
                 let (b, r, said) = app.apply(&svc.build, &svc.run, Some(&d.environment)).map_err(|e| anyhow::anyhow!("{e}"))?;
                 for l in said {
@@ -569,6 +569,24 @@ impl Apps {
             }
             None => (svc.build.clone(), svc.run.clone()),
         };
+        // A root directory inside a JS workspace builds from the repo's root (the lockfile and the
+        // workspace's packages are there), unless it brings its own Dockerfile.
+        if let Some(r) = &root
+            && build_cfg.builder == Builder::Auto
+            && std::fs::symlink_metadata(context.join("Dockerfile")).is_err()
+        {
+            let (t, r2) = (tree.clone(), r.clone());
+            if let Some(ws) = tokio::task::spawn_blocking(move || apps_build::workspace_app(&apps_build::DirTree::new(t), &r2)).await? {
+                log.line(format!("plan: {}", ws.note));
+                if build_cfg.build.is_none() {
+                    build_cfg.build = ws.build;
+                }
+                if build_cfg.start.is_none() && run.start.is_none() {
+                    build_cfg.start = ws.start;
+                }
+                context = tree.clone();
+            }
+        }
         // The variables the build's steps see: the environment's, as its instances will.
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;

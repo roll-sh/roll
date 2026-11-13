@@ -707,3 +707,49 @@ fn node_version(tree: &dyn Tree, pkg: &Value, notes: &mut Vec<String>) -> u32 {
     notes.push(format!("no Node version set: Node {}", DEFAULT.0));
     DEFAULT.0
 }
+
+/// An app in a JS workspace (`dir`, its root directory, in a pnpm, npm or yarn workspace at the
+/// tree's root): built from the whole repo, as Vercel and Railway build one, so the install sees
+/// the lockfile and the workspace's packages. The install is the root's (the workspace one); the
+/// build runs the app's own `build` script through the package manager's workspace command, and
+/// the start runs its `start` script in its directory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceApp {
+    pub build: Option<String>,
+    pub start: Option<String>,
+    pub note: String,
+}
+
+/// [`WorkspaceApp`] when `dir` is a package of a workspace at the tree's root.
+pub fn workspace_app(tree: &dyn Tree, dir: &str) -> Option<WorkspaceApp> {
+    let dir = dir.trim_matches('/');
+    if dir.is_empty() || !crate::tree::valid(dir) {
+        return None;
+    }
+    let root: Value = serde_json::from_slice(&tree.read("package.json")?).ok()?;
+    let pnpm = tree.exists("pnpm-workspace.yaml");
+    if !pnpm && root.get("workspaces").is_none() {
+        return None;
+    }
+    let app: Value = serde_json::from_slice(&tree.read(&format!("{dir}/package.json"))?).ok()?;
+    let name = app["name"].as_str().filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"@/._-".contains(&b)))?;
+    let declared = root["packageManager"].as_str().unwrap_or("");
+    let manager = if pnpm || declared.starts_with("pnpm@") || tree.exists("pnpm-lock.yaml") {
+        "pnpm"
+    } else if declared.starts_with("yarn@") || tree.exists("yarn.lock") {
+        "yarn"
+    } else {
+        "npm"
+    };
+    let has = |s: &str| app["scripts"].get(s).is_some();
+    let build = has("build").then(|| match manager {
+        "pnpm" => format!("pnpm --filter {name} run build"),
+        "yarn" => format!("yarn workspace {name} run build"),
+        _ => format!("npm run build --workspace {dir}"),
+    });
+    // npm runs any manager's scripts and ships in the image (no download at a cold start), but
+    // Yarn Berry's Plug'n'Play needs yarn itself.
+    let berry = manager == "yarn" && (tree.exists(".yarnrc.yml") || declared.starts_with("yarn@2") || declared.starts_with("yarn@3") || declared.starts_with("yarn@4"));
+    let start = has("start").then(|| format!("cd {dir} && exec {} run start", if berry { "yarn" } else { "npm" }));
+    Some(WorkspaceApp { build, start, note: format!("{dir} is the package {name} of a {manager} workspace: built from the repo's root, installed once there") })
+}

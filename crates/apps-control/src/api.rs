@@ -150,15 +150,27 @@ async fn plan(State(apps): S, b: Bytes) -> R {
             None => dir.clone(),
         };
         // What a build would use: roll.toml `[app]` over the settings sent, said in the notes.
-        let (build, said) = match crate::config::read(&root)? {
+        let (mut build, mut said) = match crate::config::read(&root)? {
             Some(app) => {
                 let (b, _, said) = app.apply(&overrides, &crate::model::Run::default(), None)?;
                 (b, said)
             }
             None => (overrides, Vec::new()),
         };
+        // As a build does: a root inside a JS workspace plans from the repo's root.
+        let mut context = root.clone();
+        if let Some(r) = v.get("root").and_then(Value::as_str)
+            && build.builder == crate::model::Builder::Auto
+            && std::fs::symlink_metadata(root.join("Dockerfile")).is_err()
+            && let Some(ws) = apps_build::workspace_app(&apps_build::DirTree::new(&dir), r)
+        {
+            said.push(ws.note);
+            build.build = build.build.or(ws.build);
+            build.start = build.start.or(ws.start);
+            context = dir.clone();
+        }
         let o = build.overrides();
-        let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(root), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
+        let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(context), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
         p.map(|mut p| {
             p.notes.splice(0..0, said);
             p

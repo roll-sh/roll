@@ -207,6 +207,17 @@ every deployment is immutable with instant rollback.
   tab is the same shell over HTTP sessions (a browser can't send the token on a WebSocket): the
   screen over SSE with its scrollback, keys and resizes as POSTs, at most 8 open per
   environment, closed on leaving the page or after 10 idle minutes.
+- **JS workspace monorepos**: a service whose root directory (`apps/web`) is a package of a
+  pnpm, npm or yarn workspace at the repo's root (`pnpm-workspace.yaml`, or `workspaces` in the
+  root `package.json`) builds with the whole repo as its context, as Vercel and Railway build
+  one: the install is the workspace's, once at the root (the lockfile and `packages/*` are
+  there), the build runs the app's `build` script through the manager's workspace command
+  (`pnpm --filter <name> run build`, `yarn workspace <name> run build`,
+  `npm run build --workspace <dir>`), and the start runs its `start` script in its directory
+  (`cd apps/web && exec npm run start`: npm ships in the image, so nothing downloads at a cold
+  start; Yarn Berry's Plug'n'Play uses yarn). A command set in the service or `roll.toml` wins,
+  and a root with its own Dockerfile keeps the root as its context. The plan (`POST
+  /v1/apps/plan`) says so in its notes.
 - **Watch paths** (monorepos; `build.watch`, `[app] watch`, the settings page): a push deploys a
   repo service only when a path that differs between what the environment runs and the pushed
   commit matches one of its patterns (gitignore-style from the repo's root, roll code's
@@ -705,20 +716,26 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+1. **Variables**: paste `.env` text in the Variables tab (New service has it), and copy an
+   environment's variables into another after it exists.
+2. **Tests for flows with none**: scaling out under load (`max_instances`), a newer push
+   superseding a queued deploy, a Postgres link's variables reaching an instance.
+3. **GitHub in New service**: say why the repo picker is missing when no GitHub App is set up,
+   and pick a branch.
+4. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-2. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-3. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-5. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+8. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-6. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+9. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-7. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
+10. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
