@@ -690,8 +690,10 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Dashboard costs**: pause polling while the tab is hidden; the service page from the event
-   log instead of three requests every 15 s.
+1. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+   the service page from the event log (SSE after a cursor) instead of three requests every
+   15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
+   variable on each read (with roll secrets, `Secrets::digest`).
 2. **Config as code**: `[app]` in `roll.toml` covering run settings (type, size, instances,
    schedule) and per-environment blocks, with an end-to-end test.
 3. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus

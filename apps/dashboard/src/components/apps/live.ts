@@ -8,6 +8,20 @@ import { useMarkState } from "../mark-state";
 export const POLL_BUSY_MS = 3000;
 export const POLL_IDLE_MS = 15000;
 
+/**
+ * Whether the page is visible. Polling waits while it's hidden (a background tab costs rolld
+ * nothing) and looks again as soon as it's back.
+ */
+export function usePageVisible(): boolean {
+  const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState !== "hidden");
+  useEffect(() => {
+    const on = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  return visible;
+}
+
 export const anyPending = (list: Pick<Service, "environments">[]) => list.some((s) => s.environments.some((e) => e.latest && isPending(e.latest.status)));
 
 /**
@@ -47,8 +61,9 @@ export function useDeployMark(services: Pick<Service, "id" | "environments">[] |
 export function useProjectServices(project: string, on: boolean) {
   const [services, setServices] = useState<Service[] | null>(null);
   const [poke, setPoke] = useState(0);
+  const visible = usePageVisible();
   useEffect(() => {
-    if (!on) return;
+    if (!on || !visible) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const loop = async () => {
@@ -69,7 +84,7 @@ export function useProjectServices(project: string, on: boolean) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [project, on, poke]);
+  }, [project, on, poke, visible]);
   useDeployMark(services);
   /** `refresh` looks again now (after making a service), then keeps polling. */
   return { services, refresh: () => setPoke((n) => n + 1) };

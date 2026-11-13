@@ -2,6 +2,7 @@ import { Play, Square, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { appsApi, followLog, runStatus, type CronRun, type Job, type LogLine } from "@/lib/apps-api";
 import { btn, EmptyPanel, input, Panel, primary } from "../ui";
+import { usePageVisible } from "./live";
 import { clock, LogView, message, type Runner } from "./shared";
 
 const MAX_LINES = 5000;
@@ -48,11 +49,12 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
 
   // While one runs, its status is polled; its output streams below.
   const running = jobs?.some((j) => j.status === "running") ?? false;
+  const visible = usePageVisible();
   useEffect(() => {
-    if (!running) return;
+    if (!running || !visible) return;
     const t = setInterval(() => void load(), 1500);
     return () => clearInterval(t);
-  }, [running, load]);
+  }, [running, load, visible]);
 
   useEffect(() => {
     if (!selected) return;
@@ -177,7 +179,9 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
 /** A cron service's recent runs: when, how it ended, how long it took. */
 function ScheduledRuns({ service, env }: { service: string; env: string }) {
   const [runs, setRuns] = useState<CronRun[] | null>(null);
+  const visible = usePageVisible();
   useEffect(() => {
+    if (!visible) return;
     let live = true;
     const load = () => appsApi.runs(service, env).then((r) => live && setRuns(r)).catch(() => {});
     void load();
@@ -186,7 +190,7 @@ function ScheduledRuns({ service, env }: { service: string; env: string }) {
       live = false;
       clearInterval(t);
     };
-  }, [service, env]);
+  }, [service, env, visible]);
   return (
     <Panel title="Scheduled runs">
       {!runs?.length ? (

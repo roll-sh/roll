@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from "react";
 import { appsApi, formatMs, type Metrics as MetricsData } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, panel } from "../ui";
+import { usePageVisible } from "./live";
 import { clock, message } from "./shared";
 
 const W = 300;
@@ -102,7 +103,9 @@ export function MetricsTab({ service, env }: { service: string; env: string }) {
   const [error, setError] = useState<string | null>(null);
   const [table, setTable] = useState(false);
 
+  const visible = usePageVisible();
   useEffect(() => {
+    if (!visible) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
@@ -122,7 +125,7 @@ export function MetricsTab({ service, env }: { service: string; env: string }) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [service, env]);
+  }, [service, env, visible]);
 
   const ink = "var(--soft)";
   const charts = useMemo(() => {

@@ -22,7 +22,7 @@ import { Deployments } from "./deployments";
 import { DomainsTab } from "./domains";
 import { JobsTab } from "./jobs";
 import { ShellTab } from "./shell";
-import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, useDeployMark } from "./live";
+import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, useDeployMark, usePageVisible } from "./live";
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
@@ -56,6 +56,7 @@ function useService(id: string, envName: string | undefined) {
   const [data, setData] = useState<Loaded | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "missing" | "offline">("loading");
   const [poke, setPoke] = useState(0);
+  const visible = usePageVisible();
 
   const load = useCallback(async (): Promise<Loaded | null> => {
     try {
@@ -77,6 +78,7 @@ function useService(id: string, envName: string | undefined) {
   }, [id, envName]);
 
   useEffect(() => {
+    if (!visible) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const loop = async () => {
@@ -90,7 +92,7 @@ function useService(id: string, envName: string | undefined) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [load, poke]);
+  }, [load, poke, visible]);
 
   return { data, state, refresh: () => setPoke((n) => n + 1) };
 }

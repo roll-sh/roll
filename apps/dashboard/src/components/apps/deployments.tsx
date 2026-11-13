@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { appsApi, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
+import { usePageVisible } from "./live";
 import { clock, DeployBadge, LogView, since, type Runner } from "./shared";
 
 const MAX_LINES = 5000;
@@ -136,16 +137,17 @@ export function Deployments({
 function useSteps(service: string, env: string, d: Deployment) {
   const [full, setFull] = useState<Deployment | null>(null);
   const pending = isPending(d.status);
+  const visible = usePageVisible();
   useEffect(() => {
     let live = true;
     const load = () => appsApi.deployment(service, env, d.id).then((x) => live && setFull(x), () => {});
     void load();
-    const t = pending ? setInterval(load, 1500) : undefined;
+    const t = pending && visible ? setInterval(load, 1500) : undefined;
     return () => {
       live = false;
       if (t) clearInterval(t);
     };
-  }, [service, env, d.id, pending]);
+  }, [service, env, d.id, pending, visible]);
   return full ? stepDurations(full) : [];
 }
 
