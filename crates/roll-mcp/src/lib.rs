@@ -14,6 +14,8 @@
 //! - Without a token on a daemon that needs one: 401 with `WWW-Authenticate` naming the protected
 //!   resource metadata, so clients start the OAuth flow (`roll_access::oauth`).
 //! - Requests from a browser (`Origin`) must come from the dashboard or the API (DNS rebinding).
+//! - Toolsets: `/v1/mcp?toolsets=postgres,code` (or `X-MCP-Toolsets`) lists only those products'
+//!   tools, as GitHub's server does: every product's tools are ~35k tokens of an agent's context.
 
 pub mod resources;
 pub mod tools;
@@ -132,10 +134,26 @@ fn unauthorized(c: &Config) -> Response {
 /// the token's rate limit).
 const MAX_BATCH: usize = 100;
 
-async fn handle(State(m): State<Mcp>, ext: Extensions, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+/// The products a connection asked to see tools for (`?toolsets=` or `X-MCP-Toolsets`, comma
+/// separated; `None`: all). The access tools (approvals, `access_check`) are always listed.
+fn toolsets(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<Option<Vec<String>>, String> {
+    let from_query = uri.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "toolsets").map(|(_, v)| v.into_owned()));
+    let Some(list) = from_query.or_else(|| headers.get("x-mcp-toolsets").and_then(|v| v.to_str().ok()).map(str::to_string)) else { return Ok(None) };
+    let names: Vec<String> = list.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty() && s != "all").collect();
+    if let Some(bad) = names.iter().find(|n| !roll_auth::scope::PRODUCTS.contains(&n.as_str())) {
+        return Err(format!("unknown toolset {bad:?}: one of {}", roll_auth::scope::PRODUCTS.join(", ")));
+    }
+    Ok((!names.is_empty()).then_some(names))
+}
+
+async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     if !origin_ok(&m.config, &headers) {
         return http_error(StatusCode::FORBIDDEN, "Origin not allowed");
     }
+    let toolsets = match toolsets(&uri, &headers) {
+        Ok(t) => t,
+        Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
+    };
     let principal = match roll_auth::Grant::on(&ext) {
         Some(g) => Principal::Grant(g.clone()),
         None if roll_auth::Operator::on(&ext) || !m.config.locked => Principal::Operator,
@@ -175,7 +193,7 @@ async fn handle(State(m): State<Mcp>, ext: Extensions, headers: HeaderMap, body:
     // session id it was given.
     let declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| m["params"]["capabilities"]["elicitation"].get("url").is_some());
     let url_elicitation = declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with(SESSION_URL)));
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, toolsets });
     let mut resp = if wants_sse(&ctx.headers) {
         let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {
             futures::stream::iter(responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))))
@@ -207,12 +225,15 @@ struct Ctx {
     as_user: bool,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
+    /// The products whose tools are listed (`None`: every product's).
+    toolsets: Option<Vec<String>>,
 }
 
 impl Ctx {
-    /// Whether the caller might use a tool for this product and these actions at all.
+    /// Whether the caller might use a tool for this product and these actions at all, and asked
+    /// for its toolset.
     fn may(&self, product: &str, actions: &[Action]) -> bool {
-        let on = product == "access" || product == "workspace" || self.m.config.products.iter().any(|p| p == product);
+        let on = self.asked(product) && (product == "access" || product == "workspace" || self.m.config.products.iter().any(|p| p == product));
         let reached = !self.as_user || product == "access" || roll_access::USER_REACH.contains(&product);
         on && reached && match &self.principal {
             Principal::Operator => true,
@@ -221,9 +242,14 @@ impl Ctx {
         }
     }
 
+    /// Whether the connection asked for this product's toolset (the access tools always).
+    fn asked(&self, product: &str) -> bool {
+        product == "access" || self.toolsets.as_ref().is_none_or(|t| t.iter().any(|p| p == product))
+    }
+
     fn usable(&self, t: &tools::Tool) -> bool {
         if t.open() {
-            return true;
+            return self.asked(t.product);
         }
         self.may(t.product, &t.actions())
     }

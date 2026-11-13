@@ -432,6 +432,14 @@ export const CLIENT_NAMES: Record<McpClient, string> = {
 export const mcpUrl = (api: string = ROLL_API) => `${api.replace(/\/+$/, "")}/v1/mcp`;
 
 /** How to connect a client: OAuth by default (no secret in the config), a bearer token with one. */
+/** The MCP URL listing only these products' tools (`?toolsets=`); none: every product's. */
+export function withToolsets(url: string, products: string[]): string {
+  if (products.length === 0) return url;
+  const u = new URL(url);
+  u.searchParams.set("toolsets", [...products].sort().join(","));
+  return u.toString().replace(/%2C/g, ",");
+}
+
 export function mcpConfig(client: McpClient, url: string, token?: string): { lang: "sh" | "json" | "toml" | "text"; text: string } {
   const header = token ? `Bearer ${token}` : undefined;
   const server = (wrap: "mcpServers" | "servers", typed: boolean) => {
