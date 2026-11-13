@@ -30,6 +30,7 @@ pub mod logstash;
 pub mod migration;
 pub mod misc;
 pub mod ml;
+pub mod rollup;
 pub mod mvt;
 pub mod searchable_snapshots;
 pub mod security;
@@ -66,6 +67,8 @@ pub struct Runtime {
     pub esql_telemetry: esql::telemetry::Telemetry,
     /// Transforms running a trigger right now.
     pub transforms: transform::Runs,
+    /// Rollup jobs running a trigger right now.
+    pub rollups: rollup::Runs,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.
@@ -330,6 +333,15 @@ handlers! { ctx;
     TransformUpgradeTransforms => transform::upgrade(ctx),
     TransformSetUpgradeMode => transform::set_upgrade_mode(ctx),
     CatTransforms => transform::cat(ctx),
+
+    RollupPutJob => rollup::put(ctx).await,
+    RollupGetJobs => rollup::get(ctx),
+    RollupStartJob => rollup::start(ctx).await,
+    RollupStopJob => rollup::stop(ctx).await,
+    RollupDeleteJob => rollup::delete(ctx).await,
+    RollupGetRollupCaps => rollup::caps(ctx),
+    RollupGetRollupIndexCaps => rollup::index_caps(ctx),
+    RollupRollupSearch => rollup::rollup_search(ctx).await,
 
     EnrichPutPolicy => enrich::put_policy(ctx).await,
     EnrichGetPolicy => enrich::get_policy(ctx),

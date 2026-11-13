@@ -952,6 +952,7 @@ const MODULES: &[Module] = &[
     Module { name: "x-pack-migrate", description: "Elasticsearch Expanded Pack Plugin - Index and Data Stream Migration", classname: "org.elasticsearch.xpack.migrate.MigratePlugin", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-ml", description: "Elasticsearch Expanded Pack Plugin - Machine Learning", classname: "org.elasticsearch.xpack.ml.MachineLearning", extended_plugins: &["x-pack-autoscaling", "lang-painless"] },
     Module { name: "x-pack-ql", description: "Elasticsearch infrastructure plugin for EQL and SQL for Elasticsearch", classname: "org.elasticsearch.xpack.ql.plugin.QlPlugin", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-rollup", description: "Elasticsearch Expanded Pack Plugin - Rollup", classname: "org.elasticsearch.xpack.rollup.Rollup", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-security", description: "Elasticsearch Expanded Pack Plugin - Security", classname: "org.elasticsearch.xpack.security.Security", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-sql", description: "The Elasticsearch plugin that powers SQL for Elasticsearch", classname: "org.elasticsearch.xpack.sql.plugin.SqlPlugin", extended_plugins: &["x-pack-ql", "lang-painless"] },
     Module { name: "x-pack-text-structure", description: "Elasticsearch Expanded Pack Plugin - Text Structure", classname: "org.elasticsearch.xpack.textstructure.TextStructurePlugin", extended_plugins: &["x-pack-core"] },

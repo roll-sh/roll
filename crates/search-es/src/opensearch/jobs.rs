@@ -1,6 +1,7 @@
 //! The job scheduler of one cluster: runs what is due in the background — OpenSearch's Index
 //! State Management jobs ([`super::ism_run`]), the triggers of started x-pack transforms
-//! ([`crate::xpack::transform`]) and of active watches ([`crate::xpack::watcher`]).
+//! ([`crate::xpack::transform`]), of active watches ([`crate::xpack::watcher`]) and of started
+//! rollup jobs ([`crate::xpack::rollup`]).
 //!
 //! One task per cluster, started when the cluster may run background work
 //! ([`Cluster::enable_background_tasks`]) and has a job. It sleeps until the earliest due
@@ -94,6 +95,7 @@ impl Jobs {
                 super::ism_run::run_due(&c, now).await;
                 crate::xpack::transform::run_due(&c, now).await;
                 crate::xpack::watcher::run_due(&c, now).await;
+                crate::xpack::rollup::run_due(&c, now).await;
                 shared.running.fetch_sub(1, Ordering::SeqCst);
                 // A run whose writes failed (a store refusing) leaves its jobs due: retry them
                 // a little later instead of spinning.
@@ -119,7 +121,7 @@ impl Jobs {
 /// The earliest due time of any job (Unix ms): what the host records when the cluster unloads,
 /// to wake it then.
 pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
-    [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st)].into_iter().flatten().min()
+    [super::ism_run::next_due(st), crate::xpack::transform::next_due(st), crate::xpack::watcher::next_due(st), crate::xpack::rollup::next_due(st)].into_iter().flatten().min()
 }
 
 #[cfg(test)]
