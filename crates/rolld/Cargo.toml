@@ -89,6 +89,7 @@ zeroize.workspace = true
 aws-config.workspace = true
 aws-sdk-kms.workspace = true
 aws-sdk-sts.workspace = true
+aws-sdk-iam.workspace = true
 # Only for the fleet end-to-end test (`--features fleet-e2e`), which drives Kafka with librdkafka:
 # Cargo has no optional dev-dependencies, and building librdkafka for every rolld test run costs
 # minutes.
