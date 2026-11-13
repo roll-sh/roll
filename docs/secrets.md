@@ -1581,20 +1581,27 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Reviewed again on 2026-11-13 (night): the core and the stacked pull requests are level with
+Reviewed again on 2026-11-13 (late): #39's own review found two ways a rotation could reset the
+role in use (a refused `ALTER ROLE`, two environments sharing the pair); both fixed and tested.
+The other threads' heads need nothing from roll secrets (MCP lists outside databases; previews
+waits on #31). Earlier, on 2026-11-13 (night): the core and the stacked pull requests are level with
 Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). The gap that's left
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **MySQL outside roll**, next to #39's Postgres: the same two roles taking turns, `ALTER USER …
-   IDENTIFIED BY` over TLS through the same guarded connection.
-2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+1. **Dynamic credentials for Postgres outside roll** (on #39), Vault's database engine: a lease
+   gets its own role (`CREATE ROLE … LOGIN PASSWORD <SCRAM verifier> VALID UNTIL … IN ROLE
+   <group>`), renewing moves `VALID UNTIL`, and ending the lease drops the role, through the same
+   guarded connection. The group role carries the grants, so nothing per lease is granted by hand.
+2. **MySQL outside roll**, next to Postgres: the same two roles taking turns and per-lease users,
+   `ALTER USER … IDENTIFIED BY` over TLS through the same guarded connection.
+3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-3. **Products say who owns a resource**, so a person's project can link their own databases,
+4. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-4. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
