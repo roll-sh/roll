@@ -10,13 +10,16 @@
 # Prints the measurements as markdown. Needs Docker (the service container is roll-previews-*).
 #
 #   scripts/preview-cost.sh [--keep]     # --keep: leave the daemon running at the end
+#   STOP_BEFORE_LAND=1 scripts/preview-cost.sh --keep   # and the preview with it (to look at it)
 set -euo pipefail
+# The ports: <P>070 for the API and so on (27 unless PREVIEW_E2E_PORTS says another two digits).
+P=${PREVIEW_E2E_PORTS:-27}
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BIN=${ROLLD:-$ROOT/target/debug/rolld}
 HOME_DIR=${PREVIEW_E2E_HOME:-$HOME/.cache/roll-previews-e2e}
 KEEP=${1:-}
-API=127.0.0.1:27070
+API=127.0.0.1:${P}070
 DOMAIN=preview.localhost
 IMAGE=${PREVIEW_IMAGE:-python:3.13-alpine}
 
@@ -45,11 +48,11 @@ trap cleanup EXIT
 # Other daemons share this host: never talk to one of theirs.
 if curl -s -o /dev/null --max-time 1 "http://$API/v1/info"; then echo "something already answers on $API: stop it first" >&2; exit 1; fi
 rm -rf "$HOME_DIR" && mkdir -p "$HOME_DIR"
-export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:27432 ROLL_REDIS=127.0.0.1:27380 ROLL_REDIS_HTTP=127.0.0.1:27081 \
-  ROLL_KAFKA=127.0.0.1:27092 ROLL_S3=127.0.0.1:27900 ROLL_STORAGE_API=127.0.0.1:27901 \
-  ROLL_QUEUES_AMQP=127.0.0.1:27672 ROLL_QUEUES_MANAGEMENT=127.0.0.1:27673 ROLL_QUEUES_STOMP=127.0.0.1:27613 ROLL_QUEUES_WEB_STOMP=127.0.0.1:27674 \
-  ROLL_QUEUES_MQTT=127.0.0.1:27883 ROLL_QUEUES_WEB_MQTT=127.0.0.1:27675 ROLL_QUEUES_STREAM=127.0.0.1:27552 ROLL_QUEUES_HTTP=127.0.0.1:27680 \
-  ROLL_NOSQL_CQL=127.0.0.1:27042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:27043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:27000 ROLL_NOSQL_REST=127.0.0.1:27100 \
+export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS=127.0.0.1:${P}380 ROLL_REDIS_HTTP=127.0.0.1:${P}081 \
+  ROLL_KAFKA=127.0.0.1:${P}092 ROLL_S3=127.0.0.1:${P}900 ROLL_STORAGE_API=127.0.0.1:${P}901 \
+  ROLL_QUEUES_AMQP=127.0.0.1:${P}672 ROLL_QUEUES_MANAGEMENT=127.0.0.1:${P}673 ROLL_QUEUES_STOMP=127.0.0.1:${P}613 ROLL_QUEUES_WEB_STOMP=127.0.0.1:${P}674 \
+  ROLL_QUEUES_MQTT=127.0.0.1:${P}883 ROLL_QUEUES_WEB_MQTT=127.0.0.1:${P}675 ROLL_QUEUES_STREAM=127.0.0.1:${P}552 ROLL_QUEUES_HTTP=127.0.0.1:${P}680 \
+  ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
   ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
 say "starting rolld ($ROLL_PRODUCTS) in $HOME_DIR"
@@ -82,7 +85,7 @@ api POST /_roll/tenants '{"id":"work"}' >/dev/null
 # Data in the parents, so the branches have something to share: 20 MiB of objects, 20,000 keys.
 KEY=$(api POST /v1/storage/keys '{"name":"e2e","permission":"admin"}')
 export AWS_ACCESS_KEY_ID=$(echo "$KEY" | jq_ "d['id']") AWS_SECRET_ACCESS_KEY=$(echo "$KEY" | jq_ "d['secret_access_key']") AWS_DEFAULT_REGION=us-east-1
-S3="aws --endpoint-url http://127.0.0.1:27900 s3"
+S3="aws --endpoint-url http://127.0.0.1:${P}900 s3"
 mkdir -p "$HOME_DIR/blobs" && for i in $(seq 1 20); do head -c 1048576 /dev/urandom >"$HOME_DIR/blobs/$i.bin"; done
 $S3 cp --quiet --recursive "$HOME_DIR/blobs" s3://assets/blobs/
 REDIS_URL=$(api GET "/v1/redis/databases/$REDIS" | jq_ "d['redis_url']")
@@ -248,6 +251,10 @@ if [ -n "$PG_BRANCH" ]; then
   say "$SCHEMA"
 fi
 
+if [ -n "${STOP_BEFORE_LAND:-}" ]; then
+  echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
+  exit 0
+fi
 say "land the change: the preview and its branches go, the parents stay"
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
 for _ in $(seq 1 120); do

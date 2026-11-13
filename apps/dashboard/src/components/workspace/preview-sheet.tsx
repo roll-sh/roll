@@ -40,6 +40,7 @@ type Act = <T>(fn: () => Promise<T>) => Promise<T>;
 export function PreviewSheet({
   preview: p,
   names,
+  masked,
   act,
   onChange,
   onClose,
@@ -47,6 +48,8 @@ export function PreviewSheet({
   preview: Preview;
   /** A parent resource's name on the canvas, by `"<kind>:<ref>"`. */
   names: Map<string, string>;
+  /** How many columns the project's rules mask, by `"<kind>:<ref>"`. */
+  masked?: Map<string, number>;
   act: Act;
   onChange: (p: Preview) => void;
   onClose: () => void;
@@ -159,6 +162,7 @@ export function PreviewSheet({
                         </div>
                         <div className="mt-0.5 font-mono text-[10.5px] text-subtle">
                           {KIND_NAME[r.kind]} · {r.mode === "schema" ? "schema only" : "branch"} · {formatBytes(r.bytes)}
+                          {masked?.get(id) ? ` · masked (${masked.get(id)})` : ""}
                         </div>
                         {r.error && <p className="mt-0.5 text-[11px] break-words text-danger">{r.error}</p>}
                       </div>
@@ -184,7 +188,7 @@ export function PreviewSheet({
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
                 <Label>Schema changes</Label>
-                <pre className="max-h-48 overflow-auto rounded-lg border border-line-2 bg-raised px-2.5 py-1.5 font-mono text-[11px] leading-relaxed inset-shadow-highlight">
+                <pre className="max-h-48 overflow-auto rounded-lg border border-line-2 bg-raised px-2.5 py-1.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] inset-shadow-highlight">
                   {p.schema_changes.map((l, i) => (
                     <div key={i} className={l.startsWith("- ") ? "text-danger" : l.startsWith("+ ") ? "text-fg" : "text-subtle"}>
                       {l}
@@ -356,7 +360,9 @@ function Screenshot({ id, at }: { id: string; at: number }) {
   return (
     <>
       <Label>Screenshot</Label>
-      <img src={src} alt="The first service's page" className="w-full rounded-lg border border-line-2" />
+      <a href={src} target="_blank" rel="noreferrer" title="Open it full size">
+        <img src={src} alt="The first service's page" className="max-h-56 w-full rounded-lg border border-line-2 object-cover object-top" />
+      </a>
     </>
   );
 }

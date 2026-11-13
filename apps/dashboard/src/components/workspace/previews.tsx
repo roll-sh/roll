@@ -1,6 +1,6 @@
 import { ExternalLink, GitBranch, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { openUrl, previewsApi, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
+import { openUrl, previewsApi, screenshotUrl, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { Inspector } from "./inspector";
@@ -151,7 +151,17 @@ export function ProjectPreviews({
       </div>
 
       <Inspector open={!!opened} onClose={() => setOpenId(null)}>
-        {opened && <PreviewSheet key={opened.id} preview={opened} names={names} act={act} onChange={put} onClose={() => setOpenId(null)} />}
+        {opened && (
+          <PreviewSheet
+            key={opened.id}
+            preview={opened}
+            names={names}
+            masked={new Map(Object.entries(settings?.masking ?? {}).map(([k, cols]) => [k, Object.keys(cols).length]))}
+            act={act}
+            onChange={put}
+            onClose={() => setOpenId(null)}
+          />
+        )}
       </Inspector>
 
       <PreviewSettingsDialog
@@ -182,8 +192,9 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
           {what && <span className="shrink-0 font-mono text-[11px] text-muted">{what}</span>}
           <span className="min-w-0 truncate font-mono text-[11px] text-subtle max-sm:hidden">{p.repo}</span>
           <span className="ml-auto shrink-0 text-[11px] text-subtle" title={new Date(p.last_active_at).toLocaleString()}>
-            {p.state === "failed" || p.state === "awaiting_approval" || p.state === "queued" ? STATE_LABEL[p.state] : since(p.last_active_at)}
+            {p.state === "ready" || p.state === "sleeping" ? `${STATE_LABEL[p.state]} · ${since(p.last_active_at)}` : STATE_LABEL[p.state]}
           </span>
+          {p.screenshot_at ? <Thumb id={p.id} at={p.screenshot_at} /> : null}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-3.5">
           {p.services.map((s) => (
@@ -209,6 +220,29 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
       </div>
     </li>
   );
+}
+
+/** The first service's page, small, beside the row (the preview's screenshot). */
+function Thumb({ id, at }: { id: string; at: number }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let url: string | null = null;
+    let live = true;
+    screenshotUrl(id).then(
+      (u) => {
+        url = u;
+        if (live) setSrc(u);
+        else URL.revokeObjectURL(u);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [id, at]);
+  if (!src) return null;
+  return <img src={src} alt="" className="h-9 w-14 shrink-0 rounded border border-line-2 object-cover object-top max-sm:hidden" />;
 }
 
 function Empty({ repos, onBranch }: { repos: string[]; onBranch: () => void }) {

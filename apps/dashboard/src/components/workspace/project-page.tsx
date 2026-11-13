@@ -64,6 +64,10 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
   const live = agents ? threadsOf(agents, repos).filter((t) => t.status !== "idle").length : 0;
   // Open while the project has a repository its agents can work in; the toggle decides after that.
   const [agentsOpen, setAgentsOpen] = useState(repos.size > 0);
+  // On a phone the panel covers the page instead of sitting beside it: closed until asked for.
+  useEffect(() => {
+    if (!window.matchMedia("(min-width: 768px)").matches) setAgentsOpen(false);
+  }, []);
   const [overlay, setOverlay] = useState(false);
   const canvas = tab === "canvas";
 

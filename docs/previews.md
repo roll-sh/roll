@@ -711,6 +711,10 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- a look at the Previews tab and sheet from screenshots of the real thing (each row says its state
+  and shows its screenshot, the sheet's schema changes wrap, masked branches say so, the
+  screenshot is a thumbnail that opens full size, and on a phone the project's agents panel
+  starts closed instead of covering the page);
 - branch roles in pg-control (`app_role`, `app_connection_uri`, kept across in-place resets) with
   its e2e test, which previews use;
 - a fifth adversarial review and its fixes (the superuser never runs what a preview's code
@@ -725,12 +729,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A look at the Previews tab and sheet as they are now** (schema changes, logs, keep,
-   screenshots and masking were added one by one): a pass for density, order and empty states,
-   from screenshots of the real thing.
-2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+1. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
