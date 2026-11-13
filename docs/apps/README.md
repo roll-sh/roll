@@ -1237,7 +1237,8 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
     when they want secrets there.
   - Done on apps' side: `GET …/variables/values` asks `SecretSource::may_reveal(who, project,
     env)` (false by default) when any value comes from roll secrets, and answers 403 naming them
-    if not; secrets' `ForApps` answers it by its own rules (`Caller::allows(Reveal, …)`, protected
+    if not; so does reading a job's output (`…/jobs/{job}/logs`: a job can print them). A shell
+    is `admin` and reaches them by design; secrets' `ForApps` answers it by its own rules (`Caller::allows(Reveal, …)`, protected
     environments, a token's scope).
   - Seal with secrets' `Keyring` (`ROLL_SECRET_KEY_PREVIOUS`, `ROLL_SECRET_KEY_KMS`), not
     `ROLL_SECRET_KEY` alone, so a key rotation by secrets' guide keeps apps' sealed variables,

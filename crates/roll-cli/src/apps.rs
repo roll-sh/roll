@@ -710,13 +710,22 @@ async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, 
     let (mut tx, mut rx) = ws.split();
     let (mut rd, mut wr) = conn.into_split();
     let mut buf = vec![0u8; 64 << 10];
-    loop {
+    // An empty message ends a direction (a half-close); the tunnel ends when both have.
+    let (mut from_local, mut from_service) = (true, true);
+    while from_local || from_service {
         tokio::select! {
-            n = rd.read(&mut buf) => match n? {
-                0 => break,
+            n = rd.read(&mut buf), if from_local => match n? {
+                0 => {
+                    tx.send(Message::Binary(Vec::new().into())).await?;
+                    from_local = false;
+                }
                 n => tx.send(Message::Binary(buf[..n].to_vec().into())).await?,
             },
-            m = rx.next() => match m {
+            m = rx.next(), if from_service => match m {
+                Some(Ok(Message::Binary(b))) if b.is_empty() => {
+                    wr.shutdown().await?;
+                    from_service = false;
+                }
                 Some(Ok(Message::Binary(b))) => wr.write_all(&b).await?,
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => {}

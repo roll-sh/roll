@@ -15,6 +15,14 @@ pub const MAX_REDIRECTS: usize = 2000;
 pub const MAX_HEADER_RULES: usize = 100;
 pub const MAX_FILE: u64 = 64 << 10;
 
+/// The longest a rule's `to` may grow to once its placeholders are filled in.
+const MAX_TARGET: usize = 4096;
+
+/// What a placeholder's value may hold as it is: the rest is percent-encoded, so a request's
+/// path can't turn a redirect into another host's (`\evil.com`, `//evil.com`) or add a query.
+const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
+const SPLAT: &percent_encoding::AsciiSet = &SEGMENT.remove(b'/');
+
 /// Headers a site may not set: the response's framing is roll's.
 const RESERVED: [&str; 8] = ["content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer", "proxy-connection"];
 
@@ -164,7 +172,15 @@ impl SiteRules {
             bound.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
             let mut to = r.to.clone();
             for (name, value) in &bound {
-                to = to.replace(&format!(":{name}"), value);
+                let set = if name == "splat" { SPLAT } else { SEGMENT };
+                to = to.replace(&format!(":{name}"), &percent_encoding::utf8_percent_encode(value, set).to_string());
+                if to.len() > MAX_TARGET {
+                    return None;
+                }
+            }
+            // Still on this site where the rule said so: never `//host`.
+            if r.to.starts_with('/') && (to.starts_with("//") || to.starts_with("/\\")) {
+                return None;
             }
             return Some(match r.status {
                 200 | 404 => Outcome::Serve(r.status, to),
@@ -212,6 +228,11 @@ mod tests {
         assert_eq!(r.redirect("/bad", None, false), None, "an unknown status is skipped");
         assert_eq!(r.redirect("/ext", None, false), None, "a rewrite stays on the site");
         assert_eq!(r.redirect("/blog/2026", None, false), None);
+        // A path can't send the visitor to another host, or add a query.
+        let open = SiteRules::parse(Some("/go/* /:splat 301\n/u/:name /:name 302\n"), None);
+        assert_eq!(open.redirect("/go/\\evil.com", None, false), Some(Outcome::Redirect(301, "/%5Cevil.com".into())));
+        assert_eq!(open.redirect("/u/a?b=1#x", None, false), Some(Outcome::Redirect(302, "/a%3Fb%3D1%23x".into())));
+        assert_eq!(open.redirect("/go/a/b", None, false), Some(Outcome::Redirect(301, "/a/b".into())));
     }
 
     #[test]

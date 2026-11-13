@@ -879,8 +879,10 @@ async fn cancel_job(State(apps): S, Path((id, env, job)): Path<(String, String, 
 }
 
 /// A job's output; `follow` streams it until the job ends.
-async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, String)>, Query(q): Query<LogQuery>) -> R {
+async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, String)>, Query(q): Query<LogQuery>, ext: Extensions) -> R {
     let j = apps.job(&id, &env, &job).await?;
+    let who = crate::integrations::Asker { operator: roll_auth::Operator::on(&ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(&ext) };
+    apps.check_secret_reveal(&id, &env, who).await?;
     let (tx, rx) = tokio::sync::watch::channel(j.status != crate::model::RunStatus::Running);
     if j.status == crate::model::RunStatus::Running {
         let (apps2, id2, env2, job2) = (apps.clone(), id.clone(), env.clone(), job.clone());

@@ -37,9 +37,10 @@ fn rules(tar: &std::path::Path, files: &HashMap<String, (u64, u64)>) -> std::io:
         let Some(&(off, len)) = files.get(name).filter(|(_, len)| *len <= crate::site_rules::MAX_FILE) else { return Ok(None) };
         let mut f = std::fs::File::open(tar)?;
         f.seek(std::io::SeekFrom::Start(off))?;
-        let mut s = String::new();
-        f.take(len).read_to_string(&mut s)?;
-        Ok(Some(s))
+        let mut b = Vec::new();
+        f.take(len).read_to_end(&mut b)?;
+        // A line that isn't UTF-8 is skipped, not the site.
+        Ok(Some(String::from_utf8_lossy(&b).into_owned()))
     };
     Ok(crate::site_rules::SiteRules::parse(read("_redirects")?.as_deref(), read("_headers")?.as_deref()))
 }

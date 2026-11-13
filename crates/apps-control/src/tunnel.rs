@@ -1,8 +1,9 @@
 //! `GET …/environments/{env}/tunnel` (a WebSocket): the bytes of one TCP connection to a web
 //! service's port, so `roll apps proxy` reaches a private service from a person's own machine
 //! (Fly's `fly proxy`). It wakes an instance and holds it awake (a lease, as a request does) for
-//! as long as the tunnel is open; binary messages are the connection's bytes both ways, and
-//! either side closing ends it. Only the service's own port, never another address.
+//! as long as the tunnel is open; binary messages are the connection's bytes both ways, an
+//! empty one the end of a direction (TCP's half-close: a request sent, its answer still to
+//! come), and the tunnel closes once both have ended. Only the service's own port.
 
 use crate::live::Lease;
 use crate::{Apps, Error, Result};
@@ -41,6 +42,7 @@ impl Apps {
         if tpl.run.kind != crate::model::RunType::Web || tpl.site.is_some() {
             return Err(Error::Conflict("only a web service that runs an instance has a port to reach".into()));
         }
+        live.may_wake().map_err(|e| Error::Conflict(format!("the service can't wake: {e}")))?;
         live.acquire_tpl(tpl).await.map_err(|e| Error::Conflict(format!("the service didn't wake: {e}")))
     }
 
@@ -58,9 +60,15 @@ impl Apps {
         let _ = tcp.set_nodelay(true);
         let (mut rd, mut wr) = tcp.into_split();
         let mut buf = vec![0u8; 64 << 10];
-        loop {
+        let (mut from_client, mut from_app) = (true, true);
+        while from_client || from_app {
             tokio::select! {
-                m = rx.next() => match m {
+                m = rx.next(), if from_client => match m {
+                    // The client is done sending: the app sees its end, and may still answer.
+                    Some(Ok(Message::Binary(b))) if b.is_empty() => {
+                        let _ = wr.shutdown().await;
+                        from_client = false;
+                    }
                     Some(Ok(Message::Binary(b))) => {
                         if wr.write_all(&b).await.is_err() {
                             break;
@@ -69,8 +77,13 @@ impl Apps {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(_)) => {}
                 },
-                n = rd.read(&mut buf) => match n {
-                    Ok(0) | Err(_) => break,
+                n = rd.read(&mut buf), if from_app => match n {
+                    Ok(0) | Err(_) => {
+                        if tx.send(Message::Binary(bytes::Bytes::new())).await.is_err() {
+                            break;
+                        }
+                        from_app = false;
+                    }
                     Ok(n) => {
                         if tx.send(Message::Binary(bytes::Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
                             break;

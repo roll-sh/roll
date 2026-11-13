@@ -1918,6 +1918,12 @@ async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
     w.fake.connect(&name);
     until("running").await;
     assert_eq!(Fake::count(&w.fake.counts.resumes), resumes + 1, "resumed, not started again");
+    // Crashed (its waker armed again by the stop): a caller still wakes it.
+    w.fake.crash(&name);
+    live.tick().await;
+    assert_eq!(state().await, "crashed");
+    w.fake.connect(&name);
+    until("running").await;
 }
 
 /// A service link gives another web service's URLs, named for it: private on the project
@@ -2153,9 +2159,12 @@ async fn a_tunnel_reaches_a_private_services_port() {
     tokio::spawn(axum::serve(l, w.api.clone()).into_future());
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel")).await.unwrap();
     ws.send(Message::Binary(b"GET /through HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec().into())).await.unwrap();
+    // Done sending (a half-close): the answer still comes.
+    ws.send(Message::Binary(Vec::new().into())).await.unwrap();
     let mut got = Vec::new();
     while let Some(Ok(m)) = ws.next().await {
         match m {
+            Message::Binary(b) if b.is_empty() => break,
             Message::Binary(b) => got.extend_from_slice(&b),
             Message::Close(_) => break,
             _ => {}

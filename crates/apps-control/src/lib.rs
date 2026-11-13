@@ -168,6 +168,8 @@ pub struct Apps {
     /// Jobs running on this node: id → its environment (`env_key`). Bounded per environment and
     /// per node, and canceled when the environment goes from this node.
     running_jobs: Mutex<HashMap<String, String>>,
+    /// Job containers this node runs at once, whatever jobs they belong to ([`jobs`]).
+    job_slots: Arc<tokio::sync::Semaphore>,
     /// Services whose project reached its spend limit this month (`spend`), as last read.
     capped: Mutex<std::collections::HashSet<String>>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
@@ -270,6 +272,7 @@ impl Apps {
             queues: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             running_jobs: Mutex::new(HashMap::new()),
+            job_slots: Arc::new(tokio::sync::Semaphore::new(jobs::MAX_CONTAINERS)),
             capped: Mutex::new(Default::default()),
             notes: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
@@ -785,6 +788,41 @@ impl Apps {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
+        // The new settings are checked before anything is written: a 400 changes nothing.
+        // Maintenance: true or {message?} turns it on, false or null off.
+        let maintenance: Option<Option<String>> = match o.get("maintenance") {
+            None => None,
+            Some(Value::Null | Value::Bool(false)) => Some(None),
+            Some(Value::Bool(true)) => Some(Some(String::new())),
+            Some(Value::Object(m)) => {
+                if let Some(k) = m.keys().find(|k| k.as_str() != "message") {
+                    return Err(Error::BadRequest(format!("maintenance.{k} isn't a field")));
+                }
+                match m.get("message") {
+                    None | Some(Value::Null) => Some(Some(String::new())),
+                    Some(Value::String(t)) if t.chars().count() <= 500 => Some(Some(t.trim().to_string())),
+                    Some(_) => return Err(Error::BadRequest("maintenance.message is at most 500 characters".into())),
+                }
+            }
+            Some(_) => return Err(Error::BadRequest("maintenance is true, {message?} or false".into())),
+        };
+        // Who gets in through its public names: networks (`a.b.c.d/n`, a bare address), or
+        // null / [] for anyone.
+        let allow_ips = match o.get("allow_ips") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= 100 => Some(a.iter().map(crate::model::ip_rule).collect::<Result<Vec<_>>>()?),
+            Some(_) => return Err(Error::BadRequest("allow_ips is at most 100 networks, or null".into())),
+        };
+        let rate_limit = match o.get("rate_limit") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let l: crate::model::RateLimit = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("rate_limit is {{per_minute, burst?}} or null: {e}")))?;
+                l.check()?;
+                Some(Some(l))
+            }
+        };
         let branch = match o.get("branch") {
             None => None,
             Some(Value::Null) => Some(None),
@@ -880,51 +918,19 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("feedback is a boolean".into())),
         }
-        // Maintenance: true or {message?} turns it on, false or null off.
-        let maintenance: Option<Option<String>> = match o.get("maintenance") {
-            None => None,
-            Some(Value::Null | Value::Bool(false)) => Some(None),
-            Some(Value::Bool(true)) => Some(Some(String::new())),
-            Some(Value::Object(m)) => {
-                if let Some(k) = m.keys().find(|k| k.as_str() != "message") {
-                    return Err(Error::BadRequest(format!("maintenance.{k} isn't a field")));
-                }
-                match m.get("message") {
-                    None | Some(Value::Null) => Some(Some(String::new())),
-                    Some(Value::String(t)) if t.chars().count() <= 500 => Some(Some(t.trim().to_string())),
-                    Some(_) => return Err(Error::BadRequest("maintenance.message is at most 500 characters".into())),
-                }
-            }
-            Some(_) => return Err(Error::BadRequest("maintenance is true, {message?} or false".into())),
-        };
         if let Some(m) = maintenance {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_maintenance(&sid, &e, m.as_deref())).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
-        // Who gets in through its public names: networks (`a.b.c.d/n`, a bare address), or
-        // null / [] for anyone.
-        if let Some(v) = o.get("allow_ips") {
-            let rules = match v {
-                Value::Null => Vec::new(),
-                Value::Array(a) if a.len() <= 100 => a.iter().map(crate::model::ip_rule).collect::<Result<Vec<_>>>()?,
-                _ => return Err(Error::BadRequest("allow_ips is at most 100 networks, or null".into())),
-            };
+        if let Some(rules) = allow_ips {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_allow_ips(&sid, &e, &rules)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
-        if let Some(v) = o.get("rate_limit") {
-            let limit = match v {
-                Value::Null => None,
-                v => {
-                    let l: crate::model::RateLimit = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("rate_limit is {{per_minute, burst?}} or null: {e}")))?;
-                    l.check()?;
-                    Some(l)
-                }
-            };
+        if let Some(limit) = rate_limit {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_rate_limit(&sid, &e, limit.as_ref())).await?;
             self.live(service, env).forget_gate();
@@ -1126,6 +1132,17 @@ impl Apps {
         Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources })
     }
 
+    /// What reads a job's output needs when the environment has values from roll secrets: the
+    /// job may have printed them, so roll secrets' own rule for revealing them.
+    pub async fn check_secret_reveal(self: &Arc<Self>, service: &str, env: &str, who: integrations::Asker<'_>) -> Result<()> {
+        let (svc, row) = self.service_env(service, env).await?;
+        let r = self.resolve_vars(&svc, &row, row.active.as_deref().unwrap_or("")).await?;
+        if r.sources.values().any(|s| *s == "secret") && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
+            return Err(Error::Forbidden(format!("this environment's values come from roll secrets, which you may not reveal in {env}, and a job's output can hold them")));
+        }
+        Ok(())
+    }
+
     /// The environment's variables: masked, or (`reveal`: who asks) in the clear. A value from
     /// roll secrets is shown only to whom roll secrets would show it; otherwise the reveal is a
     /// 403 naming them, never a partial answer.
@@ -1268,7 +1285,14 @@ impl Apps {
         // Checked at each read: a service moved to another project stops being reachable.
         anyhow::ensure!(target.project == service.project && target.id != service.id, "no service {ref} in this project");
         anyhow::ensure!(target.run.kind == RunType::Web, "{} isn't a web service: only a web service has URLs", target.name);
-        let mut v = vec![("URL".to_string(), format!("http://{}.{env}.internal:{}", target.name, target.run.port.unwrap_or(8080)))];
+        // The port its live deployment listens on (a Dockerfile's EXPOSE, an environment's own).
+        let active = row.as_ref().and_then(|r| r.active.clone());
+        let port = match active {
+            Some(a) => self.db(move |s| s.deployment(&a)).await.ok().and_then(|d| d.run.port),
+            None => None,
+        };
+        let port = port.or(target.run.port).unwrap_or(8080);
+        let mut v = vec![("URL".to_string(), format!("http://{}.{env}.internal:{port}", target.name))];
         if let Some(row) = row.filter(|_| target.run.public) {
             v.push(("PUBLIC_URL".to_string(), self.url(&row.slug)));
         }
@@ -1567,11 +1591,12 @@ impl Apps {
         if let Some(g) = live.gate() {
             return Ok(g);
         }
+        let seen = live.gate_gen();
         let (sid, e) = (live.service.clone(), live.env.clone());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
         let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit });
-        live.set_gate(g.clone());
+        live.set_gate(g.clone(), seen);
         Ok(g)
     }
 

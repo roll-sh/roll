@@ -237,7 +237,12 @@ impl Docker {
         }
         self.known.lock().wakers.insert(instance.to_string(), Some(at));
         let until = std::time::Instant::now() + Duration::from_secs(2);
-        while !sb.listening() && std::time::Instant::now() < until {
+        while !sb.listening() {
+            if std::time::Instant::now() >= until {
+                // Not bound yet on a busy host: the next start looks before it trusts it.
+                self.known.lock().wakers.remove(instance);
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }

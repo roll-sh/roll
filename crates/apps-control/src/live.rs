@@ -319,8 +319,10 @@ pub struct EnvLive {
     pub ticking: std::sync::atomic::AtomicBool,
     /// A private caller's wake is under way (the next look waits for it).
     answering: std::sync::atomic::AtomicBool,
-    /// What its public names let through, as last read (None: read it again).
+    /// What its public names let through, as last read (None: read it again), and how many
+    /// times it was forgotten (a read that began before a change isn't kept).
     gate: Mutex<Option<Arc<Gate>>>,
+    gate_gen: AtomicU64,
     /// Each client's tokens and when they were counted (its rate limit; None: no address).
     buckets: Mutex<HashMap<Option<std::net::IpAddr>, (f64, Instant)>>,
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
@@ -371,6 +373,7 @@ impl EnvLive {
             ticking: std::sync::atomic::AtomicBool::new(false),
             answering: std::sync::atomic::AtomicBool::new(false),
             gate: Mutex::new(None),
+            gate_gen: AtomicU64::new(0),
             buckets: Mutex::new(HashMap::new()),
             cpu_samples: Mutex::new(std::collections::VecDeque::new()),
             cpu_need: AtomicU32::new(0),
@@ -789,13 +792,23 @@ impl EnvLive {
         self.gate.lock().clone()
     }
 
-    pub fn set_gate(&self, g: Arc<Gate>) {
-        *self.gate.lock() = Some(g);
+    pub fn gate_gen(&self) -> u64 {
+        self.gate_gen.load(Ordering::SeqCst)
+    }
+
+    /// Keep what was read, unless its settings changed since the read began (`seen`).
+    pub fn set_gate(&self, g: Arc<Gate>, seen: u64) {
+        let mut cur = self.gate.lock();
+        if self.gate_gen.load(Ordering::SeqCst) == seen {
+            *cur = Some(g);
+        }
     }
 
     /// Its settings changed: the next request reads them again.
     pub fn forget_gate(&self) {
-        *self.gate.lock() = None;
+        let mut cur = self.gate.lock();
+        self.gate_gen.fetch_add(1, Ordering::SeqCst);
+        *cur = None;
         self.buckets.lock().clear();
     }
 
@@ -803,13 +816,20 @@ impl EnvLive {
     /// the next token.
     pub fn take_token(&self, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
         let (rate, burst) = (limit.per_minute as f64 / 60.0, limit.burst() as f64);
+        // An IPv6 client counts by its /64: one host has the whole of it to rotate through.
+        let client = client.map(|ip| match ip {
+            std::net::IpAddr::V6(v6) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & !((1u128 << 64) - 1))),
+            v4 => v4,
+        });
         let now = Instant::now();
         let mut b = self.buckets.lock();
         if b.len() >= MAX_BUCKETS && !b.contains_key(&client) {
-            // Full ones first: they're the same as no entry.
+            // Full ones first: they're the same as no entry. Then the longest unseen, never
+            // everyone's (a flood of new addresses mustn't reset the limited ones).
             b.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < burst);
-            if b.len() >= MAX_BUCKETS {
-                b.clear();
+            while b.len() >= MAX_BUCKETS {
+                let Some(oldest) = b.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| *k) else { break };
+                b.remove(&oldest);
             }
         }
         let (tokens, at) = b.entry(client).or_insert((burst, now));
@@ -840,8 +860,9 @@ impl EnvLive {
         let mut asked = Vec::new();
         for i in self.instances().into_iter().filter(|i| i.deployment == tpl.deployment) {
             match i.phase() {
-                // Asleep: a connection its network accepted since is a caller.
-                Phase::Suspended(_) | Phase::Created => {
+                // Asleep (or stopped by a crash, its waker armed again): a connection its
+                // network accepted since is a caller.
+                Phase::Suspended(_) | Phase::Created | Phase::Crashed => {
                     if self.runtime.take_callers(&i.name).await {
                         asked.push(i);
                     }
@@ -872,6 +893,10 @@ impl EnvLive {
 
     async fn wake_for_callers(self: &Arc<Self>, tpl: &Template, asked: Vec<Arc<Inst>>) {
         let _g = self.wake.lock().await;
+        // Torn down, over its spending limit or restoring its volume: nothing wakes.
+        if self.may_wake().is_err() {
+            return;
+        }
         for i in asked {
             let woke = Instant::now();
             match i.phase() {
@@ -882,7 +907,8 @@ impl EnvLive {
                     }
                     Err(_) => self.crashed(&i, "it couldn't be resumed"),
                 },
-                Phase::Created => {
+                // The same container (a crashed one too): its waker holds the caller for it.
+                Phase::Created | Phase::Crashed => {
                     let deadline = Instant::now() + self.cfg.wake_timeout;
                     match self.start(&i, &tpl.run, None, deadline).await {
                         Ok(_) => {
@@ -1570,6 +1596,28 @@ impl EnvLive {
         }
     }
 
+    /// Whether a stopped instance's process ended by itself with 0 (its work done).
+    async fn exited_cleanly(&self, name: &str) -> bool {
+        self.runtime.exited(name).await.is_some_and(|e| e.code == Some(0) && !e.oom)
+    }
+
+    /// A worker stopped (`clean`: exit 0): counted, and by its restart policy started again on
+    /// a later pass or left stopped (`done`) until a deploy or a restart.
+    fn after_stop(&self, i: &Inst, run: &Run, clean: bool, why: &str) {
+        let in_a_row = if clean && run.restart != Restart::Always { i.crashes.load(Ordering::SeqCst) } else { i.crashes.fetch_add(1, Ordering::SeqCst) + 1 };
+        let again = match run.restart {
+            Restart::Always => true,
+            Restart::OnFailure => !clean && in_a_row < run.restart_tries.unwrap_or(10),
+            Restart::Never => false,
+        };
+        if again {
+            self.log.stream(Stream::System).line(format!("{} stopped: {why}; restarting", i.name));
+        } else {
+            i.done.store(true, Ordering::SeqCst);
+            self.log.stream(Stream::System).line(format!("{} stopped: {why}; its restart policy ({}) leaves it stopped until a deploy or a restart", i.name, run.restart.as_str()));
+        }
+    }
+
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
         let run = &tpl.run;
         // A worker that follows its work runs what its backlog wants; else its floor.
@@ -1581,30 +1629,23 @@ impl EnvLive {
         let mut up = 0;
         for i in &insts {
             match i.phase() {
-                Phase::Running(_) if self.runtime.running(&i.name).await => up += 1,
+                Phase::Running(_) if self.runtime.running(&i.name).await => {
+                    up += 1;
+                    // A minute up: its crashes are no longer in a row.
+                    if i.started_at().is_some_and(|t| now_ms() - t > 60_000) {
+                        i.crashes.store(0, Ordering::SeqCst);
+                    }
+                }
                 Phase::Running(_) => {
-                    let exit = self.runtime.exited(&i.name).await;
-                    let clean = exit.as_ref().is_some_and(|e| e.code == Some(0) && !e.oom);
                     let why = self.exit_reason(&i.name, run).await;
-                    let tries = run.restart_tries.unwrap_or(10);
-                    let again = match run.restart {
-                        Restart::Always => true,
-                        Restart::OnFailure => !clean && i.crashes.load(Ordering::SeqCst) + 1 < tries,
-                        Restart::Never => false,
-                    };
+                    let clean = self.exited_cleanly(&i.name).await;
                     if clean && run.restart != Restart::Always {
                         // Done with its work, not a crash.
                         *i.phase.lock() = Phase::Created;
                     } else {
                         self.crashed(i, &why);
-                        i.crashes.fetch_add(1, Ordering::SeqCst);
                     }
-                    if again {
-                        self.log.stream(Stream::System).line(format!("{} stopped: {why}; restarting", i.name));
-                    } else {
-                        i.done.store(true, Ordering::SeqCst);
-                        self.log.stream(Stream::System).line(format!("{} stopped: {why}; its restart policy ({}) leaves it stopped until a deploy or a restart", i.name, run.restart.as_str()));
-                    }
+                    self.after_stop(i, run, clean, &why);
                 }
                 _ => {}
             }
@@ -1626,7 +1667,12 @@ impl EnvLive {
             if self.start(i, run, None, deadline).await.is_ok() {
                 up += 1;
             } else {
-                i.crashes.fetch_add(1, Ordering::SeqCst);
+                // Ended within its grace: the policy decides as for any stop.
+                let clean = self.exited_cleanly(&i.name).await;
+                if clean && run.restart != Restart::Always {
+                    *i.phase.lock() = Phase::Created;
+                }
+                self.after_stop(i, run, clean, "it ended right after it started");
             }
         }
         while up + finished < target {

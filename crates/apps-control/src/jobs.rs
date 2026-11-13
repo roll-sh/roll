@@ -19,6 +19,8 @@ const MAX_TIMEOUT_S: u64 = 24 * 3600;
 /// Jobs running at once in an environment, and on a node.
 const MAX_PER_ENV: usize = 5;
 const MAX_PER_NODE: usize = 50;
+/// Job containers a node runs at once (a job's tasks each take one).
+pub const MAX_CONTAINERS: usize = 50;
 /// A job's tasks at most, and how many of them run at once.
 const MAX_TASKS: u64 = 100;
 const PARALLEL: usize = 10;
@@ -76,8 +78,9 @@ impl Apps {
             // Its tasks, at most PARALLEL at once, each told which it is.
             let outcomes: Vec<(RunStatus, Option<i32>)> = futures::stream::iter(0..tasks)
                 .map(|n| {
-                    let (live, cmd, log, cancel) = (live.clone(), cmd.clone(), log.clone(), cancel.clone());
+                    let (live, cmd, log, cancel, slots) = (live.clone(), cmd.clone(), log.clone(), cancel.clone(), this.job_slots.clone());
                     async move {
+                        let Ok(_slot) = slots.acquire_owned().await else { return (RunStatus::Failed, None) };
                         let vars = [("ROLL_TASK_INDEX".to_string(), n.to_string()), ("ROLL_TASK_COUNT".to_string(), tasks.to_string())];
                         let ran = live.run_to_exit(Some(&cmd), &vars, Duration::from_secs(timeout), Some(log.clone()), cancel, |_| {}).await;
                         let outcome = match ran {
