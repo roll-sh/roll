@@ -16,6 +16,10 @@ pub enum At {
     Header(&'static str),
     /// The request's whole body, as text.
     RawText,
+    /// The request's whole body, JSON text sent as `application/json` (a search document).
+    RawJson,
+    /// The request's whole body, NDJSON text sent as `application/x-ndjson` (a search bulk).
+    RawNdjson,
     /// The request's whole body, from base64.
     RawB64,
 }
@@ -99,6 +103,7 @@ impl Tool {
                 None => vec![Action::Read, Action::Write, Action::Delete],
             },
             catalog::Act::ProductionIf(_) => vec![Action::Write, Action::Deploy],
+            catalog::Act::Raw(_) => vec![Action::Write, Action::Delete],
             _ => vec![found.row.action(self.method, &[], None)],
         }
     }
@@ -156,7 +161,7 @@ impl Tool {
         let mut has_query = false;
         let mut body = self.fixed.map(|f| f()).unwrap_or_else(|| json!({}));
         let mut body_used = self.fixed.is_some();
-        let mut raw: Option<Vec<u8>> = None;
+        let mut raw: Option<(Vec<u8>, &'static str)> = None;
         let mut headers = Vec::new();
         for p in self.params {
             let Some(v) = obj.get(p.name).filter(|v| !v.is_null()) else {
@@ -182,17 +187,26 @@ impl Tool {
                     body_used = true;
                 }
                 At::Header(h) => headers.push((h, as_text(v))),
-                At::RawText => raw = Some(as_text(v).into_bytes()),
+                At::RawText => raw = Some((as_text(v).into_bytes(), "application/octet-stream")),
+                At::RawJson => raw = Some((as_text(v).into_bytes(), "application/json")),
+                At::RawNdjson => {
+                    // Every line ends with a newline (Elasticsearch's bulk wants the last one too).
+                    let mut t = as_text(v);
+                    if !t.ends_with('\n') {
+                        t.push('\n');
+                    }
+                    raw = Some((t.into_bytes(), "application/x-ndjson"));
+                }
                 At::RawB64 => {
                     use base64::Engine;
-                    raw = Some(base64::engine::general_purpose::STANDARD.decode(as_text(v).trim()).map_err(|_| format!("{} isn't base64", p.name))?);
+                    raw = Some((base64::engine::general_purpose::STANDARD.decode(as_text(v).trim()).map_err(|_| format!("{} isn't base64", p.name))?, "application/octet-stream"));
                 }
             }
         }
         let q = query.finish();
         let uri = if has_query { format!("{path}?{q}") } else { path };
         let body = match raw {
-            Some(b) => Built::Raw(b, "application/octet-stream"),
+            Some((b, ct)) => Built::Raw(b, ct),
             None if body_used || matches!(self.method, "POST" | "PUT" | "PATCH") => Built::Json(body),
             None => Built::None,
         };
@@ -421,10 +435,45 @@ static TOOLS: &[Tool] = &[
     t("tasks_stats", "Tasks stats", "Nodes, queue stats, dead letters, schedules and functions.", "tasks", "GET", "/v1/tasks/stats", &[]),
     // ── search (roll search) ──
     t("search_list_clusters", "List search clusters", "Elasticsearch-compatible search clusters.", "search", "GET", "/v1/search/clusters", &[]),
+    t("search_get_cluster", "Get a search cluster", "A cluster's settings, state (loaded or asleep), indices, documents, size, URL and branches.", "search", "GET", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name")]),
+    t(
+        "search_create_cluster",
+        "Create a search cluster",
+        "A new Elasticsearch-compatible cluster (or a branch of one with parent, at a time with at). Its password comes back once, to tokens that may reveal.",
+        "search",
+        "POST",
+        "/v1/search/clusters",
+        &[breq("name", Ty::Str, "Name"), b("flavor", Ty::Str, "elasticsearch or opensearch"), b("parent", Ty::Str, "Branch this cluster"), b("at", Ty::Int, "Unix seconds to branch at"), IN_PROJECT],
+    ),
+    t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
+    t("search_usage", "Search usage", "A cluster's metering and cost, against the same workload on Elastic Cloud and Amazon OpenSearch.", "search", "GET", "/v1/search/clusters/{cluster}/usage", &[req("cluster", "Cluster id or name"), q("days", Ty::Int, "Days back (default 30)")]),
     t("search_list_indices", "List indices", "A cluster's indices.", "search", "GET", "/v1/search/clusters/{cluster}/indices", &[req("cluster", "Cluster id or name")]),
+    t("search_get_index", "Get an index", "An index's mappings, settings and aliases.", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}", &[req("cluster", "Cluster"), req("index", "Index")]),
+    t(
+        "search_create_index",
+        "Create an index",
+        "Create an index with its mappings and settings (Elasticsearch's PUT /<index>).",
+        "search",
+        "PUT",
+        "/v1/search/clusters/{cluster}/indices/{index}",
+        &[req("cluster", "Cluster"), req("index", "Index"), b("mappings", Ty::Obj, "Mappings"), b("settings", Ty::Obj, "Settings"), b("aliases", Ty::Obj, "Aliases")],
+    ),
+    t("search_delete_index", "Delete an index", "Delete an index and its documents.", "search", "DELETE", "/v1/search/clusters/{cluster}/indices/{index}", &[req("cluster", "Cluster"), req("index", "Index")]),
+    t("search_put_mapping", "Update a mapping", "Add fields to an index's mapping (Elasticsearch's PUT /<index>/_mapping).", "search", "PUT", "/v1/search/clusters/{cluster}/indices/{index}/mapping", &[req("cluster", "Cluster"), req("index", "Index"), breq("properties", Ty::Obj, "Field mappings")]),
+    t("search_add_document", "Add a document", "Index a document under a new id.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/docs", &[req("cluster", "Cluster"), req("index", "Index"), P { name: "document", ty: Ty::Str, at: At::RawJson, required: true, desc: "The document, as JSON text" }]),
+    t(
+        "search_bulk",
+        "Bulk index",
+        "Index, update or delete many documents at once (Elasticsearch's _bulk, NDJSON). Deleting is a \"delete\" action.",
+        "search",
+        "POST",
+        "/v1/search/clusters/{cluster}/indices/{index}/bulk",
+        &[req("cluster", "Cluster"), req("index", "Index"), P { name: "ndjson", ty: Ty::Str, at: At::RawNdjson, required: true, desc: "Action and document lines" }],
+    ),
+    t("search_delete_by_query", "Delete by query", "Delete every document of an index that matches a query.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/delete_by_query", &[req("cluster", "Cluster"), req("index", "Index"), breq("query", Ty::Obj, "Query DSL")]),
     t("search_query", "Search", "Run an Elasticsearch _search body on an index.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[req("cluster", "Cluster id or name"), req("index", "Index"), b("query", Ty::Obj, "Query DSL"), b("size", Ty::Int, "Hits"), b("from", Ty::Int, "Offset"), b("sort", Ty::Arr, "Sort"), b("aggs", Ty::Obj, "Aggregations")]),
     t("search_get_document", "Get a document", "A document by id.", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id")]),
-    t("search_index_document", "Index a document", "Create or replace a document.", "search", "PUT", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id"), P { name: "document", ty: Ty::Str, at: At::RawText, required: true, desc: "The document, as JSON text" }]),
+    t("search_index_document", "Index a document", "Create or replace a document.", "search", "PUT", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id"), P { name: "document", ty: Ty::Str, at: At::RawJson, required: true, desc: "The document, as JSON text" }]),
     t("search_delete_document", "Delete a document", "Delete a document.", "search", "DELETE", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id")]),
     // ── secrets (roll secrets) ──
     t("secrets_list_environments", "List environments", "A project's secret environments.", "secrets", "GET", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT]),
