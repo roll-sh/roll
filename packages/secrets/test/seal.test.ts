@@ -10,6 +10,8 @@ const fromRust: SealedValues = {
   context: "roll-secrets:prj_fzuo337olof3:sdk-vector:app:web",
   leases: [],
   problems: [],
+  dynamic: [],
+  linked: [],
   sealed: {
     v: 1,
     epk: "9PO9fuY7QZoMBtaL5PMjpi6H10M9S1AwI39B8G0vFwU",
