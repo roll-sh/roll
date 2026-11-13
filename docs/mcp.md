@@ -296,13 +296,11 @@ Ranked; the top item is in progress. A watchdog reads this list.
    `integrate/mcp-accounts`): its PR opens once #18 and #19 are on main; until then keep it merged.
 4. **Expiring tokens:** show tokens that expire within a week, and post them to the approvals
    channel, as GitHub mails before a token expires.
-5. **MCP tools send `Idempotency-Key`** where a route honours it (apps' deploys), so a retried
-   call never deploys twice.
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-7. **Finer resources:** apps' deploys by id (once #21 is on main).
+6. **Finer resources:** apps' deploys by id (once #21 is on main).
 
-Done lately: an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
+Done lately: `apps_deploy` takes an `idempotency_key` (sent as `Idempotency-Key`); an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
 one action on one resource, a while never made permanent through a child token); leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
 secrets, roll code's landings scanned from the land log, GitHub's secret scanning partner
 endpoint); audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in
