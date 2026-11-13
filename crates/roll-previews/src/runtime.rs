@@ -166,7 +166,7 @@ impl Runtime {
                 for ((p, s), live) in lives {
                     info!(preview = %p, service = %s, "the preview moved to another node; stopping its service here");
                     rt.stop(&p, &s, &live, None).await;
-                    rt.live.lock().remove(&(p, s));
+                    rt.forget(&(p, s), live);
                 }
             }
         });
@@ -192,6 +192,17 @@ impl Runtime {
                 })
             })
             .clone()
+    }
+
+    /// Drop a stopped service's entry, unless something took it meanwhile (a request whose start
+    /// must stay serialised with the stop: a fresh entry would start a second container under
+    /// the same name).
+    fn forget(&self, key: &(String, String), live: Arc<Live>) {
+        let mut map = self.live.lock();
+        // Held by the map and by `live`, nothing else.
+        if map.get(key).is_some_and(|l| Arc::ptr_eq(l, &live)) && Arc::strong_count(&live) == 2 {
+            map.remove(key);
+        }
     }
 
     async fn stop(&self, preview: &str, service: &str, live: &Live, why: Option<String>) {
@@ -785,9 +796,11 @@ impl Apps for Runtime {
     }
 
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
-        let live = self.live.lock().remove(&(preview.to_string(), service.to_string()));
+        let key = (preview.to_string(), service.to_string());
+        let live = self.live.lock().get(&key).cloned();
         if let Some(live) = live {
             self.stop(preview, service, &live, None).await;
+            self.forget(&key, live);
         }
         if let Ok(Some(host)) = self.store.service_host(preview, service) {
             // Whichever node started it.

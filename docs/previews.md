@@ -944,6 +944,10 @@ Ranked by what a person notices first. Done so far:
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
+5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+   daemon left containers) failed a wake with "the container name is already in use". A remove
+   that dropped the service's entry before stopping it could start a second container under the
+   name (fixed); if it comes back, log both starts' container ids.
 
 Looked at and dropped: branching from a stopped parent without starting it. pg-control already
 copies a stopped parent's directory directly; the slow first numbers (9.6–16.8 s) were brand-new
