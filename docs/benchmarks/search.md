@@ -81,6 +81,39 @@ per request, which load distorts less than wall time. Runs alternate between tar
 workload (micro) and per round (Rally), so drift hits all three alike. Raw outputs:
 `~/.cache/rsearch/bench/` on the machine that ran them.
 
+**Summary** (the latest run of each measure; the sections below hold every task with its
+spread, and how each number moved). Rally p50 service time in ms unless noted; roll's Rally
+numbers are from its latest binary, Elasticsearch's and OpenSearch's from the three-way races.
+
+| measure | roll | Elasticsearch 9.5.5 | OpenSearch 3.9 |
+|---|---:|---:|---:|
+| RSS, idle node | **24 MiB** | 2,519 MiB | 2,517 MiB |
+| RSS at the end of a Rally race | **145-394 MiB** | 2,338-2,822 MiB | 2,682-2,978 MiB |
+| store bytes per document (force-merged) | **199** | 263 | 262 |
+| indexing, http_logs (docs/s) | **160k** | 94k | 95k |
+| indexing, geonames (docs/s) | **67k** | 28k | 29k |
+| indexing, so (docs/s) | **39k** | 26k | 24k |
+| indexing, nyc_taxis (docs/s) | **45-51k** | 46k | 41k |
+| http_logs `default` | **2.57** | 5.68 | 4.83 |
+| http_logs `hourly_agg` | **6.79** | 121.10 | 14.00 |
+| http_logs `terms_enum` | 1.12 | 3.43 | **0.57** |
+| nyc_taxis `date_histogram_agg` | **6.56** | 10.82 | 8.88 |
+| nyc_taxis `autohisto_agg` | 29.58 | 32.20 | **12.99** |
+| nyc_taxis `distance_amount_agg` | **83.92** | 86.33 | 144.14 |
+| nyc_taxis `range` | **5.55** | 10.26 | 7.23 |
+| geonames `country_agg_uncached` | **21.40** | 27.60 | 39.82 |
+| geonames `large_terms` | **92.38** | 144.34 | 196.33 |
+| geonames `painless_static` | **58.31** | 89.85 | 91.93 |
+| geonames `field_value_script_score` | **34.73** | 41.27 | 42.07 |
+| geonames `decay_geo_gauss_script_score` | **70.06** | 70.72 | 88.57 |
+
+roll is ahead of both on every task above but two, where OpenSearch is: `autohisto_agg`
+(OpenSearch counts `auto_date_histogram` from the points tree; Elasticsearch's shard-side
+rounding choice depends on document order, so roll counts it only for date histograms, where
+the result can't differ) and `terms_enum` (under a millisecond, almost all of it network and
+thread handoffs). nyc_taxis' `distance_amount_agg` spread 89-161 ms on a loaded host in the
+latest run; its quiet-run number is the one shown.
+
 **Footprint** (`bench-search.sh footprint`):
 
 | measure | roll | Elasticsearch 9.5.5 | OpenSearch 3.9 |
