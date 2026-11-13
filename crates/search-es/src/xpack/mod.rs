@@ -265,8 +265,9 @@ handlers! { ctx;
     MlExplainDataFrameAnalytics => ml::dfa::explain(ctx).await,
     MlEvaluateDataFrame => ml::dfa::evaluate(ctx).await,
 
-    EsqlQuery => esql::query(ctx).await,
-    EsqlAsyncQuery => esql::async_query(ctx).await,
+    // ES|QL and SQL read whatever indices their query names: as the client, never as the owner.
+    EsqlQuery => internal::as_caller(internal::Caller::of(ctx), esql::query(ctx)).await,
+    EsqlAsyncQuery => internal::as_caller(internal::Caller::of(ctx), esql::async_query(ctx)).await,
     EsqlAsyncQueryGet => esql::async_get(ctx),
     EsqlAsyncQueryStop => esql::async_stop(ctx),
     EsqlAsyncQueryDelete => esql::async_delete(ctx),
@@ -282,8 +283,8 @@ handlers! { ctx;
     EsqlGetDataset => esql::datasources::get_dataset(ctx),
     EsqlDeleteDataset => esql::datasources::delete_dataset(ctx).await,
 
-    SqlQuery => sql::query(ctx).await,
-    SqlTranslate => sql::translate(ctx).await,
+    SqlQuery => internal::as_caller(internal::Caller::of(ctx), sql::query(ctx)).await,
+    SqlTranslate => internal::as_caller(internal::Caller::of(ctx), sql::translate(ctx)).await,
     SqlClearCursor => sql::clear_cursor(ctx),
     SqlGetAsync => sql::get_async(ctx),
     SqlGetAsyncStatus => sql::get_async_status(ctx),

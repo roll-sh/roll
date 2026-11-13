@@ -4,8 +4,11 @@
 //!
 //! An internal call carries no credentials, so it runs with the cluster's own authority: the
 //! outer request was authorized for its API before it got here, as Elasticsearch runs these
-//! as its internal users. The future is boxed because the call re-enters the dispatcher that
-//! is running it.
+//! as its internal users. Inside [`as_caller`] (ES|QL and SQL, which read whatever indices
+//! their query names) a call carries the client's credentials instead, so it is authorized,
+//! and reads under document and field level security, as that client; [`call_system`] stays
+//! the cluster's own (ENRICH's policy index). The future is boxed because the call re-enters
+//! the dispatcher that is running it.
 
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
@@ -16,6 +19,54 @@ use std::pin::Pin;
 
 pub type Call<'a> = Pin<Box<dyn Future<Output = EsResult<Value>> + Send + 'a>>;
 
+/// The client an ES|QL or SQL request runs for, when its reads must be authorized as it (not
+/// the cluster's owner or a superuser).
+#[derive(Clone, Debug)]
+pub struct Caller {
+    /// The headers that make an internal call that client.
+    headers: Vec<(String, String)>,
+    /// Its document and field level security (`None`: it reads documents unrestricted).
+    pub security: Option<crate::xpack::security::dls::ReadSecurity>,
+}
+
+tokio::task_local! {
+    static CALLER: Caller;
+}
+
+impl Caller {
+    /// The client of `ctx`, unless it may read everything anyway.
+    pub fn of(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
+        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER};
+        let p = ctx.principal.get()?;
+        if p.is_superuser() {
+            return None;
+        }
+        let mut headers = Vec::new();
+        match ctx.request.header(AUTHENTICATED_HEADER) {
+            // The node authenticated the owner, narrowed to some indices (a per-index route).
+            Some(user) => {
+                headers.push((AUTHENTICATED_HEADER.to_string(), user.to_string()));
+                headers.push((INDEX_SCOPE_HEADER.to_string(), ctx.request.header(INDEX_SCOPE_HEADER)?.to_string()));
+            }
+            None => headers.push(("Authorization".to_string(), ctx.request.header("authorization")?.to_string())),
+        }
+        Some(Caller { headers, security: crate::xpack::security::dls::ReadSecurity::of(ctx) })
+    }
+}
+
+/// Runs `f` with its internal calls made as `caller` (when there is one).
+pub async fn as_caller<F: Future>(caller: Option<Caller>, f: F) -> F::Output {
+    match caller {
+        Some(c) => CALLER.scope(c, f).await,
+        None => f.await,
+    }
+}
+
+/// The client the running request's internal calls are made as ([`as_caller`]).
+pub fn caller() -> Option<Caller> {
+    CALLER.try_with(Caller::clone).ok()
+}
+
 /// Sends `method uri` with a JSON body; the parsed response on 2xx, else its error.
 pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Value>) -> Call<'a> {
     let mut req = EsRequest::new(method, uri);
@@ -23,6 +74,21 @@ pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Val
         req.body = bytes::Bytes::from(b.to_json());
         req.headers.push(("Content-Type".into(), "application/json".into()));
     }
+    let _ = CALLER.try_with(|c| req.headers.extend(c.headers.iter().cloned()));
+    send(cluster, req)
+}
+
+/// [`call`] with the cluster's own authority, also inside [`as_caller`].
+pub fn call_system<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Value>) -> Call<'a> {
+    let mut req = EsRequest::new(method, uri);
+    if let Some(b) = body {
+        req.body = bytes::Bytes::from(b.to_json());
+        req.headers.push(("Content-Type".into(), "application/json".into()));
+    }
+    send(cluster, req)
+}
+
+fn send(cluster: &Cluster, req: EsRequest) -> Call<'_> {
     Box::pin(async move {
         let resp = crate::rest::handle(cluster, req).await;
         let v = if resp.body.is_empty() { Value::Null } else { crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null) };

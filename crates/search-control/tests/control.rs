@@ -910,3 +910,50 @@ async fn a_due_transform_wakes_its_sleeping_cluster() {
     }
     assert!(!e.control.node.loaded().iter().any(|n| &**n == "idle"), "a cluster without jobs stays asleep");
 }
+
+/// ES|QL and SQL read as their client: an API key limited to one index (what roll secrets hands
+/// out) sees no other index through `FROM`, a wildcard, a lookup join or SQL, and a role's
+/// document query applies to its rows.
+#[tokio::test]
+async fn esql_and_sql_read_as_their_client() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "q"})).await;
+    let (user, pw) = creds(&c);
+    for (idx, doc) in [("notes", json!({"k": "a", "team": "red"})), ("notes", json!({"k": "b", "team": "blue"})), ("secrets", json!({"k": "a", "s": "x"}))] {
+        let (s, v) = e.es(&user, &pw, reqwest::Method::POST, &format!("/{idx}/_doc?refresh=true"), Some(doc)).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/secrets/_settings", Some(json!({"index.mode": "lookup"}))).await;
+    let _ = (s, v);
+    let role = json!({"name": "notes-only", "role_descriptors": {"r": {"indices": [{"names": ["notes"], "privileges": ["read"], "query": {"term": {"team.keyword": "red"}}}]}}});
+    let (s, k) = e.es(&user, &pw, reqwest::Method::POST, "/_security/api_key", Some(role)).await;
+    assert_eq!(s, 200, "{k}");
+    // The cluster is named in the key (as the control plane's keys are): `<id>@<cluster>:<key>`.
+    let raw = format!("{}@q:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap());
+    let header = format!("ApiKey {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw));
+    let ask = |path: &'static str, body: Value| {
+        let (url, http, h) = (format!("{}{path}", e.es), e.http.clone(), header.clone());
+        async move {
+            let r = http.post(url).header("Authorization", h).json(&body).send().await.unwrap();
+            let s = r.status().as_u16();
+            (s, r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    // Its own index: only the documents its role query lets through.
+    let (s, v) = ask("/_query", json!({"query": "FROM notes | KEEP k"})).await;
+    assert_eq!((s, v["values"].clone()), (200, json!([["a"]])), "{v}");
+    for q in ["FROM secrets", "FROM notes,secrets"] {
+        let (s, v) = ask("/_query", json!({"query": q})).await;
+        assert!(s == 400 || s == 403, "{q}: {s} {v}");
+        assert!(!v.to_string().contains("\"x\""), "{q} leaked a document: {v}");
+    }
+    let (s, v) = ask("/_query", json!({"query": "FROM *"})).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(!v.to_string().contains("\"x\""), "a wildcard reached another index: {v}");
+    let (s, v) = ask("/_query", json!({"query": "FROM notes | LOOKUP JOIN secrets ON k"})).await;
+    assert!(!v.to_string().contains("\"x\""), "a lookup join reached another index: {s} {v}");
+    let (s, v) = ask("/_sql?format=json", json!({"query": "SELECT * FROM secrets"})).await;
+    assert!(s == 400 || s == 403, "SQL: {s} {v}");
+    let (s, v) = ask("/_sql?format=json", json!({"query": "SELECT k FROM notes"})).await;
+    assert_eq!((s, v["rows"].clone()), (200, json!([["a"]])), "{v}");
+}

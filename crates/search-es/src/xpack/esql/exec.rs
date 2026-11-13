@@ -2518,6 +2518,9 @@ fn top_from_source(cluster: &Cluster, src: &Src<'_>, s: &Source, prefix: &[Cmd],
     }
     let Some((nw, src_keys)) = top_source_keys(prefix, keys, &s.cols) else { return Ok(None) };
     let now = crate::time::now_millis();
+    if !direct_read(s) {
+        return Ok(None);
+    }
     let Some(plan) = super::columnar::plan(cluster, &s.index, &s.cols, &s.fields, &s.metadata, s.needed.as_ref(), 0, now) else { return Ok(None) };
     let spec = SortSpec::new(src, &src_keys, &s.cols)?;
     let mut names = std::collections::HashSet::new();
@@ -2761,7 +2764,16 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
         Some(Value::Obj(f)) => f.iter().filter(|(_, c)| c.as_object().is_some_and(|m| m.values().any(|t| t.get("time_series_dimension").and_then(Value::as_bool) == Some(true)))).map(|(k, _)| k.clone()).collect(),
         _ => Default::default(),
     };
+    // A client that may read only some indices reads the ones its field caps resolved to (its
+    // wildcards expanded to authorized indices only), never the expression again.
+    let index = if internal::caller().is_some() { indices.join(",") } else { index };
     Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions })
+}
+
+/// Whether `s` may be read straight from the shards ([`super::columnar`]): not when the client
+/// has document or field level security on one of its indices (searches apply those).
+fn direct_read(s: &Source) -> bool {
+    internal::caller().and_then(|c| c.security).is_none_or(|sec| !s.indices.iter().any(|i| sec.restricts(crate::xpack::security::dls::READ, i)))
 }
 
 fn verification_plain(msg: &str) -> EsError {
@@ -3070,7 +3082,8 @@ async fn scan(cluster: &Cluster, s: &Source, query: Option<Value>, limit: Option
     // Doc values straight from the shards when every needed column has them.
     if s.load.is_empty() && (!s.fields.is_empty() || !s.metadata.is_empty()) {
         let now = crate::time::now_millis();
-        if let Some(plan) = super::columnar::plan(cluster, &s.index, &s.cols, &s.fields, &s.metadata, s.needed.as_ref(), s.ft.len(), now)
+        if direct_read(s)
+            && let Some(plan) = super::columnar::plan(cluster, &s.index, &s.cols, &s.fields, &s.metadata, s.needed.as_ref(), s.ft.len(), now)
             && super::columnar::scan(cluster, plan, query.as_ref(), limit, now, stats, &mut sink)?
         {
             return Ok(());
@@ -4151,7 +4164,8 @@ async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) -> EsResult
                 }
                 let table = cluster.xpack.enrich.tables.read().get(&name).cloned();
                 let Some(table) = table else { continue };
-                let caps = internal::call(cluster, "GET", &format!("/{}/_field_caps?fields=*", encode(&table.index)), None).await.unwrap_or(Value::Null);
+                // The policy's own index: read by the system, as Elasticsearch's enrich lookups are.
+                let caps = internal::call_system(cluster, "GET", &format!("/{}/_field_caps?fields=*", encode(&table.index)), None).await.unwrap_or(Value::Null);
                 if table.kind == "range"
                     && let Some(t) = caps.get("fields").and_then(|m| m.get(&table.match_field)).and_then(Value::as_object).and_then(|m| m.keys().next())
                 {

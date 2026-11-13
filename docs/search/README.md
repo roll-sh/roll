@@ -107,7 +107,10 @@ those names), so it reaches no other index: a bulk line's `_index` or an `mget` 
 another index is refused (403), and so is a lookup inside a query (a `terms` lookup, an indexed
 `geo_shape`, `percolate`'s stored document, `more_like_this` documents, a `lookup` runtime
 field): those are read as the caller, as Elasticsearch authorizes them. A document an ingest
-pipeline moves (`_index`, `reroute`) is authorized again where it lands. They answer with Elasticsearch's own status and body, and pass the query string through
+pipeline moves (`_index`, `reroute`) is authorized again where it lands. ES|QL and SQL read as their client:
+their field resolution and searches carry its credentials (wildcards expand to the indices it
+may read, a lookup join's index is checked like `FROM`'s), and where its roles restrict
+documents or fields the direct shard reads give way to searches, which apply them. They answer with Elasticsearch's own status and body, and pass the query string through
 (`refresh`, `routing`, `size`, …). A write names exactly one index; a name starting with `_` is
 refused (those are Elasticsearch's own APIs: use the console). Bodies may be up to the cluster's
 `max_body_mb`.
