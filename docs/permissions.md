@@ -157,6 +157,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.
+- Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
+  names only) tests a guess at a value: `reveal` there, as reading the values is.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
   `admin`, as in secrets itself.
 - Secrets' imports (`PUT …/environments/{env}/imports`, `[{project?, environment, path}]`) are a
