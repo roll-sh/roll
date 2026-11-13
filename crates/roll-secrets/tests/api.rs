@@ -831,7 +831,9 @@ async fn reads_unlike_the_reader_are_alerted() {
     sweep().await;
     sweep().await;
     let sent = api.sent.0.lock().unwrap().clone();
-    let alerts: Vec<Value> = sent.iter().map(|n| n["alert"].clone()).collect();
+    // Notices queued in one sweep go out in no particular order.
+    let mut alerts: Vec<Value> = sent.iter().map(|n| n["alert"].clone()).collect();
+    alerts.sort_by_key(|a| a["kind"].as_str().map(String::from));
     assert_eq!(alerts, vec![json!({ "kind": "many_reveals", "actor": "alice", "count": 30 }), json!({ "kind": "new_address", "actor": "token:tok_ci", "ip": "203.0.113.7" })], "{sent:?}");
 }
 
