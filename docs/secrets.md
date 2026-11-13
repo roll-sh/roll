@@ -488,6 +488,11 @@ A link is `{kind, ref, field, mode, options}`:
   every 10 minutes. `Values.dynamic` names the keys that hold one, for a consumer that can't renew
   (a service that scales to zero refuses them). Only
   the lease's metadata is stored, never the credential.
+- **When a secret, an environment or the project goes**, what it issued is revoked first, while
+  the project's key and registries (rotators…) can still reach it. A revocation that fails (the
+  product or the customer's endpoint is down) stays as a lease that's already due, and the sweeper
+  retries it; a deleted project keeps its key and registries (`projects.forgotten_at`) until its
+  last lease is revoked, then they go too. Nothing it issued outlives it unrevoked.
 
 **Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
 standard environments that neither link it nor have its usual keys at `/`, and those keys: the
