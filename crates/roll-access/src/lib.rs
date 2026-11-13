@@ -148,6 +148,7 @@ mod policy_tests {
             rate_per_minute: None,
             revoked_why: None,
             temporary: vec![],
+            ask_otherwise: false,
         };
         let now = 100 * day;
         assert!(p.idle(&g(0, None), now), "made 100 days ago, never used");
@@ -289,6 +290,18 @@ impl Resolvers {
         self.workspace.as_ref().map(|w| w.projects_of(workspace_kind, r#ref)).unwrap_or_default()
     }
 
+    /// Register what a `kind`'s id is checked under: `f(id)` answers the canonical id (a name to its
+    /// id, a replica to its database), or `None` to keep it. One line per product in rolld.
+    pub fn by_fn(&mut self, kind: &'static str, f: impl Fn(&str) -> Option<String> + Send + Sync + 'static) {
+        self.by_kind.insert(kind, Arc::new(Fns { id: Some(Box::new(f)), env: None }));
+    }
+
+    /// Register what an environment named in `product`'s paths is: `f(id, env)` answers what rules
+    /// see (`"preview"` for a preview's own), or `None` to keep the name.
+    pub fn environment_fn(&mut self, product: &'static str, f: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static) {
+        self.environments.insert(product, Arc::new(Fns { id: None, env: Some(Box::new(f)) }));
+    }
+
     /// `env` (named in a path) of `product`'s resource `id`, as rules see it.
     pub fn environment(&self, product: &str, id: &str, env: &str) -> String {
         self.environments.get(product).and_then(|r| r.environment(id, env)).unwrap_or_else(|| env.to_string())
@@ -302,6 +315,30 @@ pub trait ApprovalChat: Send + Sync + 'static {
     fn post(&self, install: String, channel: String, a: store::Approval) -> futures::future::BoxFuture<'static, std::result::Result<String, String>>;
     /// Edit a posted card to what the approval is now.
     fn update(&self, install: String, channel: String, ts: String, a: store::Approval) -> futures::future::BoxFuture<'static, std::result::Result<(), String>>;
+    /// Post a plain message (the daily list of tokens about to expire).
+    fn notice(&self, install: String, channel: String, text: String) -> futures::future::BoxFuture<'static, std::result::Result<(), String>> {
+        let _ = (install, channel, text);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+type IdFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+type EnvFn = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
+/// A resolver from closures ([`Resolvers::by_fn`], [`Resolvers::environment_fn`]).
+struct Fns {
+    id: Option<IdFn>,
+    env: Option<EnvFn>,
+}
+
+impl Resolver for Fns {
+    fn resolve(&self, _kind: &str, id: &str) -> Option<Resolved> {
+        self.id.as_ref()?(id).map(|id| Resolved { id, environment: None })
+    }
+
+    fn environment(&self, id: &str, env: &str) -> Option<String> {
+        self.env.as_ref()?(id, env)
+    }
 }
 
 /// The access service: the store, the catalogue and the resolvers.
@@ -327,6 +364,11 @@ impl Access {
             code_sql::Target::Sqlite(path) => code_sql::Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
             code_sql::Target::Postgres { url, schema } => code_sql::Db::connect(url, schema, pg)?,
         };
+        Access::with_db(db, config, resolvers)
+    }
+
+    /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
+    pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
         Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
     }
 
@@ -388,6 +430,35 @@ impl Access {
         let n = self.store.setting("notify").ok()??;
         let (i, c) = (n["chat"]["install"].as_str()?, n["chat"]["channel"].as_str()?);
         Some((i.to_string(), c.to_string()))
+    }
+
+    /// Once a day, where approvals go: the live tokens that expire within a week (GitHub mails a
+    /// week before a token expires). One node posts it (the day is claimed in the store). Whether
+    /// it posted.
+    pub async fn expiry_digest(self: &Arc<Self>) -> Result<bool> {
+        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return Ok(false) };
+        let now = code_sql::now_ms();
+        let week = now + 7 * 86_400_000;
+        let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week)).collect();
+        if soon.is_empty() {
+            return Ok(false);
+        }
+        if !self.store.claim_day("expiry_notice", now / 86_400_000)? {
+            return Ok(false);
+        }
+        soon.sort_by_key(|g| g.expires_at);
+        let names: Vec<String> = soon
+            .iter()
+            .take(20)
+            .map(|g| {
+                let days = (g.expires_at.unwrap_or(now) - now).max(0) / 86_400_000;
+                format!("{} ({})", g.name, if days == 0 { "today".to_string() } else if days == 1 { "tomorrow".to_string() } else { format!("in {days} days") })
+            })
+            .collect();
+        let count = if soon.len() == 1 { "One roll token expires".to_string() } else { format!("{} roll tokens expire", soon.len()) };
+        let text = format!("{count} within a week: {}. Give one longer at {}/dashboard/access, or let it go.", names.join(", "), self.config.web_url.trim_end_matches('/'));
+        chat.notice(install, channel, text).await.map_err(Error::Internal)?;
+        Ok(true)
     }
 
     /// A new approval: posted to chat, when approvals go there (in the background).
@@ -515,7 +586,7 @@ impl Access {
 impl roll_auth::Grants for Access {
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
-        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())) })
+        g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), ask_otherwise: g.ask_otherwise })
     }
 }
 

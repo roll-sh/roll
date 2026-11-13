@@ -127,11 +127,7 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
           </button>
         </div>
       </div>
-      {a.args !== null && a.args !== undefined && (
-        <pre className="mt-3 max-h-56 overflow-auto rounded-lg border border-line bg-bg p-3 font-mono text-[11px] leading-relaxed text-muted">
-          {JSON.stringify(a.args, null, 2)}
-        </pre>
-      )}
+      {a.args !== null && a.args !== undefined && <Args args={a.args} />}
       {denying && (
         <input
           autoFocus
@@ -267,4 +263,29 @@ function ChatSetting() {
 /** Slack member ids typed as a list (commas, spaces or new lines). */
 function approverIds(text: string): string[] {
   return [...new Set(text.split(/[\s,]+/).map((s) => s.trim().replace(/^@/, "")).filter(Boolean))];
+}
+
+/**
+ * What a request would do, readable: a push's ref updates as a list, SQL, CQL or a Redis command as
+ * code, anything else as its JSON (secrets in it were redacted when it was asked).
+ */
+function Args({ args }: { args: unknown }) {
+  const box = "mt-3 max-h-56 overflow-auto rounded-lg border border-line bg-bg p-3 font-mono text-[11px] leading-relaxed text-muted";
+  const o = (args && typeof args === "object" ? args : {}) as Record<string, unknown>;
+  if (Array.isArray(o.updates)) {
+    const zero = (s: unknown) => typeof s === "string" && /^0+$/.test(s);
+    return (
+      <ul className={box}>
+        {(o.updates as { ref: string; old: string; new: string; action: string }[]).map((u) => (
+          <li key={u.ref}>
+            <span className={u.action === "delete" || u.action === "deploy" ? "text-danger" : "text-fg"}>{u.action}</span> {u.ref}{" "}
+            <span className="text-subtle">{zero(u.old) ? "(new)" : zero(u.new) ? "(deleted)" : `${u.old.slice(0, 8)} → ${u.new.slice(0, 8)}`}</span>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  const code = typeof o.sql === "string" ? o.sql : typeof o.query === "string" ? o.query : Array.isArray(o.command) ? (o.command as unknown[]).join(" ") : null;
+  if (code !== null) return <pre className={`${box} whitespace-pre-wrap text-fg`}>{code}</pre>;
+  return <pre className={box}>{JSON.stringify(args, null, 2)}</pre>;
 }

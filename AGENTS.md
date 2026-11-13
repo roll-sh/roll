@@ -286,7 +286,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     path (or take names).
   - Grant secrets carry a checksum (`roll_access::checksum_ok`); a leaked one is revoked, never
     just reported (`Access::revoke_leaked`: roll code's landings, GitHub's secret scanning).
-  - Grants are looked up on every request; never cache them. Read-only must be enforced by the
+  - Grants are looked up on every request; never cache them.
+  - After touching access or MCP, run `pnpm test:code` (it runs roll-auth, roll-access, roll-mcp
+    and roll-net with roll code's suites; `--docker` runs them on Postgres too) and
+    `cargo test -p rolld --test auth` (every route classified). Read-only must be enforced by the
     product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
   - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
     through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).

@@ -6,30 +6,14 @@
 //! scoped tokens by one catalogue; the resolvers here tell it what a path doesn't (the repo a
 //! change is in, the project an endpoint belongs to, a database's id from its name).
 
-use roll_access::{Access, Resolved, Resolver, Resolvers, WorkspaceResolver};
+use roll_access::{Access, Resolvers, WorkspaceResolver};
 use serde_json::Value;
 use std::sync::Arc;
-
-/// A resolver from a closure: `kind`'s id → the id rules name it by (and its environment).
-struct ResolveFn<F>(F);
-
-impl<F: Fn(&str) -> Option<String> + Send + Sync + 'static> Resolver for ResolveFn<F> {
-    fn resolve(&self, _kind: &str, id: &str) -> Option<Resolved> {
-        (self.0)(id).map(|id| Resolved { id, environment: None })
-    }
-}
 
 /// roll secrets, once it's open (it opens after roll-access): an ephemeral environment is a
 /// preview to rules (`environments: ["preview"]`), whatever its slug (`pv-12`).
 #[derive(Clone, Default)]
 pub struct SecretsEnvs(pub Arc<std::sync::OnceLock<Arc<roll_secrets::Secrets>>>);
-
-impl Resolver for SecretsEnvs {
-    fn environment(&self, project: &str, env: &str) -> Option<String> {
-        let e = self.0.get()?.environment(project, env, &roll_secrets::Caller::operator()).ok()?;
-        (e.kind == roll_secrets::EnvironmentKind::Ephemeral).then(|| "preview".to_string())
-    }
-}
 
 /// The products whose ids the evaluator can't read off a path.
 pub struct Products<'a> {
@@ -43,30 +27,34 @@ pub struct Products<'a> {
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
     let mut r = Resolvers { workspace: Some(Arc::new(WorkspaceResolver(workspace))), ..Default::default() };
-    r.environments.insert("secrets", Arc::new(p.secrets));
+    let slot = p.secrets.0;
+    r.environment_fn("secrets", move |project, env| {
+        let e = slot.get()?.environment(project, env, &roll_secrets::Caller::operator()).ok()?;
+        (e.kind == roll_secrets::EnvironmentKind::Ephemeral).then(|| "preview".to_string())
+    });
     if let Some(pg) = p.postgres {
         // A project by its id; an endpoint is in its project.
-        r.by_kind.insert("endpoint", Arc::new(ResolveFn(move |id: &str| pg.endpoint_or_404(id).ok().map(|e| e.project_id))));
+        r.by_fn("endpoint", move |id: &str| pg.endpoint_or_404(id).ok().map(|e| e.project_id));
     }
     if let Some(redis) = p.redis {
         let r2 = redis.clone();
-        r.by_kind.insert("database", Arc::new(ResolveFn(move |id: &str| r2.get(id).ok().map(|d| d.id))));
+        r.by_fn("database", move |id: &str| r2.get(id).ok().map(|d| d.id));
         // A replica is checked as its database.
-        r.by_kind.insert("replica", Arc::new(ResolveFn(move |id: &str| redis.store.replica(id).ok().flatten().map(|r| r.db_id))));
+        r.by_fn("replica", move |id: &str| redis.store.replica(id).ok().flatten().map(|r| r.db_id));
     }
     if let Some(nosql) = p.nosql {
         // NoSQL's `{id}` is "database" too, under its own product: one resolver per product kind.
-        r.by_kind.insert("nosql-database", Arc::new(ResolveFn(move |id: &str| nosql.get(id).ok().map(|d| d.id))));
+        r.by_fn("nosql-database", move |id: &str| nosql.get(id).ok().map(|d| d.id));
     }
     if let Some(broker) = p.streams {
-        r.by_kind.insert("stream", Arc::new(ResolveFn(move |id: &str| broker.find_stream(id).map(|s| s.id.clone()))));
+        r.by_fn("stream", move |id: &str| broker.find_stream(id).map(|s| s.id.clone()));
     }
     if let Some(code) = p.code {
         let c = code.clone();
-        r.by_kind.insert("default-branch", Arc::new(ResolveFn(move |repo: &str| c.default_branch_of(repo))));
+        r.by_fn("default-branch", move |repo: &str| c.default_branch_of(repo));
         for kind in ["change", "thread", "work"] {
             let code = code.clone();
-            r.by_kind.insert(kind, Arc::new(ResolveFn(move |id: &str| code.repo_of(kind, id))));
+            r.by_fn(kind, move |id: &str| code.repo_of(kind, id));
         }
     }
     r
@@ -103,8 +91,13 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
             tick.tick().await;
             let a = a.clone();
             let days = a.config.audit_days;
-            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a.store.prune(days)).await {
+            let a2 = a.clone();
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || a2.store.prune(days)).await {
                 tracing::warn!(error = %e, "pruning the access store");
+            }
+            // Tokens about to expire, once a day, where approvals go.
+            if let Err(e) = a.expiry_digest().await {
+                tracing::warn!(error = %e, "posting tokens about to expire");
             }
         }
     });
@@ -275,6 +268,11 @@ impl roll_access::ApprovalChat for ChatCards {
     fn update(&self, install: String, channel: String, ts: String, a: roll_access::store::Approval) -> futures::future::BoxFuture<'static, Result<(), String>> {
         let (code, c) = (self.code.clone(), card(&self.web, &a));
         Box::pin(async move { code.update_access_card(&install, &channel, &ts, &c).await })
+    }
+
+    fn notice(&self, install: String, channel: String, text: String) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let code = self.code.clone();
+        Box::pin(async move { code.post_access_notice(&install, &channel, &text).await })
     }
 }
 

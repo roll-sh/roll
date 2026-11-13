@@ -144,7 +144,8 @@ fn storage_account(row: &Row, query: Option<&str>, headers: &axum::http::HeaderM
     if row.product != "storage" {
         return None;
     }
-    let from_query = || query.and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.into_owned()));
+    // Trimmed as storage itself reads it (s3-control's account parameter).
+    let from_query = || query.and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.trim().to_string()));
     headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).or_else(from_query).filter(|a| !a.is_empty())
 }
 
@@ -231,10 +232,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
     let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
-    // A grant's request limit: an MCP message counts once (not the route its tool calls), a hop
-    // counts where it was decided. Over it, nothing is written: a flood stays cheap.
+    // A grant's request limit: every request counts, an MCP tool call too (as the route it calls),
+    // but not the MCP envelope around it (a batch of calls is each call); a hop counts where it was
+    // decided. Over it, nothing is written: a flood stays cheap.
     let mut limit = None;
-    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && req.extensions().get::<McpCall>().is_none()) {
+    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && route != "/v1/mcp") {
         match access.limiter.check(&grant.id, rate, Instant::now()) {
             crate::rate::Verdict::Over { retry_after } => return rate_limited(rate, retry_after),
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
@@ -303,7 +305,10 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
     // What the request needs: one action, or every action a push's ref updates take.
-    let mut needs = vec![row.action(&ctx.method, &params, json_body.as_ref())];
+    let mut needs = vec![match row.act {
+        catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),
+        _ => row.action(&ctx.method, &params, json_body.as_ref()),
+    }];
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
     if matches!(row.act, catalog::Act::GitPush) {
@@ -324,7 +329,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             git_commands = Some(prefix);
         }
     }
-    let (mut outcome, action) = if matches!(row.target, Tgt::AnyGrant) { (Outcome::Allow, needs[0]) } else { weakest(&needs, |a| scope.outcome(&target, a)) };
+    let (mut outcome, mut action) = if matches!(row.target, Tgt::AnyGrant) { (Outcome::Allow, needs[0]) } else { weakest(&needs, |a| scope.outcome(&target, a)) };
     // Putting a resource in a workspace project (or taking it out) changes which tokens reach it:
     // it also needs `admin` on that resource, where it is now, allowed outright.
     if let Some((product, r#ref)) = catalog::placement(row, &params) {
@@ -334,6 +339,23 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         if !ok {
             outcome = Outcome::Deny;
         }
+    }
+    // Copying another environment's values (apps' `variables_from`) is reading them: it needs
+    // reveal on the same resource there too, and the request gets the weaker of the two.
+    if let (Some(field), Target::One(r)) = (row.copies_from, &target)
+        && let Some(src) = json_body.as_ref().and_then(|b| b.get(field)).and_then(Value::as_str)
+    {
+        let mut from = r.clone();
+        from.environment = Some(access.resolvers.environment(row.product, r.id.as_deref().unwrap_or(""), src));
+        let copied = scope.outcome(&Target::One(from), Action::Reveal);
+        if rank(copied) < rank(outcome) {
+            (outcome, action) = (copied, Action::Reveal);
+        }
+    }
+    // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
+    // were refused before any rule; a move between projects stays refused.
+    if outcome == Outcome::Deny && ctx.grant.ask_otherwise && catalog::placement(row, &params).is_none() {
+        outcome = Outcome::Ask;
     }
     let resource = describe(&target);
     let mut approval_used: Option<String> = None;
@@ -375,7 +397,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 target,
                 bound.join("\n")
             ));
-            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone() };
+            let (environment, scope_path) = match &target {
+                Target::One(r) => (r.environment.clone(), r.path.clone()),
+                _ => (None, None),
+            };
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(id) => approval_used = Some(id),
                 Err(resp) => return *resp,
@@ -401,6 +427,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         name: ctx.grant.name.as_str().into(),
         kind: ctx.grant.kind(),
         scope: scope.clone(),
+        ask_otherwise: ctx.grant.ask_otherwise,
     });
     // A list filtered, an answer's credentials redacted, a create placed: the answer is read.
     let filter_list = matches!(row.target, Tgt::List { .. }) && narrowed(&scope, row.product, action);
@@ -454,12 +481,16 @@ fn limit_headers(h: &mut axum::http::HeaderMap, rate: u32, remaining: u32, reset
 
 /// The decision on everything a request needs: the weakest outcome, and the action it's for
 /// (the strongest among equals).
-fn weakest(needs: &[Action], outcome: impl Fn(Action) -> Outcome) -> (Outcome, Action) {
-    let rank = |o: Outcome| match o {
+/// Outcomes from weakest to strongest.
+fn rank(o: Outcome) -> u8 {
+    match o {
         Outcome::Deny => 0,
         Outcome::Ask => 1,
         Outcome::Allow => 2,
-    };
+    }
+}
+
+fn weakest(needs: &[Action], outcome: impl Fn(Action) -> Outcome) -> (Outcome, Action) {
     let mut sorted = needs.to_vec();
     sorted.sort_by(|a, b| b.cmp(a));
     sorted.dedup();
@@ -513,11 +544,14 @@ struct Asked<'a> {
     request_hash: String,
     /// What it does, when its body isn't JSON (a push's ref updates).
     args: Option<Value>,
+    /// The environment and path the request is about.
+    environment: Option<String>,
+    scope_path: Option<String>,
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
-    let Asked { headers, path, body, request_hash, args } = req;
+    let Asked { headers, path, body, request_hash, args, environment, scope_path } = req;
     let access = &ctx.access;
     let existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     let approval = match existing {
@@ -551,6 +585,8 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
                     args,
                     tool: tool.as_deref(),
                     request_hash,
+                    environment: environment.as_deref(),
+                    scope_path: scope_path.as_deref(),
                 })
             })
             .await

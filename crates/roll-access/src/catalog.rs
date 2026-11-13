@@ -20,6 +20,8 @@ pub enum Act {
     ProductionIf(&'static str),
     /// Decided from the JSON body.
     Body(fn(&Value) -> Action),
+    /// Decided from the raw body (NDJSON: search's bulk).
+    Raw(fn(&[u8]) -> Action),
     /// A git push: from the ref updates at the start of its body (the evaluator reads them):
     /// `deploy` onto the default branch, `delete` for a ref deleted, else `write`.
     GitPush,
@@ -65,11 +67,14 @@ pub struct Row {
     pub path_query: Option<&'static str>,
     /// Fields of the answer that are credentials: replaced unless the grant may `reveal`.
     pub reveals: &'static [&'static str],
+    /// A body field naming another environment of the same resource whose values the request
+    /// copies (apps' `variables_from`): it also needs `reveal` there.
+    pub copies_from: Option<&'static str>,
 }
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_))
+        matches!(self.act, Act::Body(_) | Act::Raw(_)) || self.copies_from.is_some()
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -84,6 +89,8 @@ impl Row {
                 if params.iter().any(|(k, v)| k == p && v == "production") { Action::Deploy } else { Action::Write }
             }
             Act::Body(f) => f(body.unwrap_or(&Value::Null)),
+            // Without the bytes (a dry run), the strongest it can be; the evaluator reads them.
+            Act::Raw(_) => Action::Delete,
             // The strongest it can be; the evaluator reads its commands (`git_push`).
             Act::GitPush => Action::Deploy,
         }
@@ -91,7 +98,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[] }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -127,6 +134,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn copies_from(mut self, field: &'static str) -> Row {
+        self.copies_from = Some(field);
         self
     }
 }
@@ -375,7 +386,7 @@ pub fn view(r: &Row) -> RowView {
         Act::Is(a) => a.as_str().to_string(),
         Act::ByMethod => "by method".into(),
         Act::ProductionIf(p) => format!("deploy when {{{p}}} is production, else write"),
-        Act::Body(_) => "from the body".into(),
+        Act::Body(_) | Act::Raw(_) => "from the body".into(),
         Act::GitPush => "deploy onto the default branch, delete for a deleted ref, else write".into(),
     };
     let target = match r.target {
@@ -508,6 +519,19 @@ fn cql_action(b: &Value) -> Action {
 /// ships (`deploy`); deleting a thread `delete`; and a shell, writing files, rolling back, raising a
 /// thread's runtime or interaction mode, answering an agent's approval (it would approve itself),
 /// endpoints, the gateway, projects and the machine's settings are `admin`. Unknown types too.
+/// An Elasticsearch bulk (NDJSON): `delete` when an action line deletes or an update runs a script
+/// (`ctx.op = 'delete'` deletes), or when a line isn't JSON (it fails closed); else `write`.
+fn bulk_action(b: &[u8]) -> Action {
+    for line in b.split(|c| *c == b'\n').filter(|l| !l.iter().all(u8::is_ascii_whitespace)) {
+        let Ok(v) = serde_json::from_slice::<Value>(line) else { return Action::Delete };
+        let Some(o) = v.as_object() else { return Action::Delete };
+        if o.contains_key("delete") || o.contains_key("script") {
+            return Action::Delete;
+        }
+    }
+    Action::Write
+}
+
 /// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
 /// a Slack or Discord one answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
@@ -813,6 +837,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")),
+    // A bulk can delete as well as index: its action lines decide.
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/bulk", "search", Act::Raw(bulk_action), one(PG, "cluster")),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),
@@ -863,6 +889,9 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/events", "apps", R, Tgt::Product),
     // A project's notifications: the URL is stored sealed and never answered; a webhook's signing
     // secret comes back once, so making one is reveal (Slack and Discord ones are write).
+    // A project's spend limits: at the hard limit the whole project pauses, so setting one is admin.
+    row("GET", "/v1/apps/projects/{project}/limits", "apps", R, one(&["project"], "project")),
+    row("PUT", "/v1/apps/projects/{project}/limits", "apps", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
@@ -874,7 +903,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    // `variables_from` copies another environment's values into this one: reveal there too.
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from("variables_from"),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1083,6 +1113,9 @@ mod tests {
         }
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
+        assert_eq!(bulk_action(b"{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a\"}\n"), Action::Write);
+        assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
+        assert_eq!(bulk_action(b"{\"update\":{\"_id\":\"3\"}}\n{\"script\":{\"source\":\"ctx.op = 'delete'\"}}\n"), Action::Delete);
         assert_eq!(apps_notification_action(&serde_json::json!({ "url": "https://example.com/h" })), Action::Reveal);
         assert_eq!(apps_notification_action(&serde_json::json!({ "kind": "slack", "url": "https://hooks.slack.com/x" })), Action::Write);
         let dep = find("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "x").unwrap();

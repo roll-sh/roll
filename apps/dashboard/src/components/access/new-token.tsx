@@ -1,6 +1,6 @@
 import { HorizonMark } from "@roll/brand";
 import { useEffect, useState } from "react";
-import { accessApi, describeRule, EXPIRIES, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
+import { accessApi, EXPIRIES, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
@@ -16,6 +16,7 @@ export function NewToken() {
   const [expiry, setExpiry] = useState(1);
   const [ips, setIps] = useState("");
   const [rateText, setRateText] = useState("");
+  const [askOtherwise, setAskOtherwise] = useState(false);
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState<{ grant: Grant; token: string } | null>(null);
 
@@ -44,7 +45,7 @@ export function NewToken() {
     setError(null);
     try {
       const ms = EXPIRIES[expiry].ms;
-      setMade(await accessApi.create({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, ip_allow: ipList, rate_per_minute: rate.rate }));
+      setMade(await accessApi.create({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, ip_allow: ipList, rate_per_minute: rate.rate, ask_otherwise: askOtherwise }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -69,7 +70,17 @@ export function NewToken() {
           <>
             <Panel title="What it may do">
               <div className="p-5">
-                <Builder catalog={catalog} rules={rules} onChange={(r) => setRules(r)} />
+                <Builder catalog={catalog} rules={rules} onChange={(r) => setRules(r)} askOtherwise={askOtherwise} />
+                <label className="mt-4 flex items-start gap-2 text-[13px]">
+                  <input type="checkbox" checked={askOtherwise} onChange={(e) => setAskOtherwise(e.target.checked)} className="mt-0.5" />
+                  <span>
+                    Ask me for anything else
+                    <span className="block text-[12px] text-muted">
+                      What these rules don't allow waits for your approval instead of being refused. Approve once, for a while, or always,
+                      and the token grows as you go.
+                    </span>
+                  </span>
+                </label>
               </div>
             </Panel>
             <Panel title="Name, lifetime and network">
@@ -98,13 +109,6 @@ export function NewToken() {
                 </label>
               </div>
             </Panel>
-            <div className="space-y-2">
-              {rules.map((r, i) => (
-                <p key={i} className="text-[12px] text-muted">
-                  {describeRule(r)}
-                </p>
-              ))}
-            </div>
             <ErrorNote error={error} />
             <div className="flex items-center gap-3">
               <button onClick={create} disabled={busy || problems.length > 0} className={primary}>

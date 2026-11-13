@@ -64,6 +64,8 @@ fn postgres() -> Router {
         .route("/git/{owner}/{repo}/git-receive-pack", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/storage/buckets/{name}", get(|| async { axum::Json(json!({ "name": "logs" })) }))
         .route("/v1/storage/buckets", get(|| async { axum::Json(json!([{ "name": "logs" }, { "name": "media" }])) }))
+        .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
+        .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
 }
@@ -84,7 +86,7 @@ impl Daemon {
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         configure(&mut config);
-        let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, resolvers).unwrap();
+        let access = Access::with_db(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("access.db")), "access").unwrap(), config, resolvers).unwrap();
         let public = roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") };
         let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![public]);
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
@@ -202,6 +204,14 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(ids(&list), Vec::<&str>::new());
 
     // An address outside the allowlist (an in-process request has none) is refused.
+    // A search bulk is decided by its lines: indexing is write, a delete line needs delete; the body
+    // goes on untouched.
+    let (indexer, _) = d.token(json!([{ "product": "search", "resources": "*", "actions": { "write": "allow" } }]), json!({})).await;
+    let bulk = |ndjson: &'static str| d.raw(&indexer, Method::POST, "/v1/search/clusters/c1/indices/logs/bulk", Body::from(ndjson), &[], None);
+    assert_eq!(bulk("{\"index\":{}}\n{\"msg\":\"hi\"}\n").await, (StatusCode::OK, json!({ "lines": 2 })));
+    let (s, e) = bulk("{\"index\":{}}\n{\"msg\":\"hi\"}\n{\"delete\":{\"_id\":\"1\"}}\n").await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
+
     // A bucket in another storage account is `<account>/<bucket>`: a rule for one doesn't reach
     // the same name in the default account or in a third.
     let (bucket, _) = d.token(json!([{ "product": "storage", "resources": [{ "id": "acme/logs" }], "actions": { "read": "allow" } }]), json!({})).await;
@@ -441,6 +451,10 @@ impl roll_access::ApprovalChat for FakeChat {
         self.0.lock().unwrap().push(format!("update {install} {channel} {ts} {} {}", a.id, a.state));
         Box::pin(async { Ok(()) })
     }
+    fn notice(&self, install: String, channel: String, text: String) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        self.0.lock().unwrap().push(format!("notice {install} {channel} {text}"));
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// With approvals going to a chat channel, a new approval is posted there; a press from another
@@ -478,6 +492,12 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     seen(format!("update chi_a C9 1700.1 {id} approved")).await;
     let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
     assert_eq!((a["state"].as_str(), a["decided_by"].as_str()), (Some("approved"), Some("slack:U1")));
+
+    // Once a day, the tokens about to expire are posted there too.
+    d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "name": "ci-deploy", "expires_at": code_sql::now_ms() + 2 * 86_400_000 })).await;
+    assert!(d.access.expiry_digest().await.unwrap());
+    assert!(chat.0.lock().unwrap().iter().any(|l| l.starts_with("notice chi_a C9 One roll token expires within a week: ci-deploy (")), "{:?}", chat.0.lock().unwrap());
+    assert!(!d.access.expiry_digest().await.unwrap(), "once a day");
 }
 
 /// An MCP client known by its metadata document (MCP 2025-11-25: its client_id is the document's
@@ -763,4 +783,42 @@ async fn approvals_can_be_remembered() {
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
     assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
     assert_eq!(ask("pc").await.0, StatusCode::OK);
+
+    // "Ask for anything else": what the rules don't allow asks instead of being refused, and an
+    // approval remembered for good grows the token. The operator's routes stay shut.
+    let (asks, asks_id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
+    let (_, pending) = d.call(&asks, Method::DELETE, "/v1/projects/pd", None).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    assert_eq!(approve(apr, json!("always")).await.0, StatusCode::OK);
+    assert_eq!(d.call(&asks, Method::DELETE, "/v1/projects/pd", None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&asks, Method::GET, "/v1/unclassified", None).await.1["code"], "operator_only");
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{asks_id}"), None).await;
+    assert_eq!(g["rules"].as_array().map(Vec::len), Some(2), "{g}");
+    // Only a token that asks may make one that asks.
+    let child = |ask: bool| json!({ "name": "child", "rules": [{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }], "ask_otherwise": ask });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child(false))).await.0, StatusCode::CREATED);
+    let (s, e) = d.call(&token, Method::POST, "/v1/access/tokens", Some(child(true))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+
+    // Copying another environment's variables is reading them: it needs reveal there too.
+    let (dev, _) = d.token(json!([{ "product": "apps", "resources": "*", "environments": ["dev", "dev2"], "actions": { "write": "allow", "reveal": "allow" } }]), json!({})).await;
+    let put = |from: Value| {
+        let (d, t) = (&d, dev.clone());
+        async move { d.call(&t, Method::PUT, "/v1/apps/services/svc_a/environments/dev2", Some(json!({ "variables_from": from }))).await }
+    };
+    let (s, e) = put(json!("production")).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    assert_eq!(put(json!("dev")).await.0, StatusCode::OK);
+    assert_eq!(d.call(&dev, Method::PUT, "/v1/apps/services/svc_a/environments/dev2", Some(json!({}))).await.0, StatusCode::OK);
+
+    // Remembered where it was asked: development's values, never production's.
+    let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;
+    let values = |env: &'static str| {
+        let (d, t) = (&d, secrets.clone());
+        async move { d.call(&t, Method::GET, &format!("/v1/secrets/projects/prj_s/environments/{env}/values"), None).await }
+    };
+    let apr = values("development").await.1["approval"].as_str().unwrap().to_string();
+    assert_eq!(approve(apr, json!("1h")).await.0, StatusCode::OK);
+    assert_eq!(values("development").await.0, StatusCode::OK);
+    assert_eq!(values("production").await.1["code"], "approval_pending");
 }

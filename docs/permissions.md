@@ -133,6 +133,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   name), which the gate takes like a bearer token; roll code's git server then takes the gate's
   word (`code_git::Vouched`) and records the push as `token:<name>`. An `ask` push is bound to its
   ref updates; resend it with `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
+- Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT
+  …/environments/{env}` and its `variables_from`) also needs `reveal` on the same resource in the
+  environment the body names, and the request gets the weaker of the two decisions.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -311,6 +314,19 @@ type Approval = {
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
+### Ask for anything else
+
+A token can be made so that what its rules don't allow asks a person instead of being refused
+(`ask_otherwise`; the builder's and the consent screen's "Ask me for anything else", `roll token
+create --ask-otherwise`), as Claude Code asks before anything it isn't allowed to do. Start an agent
+read-only, and approve what it asks for once, for a while or always (below): the token grows with
+what a person said yes to.
+
+- It's still refused, never asked: the operator's routes (no row in the catalogue), a request from
+  the wrong address, a revoked or idle token, and moving a resource between projects.
+- `tools/list` shows such a token every tool of the products that are on.
+- Only a token that asks may make one that does.
+
 ### Remembered approvals
 
 Approving can also allow what's asked again, as Claude Code's and Cursor's "allow for this
@@ -342,6 +358,8 @@ Approvals can also go to a Slack or Discord channel, through roll code's chat op
   Connect guest, an install open to anyone), and not the install's member list, which the roll
   code owner manages rather than the operator. Anyone else is told so. `decided_by` is the
   person (`slack:U123`, `discord:123…`).
+- Once a day, the live tokens that expire within a week are posted there too (`expiry_digest`,
+  from the hourly maintenance loop; one node posts it, the day claimed in the store).
 - Posting is best effort: an approval lives in roll (the dashboard, the API, `roll mcp approvals`);
   chat is one more place to decide it.
 - Nothing about an approval's binding changes: it still runs exactly the request it was asked
@@ -423,15 +441,17 @@ it's found, as GitHub does for its own tokens:
 
 - **In roll code.** Everything that lands, in any repository, is read after it lands. The scanner
   reads the store's durable land log, never inside the lander, with a cursor of its own and one
-  node at a time (`code-control/src/leaks.rs`). It reads every changeset a landing added, and the
-  changed files up to 1 MiB each. A file that mentions a token prefix goes to roll-access, which
-  matches checksums and revokes each live token.
+  node at a time (`code-control/src/leaks.rs`). It reads every changeset a landing added (up to
+  50), and the changed files up to 1 MiB each, at most 500 files and 64 MiB a landing; a file it
+  can't read is skipped, never retried forever. A file that mentions a token prefix goes to
+  roll-access, which matches checksums and revokes each live token. A token found in a private
+  repository says only that and the repository's id (whoever owns the token may not read it).
 - **From GitHub.** `POST /v1/access/leaks/github` takes reports from GitHub's secret scanning
   partner program: tokens found in public repositories, gists and issues. Each report is signed
   with one of GitHub's ECDSA P-256 keys (`Github-Public-Key-Identifier` and
   `Github-Public-Key-Signature`, checked against
-  `api.github.com/meta/public_keys/secret_scanning`, cached for an hour and refetched for an
-  unknown key at most once a minute). roll revokes the live tokens and answers each with its
+  `api.github.com/meta/public_keys/secret_scanning`: cached for an hour, fetched again at most once
+  a minute and one fetch at a time, and a failed fetch leaves the keys there were). roll revokes the live tokens and answers each with its
   `token_hash` and `true_positive` or `false_positive`. An unsigned or wrongly signed report
   changes nothing.
 - A revoked token answers 401 on its next request. The grant keeps `revoked_why` ("found in
@@ -447,8 +467,8 @@ agent loop; it isn't billing.
 - A GCRA per grant (`roll-access/src/rate.rs`): a full minute's worth may come at once, then one
   request every `60 s / rate`. Counted in memory on each node, so a fleet of N nodes allows up to
   N times the rate.
-- An MCP message counts once, not again for the route its tool calls; a hop to an owner counts
-  where it was decided.
+- Every MCP tool call counts, as the route it calls; the `/v1/mcp` envelope doesn't, so a batch of
+  calls (at most 100 messages) counts each call. A hop to an owner counts where it was decided.
 - Allowed answers carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds).
   Over the limit the answer is `429` `{code: "rate_limited", retry_after, limit}` with
   `Retry-After`, before anything is looked up or written: no audit row, no `last_used_at`, so a

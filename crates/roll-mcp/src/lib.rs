@@ -117,6 +117,10 @@ fn unauthorized(c: &Config) -> Response {
     r
 }
 
+/// Messages one POST may carry: each tool call in it is a request of its own (and counts against
+/// the token's rate limit).
+const MAX_BATCH: usize = 100;
+
 async fn handle(State(m): State<Mcp>, ext: Extensions, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     if !origin_ok(&m.config, &headers) {
         return http_error(StatusCode::FORBIDDEN, "Origin not allowed");
@@ -133,6 +137,7 @@ async fn handle(State(m): State<Mcp>, ext: Extensions, headers: HeaderMap, body:
     let batch = msg.is_array();
     let messages: Vec<Value> = match msg {
         Value::Array(a) if a.is_empty() => return http_error(StatusCode::BAD_REQUEST, "empty batch"),
+        Value::Array(a) if a.len() > MAX_BATCH => return http_error(StatusCode::BAD_REQUEST, &format!("a batch has at most {MAX_BATCH} messages")),
         Value::Array(a) => a,
         v => vec![v],
     };
@@ -186,7 +191,8 @@ impl Ctx {
         let on = product == "access" || product == "workspace" || self.m.config.products.iter().any(|p| p == product);
         on && match &self.principal {
             Principal::Operator => true,
-            Principal::Grant(g) => actions.iter().any(|a| g.scope.may(product, *a)),
+            // A token that asks for anything else may use any tool (some of them by asking).
+            Principal::Grant(g) => g.ask_otherwise || actions.iter().any(|a| g.scope.may(product, *a)),
         }
     }
 
