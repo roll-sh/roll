@@ -85,7 +85,7 @@ impl Daemon {
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         configure(&mut config);
-        let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, resolvers).unwrap();
+        let access = Access::with_db(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("access.db")), "access").unwrap(), config, resolvers).unwrap();
         let public = roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") };
         let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![public]);
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));

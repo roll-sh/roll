@@ -334,6 +334,11 @@ impl Access {
             code_sql::Target::Sqlite(path) => code_sql::Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
             code_sql::Target::Postgres { url, schema } => code_sql::Db::connect(url, schema, pg)?,
         };
+        Access::with_db(db, config, resolvers)
+    }
+
+    /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
+    pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
         Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
     }
 
