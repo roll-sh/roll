@@ -67,14 +67,28 @@ pub struct Row {
     pub path_query: Option<&'static str>,
     /// Fields of the answer that are credentials: replaced unless the grant may `reveal`.
     pub reveals: &'static [&'static str],
-    /// A body field naming another environment of the same resource whose values the request
-    /// copies (apps' `variables_from`): it also needs `reveal` there.
-    pub copies_from: Option<&'static str>,
+    /// Where the request names another environment of the same resource whose values it copies
+    /// (apps' `variables_from`, secrets' promote `?from=`): it also needs `reveal` there.
+    pub copies_from: Option<CopyFrom>,
 }
+
+/// Where a copying request names the environment it copies from.
+#[derive(Clone, Copy, Debug)]
+pub enum CopyFrom {
+    /// A top-level string field of the JSON body.
+    Body(&'static str),
+    /// A query parameter.
+    Query(&'static str),
+    /// Each `(environment, path)` the JSON body lists (`None`: the request's own path).
+    Each(fn(&Value) -> Sources),
+}
+
+/// Environments (and paths inside them, `None`: the request's own) a request copies from.
+pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_) | Act::Raw(_)) || self.copies_from.is_some()
+        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -136,8 +150,8 @@ impl Row {
         self.path_query = Some(q);
         self
     }
-    const fn copies_from(mut self, field: &'static str) -> Row {
-        self.copies_from = Some(field);
+    const fn copies_from(mut self, from: CopyFrom) -> Row {
+        self.copies_from = Some(from);
         self
     }
 }
@@ -532,6 +546,24 @@ fn bulk_action(b: &[u8]) -> Action {
     Action::Write
 }
 
+/// Secrets' imports (`[{project?, environment, path}]`): importing another project's folder is
+/// admin on the importing folder (that project's admin exports it too); in-project ones are write,
+/// plus reveal on each source ([`secrets_import_sources`]).
+fn secrets_imports_action(b: &Value) -> Action {
+    let list = b.as_array().map(Vec::as_slice).unwrap_or_default();
+    if list.iter().any(|i| i.get("project").is_some_and(|p| !p.is_null())) { Action::Admin } else { Action::Write }
+}
+
+/// The in-project folders an imports body reads from: every reader of the importing folder will
+/// read them.
+fn secrets_import_sources(b: &Value) -> Sources {
+    let list = b.as_array().map(Vec::as_slice).unwrap_or_default();
+    list.iter()
+        .filter(|i| i.get("project").is_none_or(Value::is_null))
+        .filter_map(|i| Some((i.get("environment")?.as_str()?.to_string(), i.get("path").and_then(Value::as_str).map(str::to_string))))
+        .collect()
+}
+
 /// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
 /// a Slack or Discord one answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
@@ -843,6 +875,9 @@ static ROWS: &[Row] = &[
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/health", "secrets", R, Tgt::AnyGrant),
+    // Search across projects: secrets keeps each project's results only where the token may read
+    // (`Grant::allows`, one check per project inside the request).
+    row("GET", "/v1/secrets/search", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.
@@ -852,6 +887,25 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("PATCH", "/v1/secrets/projects/{project}/environments/{env}", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("PUT", "/v1/secrets/projects/{project}/environments/order", "secrets", ADMIN, one(&["project"], "project")),
+    // Imports: write, reveal on each in-project source, admin for another project's folder.
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/imports", "secrets", Act::Body(secrets_imports_action), one(&["project"], "project"))
+        .env(EnvFrom::Param("env"))
+        .path_query("path")
+        .copies_from(CopyFrom::Each(secrets_import_sources)),
+    // Promote copies the selected keys' values from `?from=` into `{env}`: reveal there too.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/promote", "secrets", W, one(&["project"], "project"))
+        .env(EnvFrom::Param("env"))
+        .path_query("path")
+        .copies_from(CopyFrom::Query("from")),
+    // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
+    // names and hosts; adding one answers its signing secret once; both changes are admin.
+    row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    // A backup seals every environment's values to a key the caller chooses; a restore loads a
+    // whole project. Both are admin in secrets too.
+    row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/restore", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/policy", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -897,6 +951,12 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
+    // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends
+    // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
+    // answered (only its host).
+    row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
@@ -904,7 +964,7 @@ static ROWS: &[Row] = &[
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // `variables_from` copies another environment's values into this one: reveal there too.
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from("variables_from"),
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -913,9 +973,12 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/domains/{host}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
-    // A shell (a WebSocket's GET) and its screen run commands where the service runs: deploy* too.
-    row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
-    row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    // A shell runs any command where the service runs, with its variables (`env` prints them all):
+    // admin in every environment, as an agent's shell is. Its WebSocket, sessions, keys and screen.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     // Waking a sleeping environment and checking a domain change nothing a person sees.
     row("POST", "/v1/apps/services/{id}/environments/{env}/wake", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1101,6 +1164,11 @@ mod tests {
         // Static segments beat parameters; production decides deploy.
         let env = find("PUT", "/v1/secrets/projects/{project}/environments/order", "x").unwrap();
         assert_eq!(env.row.action("PUT", &[], None), Action::Admin);
+        // A whole project's values out (a backup) or in (a restore) is admin, never the prefix's write.
+        for r in ["backup", "restore"] {
+            let f = find("POST", &format!("/v1/secrets/projects/{{project}}/{r}"), "x").unwrap();
+            assert_eq!(f.row.action("POST", &[], None), Action::Admin, "{r}");
+        }
         // A product naming a parameter differently from its row still gets its row (secrets'
         // router says `{key}`, the row `{name}`): a value read is never the prefix's read.
         let f = find("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "x").unwrap();
@@ -1158,6 +1226,8 @@ mod tests {
         assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
+        // An apps shell runs any command with the environment's variables: admin, outside production too.
+        assert_eq!(action("POST", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}/keys", "/v1/apps/services/s/environments/staging/shell/sessions/x/keys"), Some(Action::Admin));
         // Secrets' identities mint tokens; renewing a lease extends a credential.
         assert_eq!(action("GET", "/v1/secrets/projects/{p}/identities", "x"), Some(Action::Admin));
         assert_eq!(action("POST", "/v1/secrets/projects/{p}/leases/{l}/renew", "x"), Some(Action::Reveal));

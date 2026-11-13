@@ -418,6 +418,8 @@ pub fn parse_ip_allow(list: &[String]) -> Result<Vec<ipnet::IpNet>> {
 
 fn check_name(name: &str) -> Result<()> {
     match name.trim().chars().count() {
+        // Agents read names (`roll://access/me`, approvals): one line of plain text.
+        _ if name.chars().any(|c| c.is_control() || c == '`') => Err(Error::BadRequest("a token's name is one line, without control characters or backticks".into())),
         1..=64 => Ok(()),
         _ => Err(Error::BadRequest("a token's name is 1-64 characters".into())),
     }
@@ -765,18 +767,36 @@ impl Store {
         Ok(a)
     }
 
-    pub fn approvals(&self, state: Option<&str>, limit: usize) -> Result<Vec<Approval>> {
+    /// The newest approvals, in a state and of some grants when given (`Some(&[])`: none).
+    pub fn approvals(&self, state: Option<&str>, grants: Option<&[String]>, limit: usize) -> Result<Vec<Approval>> {
         let now = code_sql::now_ms();
         let limit = limit.clamp(1, 500) as i64;
-        let rows = self.db.read(|c| match state {
-            Some("pending") => c.query(
-                &format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE state = 'pending' AND expires_at > ? ORDER BY created_at DESC LIMIT ?"),
-                params![now, limit],
-                approval_row,
-            ),
-            Some(s) => c.query(&format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE state = ? ORDER BY created_at DESC LIMIT ?"), params![s, limit], approval_row),
-            None => c.query(&format!("SELECT {APPROVAL_COLUMNS} FROM approvals ORDER BY created_at DESC LIMIT ?"), [limit], approval_row),
-        })?;
+        let mut wheres = Vec::new();
+        let mut args: Vec<code_sql::Value> = Vec::new();
+        match state {
+            Some("pending") => {
+                wheres.push("state = 'pending' AND expires_at > ?");
+                args.push(code_sql::Value::Int(now));
+            }
+            Some(s) => {
+                wheres.push("state = ?");
+                args.push(code_sql::Value::Text(s.to_string()));
+            }
+            None => {}
+        }
+        let marks;
+        if let Some(gs) = grants {
+            if gs.is_empty() {
+                return Ok(Vec::new());
+            }
+            marks = format!("grant_id IN ({})", vec!["?"; gs.len()].join(", "));
+            wheres.push(&marks);
+            args.extend(gs.iter().map(|g| code_sql::Value::Text(g.clone())));
+        }
+        args.push(code_sql::Value::Int(limit));
+        let filter = if wheres.is_empty() { String::new() } else { format!("WHERE {}", wheres.join(" AND ")) };
+        let sql = format!("SELECT {APPROVAL_COLUMNS} FROM approvals {filter} ORDER BY created_at DESC LIMIT ?");
+        let rows = self.db.read(|c| c.query(&sql, args.as_slice(), approval_row))?;
         Ok(rows
             .into_iter()
             .map(|mut a| {

@@ -11,6 +11,9 @@ API, once, in front of every route, so no surface can do more than another.
   `crates/rolld/src/access.rs`. The MCP server is `crates/roll-mcp` ([mcp.md](mcp.md)).
 - Client: `apps/dashboard/src/lib/access-api.ts`. Change it and the [HTTP API](#http-api) together.
 - Dashboard: `/dashboard/access` ("MCP & access") and the consent screen at `/oauth/authorize`.
+  Each token has a page, `/dashboard/access/tokens/<id>`: what it may do in words (resources by
+  name), what approvals allow it for a while and until when, the approvals it asked for, its recent
+  requests, and edit, rotate and revoke.
 - CLI: `roll token …` and `roll mcp …`.
 - Tests: `crates/roll-access/tests/access.rs` (scoped tokens, ask, tokens making tokens, OAuth end
   to end), `crates/roll-mcp/tests/mcp.rs`, and `crates/rolld/tests/auth.rs` (every route a real
@@ -133,9 +136,20 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   name), which the gate takes like a bearer token; roll code's git server then takes the gate's
   word (`code_git::Vouched`) and records the push as `token:<name>`. An `ask` push is bound to its
   ref updates; resend it with `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
+- An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
+  with its variables: `admin` in every environment, as an agent's shell is.
+- A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
+  `admin`, as in secrets itself.
+- Secrets' imports (`PUT …/environments/{env}/imports`, `[{project?, environment, path}]`) are a
+  copy from each in-project source: `write` on the importing folder plus `reveal` on every folder
+  imported. Importing another project's folder is `admin` on the importing folder (that project's
+  admin must export it too). Secrets also needs `admin` to change a protected environment's imports.
+- Sending a project's data out of roll with a signing secret shown once is `reveal`: an apps
+  webhook notification target, and an apps log drain (every service's output, POSTed signed).
 - Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT
-  …/environments/{env}` and its `variables_from`) also needs `reveal` on the same resource in the
-  environment the body names, and the request gets the weaker of the two decisions.
+  …/environments/{env}` and its `variables_from`, secrets' `POST …/environments/{env}/promote` and
+  its `?from=`) also needs `reveal` on the same resource in the environment the body or query names, and the request gets the weaker of the two decisions. When the copy
+  decides, the approval is about the environment copied from, so remembering it allows exactly that.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -506,7 +520,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
-| `GET /v1/access/approvals` | access read | `?state=pending` |
+| `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |

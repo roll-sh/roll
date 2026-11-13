@@ -51,6 +51,8 @@ export interface Grant {
   revoked_why?: string;
   /** What its rules don't allow asks a person instead of being refused. */
   ask_otherwise?: boolean;
+  /** Rules a person allowed for a while when approving its requests, each until a time (Unix ms). */
+  temporary?: { rule: Rule; until: number }[];
   /** Its requests over the last day (in the list). */
   activity?: { allowed: number; denied: number; asked: number };
 }
@@ -100,7 +102,13 @@ export interface Approval {
   decided_at: number | null;
   decided_by: string | null;
   expires_at: number;
+  /** The environment and path the request is about (what remembering it keeps to). */
+  environment?: string | null;
+  scope_path?: string | null;
 }
+
+/** Actions that destroy, ship, expose a credential or change who may do what: approve them with care. */
+export const RISKY: Action[] = ["delete", "deploy", "reveal", "admin"];
 
 export interface AuditEvent {
   id: string;
@@ -221,7 +229,8 @@ export const accessApi = {
       "/v1/access/check",
       { method, path, ...opts },
     ),
-  approvals: (state?: ApprovalState) => call<Approval[]>("GET", `/v1/access/approvals${query({ state })}`),
+  /** The newest approvals, in a state and of one token (`grant`) when given. */
+  approvals: (state?: ApprovalState, grant?: string) => call<Approval[]>("GET", `/v1/access/approvals${query({ state, grant })}`),
   /** `remember`: also allow the same action on the same resource for a while, or always. */
   approve: (id: string, remember?: Remember) => call<Approval>("POST", `${approval(id)}/approve`, remember && remember !== "once" ? { remember } : {}),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),

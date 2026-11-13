@@ -52,6 +52,7 @@ import { Route as OwnerRepoCommitsRevRouteImport } from './routes/$owner/$repo/c
 import { Route as OwnerRepoInfoRefsRouteImport } from './routes/$owner/$repo/info/refs'
 import { Route as AgentsSIdIndexRouteImport } from './routes/agents/s/$id/index'
 import { Route as AgentsSIdOpengraphImageRouteImport } from './routes/agents/s/$id/opengraph-image'
+import { Route as DashboardAccessTokensIdRouteImport } from './routes/dashboard/access/tokens.$id'
 import { Route as DashboardCodeOwnerIndexRouteImport } from './routes/dashboard/code/$owner/index'
 import { Route as DashboardProjectsIdIndexRouteImport } from './routes/dashboard/projects/$id/index'
 import { Route as DashboardProjectsIdSecretsRouteImport } from './routes/dashboard/projects/$id/secrets'
@@ -285,6 +286,11 @@ const AgentsSIdOpengraphImageRoute = AgentsSIdOpengraphImageRouteImport.update({
   path: '/agents/s/$id/opengraph-image',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DashboardAccessTokensIdRoute = DashboardAccessTokensIdRouteImport.update({
+  id: '/dashboard/access/tokens/$id',
+  path: '/dashboard/access/tokens/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DashboardCodeOwnerIndexRoute = DashboardCodeOwnerIndexRouteImport.update({
   id: '/dashboard/code/$owner/',
   path: '/dashboard/code/$owner/',
@@ -409,6 +415,7 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/commits/$rev': typeof OwnerRepoCommitsRevRoute
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
+  '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
@@ -467,6 +474,7 @@ export interface FileRoutesByTo {
   '/$owner/$repo/commits/$rev': typeof OwnerRepoCommitsRevRoute
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
+  '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
@@ -527,6 +535,7 @@ export interface FileRoutesById {
   '/$owner/$repo/commits/$rev': typeof OwnerRepoCommitsRevRoute
   '/$owner/$repo/info/refs': typeof OwnerRepoInfoRefsRoute
   '/agents/s/$id/opengraph-image': typeof AgentsSIdOpengraphImageRoute
+  '/dashboard/access/tokens/$id': typeof DashboardAccessTokensIdRoute
   '/dashboard/projects/$id/secrets': typeof DashboardProjectsIdSecretsRoute
   '/dashboard/storage/-/accounts': typeof DashboardStorageChar91Char93AccountsRoute
   '/dashboard/storage/-/api': typeof DashboardStorageChar91Char93ApiRoute
@@ -588,6 +597,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/commits/$rev'
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
+    | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
@@ -646,6 +656,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/commits/$rev'
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
+    | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
@@ -705,6 +716,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/commits/$rev'
     | '/$owner/$repo/info/refs'
     | '/agents/s/$id/opengraph-image'
+    | '/dashboard/access/tokens/$id'
     | '/dashboard/projects/$id/secrets'
     | '/dashboard/storage/-/accounts'
     | '/dashboard/storage/-/api'
@@ -756,6 +768,7 @@ export interface RootRouteChildren {
   DashboardRedisIndexRoute: typeof DashboardRedisIndexRoute
   DashboardStorageIndexRoute: typeof DashboardStorageIndexRoute
   AgentsSIdOpengraphImageRoute: typeof AgentsSIdOpengraphImageRoute
+  DashboardAccessTokensIdRoute: typeof DashboardAccessTokensIdRoute
   DashboardProjectsIdSecretsRoute: typeof DashboardProjectsIdSecretsRoute
   DashboardStorageChar91Char93AccountsRoute: typeof DashboardStorageChar91Char93AccountsRoute
   DashboardStorageChar91Char93ApiRoute: typeof DashboardStorageChar91Char93ApiRoute
@@ -1074,6 +1087,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsSIdOpengraphImageRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/dashboard/access/tokens/$id': {
+      id: '/dashboard/access/tokens/$id'
+      path: '/dashboard/access/tokens/$id'
+      fullPath: '/dashboard/access/tokens/$id'
+      preLoaderRoute: typeof DashboardAccessTokensIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/dashboard/code/$owner/': {
       id: '/dashboard/code/$owner/'
       path: '/dashboard/code/$owner'
@@ -1242,6 +1262,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRedisIndexRoute: DashboardRedisIndexRoute,
   DashboardStorageIndexRoute: DashboardStorageIndexRoute,
   AgentsSIdOpengraphImageRoute: AgentsSIdOpengraphImageRoute,
+  DashboardAccessTokensIdRoute: DashboardAccessTokensIdRoute,
   DashboardProjectsIdSecretsRoute: DashboardProjectsIdSecretsRoute,
   DashboardStorageChar91Char93AccountsRoute:
     DashboardStorageChar91Char93AccountsRoute,

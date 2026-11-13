@@ -68,6 +68,8 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
 }
 
 impl Daemon {
@@ -792,8 +794,15 @@ async fn approvals_can_be_remembered() {
     assert_eq!(approve(apr, json!("always")).await.0, StatusCode::OK);
     assert_eq!(d.call(&asks, Method::DELETE, "/v1/projects/pd", None).await.0, StatusCode::OK);
     assert_eq!(d.call(&asks, Method::GET, "/v1/unclassified", None).await.1["code"], "operator_only");
+    // Its dry run says what the gate would: ask.
+    let (_, c) = d.call(&asks, Method::POST, "/v1/access/check", Some(json!({ "method": "DELETE", "path": "/v1/projects/pz" }))).await;
+    assert_eq!(c["decision"], "ask", "{c}");
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{asks_id}"), None).await;
     assert_eq!(g["rules"].as_array().map(Vec::len), Some(2), "{g}");
+    // A token's page lists its own approvals, however many others there are.
+    // (`id`'s approvals are older than `asks`' just now.)
+    let (_, its) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals?grant={id}&limit=1"), None).await;
+    assert_eq!(its.as_array().map(|l| l.iter().filter(|x| x["grant_id"] == json!(id)).count()), Some(1), "{its}");
     // Only a token that asks may make one that asks.
     let child = |ask: bool| json!({ "name": "child", "rules": [{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }], "ask_otherwise": ask });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child(false))).await.0, StatusCode::CREATED);
@@ -809,7 +818,32 @@ async fn approvals_can_be_remembered() {
     let (s, e) = put(json!("production")).await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
     assert_eq!(put(json!("dev")).await.0, StatusCode::OK);
+    // Where a copy asks, the approval is about the environment copied from.
+    let (copier, _) = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "write": "allow", "reveal": "ask" } }]), json!({})).await;
+    let (_, pending) = d.call(&copier, Method::PUT, "/v1/apps/services/svc_a/environments/staging", Some(json!({ "variables_from": "production" }))).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
+    assert_eq!((asked["action"].as_str(), asked["environment"].as_str()), (Some("reveal"), Some("production")), "{asked}");
     assert_eq!(d.call(&dev, Method::PUT, "/v1/apps/services/svc_a/environments/dev2", Some(json!({}))).await.0, StatusCode::OK);
+    // Secrets' promote names where it copies from in the query: the same rule.
+    let (promoter, _) = d.token(json!([{ "product": "secrets", "resources": "*", "environments": ["development", "staging"], "actions": { "write": "allow", "reveal": "allow" } }]), json!({})).await;
+    let promote = |from: &'static str| {
+        let (d, t) = (&d, promoter.clone());
+        async move { d.call(&t, Method::POST, &format!("/v1/secrets/projects/prj_s/environments/staging/promote?from={from}"), Some(json!({}))).await }
+    };
+    let (s, e) = promote("production").await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    assert_eq!(promote("development").await.0, StatusCode::OK);
+    // Imports read each in-project source (reveal there); another project's folder is admin.
+    let import = |list: Value| {
+        let (d, t) = (&d, promoter.clone());
+        async move { d.call(&t, Method::PUT, "/v1/secrets/projects/prj_s/environments/staging/imports?path=/api", Some(list)).await }
+    };
+    let (s, e) = import(json!([{ "environment": "development", "path": "/" }, { "environment": "production", "path": "/" }])).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    assert_eq!(import(json!([{ "environment": "development", "path": "/" }])).await.0, StatusCode::OK);
+    let (s, e) = import(json!([{ "project": "prj_o", "environment": "development", "path": "/" }])).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("admin")), "{e}");
 
     // Remembered where it was asked: development's values, never production's.
     let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;
