@@ -120,6 +120,9 @@ pub enum F {
     ToCartesianPoint,
     ToGeoShape,
     ToCartesianShape,
+    ToGeohash,
+    ToGeotile,
+    ToGeohex,
     // spatial
     StX,
     StY,
@@ -257,6 +260,9 @@ const NAMES: &[(&str, F)] = &[
     ("to_cartesianpoint", F::ToCartesianPoint),
     ("to_geoshape", F::ToGeoShape),
     ("to_cartesianshape", F::ToCartesianShape),
+    ("to_geohash", F::ToGeohash),
+    ("to_geotile", F::ToGeotile),
+    ("to_geohex", F::ToGeohex),
     ("st_x", F::StX),
     ("st_y", F::StY),
     ("st_geometrytype", F::StGeometryType),
@@ -286,6 +292,11 @@ const NAMES: &[(&str, F)] = &[
 ];
 
 /// The function a (lower-case) name calls.
+/// A function's (first) name.
+pub fn name_of(f: F) -> &'static str {
+    NAMES.iter().find(|(_, g)| *g == f).map_or("", |(n, _)| n)
+}
+
 pub fn resolve(name: &str) -> Option<F> {
     NAMES.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
 }
@@ -447,7 +458,7 @@ impl F {
             (ToAggregateMetricDouble, 0) => ("numeric or aggregate_metric_double", |t| t.is_numeric() || t == DataType::AggregateMetricDouble),
             (ToDouble, 0) => ("boolean or counter_double or counter_integer or counter_long or datetime or numeric or string", |t| t.is_counter() || t.is_numeric() || t.is_string() || matches!(t, DataType::Boolean | DataType::Date)),
             (ToLong, 0) if n == 1 => ("boolean or counter_integer or counter_long or date_nanos or datetime or geohash or geohex or geotile or numeric or string", |t| {
-                matches!(t, DataType::CounterInteger | DataType::CounterLong | DataType::Boolean | DataType::Date | DataType::DateNanos) || t.is_numeric() || t.is_string()
+                matches!(t, DataType::CounterInteger | DataType::CounterLong | DataType::Boolean | DataType::Date | DataType::DateNanos) || t.is_grid() || t.is_numeric() || t.is_string()
             }),
             (ToInteger, 0) if n == 1 => ("boolean or counter_integer or datetime or numeric or string", |t| matches!(t, DataType::CounterInteger | DataType::Boolean | DataType::Date) || t.is_numeric() || t.is_string()),
             (ToString, 0) => (
@@ -456,6 +467,9 @@ impl F {
             ),
             (ToVersion, 0) => ("string or version", |t| t == DataType::Version || t.is_string()),
             (ToGeoPoint, 0) => ("geo_point or string", |t| t == DataType::GeoPoint || t.is_string()),
+            (ToGeohash, 0) => ("geohash or long or string", |t| matches!(t, DataType::Geohash | DataType::Long) || t.is_string()),
+            (ToGeotile, 0) => ("geotile or long or string", |t| matches!(t, DataType::Geotile | DataType::Long) || t.is_string()),
+            (ToGeohex, 0) => ("geohex or long or string", |t| matches!(t, DataType::Geohex | DataType::Long) || t.is_string()),
             (ToCartesianPoint, 0) => ("cartesian_point or string", |t| t == DataType::CartesianPoint || t.is_string()),
             (ToGeoShape, 0) => ("geo_point or geo_shape or string", |t| matches!(t, DataType::GeoPoint | DataType::GeoShape) || t.is_string()),
             (ToCartesianShape, 0) => ("cartesian_point or cartesian_shape or string", |t| matches!(t, DataType::CartesianPoint | DataType::CartesianShape) || t.is_string()),
@@ -503,6 +517,9 @@ impl F {
                 | ToCartesianPoint
                 | ToGeoShape
                 | ToCartesianShape
+                | ToGeohash
+                | ToGeotile
+                | ToGeohex
                 | StX
                 | StY
                 | StGeometryType
@@ -575,6 +592,9 @@ impl F {
             ToCartesianPoint => T::CartesianPoint,
             ToGeoShape => T::GeoShape,
             ToCartesianShape => T::CartesianShape,
+            ToGeohash => T::Geohash,
+            ToGeotile => T::Geotile,
+            ToGeohex => T::Geohex,
             StX | StY => T::Double,
             StDimension => T::Integer,
             StIsEmpty => T::Boolean,
@@ -588,7 +608,7 @@ pub fn is_conversion(f: F) -> bool {
     use F::*;
     matches!(
         f,
-        ToBoolean | ToDatetime | ToDateNanos | ToDouble | ToInteger | ToIp | ToLong | ToString | ToText | ToUnsignedLong | ToVersion | ToGeoPoint | ToCartesianPoint | ToGeoShape | ToCartesianShape | ToAggregateMetricDouble
+        ToBoolean | ToDatetime | ToDateNanos | ToDouble | ToInteger | ToIp | ToLong | ToString | ToText | ToUnsignedLong | ToVersion | ToGeoPoint | ToCartesianPoint | ToGeoShape | ToCartesianShape | ToAggregateMetricDouble | ToGeohash | ToGeotile | ToGeohex
     )
 }
 
@@ -611,6 +631,7 @@ pub fn conversion_accepts(f: F, t: &str) -> bool {
         ToGeoShape => string || matches!(t, "geo_point" | "geo_shape"),
         ToCartesianShape => string || matches!(t, "point" | "shape"),
         ToAggregateMetricDouble => numeric || t == "aggregate_metric_double",
+        ToGeohash | ToGeotile | ToGeohex => string || t == "long",
         _ => false,
     }
 }
@@ -1150,7 +1171,13 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
                 s.parse::<std::net::IpAddr>().map(|ip| V::Ip(ip.to_string())).map_err(|_| warn(format!("java.lang.IllegalArgumentException: '{s}' is not an IP string literal.")))
             }
         })?,
+        ToString | ToText if ty0.is_grid() => map_values(a0, |v| v.as_i64().map_or(V::Null, |l| V::Str(super::spatial::grid_address(l, ty0)))),
         ToString | ToText | ToVersion => map_values(a0, |v| V::Str(v.to_text())),
+        // Grid cells are their long encodings; strings are addresses.
+        ToGeohash | ToGeotile | ToGeohex => map_try(a0, |v| match v {
+            V::Str(s) => super::spatial::grid_parse(s, f.result_type(types)).map(V::Long).map_err(warn),
+            other => Ok(other.as_i64().map_or(V::Null, V::Long)),
+        })?,
         // Every value of the (multi-)value folds into one metric; metrics stay as they are.
         ToAggregateMetricDouble => match a0 {
             V::Null => V::Null,

@@ -679,6 +679,71 @@ pub fn st_is_empty(values: &[&str]) -> Option<bool> {
     geometry_of(values).map(|g| empty(&g))
 }
 
+/// Geohash's base 32 alphabet.
+const GEOHASH_BASE32: &[u8; 32] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+
+/// A grid cell's address from its long encoding: a geohash (`Geohash.stringEncode`), a
+/// `zoom/x/y` tile (`GeoTileUtils.stringEncode`) or an H3 index in hex.
+pub fn grid_address(cell: i64, ty: DataType) -> String {
+    match ty {
+        DataType::Geohash => {
+            let level = (cell & 15) as usize;
+            let mut bits = (cell as u64) >> 4;
+            let mut chars = vec![b'0'; level];
+            for c in chars.iter_mut().rev() {
+                *c = GEOHASH_BASE32[(bits & 31) as usize];
+                bits >>= 5;
+            }
+            String::from_utf8(chars).expect("ascii")
+        }
+        DataType::Geotile => {
+            let mask = (1u64 << 29) - 1;
+            let c = cell as u64;
+            format!("{}/{}/{}", c >> 58, (c >> 29) & mask, c & mask)
+        }
+        _ => format!("{:x}", cell as u64),
+    }
+}
+
+/// A grid cell's long encoding from its address, as Elasticsearch's conversions read it
+/// (`Geohash.longEncode`, `GeoTileUtils.longEncode`, `H3.stringToH3`); the error is the Java
+/// exception text.
+pub fn grid_parse(s: &str, ty: DataType) -> Result<i64, String> {
+    match ty {
+        DataType::Geohash => {
+            // At most 12 levels; characters outside the alphabet read as -1, like Java's `indexOf`.
+            let length = s.encode_utf16().count() as i64;
+            let mut level = length - 1;
+            let mut cell: i64 = 0;
+            for c in s.encode_utf16() {
+                let b = GEOHASH_BASE32.iter().position(|&x| u16::from(x) == c).map_or(-1, |i| i as i64);
+                cell |= b.wrapping_shl((level * 5) as u32);
+                level -= 1;
+                if level < 0 {
+                    break;
+                }
+            }
+            Ok(cell.wrapping_shl(4) | length)
+        }
+        DataType::Geotile => {
+            let invalid = || format!("java.lang.IllegalArgumentException: Invalid geotile_grid hash string of {s}. Must be three integers in a form \"zoom/x/y\".");
+            let parts: Vec<&str> = s.splitn(4, '/').collect();
+            let [z, x, y] = parts.as_slice() else { return Err(invalid()) };
+            let n = |p: &str| p.parse::<i32>().map(i64::from).map_err(|_| invalid());
+            Ok(n(z)?.wrapping_shl(58) | n(x)?.wrapping_shl(29) | n(y)?)
+        }
+        _ => {
+            if s.starts_with('-') {
+                return Err(format!("java.lang.NumberFormatException: Illegal leading minus sign on unsigned string {s}."));
+            }
+            u64::from_str_radix(s, 16).map(|v| v as i64).map_err(|e| match e.kind() {
+                std::num::IntErrorKind::PosOverflow => format!("java.lang.NumberFormatException: String value {s} exceeds range of unsigned long."),
+                _ => format!("java.lang.NumberFormatException: For input string: \"{s}\" under radix 16"),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,4 +870,19 @@ mod tests {
         assert_eq!(st_is_empty(&["POINT (0.0 0.0)"]), Some(false));
         assert_eq!(st_is_empty(&["LINESTRING EMPTY"]), Some(true));
     }
+
+    /// Encodings Elasticsearch 9.5.5 returns for `TO_LONG(TO_GEOHASH(...))` and friends.
+    #[test]
+    fn grid_cells_encode_like_elasticsearch() {
+        assert_eq!(grid_parse("9q8yy9", DataType::Geohash), Ok(5205638294));
+        assert_eq!(grid_parse("4/2/5", DataType::Geotile), Ok(1152921505680588805));
+        assert_eq!(grid_parse("811fbffffffffff", DataType::Geohex), Ok(581522903837704191));
+        assert_eq!(grid_address(5205638294, DataType::Geohash), "9q8yy9");
+        assert_eq!(grid_address(1152921505680588805, DataType::Geotile), "4/2/5");
+        // Characters outside the alphabet and a 13th level read as Java's arithmetic does.
+        assert_eq!(grid_address(grid_parse("abc", DataType::Geohash).unwrap(), DataType::Geohash), "zbc");
+        assert_eq!(grid_address(grid_parse("u4pruydqqvjxx", DataType::Geohash).unwrap(), DataType::Geohash), "04pruydqqvjxx");
+        assert!(grid_parse("1/1", DataType::Geotile).is_err());
+    }
 }
+

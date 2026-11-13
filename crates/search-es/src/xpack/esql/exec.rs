@@ -286,6 +286,9 @@ pub(crate) fn cast_function(ty: &str) -> Option<(&'static str, DataType)> {
         "geo_shape" => ("to_geoshape", DataType::GeoShape),
         "cartesian_point" => ("to_cartesianpoint", DataType::CartesianPoint),
         "cartesian_shape" => ("to_cartesianshape", DataType::CartesianShape),
+        "geohash" => ("to_geohash", DataType::Geohash),
+        "geotile" => ("to_geotile", DataType::Geotile),
+        "geohex" => ("to_geohex", DataType::Geohex),
         _ => return None,
     })
 }
@@ -665,6 +668,19 @@ impl Compiler<'_> {
                             || (matches!(lt, DataType::Date | DataType::DateNanos) && matches!(rt, DataType::Date | DataType::DateNanos | DataType::Keyword))
                             || (lt == DataType::Keyword && rt == DataType::DateNanos)
                             || matches!((lt, rt), (DataType::Date, DataType::Keyword) | (DataType::Keyword, DataType::Date) | (DataType::Ip, DataType::Keyword) | (DataType::Keyword, DataType::Ip) | (DataType::Version, DataType::Keyword) | (DataType::Keyword, DataType::Version));
+                        // Grid cells only compare for equality.
+                        if lt.is_grid() && !matches!(op, BinOp::Eq | BinOp::Neq) {
+                            return Err(verification(
+                                self.src,
+                                e.start,
+                                &format!(
+                                    "first argument of [{}] must be [date_nanos, datetime, double, integer, ip, keyword, long, text, unsigned_long or version], found value [{}] type [{}]",
+                                    &self.src[e.start..e.end],
+                                    &self.src[l.start..l.end],
+                                    lt.name()
+                                ),
+                            ));
+                        }
                         if !compatible {
                             return Err(verification(
                                 self.src,
@@ -748,7 +764,14 @@ impl Compiler<'_> {
                     }
                     return Ok((CE::Cast(Box::new(CE::Col(i)), t), t));
                 }
-                let (c, _) = self.compile(x)?;
+                let (c, xt) = self.compile(x)?;
+                // A grid cell converts through the target's function, with its type check (its
+                // address as text).
+                if xt.is_grid()
+                    && let Some(f) = functions::conversion_to(t)
+                {
+                    return self.compile(&Expr { kind: ExprKind::Call(functions::name_of(f).into(), vec![(**x).clone()]), start: e.start, end: e.end });
+                }
                 (CE::Cast(Box::new(c), t), t)
             }
             ExprKind::Call(name, args) if name == "$where" && args.len() == 2 => {
@@ -856,12 +879,28 @@ impl Compiler<'_> {
                             None => {}
                         }
                     }
-                    // Located at the offending argument.
+                    if name == "sample" && args.len() != 2 {
+                        let (l, c) = super::parser::location(self.src, e.start);
+                        return Err(EsError::new(400, "parsing_exception", format!("line {l}:{c}: error building [sample]: expects exactly two arguments")));
+                    }
+                    if matches!(name.as_str(), "top" | "sample")
+                        && let Some(a) = args.get(1)
+                    {
+                        let (_, lt) = Compiler { src: self.src, cols: self.cols, aggs: None }.compile(a)?;
+                        if lt == DataType::Null {
+                            return Err(verification(self.src, e.start, &format!("second argument of [{call}] cannot be null, received [{}]", &self.src[a.start..a.end])));
+                        }
+                        if lt != DataType::Integer {
+                            return Err(verification(self.src, e.start, &format!("second argument of [{call}] must be [integer], found value [{}] type [{}]", &self.src[a.start..a.end], functions::type_name_static(lt))));
+                        }
+                    }
+                    // A literal limit is checked at the call, a folded one at the argument.
                     if matches!(name.as_str(), "top" | "sample")
                         && let Some(n) = extra.first().and_then(V::as_i64)
                         && n <= 0
                     {
-                        return Err(verification(self.src, args[1].start, &format!("Limit must be greater than 0 in [{call}], found [{n}]")));
+                        let at = if matches!(args[1].kind, ExprKind::Lit(_)) { e.start } else { args[1].start };
+                        return Err(verification(self.src, at, &format!("Limit must be greater than 0 in [{call}], found [{n}]")));
                     }
                     if name == "top"
                         && let Some(V::Str(o)) = extra.get(1)
@@ -1838,7 +1877,7 @@ impl Grouper {
                 }
                 _ => Compiler { src, cols, aggs: None }.compile(&n.expr)?,
             };
-            if t.unsortable() && !matches!(t, DataType::Tsid | DataType::Flattened) {
+            if t.unsortable() && !t.is_grid() && !matches!(t, DataType::Tsid | DataType::Flattened) {
                 return Err(verification(src, n.expr.start, &format!("cannot group by on [{}] type for grouping [{}]", t.name(), &src[n.expr.start..n.expr.end])));
             }
             if let Some(m) = bucket_meta(&c) {
@@ -4008,6 +4047,7 @@ pub fn cell_text(v: &V, ty: DataType, format: &str) -> String {
             }
         }
         V::Long(l) if ty == DataType::Date => crate::time::java_instant_string(*l),
+        V::Long(l) if ty.is_grid() => super::spatial::grid_address(*l, ty),
         V::Multi(vs) => format!("[{}]", vs.iter().map(|x| cell_text(x, ty, format)).collect::<Vec<_>>().join(", ")),
         other => other.to_text(),
     }

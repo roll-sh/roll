@@ -51,6 +51,11 @@ pub enum DataType {
     /// A `flattened` field: its leaves by dotted path, held as the JSON text Elasticsearch
     /// prints (`{"a.c":["1","3"],"b":"x"}`).
     Flattened,
+    /// Grid cells (`TO_GEOHASH`, ...), held as Elasticsearch's long encodings and printed as
+    /// their addresses ([`super::spatial::grid_address`]).
+    Geohash,
+    Geotile,
+    Geohex,
     Unsupported,
 }
 
@@ -86,6 +91,9 @@ impl DataType {
             DataType::DenseVector => "dense_vector",
             DataType::Tsid => "_tsid",
             DataType::Flattened => "flattened",
+            DataType::Geohash => "geohash",
+            DataType::Geotile => "geotile",
+            DataType::Geohex => "geohex",
             DataType::Unsupported => "unsupported",
         }
     }
@@ -134,7 +142,11 @@ impl DataType {
 
     /// The types `SORT` and `STATS ... BY` refuse (`cannot sort on ...`).
     pub fn unsortable(self) -> bool {
-        self.is_counter() || matches!(self, DataType::AggregateMetricDouble | DataType::Histogram | DataType::ExponentialHistogram | DataType::TDigest | DataType::DenseVector | DataType::Tsid | DataType::Source | DataType::Flattened)
+        self.is_counter() || self.is_grid() || matches!(self, DataType::AggregateMetricDouble | DataType::Histogram | DataType::ExponentialHistogram | DataType::TDigest | DataType::DenseVector | DataType::Tsid | DataType::Source | DataType::Flattened)
+    }
+
+    pub fn is_grid(self) -> bool {
+        matches!(self, DataType::Geohash | DataType::Geotile | DataType::Geohex)
     }
 
     pub fn is_numeric(self) -> bool {
@@ -259,6 +271,8 @@ impl V {
             V::Long(l) => {
                 if ty == DataType::Double {
                     Value::from(*l as f64)
+                } else if ty.is_grid() {
+                    Value::from(super::spatial::grid_address(*l, ty))
                 } else if ty == DataType::Date {
                     Value::from(crate::time::java_instant_string(*l))
                 } else {
@@ -1171,7 +1185,7 @@ fn distinct_hash(x: &V, ty: DataType) -> Option<u64> {
 
 pub const AGGS: &[&str] = &[
     "count", "count_distinct", "sum", "avg", "min", "max", "median", "percentile", "values", "std_dev", "median_absolute_deviation", "top", "first", "last", "weighted_avg",
-    "variance", "present", "absent",
+    "variance", "present", "absent", "sample",
     // Time series accumulators `TS` rewrites to (the timestamp travels as the weight).
     "$first", "$last", "$rate", "$irate", "$increase", "$delta", "$idelta", "$deriv",
 ];
@@ -1455,6 +1469,20 @@ impl Acc {
                         0 => V::Null,
                         1 => xs.pop().expect("one"),
                         _ => V::Multi(xs),
+                    }
+                }
+                "sample" => {
+                    // A uniform sample without replacement, in random order (Elasticsearch keeps
+                    // the values with the smallest random keys and emits them by key).
+                    use rand::seq::SliceRandom;
+                    let n = extra.first().and_then(V::as_i64).unwrap_or(1).max(0) as usize;
+                    let mut xs = all.clone();
+                    let (picked, _) = xs.partial_shuffle(&mut rand::thread_rng(), n);
+                    let mut picked = picked.to_vec();
+                    match picked.len() {
+                        0 => V::Null,
+                        1 => picked.pop().expect("one"),
+                        _ => V::Multi(picked),
                     }
                 }
                 "first" => all.first().cloned().unwrap_or(V::Null),
