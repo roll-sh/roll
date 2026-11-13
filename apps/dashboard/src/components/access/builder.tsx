@@ -1,6 +1,7 @@
 import { Check, ChevronRight, Hand } from "lucide-react";
 import { Fragment, useEffect, useState } from "react";
 import {
+  accessApi,
   ACTION_HELP,
   ACTIONS,
   describeRule,
@@ -274,6 +275,7 @@ function Pick({ product, chosen, known, onChange }: { product: string; chosen: s
           ))}
         </div>
       )}
+      {product === "search" && known.map((k) => <Indices key={k.id} cluster={k} chosen={chosen} toggle={toggle} />)}
       <form
         className="flex flex-wrap items-center gap-1.5"
         onSubmit={(e) => {
@@ -297,6 +299,51 @@ function Pick({ product, chosen, known, onChange }: { product: string; chosen: s
           aria-label={`${productName(product)} resource ids`}
         />
       </form>
+    </div>
+  );
+}
+
+/**
+ * Some indices of a search cluster, ticked by name (`cl_1/logs-a`): loaded when opened, since
+ * listing them wakes the cluster. A pattern (`cl_1/logs-*`) is typed in "Add by id".
+ */
+function Indices({ cluster, chosen, toggle }: { cluster: { id: string; name: string }; chosen: string[]; toggle: (id: string) => void }) {
+  const [names, setNames] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => {
+    setError(null);
+    accessApi
+      .searchIndices(cluster.id)
+      .then((l) => setNames(l.map((i) => i.index).filter((n) => !n.startsWith(".")).sort()))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  };
+  if (names === null) {
+    return (
+      <p className="text-[11px] text-subtle">
+        <button type="button" onClick={load} className="text-accent hover:underline">
+          Only some indices of {cluster.name}…
+        </button>
+        {error && <span className="text-danger"> {error}</span>}
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] text-subtle">
+        Indices of {cluster.name}: a token with only these reaches them through their index routes, never the cluster itself.
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {names.length === 0 && <span className="text-[11px] text-subtle">No indices yet.</span>}
+        {names.map((n) => {
+          const id = `${cluster.id}/${n}`;
+          return (
+            <label key={id} className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] ${chosen.includes(id) ? "border-fg/40 text-fg" : "border-line text-muted"}`}>
+              <input type="checkbox" checked={chosen.includes(id)} onChange={() => toggle(id)} className="size-3" aria-label={`${cluster.name} index ${n}`} />
+              {n}
+            </label>
+          );
+        })}
+      </div>
     </div>
   );
 }
