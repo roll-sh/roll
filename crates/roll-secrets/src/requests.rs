@@ -23,6 +23,8 @@ struct StoredOp {
     tags: Option<Vec<String>>,
     #[serde(default)]
     link: Option<Option<Link>>,
+    #[serde(default)]
+    expires_at: Option<Option<i64>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -138,16 +140,17 @@ fn load(c: &Conn<'_>, env: &EnvRow, id: &str) -> Result<RequestRow> {
 fn plan(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item]) -> Result<Vec<ItemDiff>> {
     let mut out = vec![];
     for i in items {
-        let cur: Option<(String, String, String, Option<String>)> = c
-            .query_row("SELECT fp, comment, tags, link FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?", [&env.id, &i.path, &i.key, &i.owner], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        #[allow(clippy::type_complexity)]
+        let cur: Option<(String, String, String, Option<String>, Option<i64>)> = c
+            .query_row("SELECT fp, comment, tags, link, expires_at FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?", [&env.id, &i.path, &i.key, &i.owner], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })
             .optional()?;
         let kind = if i.owner.is_empty() { SecretType::Shared } else { SecretType::Personal };
         let (what, to_fp) = match (&i.action, &cur) {
             (ItemAction::Delete, None) => return Err(Error::NotFound(format!("no secret {} in {}:{}", i.key, env.slug, i.path))),
             (ItemAction::Delete, Some(_)) => (vec!["deleted".to_string()], None),
-            (ItemAction::Set { value, comment, tags, link, .. }, cur) => {
+            (ItemAction::Set { value, comment, tags, link, expires_at, .. }, cur) => {
                 let fp = match (link, value) {
                     (Some(Some(l)), _) if l.mode != crate::Mode::Managed => Some(dek.fingerprint(&l.fingerprint())),
                     (_, Some(v)) => Some(dek.fingerprint(v.expose())),
@@ -155,7 +158,7 @@ fn plan(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item]) -> Result<Vec<Ite
                 };
                 match cur {
                     None => (vec!["added".to_string()], fp),
-                    Some((cfp, ccomment, ctags, clink)) => {
+                    Some((cfp, ccomment, ctags, clink, cexp)) => {
                         let mut w = vec![];
                         if fp.as_ref().is_some_and(|f| f != cfp) {
                             w.push("changed".to_string());
@@ -168,6 +171,9 @@ fn plan(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item]) -> Result<Vec<Ite
                         }
                         if link.as_ref().is_some_and(|l| l.as_ref().map(json) != *clink) {
                             w.push("link".into());
+                        }
+                        if expires_at.is_some_and(|e| e != *cexp) {
+                            w.push("expiry".into());
                         }
                         (w, fp.or_else(|| Some(cfp.clone())))
                     }
@@ -273,8 +279,8 @@ impl Secrets {
             .iter()
             .enumerate()
             .map(|(n, i)| match &i.action {
-                ItemAction::Delete => StoredOp { path: i.path.clone(), key: i.key.clone(), owner: i.owner.clone(), delete: true, value: None, comment: None, tags: None, link: None },
-                ItemAction::Set { value, comment, tags, link, .. } => StoredOp {
+                ItemAction::Delete => StoredOp { path: i.path.clone(), key: i.key.clone(), owner: i.owner.clone(), delete: true, value: None, comment: None, tags: None, link: None, expires_at: None },
+                ItemAction::Set { value, comment, tags, link, expires_at, .. } => StoredOp {
                     path: i.path.clone(),
                     key: i.key.clone(),
                     owner: i.owner.clone(),
@@ -283,6 +289,7 @@ impl Secrets {
                     comment: comment.clone(),
                     tags: tags.clone(),
                     link: link.clone(),
+                    expires_at: *expires_at,
                 },
             })
             .collect();
@@ -374,7 +381,7 @@ impl Secrets {
                     Some(b) => Some(dek.open(&request_aad(id, n), &STANDARD.decode(b).map_err(|_| Error::Internal("a pending value isn't base64".into()))?)?),
                     None => None::<Value>,
                 };
-                ItemAction::Set { value, comment: o.comment.clone(), tags: o.tags.clone(), link: o.link.clone(), link_state: None }
+                ItemAction::Set { value, comment: o.comment.clone(), tags: o.tags.clone(), link: o.link.clone(), link_state: None, expires_at: o.expires_at }
             };
             items.push(Item { path: o.path.clone(), key: o.key.clone(), owner: o.owner.clone(), action });
         }

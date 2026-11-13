@@ -17,6 +17,7 @@ const secret = (key: string, source: Secret["source"] = { kind: "own" }): Secret
   updated_by: "operator",
   source,
   overridden: false,
+  expires_at: null,
 });
 
 describe("the .env bulk paste", () => {

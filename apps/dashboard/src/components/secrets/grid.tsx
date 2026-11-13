@@ -8,7 +8,7 @@ import { countStatus, filterRows, folderName, type StatusFilter } from "@/lib/se
 import { Segmented } from "../agents/ui/toggle-group";
 import { FolderCrumbs } from "./folders";
 import { secretsHref, useSecrets } from "./secrets-page";
-import { ago, button, Chip, CommentMark, ErrorNote, errorText, field, ghost, LinkChip, PersonalMark, primary, RefMark, SourceMark, Teach, useLoad } from "./ui";
+import { ago, button, Chip, CommentMark, ErrorNote, errorText, ExpiryMark, field, ghost, LinkChip, PersonalMark, primary, RefMark, SourceMark, Teach, useLoad } from "./ui";
 
 /**
  * The overview: every key in the folder as a row, the standard environments as columns in order.
@@ -277,6 +277,7 @@ function CellView({ cell, letter, onClick }: { cell: Cell | null; letter?: strin
       {cell.reference && <RefMark />}
       {cell.personal && <PersonalMark />}
       {cell.comment && <CommentMark />}
+      {cell.expires_at != null && <ExpiryMark at={cell.expires_at} />}
       {cell.misfit && (
         <span className="rounded border border-danger/40 px-1 font-mono text-[10px] text-danger" title={cell.misfit}>
           doesn&apos;t fit

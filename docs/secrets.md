@@ -339,6 +339,17 @@ protection policy's `notify_url`) gets one notice a day while it has stale keys:
 Live and dynamic links don't count (they change on their own); managed ones do. Two nodes never
 both remind: the day is claimed in the same write that queues the notice.
 
+**Expiry dates.** Some values stop working on a date roll can't see: a vendor's API key, a TLS
+certificate, a trial token. A secret's optional `expires_at` (ms; set in any write's `set`
+operation, `null` clears it, leaving it out keeps it) records that date. It's versioned like the
+comment, so history, rollback, promote, change requests and backups carry it, and a new value
+keeps the date until someone changes it. Insights add `expires_at` and `expiring` (within 14 days,
+or past); the grid and the environment's list show a clock, with the days left inside two weeks
+and "expired" in red after. The daily reminder above also lists expiring and expired keys (soonest
+first, names and dates only), for any environment with a notify URL, limit or not. Like
+staleness, it's only flagged: nothing stops working in roll. `roll secrets set KEY=v --expires
+2027-03-31`, `roll secrets expire KEY --on 90d` (or `never`) and the editor's date field set it.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -1204,7 +1215,8 @@ Done and in PR #20:
 - `roll secrets`, `roll secrets setup` and `roll run [--watch]`;
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history;
-- required and typed keys; insights and rotation reminders;
+- required and typed keys; insights, rotation reminders and expiry dates for values that expire
+  outside roll;
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
   Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
@@ -1238,14 +1250,10 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Expiry dates for values that expire outside roll** (a vendor's API key, a TLS certificate;
-   1Password's item expiry, Infisical's reminders): a secret's optional `expires_at`, shown in the
-   grid and insights as expiring or expired, announced to the environment's notify URL ahead of time
-   (names only), and listed by `roll secrets insights`.
-3. **`roll secrets render --watch`** (the Infisical agent, consul-template): render again when the
+2. **`roll secrets render --watch`** (the Infisical agent, consul-template): render again when the
    environment's digest changes, and run `--exec` (a reload) after each new file.
-4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-5. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

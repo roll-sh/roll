@@ -360,6 +360,9 @@ impl Secrets {
         // Client addresses tokens and identities work from (tokens.rs).
         db.add_column("tokens", "allowed_ips", "TEXT")?;
         db.add_column("identities", "allowed_ips", "TEXT")?;
+        // When a value stops working outside roll (a vendor's key, a certificate): ms, or null.
+        db.add_column("secrets", "expires_at", "INTEGER")?;
+        db.add_column("versions", "expires_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
     }

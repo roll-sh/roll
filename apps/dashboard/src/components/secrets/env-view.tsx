@@ -18,31 +18,7 @@ import { BulkBar } from "./bulk";
 import { LinkDialog } from "./link-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
-import {
-  ago,
-  button,
-  Chip,
-  CommentMark,
-  dangerButton,
-  ErrorNote,
-  errorText,
-  field,
-  sized,
-  ghost,
-  iconButton,
-  label,
-  LinkChip,
-  PersonalMark,
-  primary,
-  RefMark,
-  Reveal,
-  saveText,
-  SourceMark,
-  Teach,
-  until,
-  useLoad,
-  Warnings,
-} from "./ui";
+import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, sized, SourceMark, Teach, until, useLoad, Warnings } from "./ui";
 
 /** One environment: its folder's secrets (inline edit, reveal, add, delete, overrides), requests and history. */
 export function EnvView({ env }: { env: Environment }) {
@@ -603,6 +579,7 @@ function SecretRow({
               {t}
             </span>
           ))}
+          {s.expires_at != null && <ExpiryMark at={s.expires_at} />}
           {!s.comment && !s.tags.length && <span className="truncate text-faint" title={`by ${s.updated_by}`}>v{s.version} · {ago(s.updated_at)}</span>}
           {insight && (
             <span
@@ -699,7 +676,7 @@ function Editor({
   secret: Secret;
   refs: RefSource;
   mode: EditMode;
-  onSave: (body: { value?: string; comment?: string; tags?: string[]; link?: null }) => Promise<void>;
+  onSave: (body: { value?: string; comment?: string; tags?: string[]; link?: null; expires_at?: number | null }) => Promise<void>;
   onCancel: () => void;
 }) {
   const fresh = mode !== "edit";
@@ -707,6 +684,8 @@ function Editor({
   const [touched, setTouched] = useState(fresh);
   const [comment, setComment] = useState(fresh ? "" : s.comment);
   const [tags, setTags] = useState(fresh ? "" : s.tags.join(", "));
+  const day = (ms: number | null) => (ms == null ? "" : new Date(ms).toISOString().slice(0, 10));
+  const [expires, setExpires] = useState(fresh ? "" : day(s.expires_at));
   const [unlink, setUnlink] = useState(false);
   const [busy, setBusy] = useState(false);
   const linked = !!s.link && !unlink && !fresh;
@@ -723,6 +702,7 @@ function Editor({
       ...(comment !== s.comment || fresh ? { comment } : {}),
       ...(tags !== s.tags.join(", ") || fresh ? { tags: tagList } : {}),
       ...(unlink && { link: null }),
+      ...(expires !== (fresh ? "" : day(s.expires_at)) ? { expires_at: expires ? Date.parse(`${expires}T00:00:00Z`) : null } : {}),
     });
     setBusy(false);
   };
@@ -777,7 +757,7 @@ function Editor({
           )}
           {unfit && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
         </label>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
           <label>
             <span className={label}>Comment</span>
             <input value={comment} onChange={(e) => setComment(e.target.value)} maxLength={1000} className={field} />
@@ -785,6 +765,10 @@ function Editor({
           <label>
             <span className={label}>Tags</span>
             <input value={tags} onChange={(e) => setTags(e.target.value.toLowerCase())} className={`${field} font-mono`} />
+          </label>
+          <label title="When the value stops working outside roll (a vendor's key, a certificate): flagged in insights, announced two weeks ahead">
+            <span className={label}>Expires</span>
+            <input type="date" value={expires} onChange={(e) => setExpires(e.target.value)} className={`${field} w-34 font-mono`} />
           </label>
         </div>
       </div>

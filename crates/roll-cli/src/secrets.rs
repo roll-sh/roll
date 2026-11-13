@@ -125,6 +125,20 @@ pub enum Secrets {
         request: bool,
         #[arg(short, long)]
         message: Option<String>,
+        /// When the value stops working outside roll: a date (2027-03-31), RFC 3339, how long from
+        /// now (90d), or `never`. Insights flag it and reminders announce it two weeks ahead.
+        #[arg(long, value_name = "WHEN")]
+        expires: Option<String>,
+    },
+    /// Date when keys' values stop working outside roll (a vendor's key, a certificate), keeping
+    /// the values: `roll secrets expire STRIPE_KEY --on 2027-03-31` (or `90d`, or `never`).
+    Expire {
+        #[arg(required = true)]
+        keys: Vec<String>,
+        #[arg(long, value_name = "WHEN")]
+        on: String,
+        #[arg(long)]
+        request: bool,
     },
     /// Delete secrets.
     #[command(alias = "delete")]
@@ -652,6 +666,26 @@ fn when(s: &str) -> anyhow::Result<i64> {
     Ok(chrono::Utc::now().timestamp_millis() - minutes(s)? * 60_000)
 }
 
+/// An expiry: a date (its start, UTC), RFC 3339, how long from now (`90d`), or `never` (None).
+fn expiry(s: &str) -> anyhow::Result<Option<i64>> {
+    if s == "never" || s == "none" {
+        return Ok(None);
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(Some(d.and_hms_opt(0, 0, 0).expect("midnight").and_utc().timestamp_millis()));
+    }
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(Some(t.timestamp_millis()));
+    }
+    let m = minutes(s).map_err(|_| anyhow::anyhow!("{s}: a date (2027-03-31), RFC 3339, how long from now (90d), or never"))?;
+    Ok(Some(chrono::Utc::now().timestamp_millis() + m * 60_000))
+}
+
+/// 2027-03-31
+fn day(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default()
+}
+
 fn approval_hint(e: anyhow::Error) -> anyhow::Error {
     if e.to_string().contains("is protected") {
         return e.context("the environment is protected: add --request to open a change request");
@@ -745,7 +779,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{}", s(&v["value"]));
         }
-        Secrets::Set { pairs, comment, tags, personal, generate, request, message } => {
+        Secrets::Set { pairs, comment, tags, personal, generate, request, message, expires } => {
+            let expires = expires.as_deref().map(expiry).transpose()?;
             let mut ops = vec![];
             for p in &pairs {
                 let (key, value) = split_pair(p)?;
@@ -770,9 +805,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if personal {
                     op["type"] = json!("personal");
                 }
+                if let Some(e) = expires {
+                    op["expires_at"] = json!(e);
+                }
                 ops.push(op);
             }
             write(&c, &env, ops, message, request, json_out).await?;
+        }
+        Secrets::Expire { keys, on, request } => {
+            let at = expiry(&on)?;
+            // A set without a value would make a missing key, empty: only keys already here.
+            let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
+            let here: Vec<&str> = list.as_array().into_iter().flatten().filter(|x| x["source"]["kind"] == "own").filter_map(|x| x["key"].as_str()).collect();
+            if let Some(k) = keys.iter().find(|k| !here.contains(&k.as_str())) {
+                bail!("{k} isn't set in {}:{} (an imported or inherited key is dated where it's set)", c.at.env, c.at.path);
+            }
+            let ops = keys.iter().map(|k| json!({ "op": "set", "key": k, "expires_at": at })).collect();
+            write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Rm { keys, request } => {
             let ops = keys.iter().map(|k| json!({ "op": "delete", "key": k })).collect();
@@ -1209,7 +1258,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 let read = k["last_read_at"].as_i64().map(|at| format!("read {} by {}", ago(at), s(&k["last_read_by"]))).unwrap_or_else(|| "not read in 90 days".into());
                 let stale = if k["stale"] == true { "  STALE" } else { "" };
-                println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
+                let expiry = match k["expires_at"].as_i64() {
+                    Some(t) if t <= chrono::Utc::now().timestamp_millis() => format!("  EXPIRED {}", day(t)),
+                    Some(t) if k["expiring"] == true => format!("  EXPIRES {}", day(t)),
+                    Some(t) => format!("  expires {}", day(t)),
+                    None => String::new(),
+                };
+                println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}{expiry}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
             }
         }
         Secrets::Shares { revoke } => {

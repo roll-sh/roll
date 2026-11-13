@@ -764,9 +764,16 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     api.ok(Method::PUT, "/environments/production/secrets/IDLE?path=/old", Some(json!({ "value": "i" }))).await;
     api.values("production", "/").await;
     api.ok(Method::PATCH, "/environments/production", Some(json!({ "max_age_days": 90 }))).await;
+    // A vendor's key that stops working in three days: flagged, and its date outlives a new value.
+    let soon = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64 + 3 * 86_400_000;
+    api.ok(Method::PUT, "/environments/production/secrets/CERT", Some(json!({ "value": "c1", "expires_at": soon }))).await;
+    let kept = api.ok(Method::PUT, "/environments/production/secrets/CERT", Some(json!({ "value": "c2" }))).await;
+    assert_eq!(kept["secret"]["expires_at"].as_i64(), Some(soon));
     let i = api.ok(Method::GET, "/environments/production/insights", None).await;
     assert_eq!(i["max_age_days"], 90);
-    let used = &i["keys"][0];
+    let cert = &i["keys"][0];
+    assert_eq!((cert["key"].as_str(), cert["expiring"].as_bool()), (Some("CERT"), Some(true)));
+    let used = &i["keys"][1];
     assert_eq!((used["key"].as_str(), used["reads_30d"].as_i64(), used["last_read_by"].as_str(), used["stale"].as_bool()), (Some("USED"), Some(1), Some("operator"), Some(false)));
     let idle = api.ok(Method::GET, "/environments/production/insights?path=/old", None).await;
     assert_eq!((idle["keys"][0]["key"].as_str(), idle["keys"][0]["last_read_at"].clone()), (Some("IDLE"), Value::Null));
@@ -784,7 +791,9 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     let sent = api.sent.0.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "one reminder a day");
     assert_eq!((sent[0]["stale"].clone(), sent[0]["max_age_days"].as_i64()), (json!(["USED"]), Some(90)));
-    assert!(!sent[0].to_string().contains("\"u\""), "names, never values");
+    assert_eq!(sent[0]["expiring"], json!([{ "key": "CERT", "expires_at": soon }]));
+    assert!(sent[0]["text"].as_str().unwrap().contains("CERT in 3 days"), "{}", sent[0]["text"]);
+    assert!(!sent[0].to_string().contains("\"u\"") && !sent[0].to_string().contains("c2"), "names, never values");
 }
 
 #[tokio::test]

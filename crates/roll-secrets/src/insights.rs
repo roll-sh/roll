@@ -25,7 +25,14 @@ pub struct KeyInsight {
     pub reads_30d: i64,
     /// Unchanged for longer than the environment's `max_age_days`.
     pub stale: bool,
+    /// When its value stops working outside roll, if someone said.
+    pub expires_at: Option<i64>,
+    /// It expires within `EXPIRING_DAYS`, or already has.
+    pub expiring: bool,
 }
+
+/// How far ahead an expiry is flagged and announced.
+pub(crate) const EXPIRING_DAYS: i64 = 14;
 
 #[derive(Debug, Serialize)]
 pub struct Insights {
@@ -71,6 +78,8 @@ impl Secrets {
                 let read = last.get(&e.row.key);
                 KeyInsight {
                     stale: max_age_days.is_some_and(|d| now - e.row.updated_at > d * 86_400_000),
+                    expires_at: e.row.expires_at,
+                    expiring: e.row.expires_at.is_some_and(|t| t < now + EXPIRING_DAYS * 86_400_000),
                     last_read_at: read.map(|r| r.0),
                     last_read_by: read.map(|r| r.1.clone()),
                     reads_30d: month.get(&e.row.key).copied().unwrap_or(0),
