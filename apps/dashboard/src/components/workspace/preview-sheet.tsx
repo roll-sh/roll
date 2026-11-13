@@ -31,6 +31,8 @@ const KIND_NAME: Record<PreviewKind, string> = {
 const small =
   "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] text-muted inset-shadow-highlight transition-colors hover:border-line-3 hover:text-fg disabled:opacity-40";
 
+const input = "h-7 rounded-md border border-line-2 bg-canvas px-2 font-mono text-[11.5px] outline-none transition-colors focus:border-accent/60";
+
 type Act = <T>(fn: () => Promise<T>) => Promise<T>;
 
 /**
@@ -207,6 +209,8 @@ export function PreviewSheet({
               <Stat label="So far" value={money(p.cost.month_to_date_usd)} note="this month" />
             </div>
 
+            <Vars id={p.id} />
+
             <Label>Details</Label>
             <Rows
               rows={[
@@ -295,6 +299,75 @@ export function PreviewSheet({
           </div>
         )}
       </div>
+    </>
+  );
+}
+
+/** The preview's own variables, over the project's `env` (its services redeploy with them). */
+function Vars({ id }: { id: string }) {
+  const [vars, setVars] = useState<Record<string, string> | null>(null);
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.vars(id).then(
+      (v) => live && setVars(v.vars),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  const save = async (change: Record<string, string | null>) => {
+    setBusy(true);
+    try {
+      setVars((await previewsApi.setVars(id, change)).vars);
+      setError(null);
+      return true;
+    } catch (e) {
+      setError(errorText(e));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!vars) return error ? <p className="text-[11.5px] text-danger">{error}</p> : null;
+  return (
+    <>
+      <Label>Variables</Label>
+      <p className="text-[11.5px] text-subtle">Its own, over the project's. Its services redeploy with them.</p>
+      {Object.keys(vars).length > 0 && (
+        <ul className="space-y-1">
+          {Object.entries(vars).map(([k, v]) => (
+            <li key={k} className="group flex items-center gap-2 font-mono text-[11.5px]">
+              <span className="shrink-0">{k}</span>
+              <span className="min-w-0 flex-1 truncate text-muted">{v}</span>
+              <button className="text-subtle hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void save({ [k]: null })} aria-label={`Remove ${k}`}>
+                <Trash2 className="size-3.5" strokeWidth={1.5} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form
+        className="flex gap-1.5"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (name.trim() && (await save({ [name.trim()]: value }))) {
+            setName("");
+            setValue("");
+          }
+        }}
+      >
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="NAME" aria-label="Name" spellCheck={false} className={`${input} w-[38%]`} />
+        <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="value" aria-label="Value" spellCheck={false} className={`${input} min-w-0 flex-1`} />
+        <button type="submit" className={small} disabled={busy || !name.trim()}>
+          Set
+        </button>
+      </form>
+      {error && <p className="text-[11.5px] text-danger">{error}</p>}
     </>
   );
 }

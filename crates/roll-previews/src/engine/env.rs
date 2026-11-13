@@ -43,7 +43,7 @@ impl EnvSource for Engine {
             .find(|x| x.name == service)
             .ok_or_else(|| anyhow::anyhow!("{} no longer has a service {service} at {}", svc.repo, short(&rev)))?;
         // Later entries win: roll.toml, the secrets environment, the project's overrides, the
-        // branches, then roll's own.
+        // preview's own, the branches, then roll's own.
         let mut env = spec.env.clone();
         // A protected base (production) reaches a preview only when the project allows it and
         // the change is trusted; a fork's code never gets it.
@@ -51,8 +51,8 @@ impl EnvSource for Engine {
         for (k, v) in self.resolve_secrets(&r, untrusted).await? {
             set(&mut env, &k, v);
         }
-        for (k, v) in &s.env {
-            set(&mut env, k, v.clone());
+        for (k, v) in s.env.iter().map(|(k, v)| (k.clone(), v.clone())).chain(self.store.vars(preview)?) {
+            set(&mut env, &k, v);
         }
         for (k, v) in self.resource_env(preview).await? {
             set(&mut env, &k, v);

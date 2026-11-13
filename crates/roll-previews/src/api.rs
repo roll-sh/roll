@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
+        .route("/v1/previews/{id}/env", get(vars).put(put_vars))
         .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
@@ -152,6 +154,26 @@ async fn keep(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<
     check_id(&id)?;
     let k: KeepBody = body(&b)?;
     blocking(e, move |e| e.keep(&id, k.hours)).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VarsBody {
+    /// `null` removes one.
+    vars: BTreeMap<String, Option<String>>,
+}
+
+async fn vars(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    let vars = blocking(e, move |e| e.store.vars(&id)).await?;
+    Ok(Json(serde_json::json!({ "vars": vars })))
+}
+
+async fn put_vars(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    let v: VarsBody = body(&b)?;
+    let vars = e.set_vars(&id, v.vars).await?;
+    Ok(Json(serde_json::json!({ "vars": vars })))
 }
 
 /// The preview's screenshot (a PNG), taken once per head when the project's rules ask.

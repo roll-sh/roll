@@ -129,6 +129,46 @@ impl Engine {
         self.store.view(self.store.row(id)?)
     }
 
+    /// Set (`Some`) or remove (`None`) the preview's own variables, over the project's `env`
+    /// (Vercel's branch-scoped variables, Railway's per-environment ones). Its services redeploy
+    /// with them. roll's own (`ROLL_*`, `PORT`) and its branches' are refused: those always win.
+    pub async fn set_vars(&self, id: &str, changes: BTreeMap<String, Option<String>>) -> Result<BTreeMap<String, String>> {
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        // Best effort: a preview not branched yet has no names to clash with.
+        let theirs: Vec<String> = self.resource_env(id).await.map(|v| v.into_iter().map(|(k, _)| k).collect()).unwrap_or_default();
+        for (k, v) in &changes {
+            let well_formed = !k.is_empty() && k.len() <= 128 && !k.starts_with(|c: char| c.is_ascii_digit()) && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if !well_formed {
+                return Err(Error::BadRequest(format!("{k:?} isn't a variable name (letters, digits and _)")));
+            }
+            if k.starts_with("ROLL_") || k == "PORT" || theirs.contains(k) {
+                return Err(Error::BadRequest(format!("{k} is set by roll or the preview's branches")));
+            }
+            if v.as_ref().is_some_and(|v| v.len() > MAX_VAR_BYTES) {
+                return Err(Error::BadRequest(format!("{k}: at most {MAX_VAR_BYTES} bytes")));
+            }
+        }
+        let mut vars = self.store.vars(id)?;
+        for (k, v) in changes {
+            match v {
+                Some(v) => vars.insert(k, v),
+                None => vars.remove(&k),
+            };
+        }
+        if vars.len() > MAX_VARS {
+            return Err(Error::BadRequest(format!("at most {MAX_VARS} variables per preview")));
+        }
+        self.store.set_vars(id, &vars)?;
+        let names: Vec<&str> = vars.keys().map(String::as_str).collect();
+        self.store.log(id, &if names.is_empty() { "its own variables removed".to_string() } else { format!("its own variables: {}", names.join(", ")) })?;
+        self.store.update(id, |row| row.next_at = 0)?;
+        self.kick();
+        Ok(vars)
+    }
+
     /// Re-branch `which` (`"<kind>:<parent>"`, or every resource when empty) from the parents.
     pub fn reset(&self, id: &str, which: Vec<String>) -> Result<Preview> {
         let resources = self.store.resources(id)?;
@@ -240,6 +280,9 @@ impl Engine {
 
 /// The longest a preview can be kept past its TTL in one go (30 days).
 pub const KEEP_MAX_HOURS: u32 = 720;
+/// A preview's own variables: how many, and how long each value.
+pub const MAX_VARS: usize = 100;
+pub const MAX_VAR_BYTES: usize = 32 * 1024;
 
 /// How many lines each later read of a polled log asks for.
 pub const FOLLOW_WINDOW: usize = 2000;

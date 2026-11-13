@@ -363,6 +363,9 @@ impl Store {
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
+        if !db.has_column("previews", "vars")? {
+            db.add_column("previews", "vars", "TEXT")?;
+        }
         for col in ["kept_until", "goes_at"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "INTEGER")?;
@@ -805,6 +808,21 @@ impl Store {
     /// Until when the preview is kept past its TTL (`None`: its rules decide).
     pub fn kept_until(&self, id: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT kept_until FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// The preview's own variables (`PUT …/env`), over the project's `env`.
+    pub fn vars(&self, id: &str) -> Result<std::collections::BTreeMap<String, String>> {
+        let raw: Option<String> = self.db.read(|c| c.query_row("SELECT vars FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
+        Ok(raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
+    }
+
+    pub fn set_vars(&self, id: &str, vars: &std::collections::BTreeMap<String, String>) -> Result<()> {
+        let raw = (!vars.is_empty()).then(|| serde_json::to_string(vars).unwrap_or_default());
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![raw, id])?))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no preview {id}")));
+        }
+        Ok(())
     }
 
     /// When the preview goes unless it's used or kept, once that's close ([`crate::engine`]'s

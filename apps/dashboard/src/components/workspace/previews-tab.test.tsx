@@ -63,6 +63,7 @@ beforeEach(() => {
   api.settings.mockResolvedValue(settings);
   api.usage.mockResolvedValue({ previews: 1, sleeping_usd_month: 0.02, active_usd_hour: 0.01, month_to_date_usd: 0.4, bytes: 1 << 20 });
   api.activity.mockResolvedValue([]);
+  api.vars.mockResolvedValue({ vars: {} });
 });
 
 const view = () =>
@@ -89,7 +90,7 @@ describe("the Previews tab", () => {
     await u.click(screen.getByRole("button", { name: "Delete" }));
     const confirm = screen.getByRole("button", { name: "Delete preview" });
     expect(confirm).toBeDisabled();
-    await u.type(screen.getByRole("textbox"), "pr482-shop");
+    await u.type(screen.getByRole("textbox", { name: /to confirm/ }), "pr482-shop");
     await u.click(confirm);
     expect(api.remove).toHaveBeenCalledWith("pv_abc");
     expect(await within(list).findByRole("button", { name: "Checkout redesign: Deleting" })).toBeInTheDocument();

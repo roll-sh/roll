@@ -260,6 +260,9 @@ impl Engine {
             _ => (None, None),
         };
         let mut vars: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (k, v) in self.store.vars(&r.id)? {
+            set(&mut vars, &k, v);
+        }
         for (k, v) in urls {
             set(&mut vars, &k, v);
         }

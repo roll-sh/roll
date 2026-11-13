@@ -198,6 +198,10 @@ export const previewsApi = {
   refresh: (id: string) => call<Preview>("POST", `${one(id)}/refresh`),
   /** Keep it past its TTL for `hours` (at most 720); 0 lets its rules decide again. */
   keep: (id: string, hours: number) => call<Preview>("POST", `${one(id)}/keep`, { hours }),
+  /** Its own variables, over the project's `env`. */
+  vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
+  /** Set or (`null`) remove some of its own variables; its services redeploy with them. */
+  setVars: (id: string, vars: Record<string, string | null>) => call<{ vars: Record<string, string> }>("PUT", `${one(id)}/env`, { vars }),
   sleep: (id: string) => call<Preview>("POST", `${one(id)}/sleep`),
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */

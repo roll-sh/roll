@@ -152,9 +152,14 @@ impl Brancher for FakeData {
     }
 }
 
+/// A deploy's variables.
+pub type Vars = Vec<(String, String)>;
+
 #[derive(Default)]
 pub struct FakeApps {
     pub deployed: Mutex<HashMap<(String, String), String>>,
+    /// The variables each service was last deployed with.
+    pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
@@ -184,6 +189,7 @@ impl Apps for FakeApps {
             anyhow::bail!("the build failed");
         }
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
+        self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         Ok(None)
     }
     async fn wake(&self, _: &str, _: &str) -> anyhow::Result<()> {

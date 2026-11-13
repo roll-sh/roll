@@ -236,6 +236,10 @@ behind the `Apps` trait:
   1. its `roll.toml` `[preview] env`;
   2. the resolved secrets environment (`pv-<preview id>`, inheriting its base);
   3. the project's preview `env` overrides;
+  3b. the preview's own variables (`PUT /v1/previews/{id}/env`, the sheet, `roll preview env`):
+     Vercel's branch-scoped variables. Setting them redeploys its services; names roll or the
+     preview's branches set (`ROLL_*`, `PORT`, `DATABASE_URL`, …) are refused, so they can't
+     point a preview at other data;
   4. the branched resources' URLs:
 
      | Resource | Variables |
@@ -571,6 +575,7 @@ Bodies are JSON. Every error is `{"error": string}`.
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none) |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image |
+| `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
@@ -737,6 +742,7 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- a preview's own variables over the project's (`…/env`, the sheet, `roll preview env`);
 - `[skip preview]` and `[preview]` in a change's title, a `manual` mode, and path filters (`paths`,
   `ignore_paths`) on what a change touches since its merge base, and pushes that touch only
   ignored paths keep the running services;

@@ -393,3 +393,23 @@ async fn path_filters_leave_out_changes_and_pushes_that_touch_only_ignored_paths
     assert_eq!(rev().as_deref(), Some("cs_9d"));
     assert_eq!(e.engine.store.row(&p.id).unwrap().runs, None);
 }
+
+#[tokio::test]
+async fn a_preview_s_own_variables_redeploy_it_and_never_shadow_roll_s() {
+    let e = env(json!({ "enabled": true, "env": { "FEATURE": "off" } }));
+    e.code.open(change("chg_v", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_v").unwrap().unwrap();
+    let var = |k: &str| e.apps.vars.lock().get(&(p.id.clone(), "web".to_string())).and_then(|v| v.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()));
+    let set = |k: &str, v: Option<&str>| std::collections::BTreeMap::from([(k.to_string(), v.map(String::from))]);
+    assert_eq!(var("FEATURE").as_deref(), Some("off"));
+    e.engine.set_vars(&p.id, set("FEATURE", Some("on"))).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(var("FEATURE").as_deref(), Some("on"), "redeployed with the preview's own");
+    for k in ["ROLL_PREVIEW", "PORT", "DATABASE_URL", "BAD-NAME"] {
+        assert!(matches!(e.engine.set_vars(&p.id, set(k, Some("x"))).await, Err(roll_previews::Error::BadRequest(_))), "{k}");
+    }
+    e.engine.set_vars(&p.id, set("FEATURE", None)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(var("FEATURE").as_deref(), Some("off"), "removed: the project's again");
+}

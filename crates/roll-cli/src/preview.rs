@@ -70,6 +70,15 @@ pub enum Preview {
         #[arg(long)]
         release: bool,
     },
+    /// Its own variables, over the project's `env`: list them, set `NAME=value`, or --unset NAME.
+    /// Its services redeploy with them.
+    Env {
+        preview: String,
+        /// `NAME=value` to set.
+        set: Vec<String>,
+        #[arg(long)]
+        unset: Vec<String>,
+    },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
         preview: String,
@@ -352,6 +361,30 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Wake { preview } => api.post(&format!("/v1/previews/{preview}/wake"), json!({})).await?,
         Preview::Refresh { preview } => api.post(&format!("/v1/previews/{preview}/refresh"), json!({})).await?,
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
+        Preview::Env { preview, set, unset } => {
+            let path = format!("/v1/previews/{preview}/env");
+            let v = if set.is_empty() && unset.is_empty() {
+                api.get(&path).await?
+            } else {
+                let mut vars = serde_json::Map::new();
+                for kv in &set {
+                    let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv:?} isn't NAME=value"))?;
+                    vars.insert(k.to_string(), json!(v));
+                }
+                for k in &unset {
+                    vars.insert(k.clone(), Value::Null);
+                }
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "vars": vars }))).await?
+            };
+            if !as_json {
+                match v["vars"].as_object().filter(|m| !m.is_empty()) {
+                    Some(m) => m.iter().for_each(|(k, v)| println!("{k}={}", v.as_str().unwrap_or_default())),
+                    None => println!("no variables of its own (the project's `env` applies)"),
+                }
+                return Ok(());
+            }
+            v
+        }
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
         Preview::Logs { preview, service, lines, follow } => {
             let path_base = match &service {
