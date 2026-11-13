@@ -570,6 +570,9 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 Box::new(RightSemiNode {
                     left: left.clone(),
                     right: right.clone(),
+                    lneed: nd::join_left(need, *nleft, lk, cond.as_ref()),
+                    lup: nd::slice(need, 0, *nleft),
+                    rneed: semi_right_need(*nleft, rk, cond.as_ref()),
                     lkeys: lk.clone(),
                     rkeys: rk.clone(),
                     cond: cond.clone(),
@@ -6434,12 +6437,38 @@ impl Node for HashJoinNode {
     }
 }
 
+/// The right (probing) side's columns a Hash Right Semi / Anti Join reads: its keys' and
+/// its condition's (over the left row then the right one). None: all.
+fn semi_right_need(nleft: usize, rkeys: &[Expr], cond: Option<&Expr>) -> Option<Vec<bool>> {
+    let mut out = super::need::of(rkeys)?;
+    if let Some(c) = cond {
+        let mut m = Vec::new();
+        if !super::need::mark(c, &mut m) {
+            return None;
+        }
+        for i in (nleft..m.len()).filter(|&i| m[i]) {
+            if out.len() <= i - nleft {
+                out.resize(i - nleft + 1, false);
+            }
+            out[i - nleft] = true;
+        }
+    }
+    Some(out)
+}
+
 /// Hash Right Semi / Right Anti Join: the left rows hashed, the right rows probing. A
 /// semi join puts a left row out at its first match, as the probes find it; an anti join
 /// puts out the left rows nothing matched once the probes are done, bucket by bucket.
 struct RightSemiNode {
     left: Arc<Plan>,
     right: Arc<Plan>,
+    /// The columns of each side's rows the join reads, or returns (the left side's): the
+    /// Hash's tuple and the outer side's batch files hold these (the plan's target lists).
+    /// None: all.
+    lneed: Option<Vec<bool>>,
+    rneed: Option<Vec<bool>>,
+    /// The left columns the join returns (None: all): the Hash's tuple has them first.
+    lup: Option<Vec<bool>>,
     lkeys: Vec<Expr>,
     rkeys: Vec<Expr>,
     cond: Option<Expr>,
@@ -6466,15 +6495,24 @@ impl RightSemiNode {
         if useskew && hj.wants_skew() {
             hj.build_skew(&skew_mcvs(&self.right, &self.rkeys, ctx));
         }
+        // (The Hash's tuple: the columns returned, then the others the join reads, its keys.)
+        let order: Vec<usize> = {
+            let has = |m: &Option<Vec<bool>>, c: usize| m.as_ref().is_none_or(|m| m.get(c).copied().unwrap_or(false));
+            let n = ltypes.len();
+            (0..n)
+                .filter(|&c| has(&self.lneed, c) && has(&self.lup, c))
+                .chain((0..n).filter(|&c| has(&self.lneed, c) && !has(&self.lup, c)))
+                .collect()
+        };
         ctx.statement(|| {
-            let mut node = open(&self.left, ctx)?;
+            let mut node = open_need(&self.left, self.lneed.clone(), ctx)?;
             while let Some(r) = node.next(ctx)? {
                 let k = eval_all(&self.lkeys, &r, ctx)?;
                 if !self.anti && k.iter().any(Value::is_null) {
                     continue;
                 }
                 let h = super::pghash::combine(&k, &lk, Some(&cat));
-                let tlen = super::workmem::minimal_tuple_len_cols(&r, &ltypes, None, ctx);
+                let tlen = super::workmem::minimal_tuple_len_order(&r, &ltypes, &order, ctx);
                 hj.build_insert(r, h, tlen, ctx)?;
             }
             Ok(())
@@ -6484,7 +6522,7 @@ impl RightSemiNode {
         if hj.total_tuples == 0 {
             return Ok(out);
         }
-        let mut right = open(&self.right, ctx)?;
+        let mut right = open_need(&self.right, self.rneed.clone(), ctx)?;
         let mut rtypes = Vec::new();
         let mut probe: Option<super::hashjoin::BatchReader> = None;
         loop {
@@ -6526,7 +6564,7 @@ impl RightSemiNode {
                     if rtypes.is_empty() {
                         rtypes = crate::sql::paths::analyzejoins::col_types(&self.right);
                     }
-                    let tlen = super::workmem::minimal_tuple_len_cols(&r, &rtypes, None, ctx);
+                    let tlen = super::workmem::minimal_tuple_len_cols(&r, &rtypes, self.rneed.as_deref(), ctx);
                     hj.save_outer(b, h, &r, tlen, ctx)?;
                     continue;
                 }
@@ -6588,7 +6626,7 @@ impl RightSemiNode {
         let built = build_hash(rows, &self.lkeys, &lnorm, self.nbuckets, self.anti, false, ctx)?;
         let mut emitted = vec![false; built.rows.len()];
         let mut out = Vec::new();
-        let mut right = open(&self.right, ctx)?;
+        let mut right = open_need(&self.right, self.rneed.clone(), ctx)?;
         while let Some(r) = right.next(ctx)? {
             ctx.check()?;
             self.probe(&built, &mut emitted, &r, &rnorm, &mut out, ctx)?;
