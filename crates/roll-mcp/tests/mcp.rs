@@ -24,6 +24,7 @@ fn products() -> Router {
     Router::new()
         .route("/v1/projects", get(|| async { axum::Json(json!([{ "id": "pa" }])) }))
         .route("/v1/projects/{id}", delete(|| async { axum::http::StatusCode::NO_CONTENT }))
+        .route("/v1/previews/{id}/screenshot", get(|| async { ([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]) }))
 }
 
 impl Daemon {
@@ -254,4 +255,12 @@ async fn prompt_arguments_complete_from_what_it_may_read() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5), "it didn't wait on an approval");
     let pending = d.http(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await.2;
     assert_eq!(pending.as_array().map_or(0, Vec::len) + pending["approvals"].as_array().map_or(0, Vec::len), 0, "no approval opened: {pending}");
+}
+
+/// A screenshot comes back as MCP image content, so an agent can look at a preview.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screenshot_is_an_image_the_agent_sees() {
+    let d = Daemon::with_products(vec!["previews".into()]);
+    let shot = d.tool(OPERATOR, "previews_screenshot", json!({ "id": "pv_1" })).await;
+    assert_eq!((shot["isError"].as_bool(), shot["content"][1]["type"].as_str(), shot["content"][1]["mimeType"].as_str()), (Some(false), Some("image"), Some("image/png")), "{shot}");
 }

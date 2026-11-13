@@ -1161,6 +1161,12 @@ static ROWS: &[Row] = &[
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A preview's own variables come back with their values: reveal (setting them is write, by
+    // the prefix).
+    row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Accepting a visual change is a person's call (with `visual_review = "required"` previews
+    // refuses tokens anyway): admin, so a write token can't wave its own diff through.
+    row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // ── roll code ──
     row("GET", "/v1/code", "code", R, Tgt::AnyGrant),
     row("GET", "/v1/code/health", "code", R, Tgt::AnyGrant),
@@ -1396,6 +1402,8 @@ mod tests {
         assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
+        assert_eq!(action("GET", "/v1/previews/{id}/env", "/v1/previews/pv_1/env"), Some(Action::Reveal), "a preview's variables have their values");
+        assert_eq!(action("POST", "/v1/previews/{id}/visual/accept", "/v1/previews/pv_1/visual/accept"), Some(Action::Admin));
         // An apps shell runs any command with the environment's variables: admin, outside production
         // too, all of a session (closing one included). Waking an environment starts compute: write.
         for (m, p) in [("POST", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}/resize"), ("DELETE", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}")] {

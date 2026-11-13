@@ -650,6 +650,9 @@ static TOOLS: &[Tool] = &[
     t("previews_sleep", "Sleep a preview", "Stop a preview's services until it's woken (its data stays).", "previews", "POST", "/v1/previews/{id}/sleep", &[req("id", "Preview id")]),
     t("previews_wake", "Wake a preview", "Start a sleeping preview's services again.", "previews", "POST", "/v1/previews/{id}/wake", &[req("id", "Preview id")]),
     t("previews_usage", "Previews usage", "What a project's previews used and cost this month, against its budget.", "previews", "GET", "/v1/previews/projects/{project}/usage", &[req("project", "Workspace project")]),
+    t("previews_list_shares", "List a preview's share links", "Who a preview is shared with outside the team, and until when (never the links' tokens).", "previews", "GET", "/v1/previews/{id}/shares", &[req("id", "Preview id")]),
+    t("previews_env", "A preview's variables", "A preview's own variables, with their values (reveal).", "previews", "GET", "/v1/previews/{id}/env", &[req("id", "Preview id")]),
+    t("previews_screenshot", "Screenshot a preview", "A preview's page as an image the agent can look at; diff against the base or the previous deploy, another page, or the phone view.", "previews", "GET", "/v1/previews/{id}/screenshot", &[req("id", "Preview id"), q("diff", Ty::Str, "base or previous: highlight what changed"), q("page", Ty::Str, "Path of the page (default /)"), q("view", Ty::Str, "phone for a phone-sized view")]),
     t("previews_share", "Share a preview", "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in).", "previews", "POST", "/v1/previews/{id}/shares", &[req("id", "Preview id"), breq("hours", Ty::Int, "How long the link works")]),
     t("previews_delete", "Delete a preview", "Tear a preview down with its branches.", "previews", "DELETE", "/v1/previews/{id}", &[req("id", "Preview id")]),
 ];

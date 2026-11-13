@@ -58,6 +58,9 @@ const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_ANSWER: usize = 32 << 20;
 /// Text returned to the model at most; longer answers are cut (the structured content stays whole).
 const MAX_TEXT: usize = 256 << 10;
+/// Images a tool answers come back as MCP image content, up to this size (a screenshot).
+const IMAGES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
+const MAX_IMAGE: usize = 4 << 20;
 
 /// Tools served by another crate (roll code's, `code_control::mcp`), fronted under new names.
 pub trait ToolSet: Send + Sync + 'static {
@@ -702,6 +705,11 @@ async fn outcome(tool: &str, resp: Response) -> Value {
             Err(_) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                // An image the agent can look at (a preview's screenshot): MCP's image content.
+                if IMAGES.contains(&ct.as_str()) && bytes.len() <= MAX_IMAGE {
+                    let text = format!("a {ct} image, {} bytes", bytes.len());
+                    return json!({ "content": [{ "type": "text", "text": text }, { "type": "image", "data": b64, "mimeType": ct }], "structuredContent": { "content_type": ct, "bytes": bytes.len() }, "isError": false });
+                }
                 (format!("{} bytes of {ct} (base64 in structuredContent.content_b64)", bytes.len()), json!({ "content_type": ct, "bytes": bytes.len(), "content_b64": b64 }))
             }
         },
