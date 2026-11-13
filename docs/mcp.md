@@ -96,8 +96,9 @@ fails with the user's reason.
 A client that opens URLs for elicitation (it declares `capabilities.elicitation.url` in
 `initialize`, MCP 2025-11-25) gets the approval as one instead: the call answers the JSON-RPC error
 `-32042` with `data.elicitations[0]` = `{mode: "url", elicitationId: "apr_…", url, message}` (and
-`data.approval`). The client shows the person the approval page, and sends the call again once
-they've decided; the gate finds its approval.
+`data.approval`) at once, without waiting. The client shows the person the approval page, and sends
+the call again once they've decided; the gate finds its approval (and a denial answers with the
+person's reason).
 
 ## Authorization
 
@@ -136,8 +137,9 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 - Streamable HTTP, JSON-RPC 2.0, protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26` and
   `2024-11-05`.
 - **Stateless:** every node of a cluster answers every request, and nothing is lost on a restart.
-  `initialize` answers an `Mcp-Session-Id` that holds no state: it only says whether the client
-  declared URL elicitation (`roll-url-1` or `roll-1`), so later calls know how to ask for approvals.
+  `initialize` answers an `Mcp-Session-Id` that holds no state: its prefix says whether the client
+  declared URL elicitation (`roll-url-1.` or `roll-1.`, then a random part, so ids are unique), so
+  later calls know how to ask for approvals.
   A request without one works as before. `GET` and `DELETE` answer 405.
 - Responses are JSON, or server-sent events when `Accept` has `text/event-stream` without
   `application/json`. Keep-alive comments come every 15 seconds while a call waits, for example on
