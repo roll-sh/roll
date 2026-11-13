@@ -268,6 +268,8 @@ impl From<crypto::CryptoError> for Error {
 #[serde(rename_all = "lowercase")]
 pub enum KeySource {
     Env,
+    /// `ROLL_SECRET_KEY_KMS`: decrypted by AWS KMS at startup.
+    Kms,
     File,
     Missing,
 }

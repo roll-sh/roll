@@ -52,9 +52,23 @@ impl Api {
     }
 }
 
-/// The deployment key: `ROLL_SECRET_KEY`, else (one node) a generated key file.
+/// The deployment key: `ROLL_SECRET_KEY_KMS` (a KMS ciphertext, decrypted at startup), else
+/// `ROLL_SECRET_KEY`, else (one node) a generated key file.
 fn keyring(home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    if let Some(ct) = env("ROLL_SECRET_KEY_KMS") {
+        let run = async {
+            let conf = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+            let key = kms_decrypt(&conf, &ct).await?;
+            let previous = match env("ROLL_SECRET_KEY_KMS_PREVIOUS") {
+                Some(p) => Some(kms_decrypt(&conf, &p).await?),
+                None => None,
+            };
+            Keyring::new(key.expose(), previous.as_ref().map(Value::expose)).map_err(|e| e.to_string())
+        };
+        let keyring = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(run));
+        return (keyring, KeySource::Kms);
+    }
     if let Some(k) = env("ROLL_SECRET_KEY") {
         return (Keyring::new(&k, env("ROLL_SECRET_KEY_PREVIOUS").as_deref()).map_err(|e| e.to_string()), KeySource::Env);
     }
@@ -74,6 +88,23 @@ fn keyring(home: &Path, shared: bool) -> (Result<Keyring, String>, KeySource) {
         }
     };
     (Keyring::new(&key, None).map_err(|e| e.to_string()), KeySource::File)
+}
+
+/// The deployment key from its KMS ciphertext (base64, made with `aws kms encrypt
+/// --encryption-context roll=secrets`): the context binds it to roll secrets, and the plaintext
+/// lives only in memory (zeroized). Errors name KMS's code, never key material.
+async fn kms_decrypt(conf: &aws_config::SdkConfig, ciphertext: &str) -> Result<Value, String> {
+    use base64::Engine as _;
+    let blob = base64::engine::general_purpose::STANDARD.decode(ciphertext.trim()).map_err(|_| "ROLL_SECRET_KEY_KMS isn't base64 (the CiphertextBlob of aws kms encrypt)".to_string())?;
+    let out = aws_sdk_kms::Client::new(conf)
+        .decrypt()
+        .ciphertext_blob(aws_sdk_kms::primitives::Blob::new(blob))
+        .encryption_context("roll", "secrets")
+        .send()
+        .await
+        .map_err(|e| format!("KMS couldn't decrypt the deployment key: {}", aws_sdk_kms::error::ProvideErrorMetadata::code(&e).unwrap_or("no answer")))?;
+    let plain = out.plaintext.ok_or("KMS answered without a plaintext")?.into_inner();
+    String::from_utf8(plain).map(Value::new).map_err(|_| "the KMS-decrypted deployment key isn't text".to_string())
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
@@ -597,5 +628,48 @@ impl code_control::SecretEnv for ForCode {
             Ok(out)
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderMap;
+    use serde_json::{Value as Json, json};
+    use std::sync::{Arc, Mutex};
+
+    /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_deployment_key_comes_from_kms_with_roll_secrets_context() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let seen: Arc<Mutex<Vec<Json>>> = Default::default();
+        let s = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: HeaderMap, body: axum::body::Bytes| {
+            let s = s.clone();
+            async move {
+                let req: Json = serde_json::from_slice(&body).unwrap_or_default();
+                s.lock().unwrap().push(req.clone());
+                let decrypt = headers.get("x-amz-target").is_some_and(|t| t == "TrentService.Decrypt");
+                if decrypt && req["EncryptionContext"] == json!({ "roll": "secrets" }) && req["CiphertextBlob"] == json!(b64(b"sealed")) {
+                    (axum::http::StatusCode::OK, axum::Json(json!({ "KeyId": "arn:aws:kms:eu-west-1:1:key/k", "Plaintext": b64(b"a-deployment-key-of-32-characters!!") })))
+                } else {
+                    (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "InvalidCiphertextException", "message": "no" })))
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conf = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("eu-west-1"))
+            .endpoint_url(&base)
+            .credentials_provider(aws_sdk_kms::config::SharedCredentialsProvider::new(aws_sdk_kms::config::Credentials::new("AKIATEST", "secret", None, None, "test")))
+            .build();
+        let key = super::kms_decrypt(&conf, &b64(b"sealed")).await.unwrap();
+        assert_eq!(key.expose(), "a-deployment-key-of-32-characters!!");
+        assert!(roll_secrets::Keyring::new(key.expose(), None).is_ok());
+        let wrong = super::kms_decrypt(&conf, &b64(b"other")).await.unwrap_err();
+        assert_eq!(wrong, "KMS couldn't decrypt the deployment key: InvalidCiphertextException");
     }
 }

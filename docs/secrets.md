@@ -113,6 +113,15 @@ data key encrypts every value                     (aad "roll-secrets:v1:<project
   `<home>/secrets.key` (mode 0600) and logs that it did. A node using the system database refuses to
   serve secrets without `ROLL_SECRET_KEY` (every route answers 503 and says why), because nodes must
   share the key.
+- **The deployment key from AWS KMS.** Instead of the key itself, a node can hold it encrypted:
+  `ROLL_SECRET_KEY_KMS` is the base64 `CiphertextBlob` of
+  `aws kms encrypt --key-id <key> --plaintext fileb://key --encryption-context roll=secrets`.
+  rolld decrypts it once at startup with the standard AWS credentials (an instance or task role on
+  roll cloud), so the plaintext key is never in the environment or on disk, a stolen environment
+  is useless without KMS access, and every startup is a CloudTrail event. The encryption context
+  binds the ciphertext to roll secrets. Rotation works the same with `ROLL_SECRET_KEY_KMS_PREVIOUS`.
+  If KMS can't decrypt it, every route answers 503 with KMS's error code (never key material), and
+  health reports `"key": "kms"`.
 - **Key rotation.** Set the new key as `ROLL_SECRET_KEY` and the old one as
   `ROLL_SECRET_KEY_PREVIOUS`. A data key that opens only with the previous key is resealed with the
   new key on first use, so the previous key can be dropped once `GET /v1/secrets/health` reports
@@ -886,7 +895,7 @@ isn't in the workspace is 404.
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
+| `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
 | `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
 | `GET /grid?path=` | | `Grid` |

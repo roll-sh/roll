@@ -49,6 +49,7 @@ url = "2"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
+aws-sdk-kms = "1"
 # Tests only: endpoints that make the SDK sign with SigV4a.
 aws-smithy-types = "1"
 # Tests only: an S3 client with a test CA and pinned addresses (crates/rolld/tests/fleet_e2e.rs).

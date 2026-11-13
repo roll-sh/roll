@@ -205,7 +205,7 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 /** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
-export type Health = { ok: boolean; key: "env" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
+export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */
