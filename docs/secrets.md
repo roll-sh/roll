@@ -1179,8 +1179,16 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Encrypted project backup and restore**: `roll secrets backup` writes every environment,
+   folder, value, link and policy of a project as one archive sealed to a recipient key
+   (`roll-seal-v1`, X25519), and `roll secrets restore` loads it into an empty project, on this
+   server or another. Disaster recovery and moving between roll servers, with nothing readable at
+   rest outside the holder of the key.
+3. **The deployment key in the dashboard**: Environments shows where the key comes from (`env`,
+   `kms`, `file`), whether a rotation's reseal is done, and a warning for a single node's generated
+   key file; the identity form takes allowed addresses.
+4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+5. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
