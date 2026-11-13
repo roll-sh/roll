@@ -485,10 +485,12 @@ export const mcpUrl = (api: string = ROLL_API) => `${api.replace(/\/+$/, "")}/v1
 
 /** How to connect a client: OAuth by default (no secret in the config), a bearer token with one. */
 /** The MCP URL listing only these products' tools (`?toolsets=`); none: every product's. */
-export function withToolsets(url: string, products: string[]): string {
-  if (products.length === 0) return url;
+export function withToolsets(url: string, products: string[], readonly = false): string {
+  if (products.length === 0 && !readonly) return url;
   const u = new URL(url);
-  u.searchParams.set("toolsets", [...products].sort().join(","));
+  if (products.length > 0) u.searchParams.set("toolsets", [...products].sort().join(","));
+  // Read-only: the server lists and runs only read-only tools (the token's rules still decide).
+  if (readonly) u.searchParams.set("readonly", "1");
   return u.toString().replace(/%2C/g, ",");
 }
 
