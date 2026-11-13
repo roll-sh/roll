@@ -810,6 +810,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/health", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
+    // How long a project keeps old values (history_days): purging is the project admin's.
+    row("PATCH", "/v1/secrets/projects/{project}", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("PUT", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
