@@ -780,17 +780,29 @@ impl Store {
 
     /// The grant was used now, from `ip`: written at most once a minute per grant per node.
     pub fn touch(&self, id: &str, ip: Option<&str>) {
-        let now = code_sql::now_ms();
-        {
-            let mut t = self.touched.lock().unwrap_or_else(|e| e.into_inner());
-            if t.get(id).is_some_and(|last| now - last < TOUCH_MS) {
-                return;
-            }
-            if t.len() > 4 * MAX_GRANTS {
-                t.clear();
-            }
-            t.insert(id.to_string(), now);
+        if self.touch_due(id) {
+            self.record_use(id, ip);
         }
+    }
+
+    /// Whether this node should write a grant's last use now (at most once a minute per grant),
+    /// claiming it if so: in memory, so the request that isn't due costs nothing more.
+    pub fn touch_due(&self, id: &str) -> bool {
+        let now = code_sql::now_ms();
+        let mut t = self.touched.lock().unwrap_or_else(|e| e.into_inner());
+        if t.get(id).is_some_and(|last| now - last < TOUCH_MS) {
+            return false;
+        }
+        if t.len() > 4 * MAX_GRANTS {
+            t.clear();
+        }
+        t.insert(id.to_string(), now);
+        true
+    }
+
+    /// Write a grant's last use (after [`Store::touch_due`]).
+    pub fn record_use(&self, id: &str, ip: Option<&str>) {
+        let now = code_sql::now_ms();
         if let Err(e) = self.db.write_unsynced(|c| c.execute("UPDATE grants SET last_used_at = ?, last_used_ip = ? WHERE id = ?", params![now, ip, id])) {
             tracing::warn!(error = %e, "recording a token's last use");
         }

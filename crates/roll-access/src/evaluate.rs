@@ -264,9 +264,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     // Used: from an address it may be used from (a refused address neither keeps it from idling
     // nor becomes its last address).
-    if !decided_before {
+    if !decided_before && access.store.touch_due(&ctx.grant.id) {
         let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
-        tokio::task::spawn_blocking(move || a.store.touch(&id, ip.as_deref()));
+        tokio::task::spawn_blocking(move || a.store.record_use(&id, ip.as_deref()));
     }
     // A user's own token acts as them (docs/permissions.md, "Users' own tokens"): as they are now
     // (disabled or gone, the token is dead), and only where their session reaches.
