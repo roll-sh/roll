@@ -963,6 +963,7 @@ Ranked by what a person notices first. Done so far:
 - the previews waiting for a visual review first in the list, tagged "to review";
 - `roll preview screenshot` (any screenshot or diff to a file);
 - the settings' screenshot rules in a section of their own ("Screenshots and checks");
+- a second service in the live check (`wiki:/` taken in its own run and compared);
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;
@@ -1006,10 +1007,12 @@ Ranked by what a person notices first. Done so far:
   logs that say when lines were missed and stop with a hidden tab).
 
 1. **Screenshots of roll apps' services**: `RollApps::screenshot` takes nothing, so a project on
-   roll apps has no screenshots, comparisons or visual reviews. The browser container joins the
-   service's own network (the page's code then reaches only what the service does), so roll apps
-   has to say where an instance runs (its container on this host, or a screenshot of its own on
-   Fargate). Waits for the apps thread (told on 2026-11-13).
+   roll apps has no screenshots, comparisons or visual reviews (and gets no baseline). roll apps'
+   #26 adds `apps_control::Apps::reachable(service, env) -> Option<Reachable { container, port }>`
+   (it wakes the instance and holds it awake while the value lives; `None` on Fargate; a
+   `Conflict` for a worker, a cron or a static site). Once #26 is on main: `RollApps::screenshot`
+   joins `container` as the runtime's screenshot does (`--network container:…`, the same
+   hardening), loads `http://127.0.0.1:<port>/`, and lets the baseline be made on roll apps.
 2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change

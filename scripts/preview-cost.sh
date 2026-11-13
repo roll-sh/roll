@@ -73,6 +73,9 @@ api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
 TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\n'
 api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"}}}" >/dev/null
+# A second service, from a second repo (its default branch in every preview): its pages too.
+api POST /v1/code/repos '{"owner":"acme","name":"wiki","source":"native"}' >/dev/null
+api POST /v1/code/repos/acme/wiki/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"the wiki\"}}}" >/dev/null
 REDIS=$(api POST /v1/redis/databases '{"name":"cache"}' | jq_ "d['id']")
 api POST /v1/storage/buckets '{"name":"assets"}' >/dev/null
 NOSQL=$(api POST /v1/nosql/databases '{"name":"events"}' | jq_ "d['id']")
@@ -110,7 +113,7 @@ PY
 resp "$REDIS_URL" 20000 parent
 
 PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
-for r in "repo/acme%2Fweb" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work"; do
+for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
 api PUT "/v1/previews/projects/$PRJ/settings" "{\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"}}}" >/dev/null
@@ -134,8 +137,8 @@ api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q 
 # What CI outside GitHub does: wait for the change's preview, take the URL it prints.
 WAITED=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview wait --change "$CHG" --timeout 60)
 [ "$WAITED" = "$(echo "$P" | jq_ "d['url']")" ] || { echo "roll preview wait printed $WAITED"; exit 1; }
-HOST=$(echo "$P" | jq_ "d['services'][0]['url'].split('//')[1].split(':')[0]")
-QUERY=$(echo "$P" | jq_ "d['services'][0]['share_url'].split('/?')[1]")
+HOST=$(echo "$P" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['url'].split('//')[1].split(':')[0]")
+QUERY=$(echo "$P" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url'].split('/?')[1]")
 JAR="$HOME_DIR/cookies"
 # A private preview (link access, the default) answers 401 without its link.
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a preview without its link should be 401"; exit 1; }
@@ -217,7 +220,7 @@ ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/"],"hide":[".clock"],"budget":{"load_ms":60000}}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"hide":[".clock"],"budget":{"load_ms":60000}}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -418,6 +421,7 @@ case "$ERRORS_NEW" in [0-9]*) ;; *) echo "the comparison with main should count 
 # The other page, taken in the same session and compared with main's.
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
 case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac
+case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki service's page should be taken in its own run and compared: $PAGES"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?page=%2Fpricing")" = image/png ] || { echo "/pricing's screenshot should be there"; exit 1; }
 # Visual review: the change's page differs from main's, so it waits for someone; accepted, it's done.
 api PUT "/v1/previews/projects/$PRJ/settings" '{"visual_review":"required"}' >/dev/null
