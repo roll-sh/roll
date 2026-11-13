@@ -369,6 +369,9 @@ type Approval = {
   reason if they denied it (for the approval's ten minutes, rather than asking them again), or runs it
   once approved. An approval runs one request: the one whose method, path and body hash it holds.
   It can't be reused.
+- A token's waiting reads and writes (two or more, none with a body to review) can be approved
+  together from the header's waiting list, each once; delete, deploy, reveal and admin are
+  approved one by one.
 - The person decides on the dashboard (a notification in the header, and the list under
   `/dashboard/access/approvals`), with `roll mcp approvals` / `roll mcp approve <id>`, or through the
   API. Only the operator decides. A grant never approves its own request, not even with `admin` on
