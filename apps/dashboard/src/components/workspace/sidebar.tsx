@@ -1,9 +1,10 @@
 import { RollLogo } from "@roll/brand";
 import { GitBranch, House, KeyRound, Plus, Search } from "lucide-react";
 import { useLocation } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { requestSignIn } from "@/lib/code-token";
+import { secretsApi } from "@/lib/secrets-api";
 import { hideAgents } from "@/lib/agents-surface";
 import { monthOf, projectMonth, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace } from "@/lib/workspace-store";
@@ -185,6 +186,7 @@ function Projects({ pathname }: { pathname: string }) {
               >
                 <KeyRound className={`size-3 ${secrets ? "text-accent" : ""}`} />
                 Secrets
+                <SecretsToFix project={p.id} at={pathname} />
               </Link>
             )}
             </div>
@@ -200,5 +202,29 @@ function Projects({ pathname }: { pathname: string }) {
         )}
       </div>
     </>
+  );
+}
+
+/** How many of a project's secrets findings need fixing now (expired, missing, exposed), looked at
+ *  again as the page changes; nothing while it's none or can't be read. */
+function SecretsToFix({ project, at }: { project: string; at: string }) {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    let live = true;
+    secretsApi(project)
+      .health()
+      .then(
+        (found) => live && setN(found.filter((f) => f.issue === "expired" || f.issue === "missing" || f.issue === "exposed").length),
+        () => live && setN(0),
+      );
+    return () => {
+      live = false;
+    };
+  }, [project, at]);
+  if (!n) return null;
+  return (
+    <span className="ml-auto mr-1 grid h-4 min-w-4 place-items-center rounded-full bg-danger/15 px-1 font-mono text-[10px] text-danger tabular-nums" title={`${n} to fix now: open Health`}>
+      {n}
+    </span>
   );
 }

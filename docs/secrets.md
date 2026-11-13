@@ -406,7 +406,8 @@ with a detail (the other environments, the reason, the date): never a value, and
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal. In the
 dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
 made in the browser) and an expired or expiring key's new date, each one change, or a change
-request where the environment is protected.
+request where the environment is protected. The Health tab and the sidebar's Secrets entry carry
+the count of findings to fix now (expired, missing, exposed).
 
 Health, `POST …/leaks` and `GET /v1/secrets/search` filter each finding by the caller's own access,
 so roll-access lets a token limited to some environments or folders call them (they're marked
@@ -1400,9 +1401,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Health in the sidebar**: each project's Secrets entry carries its count of findings to fix
-   now (expired, missing, exposed), so a project that needs attention shows without opening it.
-2. **Health across projects**: Home lists every project's serious findings, and `roll secrets
+1. **Health across projects**: Home lists every project's serious findings, and `roll secrets
    health --all` does in the terminal, filtered like `find` to what the caller may read.
 
 Waiting on other pull requests:
