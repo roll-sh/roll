@@ -228,6 +228,11 @@ impl Hooks {
     /// every retry, for receivers that dedupe), and `who` naming the sender. Any 2xx is success;
     /// the answer is read up to [`ANSWER_MAX`] and dropped.
     fn post_signed(&self, url: &url::Url, who: (&str, &str), delivery: &str, secret: &Value, body: &Json) -> Result<()> {
+        self.send_signed(url, who, delivery, secret, body, None).map(|_| ())
+    }
+
+    /// POST `body` signed; with `keep`, the 2xx answer (at most `keep` bytes), else it's drained.
+    fn send_signed(&self, url: &url::Url, who: (&str, &str), delivery: &str, secret: &Value, body: &Json, keep: Option<usize>) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         use hmac::Mac as _;
         let host = url.host_str().unwrap_or_default().to_string();
         let body = serde_json::to_vec(body).expect("JSON");
@@ -252,6 +257,17 @@ impl Hooks {
                 // Without the URL: it may carry a token of the receiver's.
                 .map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
             let status = resp.status();
+            if let (Some(limit), true) = (keep, status.is_success()) {
+                // The answer may hold a value: zeroed when dropped, never in an error.
+                let mut out = zeroize::Zeroizing::new(Vec::new());
+                while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                    if out.len() + c.len() > limit {
+                        return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                    }
+                    out.extend_from_slice(&c);
+                }
+                return Ok(out);
+            }
             let mut read = 0;
             while read < ANSWER_MAX {
                 match resp.chunk().await {
@@ -262,7 +278,7 @@ impl Hooks {
             if !status.is_success() {
                 return Err(Error::Link(format!("{host} answered {status}")));
             }
-            Ok(())
+            Ok(Default::default())
         })
     }
 }
@@ -286,6 +302,14 @@ impl roll_secrets::Deliver for AuditDeliver {
         // A retried batch (or notice) is the same body: the same delivery.
         let delivery = delivery_id(&format!("{id}:{body}"));
         self.0.post_signed(&u, ("x-roll-sink", id), &delivery, secret, body)
+    }
+
+    /// A rotator's call: the same guards and signature, and its answer. Each call is its own
+    /// delivery: issuing twice makes two values.
+    fn call(&self, url: &str, id: &str, secret: &Value, body: &Json, limit: usize) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        let u = self.0.url(url)?;
+        let delivery = roll_secrets::names::new_id("dlv", 16);
+        self.0.send_signed(&u, ("x-roll-rotator", id), &delivery, secret, body, Some(limit))
     }
 
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.

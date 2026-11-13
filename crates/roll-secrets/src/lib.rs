@@ -13,6 +13,7 @@
 pub mod access;
 mod alerts;
 pub mod api;
+pub mod rotators;
 mod audit;
 pub mod backup;
 pub mod crypto;
@@ -366,7 +367,13 @@ impl Secrets {
         db.add_column("versions", "expires_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
+        db.ensure_schema(rotators::SCHEMA)?;
+        // Rotators are a link kind of roll secrets' own: they call out through rolld.
+        let mut links = opts.links;
+        if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
+            links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
+        }
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
     }
 
     pub fn links(&self) -> &Links {

@@ -78,6 +78,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
+        .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
+        .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -777,6 +779,23 @@ async fn create_sink(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
 
 async fn delete_sink(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_sink(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.rotators(&project, &c)).await?))
+}
+
+async fn add_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::rotators::NewRotator = body(&b)?;
+    let (r, secret) = blocking(s, move |s| s.add_rotator(&project, n, &c)).await?;
+    let mut v = serde_json::to_value(&r).expect("JSON");
+    v["secret"] = json!(secret);
+    Ok(secret_response(created(v)))
+}
+
+async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_rotator(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

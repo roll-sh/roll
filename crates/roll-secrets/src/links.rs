@@ -207,12 +207,17 @@ impl crate::Secrets {
         caller.need(crate::Action::Read, &crate::Scope::project(project))?;
         self.project(project)?;
         let p = self.workspace.get(project).map_err(|e| Error::Internal(e.to_string()))?;
-        Ok(p.resources
+        let mut out: Vec<Target> = p
+            .resources
             .into_iter()
             .filter_map(|r| {
                 let provider = self.links.0.get(r.kind.as_str())?;
                 Some(Target { kind: r.kind.as_str().into(), name: provider.name(&r.r#ref).unwrap_or_else(|| r.r#ref.clone()), r#ref: r.r#ref, fields: provider.fields().to_vec() })
             })
-            .collect())
+            .collect();
+        if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
+            out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        Ok(out)
     }
 }

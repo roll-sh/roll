@@ -54,6 +54,12 @@ pub trait Deliver: Send + Sync {
         let _ = (url, limit);
         Err(crate::Error::Link("fetching isn't on this server".into()))
     }
+    /// POST `body` to `url`, signed with `secret`, `X-Roll-Rotator: <id>`, and the 2xx answer (at
+    /// most `limit` bytes): a rotator's (rotators.rs). The answer may hold a value.
+    fn call(&self, url: &str, id: &str, secret: &Value, body: &Json, limit: usize) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        let _ = (url, id, secret, body, limit);
+        Err(crate::Error::Link("calling out isn't on this server".into()))
+    }
 }
 
 #[derive(Debug, Serialize)]

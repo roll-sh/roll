@@ -114,6 +114,14 @@ impl roll_secrets::Deliver for Sent {
         };
         Ok(doc.to_string().into_bytes())
     }
+    /// A rotator outside roll: each issue is a new vendor key.
+    fn call(&self, _: &str, _: &str, _: &Secret, body: &Value, _: usize) -> roll_secrets::Result<zeroize::Zeroizing<Vec<u8>>> {
+        let mut sent = self.0.lock().unwrap();
+        sent.push(body.clone());
+        let n = sent.iter().filter(|b| b["action"] == "issue").count();
+        let answer = if body["action"] == "issue" { json!({ "value": format!("vendor-key-{n}"), "handle": n }) } else { json!({}) };
+        Ok(answer.to_string().into_bytes().into())
+    }
 }
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
@@ -798,6 +806,21 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     assert_eq!(sent[0]["expiring"], json!([{ "key": "CERT", "expires_at": soon }]));
     assert!(sent[0]["text"].as_str().unwrap().contains("CERT in 3 days"), "{}", sent[0]["text"]);
     assert!(!sent[0].to_string().contains("\"u\"") && !sent[0].to_string().contains("c2"), "names, never values");
+}
+
+#[tokio::test]
+async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
+    let api = Api::new().await;
+    let r = api.ok(Method::POST, "/rotators", Some(json!({ "name": "stripe", "url": "https://rotator.example/stripe?token=t" }))).await;
+    assert!(r["secret"].as_str().unwrap().starts_with("whsec_") && r["host"] == "rotator.example", "{r}");
+    let link = json!({ "kind": "rotator", "ref": r["id"], "field": "value", "mode": "managed" });
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "link": link }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "vendor-key-1");
+    api.ok(Method::POST, "/environments/production/secrets/STRIPE_KEY/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["STRIPE_KEY"], "vendor-key-2");
+    // The key it issues keeps it.
+    let (s, _) = api.call(Method::DELETE, &format!("/rotators/{}", r["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
 }
 
 #[tokio::test]

@@ -6597,6 +6597,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
+ "zeroize",
 ]
 
 [[package]]
