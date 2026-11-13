@@ -559,8 +559,8 @@ open it.
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
-they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Cloudflare Workers, AWS
-Parameter Store, a Kubernetes Secret, an endpoint
+they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Cloudflare
+Workers, AWS Parameter Store, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -664,6 +664,18 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   signed with SigV4 by hand from s3-proto's primitives (no AWS SDK in rolld). `prefix` is a path
   that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
   it.
+
+### `render` and `netlify`
+
+- **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
+  environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
+  deleted; the key holding an API key is a secret of this environment and folder.
+- **`netlify`**, `{account, site, context?, token_key}`: a Netlify site's variables, one deploy
+  context's values (`all` by default; `production`, `deploy-preview`, `branch-deploy`, `dev`). A
+  changed key sets that context's value (or creates the variable with it), a removed key deletes
+  the variable.
+
+Like Vercel's, they use the platforms' fixed API hosts.
 
 ### `gitlab`
 
@@ -1075,7 +1087,7 @@ Done and in PR #20: the store and crypto, rolld's mount and link providers (Post
 streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
 checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
 sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store,
-Kubernetes, GitLab CI), audit
+Kubernetes, GitLab CI, Render, Netlify), audit
 sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
 previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
 for stored values, typed keys, sharing across projects, and the fixes from a third security review (of identities, sharing,
@@ -1096,8 +1108,7 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **More sync targets people ask for**: Fly.io app secrets, Render environment groups and Netlify
-   site variables, each a `SyncTarget` in rolld like Vercel's (their APIs checked against the
-   platforms' docs and a recorded exchange before they ship).
+4. **Fly.io and Railway as sync targets** (their APIs are GraphQL; checked against their docs
+   before they ship), and Render environment groups alongside a service's own variables.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

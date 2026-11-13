@@ -26,14 +26,16 @@ pub(super) struct Http {
     cloudflare: String,
     /// `None`: `https://ssm.<region>.amazonaws.com`.
     ssm: Option<String>,
+    render: String,
+    netlify: String,
 }
 
 impl Http {
     pub(super) fn new() -> Http {
-        Http::with_bases("https://api.vercel.com", "https://api.cloudflare.com", None)
+        Http::with_bases("https://api.vercel.com", "https://api.cloudflare.com", None, "https://api.render.com", "https://api.netlify.com")
     }
 
-    fn with_bases(vercel: &str, cloudflare: &str, ssm: Option<&str>) -> Http {
+    fn with_bases(vercel: &str, cloudflare: &str, ssm: Option<&str>, render: &str, netlify: &str) -> Http {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(10))
@@ -41,7 +43,7 @@ impl Http {
             .user_agent("roll-secrets-sync")
             .build()
             .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into) }
+        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into() }
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -353,7 +355,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new() };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -381,6 +383,144 @@ impl SyncTarget for Kubernetes {
             let (status, body) = http.send(req.bearer_auth(token).json(&secret), &what).await?;
             if !status.is_success() {
                 return Err(Error::Link(format!("{what}: {verb} it: {status} {}", k8s_reason(&body))));
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── render ──
+
+/// A Render service's own environment variables (not a linked environment group's).
+pub(super) struct Render(pub(super) Http);
+
+impl Render {
+    /// (service, token_key)
+    fn target(&self, t: &Json) -> Result<(String, String)> {
+        let [service, token_key] = target("render", t, [("service", true), ("token_key", true)])?;
+        let service = service.unwrap_or_default();
+        if !ident(&service, 64, "-") {
+            return Err(bad("service is a Render service's id (srv-…)"));
+        }
+        Ok((service, key_field("render", "token_key", token_key)?))
+    }
+}
+
+impl SyncTarget for Render {
+    fn kind(&self) -> &str {
+        "render"
+    }
+    fn label(&self) -> &str {
+        "Render environment variables"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "service", label: "Service id", required: true, placeholder: "srv-d0abc123" },
+            SyncField { name: "token_key", label: "Key holding an API key", required: true, placeholder: "RENDER_API_KEY" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (service, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        let what = format!("render {service}");
+        let base = format!("{}/v1/services/{service}/env-vars", self.0.render);
+        block_on(async {
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                let req = self.0.client.put(format!("{base}/{}", urlencoding::encode(name))).bearer_auth(token).json(&json!({ "value": v.expose() }));
+                let (status, _) = self.0.send(req, &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {name}: {status}")));
+                }
+            }
+            for name in p.removed {
+                let (status, _) = self.0.send(self.0.client.delete(format!("{base}/{}", urlencoding::encode(name))).bearer_auth(token), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {name}: {status}")));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── netlify ──
+
+/// A Netlify site's environment variables, one deploy context's values.
+pub(super) struct Netlify(pub(super) Http);
+
+const NETLIFY_CONTEXTS: &[&str] = &["all", "production", "deploy-preview", "branch-deploy", "dev"];
+
+impl Netlify {
+    /// (account, site, context, token_key)
+    fn target(&self, t: &Json) -> Result<(String, String, String, String)> {
+        let [account, site, context, token_key] = target("netlify", t, [("account", true), ("site", true), ("context", false), ("token_key", true)])?;
+        let (account, site) = (account.unwrap_or_default(), site.unwrap_or_default());
+        if !ident(&account, 64, "-_") || !ident(&site, 64, "-") {
+            return Err(bad("account is a Netlify account's id (or slug), site a site's id"));
+        }
+        let context = context.unwrap_or_else(|| "all".into());
+        if !NETLIFY_CONTEXTS.contains(&context.as_str()) {
+            return Err(bad(format!("context is one of {}", NETLIFY_CONTEXTS.join(", "))));
+        }
+        Ok((account, site, context, key_field("netlify", "token_key", token_key)?))
+    }
+}
+
+impl SyncTarget for Netlify {
+    fn kind(&self) -> &str {
+        "netlify"
+    }
+    fn label(&self) -> &str {
+        "Netlify environment variables"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "account", label: "Account id or slug", required: true, placeholder: "acme" },
+            SyncField { name: "site", label: "Site id", required: true, placeholder: "3970e0fe-8564-4903-9a55-c5f8de49fb8b" },
+            SyncField { name: "context", label: "Deploy context", required: false, placeholder: "all, production, deploy-preview, branch-deploy, dev" },
+            SyncField { name: "token_key", label: "Key holding a personal access token", required: true, placeholder: "NETLIFY_AUTH_TOKEN" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (account, site, context, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        let what = format!("netlify {site}");
+        let base = format!("{}/api/v1/accounts/{}/env", self.0.netlify, urlencoding::encode(&account));
+        let site_q = format!("site_id={}", urlencoding::encode(&site));
+        block_on(async {
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                // The context's value of a variable that exists; else the variable, with it.
+                let req = self.0.client.patch(format!("{base}/{}?{site_q}", urlencoding::encode(name))).bearer_auth(token).json(&json!({ "context": context, "value": v.expose() }));
+                let (mut status, _) = self.0.send(req, &what).await?;
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    let req = self.0.client.post(format!("{base}?{site_q}")).bearer_auth(token).json(&json!([{ "key": name, "values": [{ "value": v.expose(), "context": context }] }]));
+                    status = self.0.send(req, &what).await?.0;
+                }
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {name}: {status}")));
+                }
+            }
+            for name in p.removed {
+                let (status, _) = self.0.send(self.0.client.delete(format!("{base}/{}?{site_q}", urlencoding::encode(name))).bearer_auth(token), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {name}: {status}")));
+                }
             }
             Ok(())
         })
@@ -453,7 +593,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new() };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -694,7 +834,7 @@ mod tests {
     }
 
     fn http(base: &str) -> Http {
-        Http::with_bases(base, base, Some(base))
+        Http::with_bases(base, base, Some(base), base, base)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -756,6 +896,25 @@ mod tests {
         let theirs = push(k(), t("theirs"), &[("KUBE_TOKEN", "sa-token")]).await.unwrap_err().to_string();
         assert!(theirs.contains("isn't roll's") && !theirs.contains("v-123"), "{theirs}");
         assert!(Kubernetes { allow_private: false }.check("p", &BTreeSet::new(), &t("shop-env")).is_err(), "a private address");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_and_netlify_set_each_changed_variable_and_delete_removed_ones() {
+        let (base, seen) = mock().await;
+        push(Arc::new(Render(http(&base))), json!({ "service": "srv-abc", "token_key": "RENDER_API_KEY" }), &[("RENDER_API_KEY", "rnd")]).await.unwrap();
+        push(Arc::new(Netlify(http(&base))), json!({ "account": "acme", "site": "site-1", "context": "production", "token_key": "NETLIFY_AUTH_TOKEN" }), &[("NETLIFY_AUTH_TOKEN", "nfp")]).await.unwrap();
+        let seen = seen.lock().unwrap();
+        let calls: Vec<(&str, &str)> = seen.iter().map(|s| (s.0.as_str(), s.1.as_str())).collect();
+        assert_eq!(
+            calls,
+            [
+                ("PUT", "/v1/services/srv-abc/env-vars/NEW"),
+                ("DELETE", "/v1/services/srv-abc/env-vars/OLD"),
+                ("PATCH", "/api/v1/accounts/acme/env/NEW?site_id=site-1"),
+                ("DELETE", "/api/v1/accounts/acme/env/OLD?site_id=site-1"),
+            ]
+        );
+        assert_eq!((seen[0].2.clone(), seen[2].2.clone()), (json!({ "value": "v-123" }), json!({ "context": "production", "value": "v-123" })));
     }
 
     #[tokio::test(flavor = "multi_thread")]
