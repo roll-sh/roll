@@ -48,6 +48,11 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       <p className="font-mono text-[11px] text-subtle tabular-nums">
         {money(env.sleeping_usd_month)}/mo asleep · {money(env.active_usd_hour)}/h active
       </p>
+      {env.expires_at != null && (
+        <p className="text-[12px] text-muted">
+          Unused, it goes {new Date(env.expires_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })} unless it's opened or kept.
+        </p>
+      )}
       {env.dashboard_url && (
         <a href={env.dashboard_url} className="inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg">
           Open in Previews <ArrowUpRight className="size-3.5" strokeWidth={1.5} />

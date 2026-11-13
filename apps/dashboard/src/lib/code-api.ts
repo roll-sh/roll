@@ -346,6 +346,8 @@ export interface PreviewEnvironment {
   schema_changes?: string[];
   /** A public preview's screenshot behind a signed, expiring link. */
   screenshot_url?: string;
+  /** When it goes unless it's opened or kept (ms), once that's a day away. */
+  expires_at?: number;
 }
 
 export interface Change {

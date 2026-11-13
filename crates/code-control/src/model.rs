@@ -295,6 +295,9 @@ pub struct PreviewEnvironment {
     /// A signed, expiring link to the first service's screenshot (public previews only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot_url: Option<String>,
+    /// When the preview goes unless it's opened or kept (ms), once that's close (a day ahead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

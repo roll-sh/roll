@@ -113,6 +113,7 @@ impl CodeSource {
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
+                expires_at: p.goes_at,
                 // Only a public preview's: the comment is readable by whoever reads the pull request.
                 screenshot_url: (s.access == crate::settings::Access::Public)
                     .then(|| p.screenshot_link.clone())

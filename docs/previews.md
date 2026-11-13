@@ -101,6 +101,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   (7 days by default). `DELETE /v1/previews/{id}` deletes it at once. Deletion removes, in this
   order: services, the secrets environment, then every data branch. Each step is idempotent, and
   the preview row goes last, so a crash restarts the deletion.
+  A day before an unused preview's TTL passes (a quarter of a shorter TTL ahead), the change, its
+  pull request comment, the sheet and its activity say when, and how to keep it; using it again
+  takes the warning back.
   A change's preview deleted by its TTL or by hand stays deleted until the change's next push
   (`dismissed(change_id, head)`).
 - **Limits**:
@@ -590,6 +593,7 @@ type Preview = {
   change: string | null; number: number | null; github_pr: number | null; branch: string | null;
   title: string; head: string; trusted: boolean;
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
+  goes_at: number | null;             // when it goes unless opened or kept, once a day away (or a quarter of a shorter TTL)
   desired: "active" | "deleted";
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   error: string | null;
@@ -716,7 +720,8 @@ Ranked by what a person notices first. Done so far:
   automations) at 80% and 100% of `max_usd_month`, once a month per budget;
 - Postgres column masking per preview (measured: the branch reads `user-…@example.invalid`, the
   parent the real address);
-- keeping a preview past its TTL (`POST …/keep`, the sheet, `roll preview keep`);
+- keeping a preview past its TTL (`POST …/keep`, the sheet, `roll preview keep`), and a warning a
+  day before an unused one goes;
 - each thread checked live against its latest branch: roll secrets (`wip/previews-on-secrets`:
   the one-call ensure, an untrusted environment expiring in 24 h, a dropped override gone, the
   service seeing development's value), roll apps (`wip/previews-on-apps`: a preview ready only
@@ -755,14 +760,11 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A warning before a preview expires**: a preview unused for `ttl_hours` goes without notice.
-   Say when it will (the pull request comment, the change, the sheet) a day ahead, with how to
-   keep it, as Render's and Heroku's review apps do.
-2. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
+1. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
    words do now. roll code changes have no labels yet; GitHub's go through the mirror.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

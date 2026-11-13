@@ -221,7 +221,9 @@ export function PreviewSheet({
                   "expires",
                   p.kept_until && p.kept_until > Date.now()
                     ? `kept until ${new Date(p.kept_until).toLocaleDateString()}`
-                    : p.expires_at
+                    : p.goes_at
+                      ? `unused: goes ${new Date(p.goes_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}`
+                      : p.expires_at
                       ? new Date(p.expires_at).toLocaleDateString()
                       : "with its change",
                 ],

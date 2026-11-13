@@ -209,6 +209,16 @@ impl Engine {
                 self.mark_deleted(&r.id, &format!("unused for {} hours (ttl)", s.ttl_hours))?;
                 continue;
             }
+            // Close to going: say when, once (the change, its pull request, the sheet); used or
+            // kept again, take it back.
+            let goes = goes_soon(r.last_active_at, r.expires_at, kept, s.ttl_hours, now);
+            if goes != self.store.goes_at(&r.id)? {
+                self.store.set_goes_at(&r.id, goes)?;
+                if let Some(at) = goes {
+                    self.store.log(&r.id, &format!("unused: it goes in {} unless it's opened or kept", in_words(at - now)))?;
+                }
+                self.store.update(&r.id, |row| row.next_at = 0)?;
+            }
             // Unused for a while, nothing running: let the branches drop what they keep warm.
             if r.last_active_at + IDLE_AFTER_MS <= now && matches!(r.state, State::Ready | State::Sleeping) && !self.store.idled(&r.id)? {
                 let running = self.store.services(&r.id)?.iter().any(|x| x.state == ServiceState::Running);

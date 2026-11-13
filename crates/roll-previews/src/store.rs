@@ -363,8 +363,10 @@ impl Store {
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
-        if !db.has_column("previews", "kept_until")? {
-            db.add_column("previews", "kept_until", "INTEGER")?;
+        for col in ["kept_until", "goes_at"] {
+            if !db.has_column("previews", col)? {
+                db.add_column("previews", col, "INTEGER")?;
+            }
         }
         for col in ["released", "schema_head", "schema_changes", "runs"] {
             if !db.has_column("previews", col)? {
@@ -805,6 +807,17 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT kept_until FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
+    /// When the preview goes unless it's used or kept, once that's close ([`crate::engine`]'s
+    /// warning; `None`: not close).
+    pub fn goes_at(&self, id: &str) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT goes_at FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_goes_at(&self, id: &str, at: Option<i64>) -> Result<()> {
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET goes_at = ? WHERE id = ?", params![at, id])?))?;
+        Ok(())
+    }
+
     pub fn set_kept_until(&self, id: &str, until: Option<i64>) -> Result<()> {
         let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET kept_until = ? WHERE id = ?", params![until, id])?))?;
         if n == 0 {
@@ -1065,6 +1078,7 @@ impl Store {
         let share_url = url.as_deref().map(share);
         let schema_changes = self.schema_changes(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
+        let goes_at = self.goes_at(&r.id)?;
         let screenshot_at = self.screenshot_at(&r.id)?;
         let screenshot_link = self.screenshot_link(&r.id)?;
         Ok(Preview {
@@ -1099,6 +1113,7 @@ impl Store {
             cost: cost.rounded(),
             schema_changes,
             kept_until,
+            goes_at,
             screenshot_at,
             screenshot_link,
             last_reset_at: r.last_reset_at,

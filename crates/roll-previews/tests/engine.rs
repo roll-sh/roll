@@ -116,6 +116,15 @@ async fn previews_beyond_the_limit_wait_and_start_as_others_go() {
     assert!(err.to_string().contains("max_previews"), "{err}");
     // Unused past its TTL it goes, unless it's kept; released, its rules decide again.
     let b = e.engine.store.row_by_change("chg_b").unwrap().unwrap();
+    // A day before it goes, the change and its pull request are told when; used again, not.
+    let (now, h) = (e.engine.store.now_ms().unwrap(), 3_600_000);
+    e.engine.store.update(&b.id, |r| r.last_active_at = now - 156 * h).unwrap();
+    e.engine.pass().await.unwrap();
+    let goes = e.code.last_report("chg_b").goes_at;
+    assert!(goes.is_some_and(|t| (t - (now + 12 * h)).abs() < 60_000), "{goes:?}");
+    e.engine.store.update(&b.id, |r| r.last_active_at = now).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.code.last_report("chg_b").goes_at, None, "used again");
     e.engine.store.update(&b.id, |r| r.last_active_at = 0).unwrap();
     e.engine.keep(&b.id, 24).unwrap();
     e.engine.pass().await.unwrap();

@@ -31,6 +31,30 @@ const MAX_BACKOFF_MS: i64 = 600_000;
 /// A preview unused this long has its branches told it's idle ([`Brancher::idle`]).
 pub const IDLE_AFTER_MS: i64 = 3_600_000;
 
+/// How long before an unused preview goes it says so: a day, or a quarter of a shorter TTL.
+const WARN_BEFORE_MS: i64 = 86_400_000;
+
+/// When a preview goes, if that's within its warning: unused since `last_active_at` for
+/// `ttl_hours`, or at `expires_at`, whichever is first. `None` when it's kept or not close.
+pub fn goes_soon(last_active_at: i64, expires_at: Option<i64>, kept: bool, ttl_hours: u32, now: i64) -> Option<i64> {
+    if kept {
+        return None;
+    }
+    let ttl_ms = ttl_hours as i64 * 3_600_000;
+    let at = expires_at.map_or(last_active_at + ttl_ms, |e| e.min(last_active_at + ttl_ms));
+    (at - now <= WARN_BEFORE_MS.min(ttl_ms / 4)).then_some(at)
+}
+
+/// A duration as the activity says it: `23 hours`, `40 minutes`.
+fn in_words(ms: i64) -> String {
+    let m = (ms.max(0) + 59_999) / 60_000;
+    match m {
+        0..=1 => "a minute".into(),
+        2..=119 => format!("{m} minutes"),
+        _ => format!("{} hours", (m + 30) / 60),
+    }
+}
+
 /// Previews converged at once.
 const PARALLEL: usize = 4;
 
@@ -472,6 +496,15 @@ mod tests {
         assert!(!wants(&s, &ChangeInfo { title: "Fix typo [Skip Preview]".into(), ..ch.clone() }));
         assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
+        // Unused for 6 of a week's hours: quiet; within a day: when. A 4-hour TTL warns an hour ahead.
+        let h = 3_600_000;
+        assert_eq!(goes_soon(0, None, false, 168, 100 * h), None);
+        assert_eq!(goes_soon(0, None, false, 168, 150 * h), Some(168 * h));
+        assert_eq!(goes_soon(0, None, true, 168, 150 * h), None);
+        assert_eq!(goes_soon(0, Some(30 * h), false, 168, 0), None);
+        assert_eq!(goes_soon(0, Some(30 * h), false, 168, 9 * h), Some(30 * h));
+        assert_eq!(goes_soon(0, None, false, 4, 2 * h), None);
+        assert_eq!(goes_soon(0, None, false, 4, 3 * h), Some(4 * h));
         let manual = Settings { manual: true, ..s.clone() };
         assert!(!wants(&manual, &ch));
         assert!(wants(&manual, &ChangeInfo { title: "Try the nav [Preview]".into(), ..ch.clone() }));

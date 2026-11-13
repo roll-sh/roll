@@ -199,6 +199,9 @@ pub struct Preview {
     pub schema_changes: Option<Vec<String>>,
     /// Kept past its TTL until then (`POST …/keep`); a landed or closed change still ends it.
     pub kept_until: Option<i64>,
+    /// When it goes unless it's used or kept, said once that's close (a day, or a quarter of a
+    /// shorter TTL): the change, its pull request and the sheet warn.
+    pub goes_at: Option<i64>,
     /// When its screenshot was taken (`GET …/screenshot`), if it has one.
     pub screenshot_at: Option<i64>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in

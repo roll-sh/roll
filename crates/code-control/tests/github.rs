@@ -676,6 +676,7 @@ async fn connect_import_webhooks_and_mirror() {
             head: None,
             schema_changes: None,
             screenshot_url: None,
+            expires_at: None,
         }),
     };
     let preview_calls = |path: &str| g.mock.calls.lock().iter().filter(|(_, p, _)| p.contains(path)).cloned().collect::<Vec<_>>();

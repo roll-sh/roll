@@ -275,6 +275,15 @@ fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static
 }
 
 /// The pull request comment for a preview.
+/// The comment's warning that an unused preview is about to go.
+fn expiry_line(ms: i64) -> Option<String> {
+    let at = chrono::DateTime::from_timestamp_millis(ms)?;
+    Some(format!(
+        "\n**Unused, it goes at {} UTC** unless it's opened or kept (`roll preview keep`, or Keep in roll). A new push brings it back.\n",
+        at.format("%Y-%m-%d %H:%M")
+    ))
+}
+
 fn preview_comment(c: &Change) -> String {
     let marker = format!("<!-- roll-preview:{} -->", c.id);
     let Some(p) = &c.preview else { return format!("**roll preview**: deleted.\n\n{marker}") };
@@ -316,6 +325,9 @@ fn preview_comment(c: &Change) -> String {
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
             ));
+            if let Some(line) = e.expires_at.and_then(expiry_line) {
+                out.push_str(&line);
+            }
         }
         None => {
             out.push_str("**roll preview**");
@@ -365,6 +377,7 @@ mod preview_tests {
             head: None,
             schema_changes: None,
             screenshot_url: None,
+            expires_at: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -377,5 +390,6 @@ mod preview_tests {
         let block = schema_block(&["+ column public.users.nick text".into(), "+ table public.x```y".into()]);
         assert!(block.contains("<summary>Schema changes (2)</summary>") && block.contains("+ column public.users.nick text"), "{block}");
         assert_eq!(block.matches("```").count(), 2, "a name can't close the fence: {block}");
+        assert!(expiry_line(1_794_600_000_000).is_some_and(|l| l.contains("goes at 2026-11-13 20:00 UTC")));
     }
 }
