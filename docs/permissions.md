@@ -314,6 +314,19 @@ type Approval = {
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
+### Ask for anything else
+
+A token can be made so that what its rules don't allow asks a person instead of being refused
+(`ask_otherwise`; the builder's and the consent screen's "Ask me for anything else", `roll token
+create --ask-otherwise`), as Claude Code asks before anything it isn't allowed to do. Start an agent
+read-only, and approve what it asks for once, for a while or always (below): the token grows with
+what a person said yes to.
+
+- It's still refused, never asked: the operator's routes (no row in the catalogue), a request from
+  the wrong address, a revoked or idle token, and moving a resource between projects.
+- `tools/list` shows such a token every tool of the products that are on.
+- Only a token that asks may make one that does.
+
 ### Remembered approvals
 
 Approving can also allow what's asked again, as Claude Code's and Cursor's "allow for this

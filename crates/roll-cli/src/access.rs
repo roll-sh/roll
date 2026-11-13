@@ -60,6 +60,9 @@ pub struct Create {
     /// Requests a minute it may make (per node; over it, 429 with Retry-After).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100_000))]
     rate: Option<u32>,
+    /// What the rules don't allow asks you instead of being refused.
+    #[arg(long)]
+    ask_otherwise: bool,
 }
 
 /// What a token may do, as flags (`create` and `edit`).
@@ -112,6 +115,9 @@ pub struct Edit {
     /// Requests a minute it may make (`none` takes the limit off).
     #[arg(long)]
     rate: Option<String>,
+    /// Whether what the rules don't allow asks you instead of being refused.
+    #[arg(long)]
+    ask_otherwise: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -323,7 +329,7 @@ pub fn date(ms: i64) -> String {
 pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
-            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate });
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "ask_otherwise": c.ask_otherwise });
             let made = api.post("/v1/access/tokens", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
@@ -394,8 +400,11 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 };
                 patch.insert("rate_per_minute".into(), rate);
             }
+            if let Some(a) = e.ask_otherwise {
+                patch.insert("ask_otherwise".into(), json!(a));
+            }
             if patch.is_empty() {
-                bail!("nothing to change: --name, --expires, --ip, --rate, or new rules (--preset, --allow, --ask)");
+                bail!("nothing to change: --name, --expires, --ip, --rate, --ask-otherwise, or new rules (--preset, --allow, --ask)");
             }
             let g = api.call(reqwest::Method::PATCH, &format!("/v1/access/tokens/{}", e.id), Some(Value::Object(patch))).await?;
             if json_out {

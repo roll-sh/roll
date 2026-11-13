@@ -49,6 +49,8 @@ export interface Grant {
   rate_per_minute?: number;
   /** Why roll revoked it (a leaked secret: "found in acme/site .env at …"). */
   revoked_why?: string;
+  /** What its rules don't allow asks a person instead of being refused. */
+  ask_otherwise?: boolean;
   /** Its requests over the last day (in the list). */
   activity?: { allowed: number; denied: number; asked: number };
 }
@@ -59,6 +61,7 @@ export interface NewGrant {
   expires_at?: number | null;
   ip_allow?: string[];
   rate_per_minute?: number | null;
+  ask_otherwise?: boolean;
 }
 
 /** How long an approval also allows the same action on the same resource. */
@@ -158,6 +161,7 @@ export interface Consent {
   expires_at?: number | null;
   ip_allow?: string[];
   rate_per_minute?: number | null;
+  ask_otherwise?: boolean;
 }
 
 const token = (id: string) => `/v1/access/tokens/${encodeURIComponent(id)}`;

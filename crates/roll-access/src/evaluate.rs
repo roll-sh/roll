@@ -349,6 +349,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             (outcome, action) = (copied, Action::Reveal);
         }
     }
+    // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
+    // were refused before any rule; a move between projects stays refused.
+    if outcome == Outcome::Deny && ctx.grant.ask_otherwise && catalog::placement(row, &params).is_none() {
+        outcome = Outcome::Ask;
+    }
     let resource = describe(&target);
     let mut approval_used: Option<String> = None;
     match outcome {
@@ -419,6 +424,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         name: ctx.grant.name.as_str().into(),
         kind: ctx.grant.kind(),
         scope: scope.clone(),
+        ask_otherwise: ctx.grant.ask_otherwise,
     });
     // A list filtered, an answer's credentials redacted, a create placed: the answer is read.
     let filter_list = matches!(row.target, Tgt::List { .. }) && narrowed(&scope, row.product, action);

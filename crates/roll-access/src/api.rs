@@ -198,7 +198,7 @@ async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate:
     let by = match who(&a, &ext)? {
         Who::Operator => "operator".to_string(),
         Who::Grant(g) => {
-            check_within(&a, &g, &Shape { rules: &new.rules, expires_at: new.expires_at, ip_allow: &new.ip_allow, rate: new.rate_per_minute }).await?;
+            check_within(&a, &g, &Shape { rules: &new.rules, expires_at: new.expires_at, ip_allow: &new.ip_allow, rate: new.rate_per_minute, ask_otherwise: new.ask_otherwise }).await?;
             g.id.to_string()
         }
     };
@@ -213,18 +213,19 @@ struct Shape<'a> {
     expires_at: Option<i64>,
     ip_allow: &'a [String],
     rate: Option<u32>,
+    ask_otherwise: bool,
 }
 
 impl<'a> Shape<'a> {
     fn of(g: &'a crate::store::Grant) -> Shape<'a> {
-        Shape { rules: &g.rules, expires_at: g.expires_at, ip_allow: &g.ip_allow, rate: g.rate_per_minute }
+        Shape { rules: &g.rules, expires_at: g.expires_at, ip_allow: &g.ip_allow, rate: g.rate_per_minute, ask_otherwise: g.ask_otherwise }
     }
 }
 
 /// A grant may hand out only what it has: rules it covers, for no longer than it lives, from no
 /// more addresses than it may be used from, at no more requests a minute than it may make.
 async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, shape: &Shape<'_>) -> crate::Result<()> {
-    let Shape { rules, expires_at, ip_allow, rate } = *shape;
+    let Shape { rules, expires_at, ip_allow, rate, ask_otherwise } = *shape;
     let id = g.id.to_string();
     let maker = blocking(a.clone(), move |a| a.store.get(&id)).await?;
     // Its own rules, not what it's allowed for a while: a while never becomes for good.
@@ -243,6 +244,9 @@ async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, shape: &Shape<'_>) 
         if !inside {
             return Err(Error::Forbidden(format!("a token limited to {} can only make tokens limited within those addresses", maker.ip_allow.join(", "))));
         }
+    }
+    if ask_otherwise && !maker.ask_otherwise {
+        return Err(Error::Forbidden("only a token that asks for anything else can make one that does".into()));
     }
     if let Some(mine) = maker.rate_per_minute
         && rate.is_none_or(|r| r > mine)
@@ -275,7 +279,8 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
         let expires = change.expires_at.unwrap_or(target.expires_at);
         let ips = change.ip_allow.clone().unwrap_or(target.ip_allow.clone());
         let rate = change.rate_per_minute.unwrap_or(target.rate_per_minute);
-        check_within(&a, &g, &Shape { rules: &rules, expires_at: expires, ip_allow: &ips, rate }).await?;
+        let ask_otherwise = change.ask_otherwise.unwrap_or(target.ask_otherwise);
+        check_within(&a, &g, &Shape { rules: &rules, expires_at: expires, ip_allow: &ips, rate, ask_otherwise }).await?;
     }
     // A token whose rules, lifetime or addresses change meets the policy as it is now.
     if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {

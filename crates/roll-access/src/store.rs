@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS grants (
     client_id TEXT,
     rate_per_minute INTEGER,
     revoked_why TEXT,
-    temp_rules TEXT
+    temp_rules TEXT,
+    ask_otherwise INTEGER
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grant_secrets (
     hash TEXT PRIMARY KEY,
@@ -141,6 +142,9 @@ pub struct Grant {
     /// Rules a person allowed for a while when approving one of its requests, each until a time.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub temporary: Vec<TempRule>,
+    /// What its rules don't allow asks a person instead of being refused ("ask for anything else").
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ask_otherwise: bool,
 }
 
 /// A rule allowed for a while (an approval's "for an hour").
@@ -193,6 +197,9 @@ pub struct NewGrant {
     pub ip_allow: Vec<String>,
     #[serde(default)]
     pub rate_per_minute: Option<u32>,
+    /// What the rules don't allow asks a person instead of being refused.
+    #[serde(default)]
+    pub ask_otherwise: bool,
 }
 
 /// A change to a grant: only the fields it has.
@@ -207,6 +214,7 @@ pub struct GrantChange {
     /// `null` takes the limit off.
     #[serde(default, deserialize_with = "some")]
     pub rate_per_minute: Option<Option<u32>>,
+    pub ask_otherwise: Option<bool>,
 }
 
 fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::result::Result<Option<T>, D::Error> {
@@ -299,9 +307,9 @@ pub struct Store {
     touched: std::sync::Mutex<std::collections::HashMap<String, i64>>,
 }
 
-/// A grant's columns, as `grant_row` reads them (20 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (21 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.revoked_why, g.temp_rules";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.revoked_why, g.temp_rules, g.ask_otherwise";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
@@ -334,6 +342,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         rate_per_minute: r.get::<_, Option<i64>>(17)?.and_then(|n| u32::try_from(n).ok()),
         revoked_why: r.get(18)?,
         temporary: r.get::<_, Option<String>>(19)?.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
+        ask_otherwise: r.get::<_, Option<bool>>(20)?.unwrap_or(false),
     })
 }
 
@@ -451,6 +460,9 @@ impl Store {
         if !db.has_column("grants", "temp_rules")? {
             db.add_column("grants", "temp_rules", "TEXT")?;
         }
+        if !db.has_column("grants", "ask_otherwise")? {
+            db.add_column("grants", "ask_otherwise", "INTEGER")?;
+        }
         Ok(Store { db, touched: Default::default() })
     }
 
@@ -521,8 +533,8 @@ impl Store {
                 return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
             }
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from)],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, ask_otherwise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), new.ask_otherwise],
             )?;
             c.execute(
                 "INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -552,7 +564,7 @@ impl Store {
             c.query_row(
                 &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
-                |r| Ok((grant_row(r)?, r.get::<_, String>(20)?, r.get::<_, Option<i64>>(21)?)),
+                |r| Ok((grant_row(r)?, r.get::<_, String>(21)?, r.get::<_, Option<i64>>(22)?)),
             )
             .optional()
         })?;
@@ -594,6 +606,9 @@ impl Store {
             }
             if let Some(rate) = &change.rate_per_minute {
                 c.execute("UPDATE grants SET rate_per_minute = ? WHERE id = ?", params![rate.map(i64::from), id])?;
+            }
+            if let Some(ask) = change.ask_otherwise {
+                c.execute("UPDATE grants SET ask_otherwise = ? WHERE id = ?", params![ask, id])?;
             }
             Ok(())
         })?;
@@ -953,8 +968,8 @@ impl Store {
         self.db.write(|c| {
             // The grant exists from now, unusable (no secret) until the code is exchanged.
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?)",
-                params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from)],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, ask_otherwise) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![grant_id, new.name.trim(), rules, new.expires_at, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), new.ask_otherwise],
             )?;
             c.execute(
                 "INSERT INTO oauth_codes (hash, client_id, grant_id, redirect_uri, challenge, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
