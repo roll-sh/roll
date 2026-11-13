@@ -38,10 +38,18 @@ fn linked_tombstones_preserve_snapshots_and_conflicts_until_gc() {
         s.compact().unwrap();
         check_pinned(&s);
         // A newer overlapping L0 file must not resurrect the old L1 value when the
-        // tombstone and its older versions are reclaimed together.
+        // tombstone and its older versions are reclaimed together. (It has a key in the L1
+        // file's range, b55: compaction merges only the L1 files an L0 file has keys in.)
         drop(pin);
         let now = s
-            .commit(vec![(b"b4".to_vec(), Some(Bytes::from_static(b"left"))), (b"b8".to_vec(), Some(Bytes::from_static(b"right")))], |_| Ok(()))
+            .commit(
+                vec![
+                    (b"b4".to_vec(), Some(Bytes::from_static(b"left"))),
+                    (b"b55".to_vec(), Some(Bytes::from_static(b"between"))),
+                    (b"b8".to_vec(), Some(Bytes::from_static(b"right"))),
+                ],
+                |_| Ok(()),
+            )
             .unwrap();
         s.flush_memtables().unwrap();
         s.compact().unwrap();
@@ -51,7 +59,7 @@ fn linked_tombstones_preserve_snapshots_and_conflicts_until_gc() {
             assert!(!s.latest_version_ts(b"b5").unwrap().is_some_and(|ts| ts > now));
             assert_eq!(s.get(b"b6", now).unwrap().as_deref(), Some(&b"new"[..]));
             let keys: Vec<_> = s.scan(b"b", b"c", now).map(|r| r.unwrap().0).collect();
-            assert_eq!(keys, [b"b4", b"b6", b"b8"]);
+            assert_eq!(keys, [&b"b4"[..], b"b55", b"b6", b"b8"]);
         };
         check_reclaimed(&s);
         drop(s);

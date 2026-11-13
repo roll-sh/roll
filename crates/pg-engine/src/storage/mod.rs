@@ -1901,10 +1901,10 @@ impl Store {
         self.compact()
     }
 
-    /// Merge L0 into L1: every L0 file with the L1 files whose user keys overlap one of theirs
-    /// (the others stay as they are, also between L0 files' ranges: a new index's entries and
-    /// a catalog change don't rewrite the table loaded between them, nor drop its cached
-    /// blocks; the outputs end before each such file, so L1's files still don't overlap).
+    /// Merge L0 into L1: every L0 file with the L1 files whose range holds a user key of one
+    /// of theirs (the others stay as they are, also within an L0 file's range: a new index's
+    /// entries and a catalog change don't rewrite the table loaded between them, nor drop its
+    /// cached blocks; the outputs end before each such file, so L1's files still don't overlap).
     pub fn compact(&self) -> Result<()> {
         let _g = self.bg.lock();
         // A closed store's files may belong to a store opened after it (`close` waits for a
@@ -1935,12 +1935,21 @@ impl Store {
             .l1
             .partition_point(|s| user_key(&s.meta.first_key) <= hi)
             .max(first);
-        let meets_l0 = |s: &SstReader| {
+        // (An L0 file whose range spans many tables' files, a few catalog writes or size
+        // estimates, has keys in few of them: only those it has keys in are merged.)
+        let mut inputs_l1: Vec<Arc<SstReader>> = Vec::new();
+        let mut kept: Vec<Arc<SstReader>> = Vec::new();
+        for s in &view.l1[first..last] {
             let (a, b) = (user_key(&s.meta.first_key), user_key(&s.meta.last_key));
-            inputs_l0.iter().any(|l| b >= user_key(&l.meta.first_key) && a <= user_key(&l.meta.last_key))
-        };
-        let (inputs_l1, kept): (Vec<Arc<SstReader>>, Vec<Arc<SstReader>>) =
-            view.l1[first..last].iter().cloned().partition(|s| meets_l0(s));
+            let mut has = false;
+            for l in &inputs_l0 {
+                if l.has_user_key_in(a, b)? {
+                    has = true;
+                    break;
+                }
+            }
+            if has { inputs_l1.push(s.clone()) } else { kept.push(s.clone()) }
+        }
         // (The next L1 file left in place that the outputs reach: one ends before it.)
         let mut next_kept = 0;
         let horizon = self.gc_horizon();
@@ -3849,6 +3858,53 @@ mod tests {
                 assert!(rows.iter().filter(|(k, _)| k.starts_with(p) && k != "m0100").all(|(_, x)| x == v), "{p}");
             }
             assert_eq!(s.get(b"m0100", ts).unwrap().as_deref(), Some(&b"m2"[..]));
+            drop(s);
+            s = Store::open(dir.path(), o()).unwrap();
+        }
+    }
+
+    /// An L0 file whose range spans L1 files it has no keys in (a few writes to tables far
+    /// apart) leaves them as they are: only the files holding one of its keys are merged.
+    #[test]
+    fn compaction_leaves_l1_files_an_l0_file_has_no_keys_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = || StoreOptions { sync: false, background: false, ..Default::default() };
+        let mut s = Store::open(dir.path(), o()).unwrap();
+        let fill = |s: &Arc<Store>, p: &str| {
+            for i in 0..200 {
+                put(s, &format!("{p}{i:04}"), Some(p));
+            }
+            s.flush_memtables().unwrap();
+            s.compact().unwrap();
+        };
+        for p in ["c", "m", "q", "x"] {
+            fill(&s, p);
+        }
+        let ids = |s: &Arc<Store>| s.view().l1.iter().map(|f| f.meta.id).collect::<Vec<_>>();
+        let before = ids(&s);
+        assert_eq!(before.len(), 4);
+        // (One file from "a" to "z", with a key in the first and the last file's ranges only:
+        // "c0100" in c's, "x0300" past x's last key, "n" between m's and q's.)
+        for k in ["a0001", "c0100", "n0001", "x0300", "z0001"] {
+            put(&s, k, Some("new"));
+        }
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        let after = ids(&s);
+        assert!(after.contains(&before[1]) && after.contains(&before[2]), "m's and q's files stay: {before:?} -> {after:?}");
+        assert!(!after.contains(&before[0]), "c's file holds c0100: merged");
+        let ranges = s.view().l1.iter().map(|f| (user_key(&f.meta.first_key).to_vec(), user_key(&f.meta.last_key).to_vec())).collect::<Vec<_>>();
+        assert!(ranges.windows(2).all(|w| w[0].1 < w[1].0), "{ranges:?}");
+        for _ in 0..2 {
+            let ts = s.visible_ts();
+            let rows = scan_all(&s, ts);
+            assert_eq!(rows.len(), 804);
+            for p in ["c", "m", "q", "x"] {
+                assert!(rows.iter().filter(|(k, _)| k.starts_with(p) && k != "c0100" && k != "x0300").all(|(_, v)| v == p), "{p}");
+            }
+            for k in ["a0001", "c0100", "n0001", "x0300", "z0001"] {
+                assert_eq!(s.get(k.as_bytes(), ts).unwrap().as_deref(), Some(&b"new"[..]), "{k}");
+            }
             drop(s);
             s = Store::open(dir.path(), o()).unwrap();
         }

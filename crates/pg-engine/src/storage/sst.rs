@@ -1181,6 +1181,43 @@ impl SstReader {
         self.index.at.len()
     }
 
+    /// Whether the file holds an entry whose user key is in [lo, hi] (both ends included):
+    /// its range alone answers when its first key is in it; else the block index finds the
+    /// one block that would hold it, read without filling the cache.
+    pub fn has_user_key_in(&self, lo: &[u8], hi: &[u8]) -> Result<bool> {
+        let (first, last) = (user_key(&self.meta.first_key), user_key(&self.meta.last_key));
+        if last < lo || first > hi {
+            return Ok(false);
+        }
+        if first >= lo {
+            return Ok(true);
+        }
+        // (`lo` itself sorts before each of its versions: the first entry at or past it.)
+        let i = self.find_block(lo);
+        if i >= self.block_count() {
+            return Ok(false);
+        }
+        let b = self.block_with(i, false)?;
+        let mut pos = BlockPos::default();
+        b.seek(lo, &mut pos);
+        while pos.index() < b.len() {
+            let uk = user_key(pos.key());
+            if uk > hi {
+                return Ok(false);
+            }
+            if uk >= lo {
+                return Ok(true);
+            }
+            b.step(&mut pos);
+        }
+        // (Past the block's end: the next block's first entry, the next key after `lo`.)
+        Ok(i + 1 < self.block_count() && {
+            let b = self.block_with(i + 1, false)?;
+            b.at(0, &mut pos);
+            pos.index() < b.len() && user_key(pos.key()) <= hi
+        })
+    }
+
     /// Index of the first block whose last key is >= `key`.
     pub fn find_block(&self, key: &[u8]) -> usize {
         self.index.find(key)
