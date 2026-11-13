@@ -951,24 +951,26 @@ Ranked; the top item not marked *waiting* is what's being worked on. A product r
 2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
 earlier security, product and integration reviews).
 
-1. **gRPC from the internet**: the edge's HTTPS listener offering `h2` (hyper's auto
-   builder), so Cloudflare's gRPC reaches h2c apps (done: `run.h2c` to the app, trailers
-   through the proxy); then TCP services.
-2. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
+1. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
    bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
    (Render's and Vercel's static sites). Exporting the files needs the built image: easy on
    Docker, through CodeBuild on the fleet, so it's tested with the first AWS run.
-3. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
+2. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
    by `roll up --all` with the plan shown first (Render's Blueprints), then importing a Compose
    file's image services (Railway's).
-4. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
+3. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-5. **Region**: the region shown on the overview and each environment, defaulting to the project's
+4. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-6. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
+6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+   listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
+   with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
+   and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
+   Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
 7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
