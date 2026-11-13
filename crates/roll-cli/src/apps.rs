@@ -242,9 +242,10 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
-    /// Roll back to an earlier deployment (no build: its image runs again).
+    /// Roll back to an earlier deployment (no build: its image runs again); with no id, the one
+    /// that was live before the current one (`heroku rollback`).
     Rollback {
-        deployment: String,
+        deployment: Option<String>,
         #[command(flatten)]
         target: Target,
     },
@@ -1105,6 +1106,24 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
         }
         AppsCmd::Rollback { deployment, target } => {
             let svc = service(api, &target).await?;
+            let deployment = match deployment {
+                Some(d) => d,
+                None => {
+                    let env = api.get(&env_path(&svc, &target.env)).await?;
+                    let all = api.get(&format!("{}/deploys", env_path(&svc, &target.env))).await?;
+                    let live = s(&env["active"]["id"]);
+                    let prev = all
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|d| d["status"] == "inactive" && s(&d["id"]) != live && !d["image"].is_null())
+                        .ok_or_else(|| anyhow::anyhow!("nothing was live in {} before {live}", target.env))?;
+                    if !json_out {
+                        eprintln!("rolling back to {} ({})", s(&prev["id"]), s(&prev["message"]));
+                    }
+                    s(&prev["id"])
+                }
+            };
             let dep = api.post(&format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(&deployment)), json!({})).await?;
             if !json_out {
                 return watch(api, &svc, &target.env, &dep).await;

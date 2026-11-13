@@ -233,6 +233,8 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const deploy = () => runner.run("deploy", () => appsApi.deploy(service.id, envName));
   const redeploy = () => runner.run("redeploy", () => appsApi.redeploy(service.id, envName));
   const upload = service.source.kind === "upload";
+  // What a crash's "Roll back" goes to: the newest deployment that was live before this one.
+  const previous = data.deploys?.find((d) => d.status === "inactive" && d.id !== env?.active?.id && d.image) ?? null;
   const busy = runner.busy !== null;
 
   return (
@@ -350,6 +352,17 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <button type="button" className={btn} onClick={() => go({ tab: "logs" })}>
             See the logs
           </button>
+          {previous && (
+            <button
+              type="button"
+              className={btn}
+              disabled={busy}
+              title={`Run ${previous.id} again (its image: no build)`}
+              onClick={() => runner.run("rollback", () => appsApi.rollback(service.id, envName, previous.id))}
+            >
+              <RotateCw className="size-3.5" /> Roll back to {previous.revision ? previous.revision.slice(0, 7) : previous.id.slice(-6)}
+            </button>
+          )}
         </div>
       )}
 

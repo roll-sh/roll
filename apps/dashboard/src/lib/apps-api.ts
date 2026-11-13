@@ -292,7 +292,7 @@ export interface NotifyTarget {
   secret?: string;
 }
 
-export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency";
+export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "cron.failed" | "job.failed";
 
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
 export interface LogDrain {

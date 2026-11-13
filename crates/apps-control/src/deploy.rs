@@ -1178,7 +1178,7 @@ impl Apps {
             return Ok(run);
         }
         let live = self.load_live(service, env).await?;
-        let (this, id) = (self.clone(), run.id.clone());
+        let (this, id, sid, e, dep) = (self.clone(), run.id.clone(), service.to_string(), env.to_string(), active.clone());
         tokio::spawn(async move {
             let (status, code) = match live.run_once(timeout).await {
                 Ok((_, _, true)) => (RunStatus::TimedOut, None),
@@ -1189,7 +1189,13 @@ impl Apps {
                     (RunStatus::Failed, None)
                 }
             };
+            let failed = matches!(status, RunStatus::Failed | RunStatus::TimedOut);
+            let data = serde_json::json!({ "run": id, "status": status.as_str(), "exit_code": code });
             let _ = this.db(move |s| s.finish_run(&id, status, code)).await;
+            // A failed or timed-out run is an incident's start: an event (notified by default).
+            if failed {
+                let _ = this.db(move |s| s.add_event("cron.failed", &sid, &e, Some(&dep), &data)).await;
+            }
         });
         Ok(run)
     }

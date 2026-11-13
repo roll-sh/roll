@@ -862,6 +862,15 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!((last["status"].as_str(), last["exit_code"].as_i64()), (Some("succeeded"), Some(0)), "{last}");
+    assert!(!call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1.to_string().contains("cron.failed"));
+    // A run that fails is an event (notified by default), with its exit code.
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_EXIT": "3"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    settled(&w, &cid, "production", d["id"].as_str().unwrap()).await;
+    call(&w.api, "POST", &format!("{base}/runs"), None).await;
+    let ev = get_until(&w.api, "/v1/apps/events?after=0", |v| v.to_string().contains("cron.failed")).await;
+    let failed = ev["events"].as_array().unwrap().iter().find(|e| e["kind"] == "cron.failed").unwrap();
+    assert_eq!((failed["data"]["exit_code"].as_i64(), failed["data"]["status"].as_str()), (Some(3), Some("failed")), "{failed}");
     let _ = Ordering::SeqCst;
 }
 
@@ -1031,7 +1040,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "cron.failed"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

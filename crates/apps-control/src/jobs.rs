@@ -63,6 +63,7 @@ impl Apps {
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(job.id.clone(), cancel.clone());
         let (this, id, cmd) = (self.clone(), job.id.clone(), command.to_string());
+        let (sid, e, dep) = (service.to_string(), env.to_string(), tpl.deployment.clone());
         tokio::spawn(async move {
             let ran = live.run_to_exit(Some(&cmd), Duration::from_secs(timeout), Some(log.clone()), cancel, |_| {}).await;
             let (status, code) = match ran {
@@ -80,6 +81,11 @@ impl Apps {
             this.running_jobs.lock().remove(&id);
             let id2 = id.clone();
             let _ = this.db(move |s| s.finish_job(&id2, status, code)).await;
+            // A job that failed (not one canceled) is an event: `job.failed`, off by default.
+            if matches!(status, RunStatus::Failed | RunStatus::TimedOut) {
+                let data = serde_json::json!({ "job": id, "status": status.as_str(), "exit_code": code });
+                let _ = this.db(move |s| s.add_event("job.failed", &sid, &e, Some(&dep), &data)).await;
+            }
             this.logs.flush().await;
             this.logs.retire(&format!("job:{id}"));
         });
