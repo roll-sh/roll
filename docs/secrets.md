@@ -403,7 +403,15 @@ imports and base), `exposed` (a protected value also in an unprotected environme
 `expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
-decrypted. Only what the caller may read is listed, and `weak` only where it may reveal. In the
+decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
+
+**Keys no code reads.** With `?code=1` (`roll secrets health --code`, the view's "Check the code"),
+health also lists `unreferenced` keys: ones no repository on the project's canvas mentions on its
+default branch, looked up in roll code's search index (rolld's `CodeRefs`; roll secrets reads no
+files). A mention anywhere counts, as a case-sensitive substring, so a key that might be read is
+never flagged. It's a search per key and repository (up to 500 keys), so only on request, and any
+repository that can't be searched here (the index not ready, roll code off) makes the check say
+nothing at all rather than guess. In the
 dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
 made in the browser) and an expired or expiring key's new date, each one change, or a change
 request where the environment is protected. The Health tab and the sidebar's Secrets entry carry
@@ -1231,7 +1239,7 @@ isn't in the workspace is 404.
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
-| `GET /health` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
+| `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
@@ -1291,7 +1299,7 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread"; environment: string; path: string; key: string; detail: string };
+type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
@@ -1409,9 +1417,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Keys no code reads** (roll code's index): for repositories on the project's canvas, a key whose
-   name appears nowhere on the default branch is flagged `unreferenced` in health, from the
-   trigram index, never by reading files here.
 
 Waiting on other pull requests:
 

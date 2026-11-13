@@ -319,6 +319,8 @@ pub struct Secrets {
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
     logins: oidc::Window,
+    /// roll code's search, once rolld has it (health's `code` check).
+    code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -380,7 +382,7 @@ impl Secrets {
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
     }
 
     pub fn links(&self) -> &Links {

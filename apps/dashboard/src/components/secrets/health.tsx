@@ -1,4 +1,4 @@
-import { CircleCheck, Dices } from "lucide-react";
+import { CircleCheck, Dices, FileSearch } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
 import { needsApproval, type Finding, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
@@ -14,12 +14,14 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
   { issue: "expiring", title: "Expiring", what: "Values that stop working outside roll within two weeks.", serious: false },
   { issue: "stale", title: "Stale", what: "Unchanged for longer than their environment allows.", serious: false },
   { issue: "unread", title: "Unread", what: "Nobody revealed, exported, resolved or synced them in 90 days: still needed?", serious: false },
+  { issue: "unreferenced", title: "Not in the code", what: "No repository on this project's canvas mentions them (roll code's search): still needed?", serious: false },
 ];
 
 /** Everything insights flag, in every environment at once, worst first (docs/secrets.md, "Health"). */
 export function HealthView() {
   const { api, project, standard, reloadEnvs } = useSecrets();
-  const found = useLoad(() => api.health(), [api]);
+  const [code, setCode] = useState(false);
+  const found = useLoad(() => api.health(code), [api, code]);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fix = async (f: Finding, body: SetSecret, what: string) => {
@@ -38,6 +40,11 @@ export function HealthView() {
   if (!found.data) return null;
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-4 py-5">
+      <div className="flex items-center justify-end">
+        <button className={ghost} onClick={() => setCode(true)} disabled={code} title="Search the repositories on this project's canvas for each key (roll code's index)">
+          <FileSearch className="size-3.5" /> {code ? (found.loading ? "Checking the code…" : "Code checked") : "Check the code"}
+        </button>
+      </div>
       <ErrorNote error={error} onDismiss={() => setError(null)} />
       {note && (
         <p className="fade-in flex items-center gap-2 text-[12px] text-muted" role="status">

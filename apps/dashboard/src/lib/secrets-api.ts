@@ -192,7 +192,8 @@ export function secretsApi(project: string) {
     deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),
     /** Which candidates (tokens of some text) are this project's values the caller may reveal; never the values. */
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
-    health: () => req<Finding[]>("GET", `${P}/health`),
+    /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
+    health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
     rotators: () => req<Rotator[]>("GET", `${P}/rotators`),
     /** The answer holds its signing secret, once. */
     addRotator: (r: { name: string; url: string }) => req<Rotator & { secret: string }>("POST", `${P}/rotators`, r),

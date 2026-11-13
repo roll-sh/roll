@@ -813,8 +813,9 @@ async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.all_health(&c)).await?))
 }
 
-async fn project_health(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
-    Ok(ok(blocking(s, move |s| s.project_health(&project, &c)).await?))
+async fn project_health(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Q) -> crate::Result<Response> {
+    let code = flag(&q, "code", false);
+    Ok(ok(blocking(s, move |s| s.project_health(&project, &c, code)).await?))
 }
 
 async fn rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

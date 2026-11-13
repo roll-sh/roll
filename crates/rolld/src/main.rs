@@ -448,6 +448,9 @@ async fn run() -> anyhow::Result<()> {
     let products_api = secrets::Api::default();
     let secrets = secrets::open(&args, &home, ws.clone(), !auth.enforcing(), products_api.clone())?;
     code_secrets.set(secrets.clone(), ws.clone());
+    if let Some(c) = &code {
+        secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
+    }
     router = router.merge(roll_workspace::router(ws)).merge(roll_secrets::router(secrets));
     products_api.set(router.clone());
     // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of

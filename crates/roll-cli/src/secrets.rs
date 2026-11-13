@@ -184,8 +184,11 @@ pub enum Secrets {
     /// expiring, stale, unread. Fails when there's an expired, missing or exposed one.
     Health {
         /// Every project you can read, not only this one.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "code")]
         all: bool,
+        /// Also the keys no repository on the project's canvas mentions (roll code's search).
+        #[arg(long)]
+        code: bool,
     },
     /// The keys a template (`.env.example`) names that the environment doesn't have, without
     /// reading a value; fails when one is missing (`--strict`: also when it has keys the template
@@ -740,7 +743,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         return open_share(api, link).await;
     }
     // Health across projects spans them too.
-    if let Secrets::Health { all: true } = &cmd {
+    if let Secrets::Health { all: true, .. } = &cmd {
         let v = api.get("/v1/secrets/findings").await?;
         if json_out {
             println!("{}", serde_json::to_string_pretty(&v)?);
@@ -921,8 +924,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
             }
         }
-        Secrets::Health { all: false } => {
-            let v = c.call(Method::GET, &format!("{}/health", c.base()), None).await?;
+        Secrets::Health { all: false, code } => {
+            let v = c.call(Method::GET, &format!("{}/health{}", c.base(), if code { "?code=1" } else { "" }), None).await?;
             if json_out {
                 return print(&v);
             }
@@ -1131,7 +1134,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Health { all: true } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
