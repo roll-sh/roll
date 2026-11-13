@@ -184,6 +184,8 @@ pub struct LiveConfig {
     pub wake_timeout: Duration,
     /// How long a worker must keep running after a start to count as up.
     pub worker_grace: Duration,
+    /// A crashed worker's first restart wait, doubling with each crash in a row to 60 times it.
+    pub restart_backoff: Duration,
     /// How long old instances may finish their requests after a switch.
     pub drain: Duration,
     /// How long more instances than needed may stay up before one is stopped.
@@ -203,6 +205,7 @@ impl Default for LiveConfig {
         LiveConfig {
             wake_timeout: Duration::from_secs(60),
             worker_grace: Duration::from_secs(2),
+            restart_backoff: Duration::from_secs(1),
             drain: Duration::from_secs(30),
             scale_down_after: Duration::from_secs(60),
             probe_every: Duration::from_millis(10),
@@ -1325,9 +1328,9 @@ impl EnvLive {
             if up >= target {
                 break;
             }
-            // Back off: 1 s doubling to 60 s since it last ran.
+            // Back off: `restart_backoff` (1 s) doubling to 60 times it since it last ran.
             let crashes = i.crashes.load(Ordering::SeqCst).min(6);
-            let wait = Duration::from_secs((1u64 << crashes).min(60));
+            let wait = (self.cfg.restart_backoff * (1u32 << crashes)).min(self.cfg.restart_backoff * 60);
             if i.last_used.lock().elapsed() < wait {
                 continue;
             }

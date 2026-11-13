@@ -1108,8 +1108,14 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   - Once people manage secrets on their own projects, a canvas stops proving ownership: a
     person-owned project counts only for services that person owns (apps' `SecretSource`, and
     already scaling on a stream).
-- **roll-search** touches nothing of apps; its conflicts with apps are additions side by side
-  (`Product`/`Kind` arrays grow).
+- **roll-search** (4a973673d, waiting on #22's hold): its conflicts with apps are additions side
+  by side (`Product`/`Kind` arrays grow). A link to a search cluster gets its own API key
+  through apps' `Resources::link`/`unlink` (#26): whichever of #22 and #26 reaches main second
+  adds `LinkKind::Search` (`ALL`, `as_str`, `parse`) and, in rolld's `RollResources`, `link` as
+  `search_control::Control::mint_link(ref, service)` into `Minted { vars, kept }` and `unlink`
+  as `revoke_link(ref, kept)`. The key is data-only (no security privileges), its variables
+  `ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY`; an OpenSearch cluster refuses for now (a 400,
+  never the cluster's password) until its dialect has a security API.
 - **Conflicts with apps**: previews merges cleanly. With main (and #24), six files from apps
   merging feature/accounts rather than main's squash of #18 (`AGENTS.md`, `rolld/src/{auth,
   cluster,main}.rs`, `tests/auth.rs`, `docs/workspace.md`): take apps' side, keeping one early
@@ -1133,11 +1139,7 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Tests for what people rely on**: a crash loop's event and notification, a worker restarting
-   with backoff, cron firing on schedule and skipping while the last run goes, concurrent requests
-   waking one instance, a wake timeout's 503 with `Retry-After`, a web service scaling in; and
-   the tag and wake tests reading what a user sees, not internals.
-2. **Private networking that wakes**: `<svc>.<env>.internal` reaching a service that's asleep, as
+1. **Private networking that wakes**: `<svc>.<env>.internal` reaching a service that's asleep, as
    Railway's private network and Fly's Flycast do. The network sandbox already holds the
    aliases while the app sleeps, so the shape is a waker in the sandbox: roll-fetch's `wake`
    mode listening on the app's port while it's down, asking the owner to wake it on the first
@@ -1146,38 +1148,38 @@ Vercel, Cloud Run and Heroku, and integration with the other branches' heads) se
    and (b) a handoff that never makes a starting app lose its bind: rolld signals the waker to
    let go before any start (a public request, a cron run), measured so the cold start keeps its
    gain.
-3. **Links between services**: a `service` link kind giving `<NAME>_URL` (private) and
+2. **Links between services**: a `service` link kind giving `<NAME>_URL` (private) and
    `<NAME>_PUBLIC_URL`, as Render's `fromService`.
-4. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
+3. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
    DNS-01 on a delegated `_acme-challenge` (Railway's and Render's).
-5. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
-    page (Render's `maxShutdownDelaySeconds` and `maintenanceMode`).
-6. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+4. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
+   page (Render's `maxShutdownDelaySeconds` and `maintenanceMode`).
+5. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-7. **Region**: the region shown on the overview and each environment, defaulting to the project's
+6. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
-    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
-    user's first AWS run.*
-9. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+7. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+   Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
+   user's first AWS run.*
+8. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-10. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+9. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-12. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-13. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+11. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-14. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
-   restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
-   Firecracker microVM hosts on the fleet.
-15. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-16. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).
+13. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+    restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
+    Firecracker microVM hosts on the fleet.
+14. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+15. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).

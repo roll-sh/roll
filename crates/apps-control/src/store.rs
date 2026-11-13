@@ -402,6 +402,8 @@ pub struct Switch<'a> {
     pub ready_ms: Option<i64>,
     pub epoch: Option<i64>,
     pub vars_hash: Option<&'a str>,
+    /// [`Store::seal_snapshot`] of the variables it went live with.
+    pub snapshot: Option<&'a str>,
 }
 
 /// Custom domains a service may claim, and a project: one tenant never floods the shared
@@ -716,7 +718,7 @@ impl Store {
     /// `epoch` (the service's lease epoch on the node switching), it's fenced too: a node whose
     /// lease is older than one that has already switched this service can't switch it.
     pub fn switch_active(&self, w: &Switch<'_>) -> Result<bool> {
-        let Switch { service, env, from, to, ready_ms, epoch, vars_hash } = *w;
+        let Switch { service, env, from, to, ready_ms, epoch, vars_hash, snapshot } = *w;
         let now = self.now()?;
         self.db.write(|c| {
             if let Some(ep) = epoch {
@@ -746,6 +748,10 @@ impl Store {
             // (it would read as "needs a deploy").
             if let Some(h) = vars_hash {
                 c.execute("UPDATE deployments SET vars_hash = ? WHERE id = ?", params![h, to])?;
+            }
+            // Its variables too: a change made the moment after can't land in its snapshot.
+            if let Some(sealed) = snapshot {
+                c.execute("INSERT INTO deploy_vars (deployment, sealed) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET sealed = excluded.sealed", params![to, sealed])?;
             }
             let revision: Option<String> = c.query_row("SELECT revision FROM deployments WHERE id = ?", [to], |r| r.get(0)).optional()?.flatten();
             insert_event(c, now, "deploy.active", service, env, Some(to), &serde_json::json!({ "revision": revision, "replaced": from }))?;
@@ -1122,13 +1128,10 @@ impl Store {
         format!("{service}/{env}/{name}")
     }
 
-    /// What `env`'s own variables were when `deployment` went live, sealed under it (what a
-    /// rollback to it restores).
-    pub fn snapshot_variables(&self, service: &str, env: &str, deployment: &str) -> Result<()> {
-        let vars = self.variables(service, env)?;
-        let sealed = self.sealer.seal(&format!("snapshot:{deployment}"), &serde_json::to_string(&vars).expect("JSON"));
-        self.db.execute("INSERT INTO deploy_vars (deployment, sealed) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET sealed = excluded.sealed", params![deployment, sealed])?;
-        Ok(())
+    /// `env`'s own variables as `deployment` went live with them, sealed under it (what a
+    /// rollback to it restores; stored by [`Store::switch_active`]).
+    pub fn seal_snapshot(&self, deployment: &str, vars: &BTreeMap<String, String>) -> String {
+        self.sealer.seal(&format!("snapshot:{deployment}"), &serde_json::to_string(vars).expect("JSON"))
     }
 
     pub fn snapshot(&self, deployment: &str) -> Result<Option<BTreeMap<String, String>>> {
@@ -1766,7 +1769,7 @@ mod tests {
         let db = Db::open_sqlite(&dir.path().join("apps.db"), Default::default()).unwrap();
         let s = Store::new(db, Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
         s.db.execute("INSERT INTO environments (service, name, branch, ephemeral, active, slug, port, created_at) VALUES ('svc_a', 'production', NULL, 0, NULL, 'a', NULL, 0)", params![]).unwrap();
-        let sw = |from, to, epoch| Switch { service: "svc_a", env: "production", from, to, ready_ms: None, epoch: Some(epoch), vars_hash: None };
+        let sw = |from, to, epoch| Switch { service: "svc_a", env: "production", from, to, ready_ms: None, epoch: Some(epoch), vars_hash: None, snapshot: None };
         // The new owner (epoch 2) switches; the old one (epoch 1), finishing its rollout late,
         // can't, even from the state it saw.
         assert!(s.switch_active(&sw(None, "dep_new", 2)).unwrap());

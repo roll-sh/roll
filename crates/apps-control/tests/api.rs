@@ -616,19 +616,29 @@ async fn a_link_puts_its_variables_in_the_instances() {
 }
 
 /// Requests that pile up past an instance's concurrency start more instances, up to
-/// `max_instances`.
+/// `max_instances`; once they've gone, the extra instances go one at a time, the newest
+/// request's instance last.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn requests_past_an_instances_concurrency_scale_it_out() {
-    let w = world().await;
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "busy", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "concurrency": 1, "max_instances": 3}, "variables": {"FAKE_SLOW_MS": "1500"} }))).await;
+async fn requests_past_an_instances_concurrency_scale_it_out_and_back_in() {
+    let w = world_with(|c| c.live.scale_down_after = Duration::ZERO).await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "busy", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "concurrency": 1, "max_instances": 3}, "variables": {"FAKE_SLOW_MS": "400"} }))).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
     let host = host(&svc["environments"][0]["url"]);
     let all = futures::future::join_all((0..6).map(|_| visit(&w, &host, "/"))).await;
     assert!(all.iter().all(|(st, _)| *st == StatusCode::OK), "{all:?}");
-    let up = w.fake.instances(&id).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
-    assert!((2..=3).contains(&up), "scaled out to {up} (max 3)");
+    let running = |w: &World| w.fake.instances(&id).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+    // Counted as made: the reaper may already be taking them in.
+    let made = w.fake.instances(&id).len();
+    assert!((2..=3).contains(&made), "scaled out to {made} (max 3)");
+    // The crowd gone: one goes per pass (each pass first notes it's over, then stops one).
+    let live = w.apps.live(&id, "production");
+    for _ in 0..(2 * made) {
+        live.tick().await;
+    }
+    assert_eq!(running(&w), 1, "back to one, still awake for the next request");
+    assert_eq!(visit(&w, &host, "/").await.0, StatusCode::OK);
 }
 
 /// A push while a build runs queues; a newer one supersedes the queued one, and only the newest
@@ -1441,7 +1451,8 @@ async fn a_deploy_hook_deploys_with_its_url_alone() {
     assert_eq!(st, StatusCode::CREATED, "{h}");
     let path = h["path"].as_str().unwrap().to_string();
     assert_eq!(call(&w.api, "GET", &base, None).await.1["hook"], true);
-    let wrong = format!("{}x", &path[..path.len() - 1]);
+    // One character off (never the same one: `x` is in the alphabet too).
+    let wrong = format!("{}{}", &path[..path.len() - 1], if path.ends_with('x') { 'y' } else { 'x' });
     assert_eq!(call(&hooks, "POST", &wrong, None).await.0, StatusCode::NOT_FOUND, "a wrong token is a 404 like any other");
     let (st, d) = call(&hooks, "POST", &format!("{path}?image=nginx:1.28"), None).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
@@ -1690,3 +1701,119 @@ async fn rolling_back_again_goes_further_back() {
     settled(&w, &id, "production", r2["id"].as_str().unwrap()).await;
     assert_eq!(back(&w).await.0, StatusCode::CONFLICT, "nothing before d1");
 }
+
+/// A worker that keeps crashing is restarted each time (backing off), and three crashes in ten
+/// minutes are a crash loop: on the environment with why, and one event, sent to the project's
+/// targets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crashing_worker_restarts_and_its_crash_loop_is_one_event() {
+    let w = world_with(|c| c.live.restart_backoff = Duration::from_millis(5)).await;
+    let got: Arc<Mutex<Vec<Value>>> = Default::default();
+    let g = got.clone();
+    let hook = axum::Router::new().route("/hook", axum::routing::post(move |b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push(serde_json::from_slice(&b).unwrap());
+            StatusCode::OK
+        }
+    }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, hook).into_future());
+    call(&w.api, "POST", &format!("/v1/apps/projects/{}/notifications", w.project), Some(json!({"url": format!("http://{at}/hook")}))).await;
+    let (svc, d) = image_service(&w, "billing", json!({"type": "worker", "min_instances": 1})).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let live = w.apps.live(&id, "production");
+    let running = |w: &World| w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).map(|(n, _, _)| n).collect::<Vec<_>>();
+    for n in 0..3 {
+        let up = running(&w);
+        assert_eq!(up.len(), 1, "one running worker: {:?}", w.fake.instances(&id));
+        let name = up[0].clone();
+        w.fake.crash(&name);
+        let mut back = false;
+        for _ in 0..200 {
+            live.tick().await;
+            if running(&w).len() == 1 {
+                back = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(back, "crash {n}: restarted");
+    }
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    assert_eq!(env["crash_loop"]["crashes"], 3, "{env}");
+    assert!(env["crash_loop"]["last_error"].as_str().unwrap().contains("137"), "{env}");
+    let mut sent = Vec::new();
+    for _ in 0..100 {
+        sent = got.lock().iter().filter(|b| b["type"] == "crash_loop").cloned().collect();
+        if !sent.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["service"].as_str(), Some(id.as_str()));
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert_eq!(events["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "crash_loop").count(), 1, "once, however long it lasts: {events}");
+}
+
+/// A crowd at a sleeping service wakes one instance; those waiting on a start slower than the
+/// wake timeout get a 503 page that says when to try again, and the retry gets the app.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crowd_wakes_one_instance_and_a_slow_start_says_when_to_retry() {
+    let w = world_with(|c| c.live.wake_timeout = Duration::from_millis(300)).await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "slow", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"FAKE_BOOT_MS": "900"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let h = host(&svc["environments"][0]["url"]);
+    let get = || async {
+        let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
+        let resp = w.public.clone().oneshot(req).await.unwrap();
+        (resp.status(), resp.headers().get("retry-after").map(|v| v.to_str().unwrap().to_string()))
+    };
+    let created = Fake::count(&w.fake.counts.creates);
+    let crowd = futures::future::join_all((0..8).map(|_| get())).await;
+    // The one that woke it waits for its start; those behind it give up at the timeout.
+    let waited = crowd.iter().filter(|(st, retry)| *st == StatusCode::SERVICE_UNAVAILABLE && retry.is_some()).count();
+    assert!(waited >= 7 && crowd.iter().all(|(st, _)| *st == StatusCode::OK || *st == StatusCode::SERVICE_UNAVAILABLE), "{crowd:?}");
+    let mut ok = None;
+    for _ in 0..50 {
+        let (st, _) = get().await;
+        if st == StatusCode::OK {
+            ok = Some(st);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(ok, Some(StatusCode::OK), "a retry gets the app once it has started");
+    assert!(Fake::count(&w.fake.counts.creates) - created <= 1, "one instance woke for all of them");
+    assert_eq!(w.fake.instances(&id).iter().filter(|(_, _, st)| *st == FakeState::Running).count(), 1);
+}
+
+/// A cron service runs when its schedule comes round, and a run still going when the next is
+/// due makes that one skipped, not a second copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cron_fires_on_its_schedule_and_skips_while_the_last_run_goes() {
+    let w = world().await;
+    // No exit: each run keeps going.
+    let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "every-minute", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "* * * * *"} }))).await;
+    let cid = cron["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &cid, "production", cron["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    let runs = format!("/v1/apps/services/{cid}/environments/production/runs");
+    // Minutes from now on: the reaper's own passes, at the real time, find nothing due.
+    let t = code_sql::now_ms() + 3_600_000;
+    w.apps.cron_pass(t).await;
+    assert_eq!(call(&w.api, "GET", &runs, None).await.1, json!([]), "the first pass only starts the clock");
+    w.apps.cron_pass(t + 61_000).await;
+    let first = get_until(&w.api, &runs, |r| r[0]["status"] == "running").await;
+    assert_eq!(first.as_array().unwrap().len(), 1, "{first}");
+    w.apps.cron_pass(t + 122_000).await;
+    let both = get_until(&w.api, &runs, |r| r.as_array().is_some_and(|a| a.len() == 2)).await;
+    assert_eq!((both[0]["status"].as_str(), both[1]["status"].as_str()), (Some("skipped"), Some("running")), "{both}");
+    w.apps.cron_pass(t + 122_500).await;
+    assert_eq!(call(&w.api, "GET", &runs, None).await.1.as_array().unwrap().len(), 2, "once per due time");
+}
+

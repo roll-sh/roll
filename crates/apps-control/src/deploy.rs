@@ -527,6 +527,10 @@ impl Apps {
             self.pre_deploy(&tpl, &cmd, log, &cancel).await?;
         }
         self.step(&d.service, &d.id, "rollout").await;
+        // The environment's own variables as this deployment reads them: what a rollback to it
+        // restores, kept with its switch to live.
+        let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
+        let snapshot = self.db(move |s| Ok(s.seal_snapshot(&did, &s.variables(&sid, &e)?))).await?;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             fingerprint(&r.vars_for_hash(), &svc)
@@ -586,7 +590,7 @@ impl Apps {
             // visitor gets the old one (a failed switch takes the canary out again).
             None => live.set_share(100),
         }
-        let (sid, e, from, to, vh) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone());
+        let (sid, e, from, to, vh, snap) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone(), snapshot.clone());
         let switched: anyhow::Result<()> = async {
             // Epochs only grow on a backend that outlives the process; the in-memory one starts
             // again at 1, and a fence kept in the store would then refuse every later switch.
@@ -598,7 +602,7 @@ impl Apps {
             };
             let ready = (!made.is_empty()).then_some(took.as_millis() as i64);
             let ok = self
-                .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh) }))
+                .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
             Ok(())
@@ -622,11 +626,6 @@ impl Apps {
                 live.promote_canary().await;
                 log.stream(Stream::System).line("the new deployment takes every request");
             }
-        }
-        // Live: its variables as they are now are what a rollback to it restores.
-        let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
-        if let Err(err) = self.db(move |s| s.snapshot_variables(&sid, &e, &did)).await {
-            warn!(deployment = %d.id, error = %err, "apps: a deployment's variables weren't kept for its rollback");
         }
         Ok(())
     }
@@ -1174,7 +1173,7 @@ impl Apps {
             }
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
-                self.cron_tick().await;
+                self.cron_pass(code_sql::now_ms()).await;
             }
             if n.is_multiple_of(60) {
                 self.sweep_uploads().await;
@@ -1445,11 +1444,10 @@ impl Apps {
         failed.map_or(Ok(()), Err)
     }
 
-    /// Cron: start the runs that are due in owned cron services (a run still going when the
-    /// next is due is skipped).
-    async fn cron_tick(self: &Arc<Self>) {
+    /// Cron: start the runs that are due at `now` in owned cron services (a run still going
+    /// when the next is due is skipped). The reaper's pass, every few seconds.
+    pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
-        let now = code_sql::now_ms();
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s).ok()) else { continue };
             let sid = svc.id.clone();
