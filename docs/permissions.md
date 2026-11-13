@@ -374,7 +374,8 @@ agent loop; it isn't billing.
 - Allowed answers carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds).
   Over the limit the answer is `429` `{code: "rate_limited", retry_after, limit}` with
   `Retry-After`, before anything is looked up or written: no audit row, no `last_used_at`, so a
-  flood stays cheap. Over MCP it's an error result with the same body and `http_status: 429`.
+  flood stays cheap. Over MCP the `/v1/mcp` request itself answers that `429` (the MCP SDKs raise it
+  with its body, so the agent sees when to retry).
 
 ## Storage
 
