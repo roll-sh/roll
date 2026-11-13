@@ -393,6 +393,13 @@ start_roll() {
   for _ in $(seq 1 "$jobs"); do
     local started=
     for _ in $(seq 1 20); do
+      # A port something already answers on belongs to another process: until ours fails to
+      # bind, the readiness check below would take that server for ours (and run tests that
+      # wipe its cluster).
+      if curl -fs -m 2 "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+        port=$((port + 1))
+        continue
+      fi
       local log=$OUT/runs/search-dev-$port.log
       "$bin" --listen "127.0.0.1:$port" --dialect "$dialect" --yaml-test-cluster "${ROLL_EXTRA_ARGS[@]}" >"$log" 2>&1 &
       local pid=$!
