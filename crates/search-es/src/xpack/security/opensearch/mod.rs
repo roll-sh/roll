@@ -231,18 +231,27 @@ fn wildcard(pattern: &str, s: &str) -> bool {
     if pattern.len() > 1 && pattern.starts_with('/') && pattern.ends_with('/') {
         return regex::Regex::new(&format!("^(?:{})$", &pattern[1..pattern.len() - 1])).is_ok_and(|r| r.is_match(s));
     }
-    fn go(p: &[u8], s: &[u8]) -> bool {
-        match p.first() {
-            None => s.is_empty(),
-            Some(b'*') => (0..=s.len()).any(|i| go(&p[1..], &s[i..])),
-            Some(b'?') => !s.is_empty() && go(&p[1..], &s[1..]),
-            Some(c) => s.first() == Some(c) && go(&p[1..], &s[1..]),
+    // Greedy, backtracking only to the last `*`: O(pattern × name) whatever the pattern (a
+    // recursive match is exponential in its stars, and mappings and names are tenants').
+    let (p, s) = (pattern.as_bytes(), s.as_bytes());
+    let (mut pi, mut si, mut star, mut mark) = (0, 0, None, 0);
+    while si < s.len() {
+        if p.get(pi) == Some(&b'*') {
+            star = Some(pi);
+            pi += 1;
+            mark = si;
+        } else if p.get(pi).is_some_and(|&c| c == b'?' || c == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if let Some(st) = star {
+            pi = st + 1;
+            mark += 1;
+            si = mark;
+        } else {
+            return false;
         }
     }
-    if pattern.matches('*').count() > 8 {
-        return false;
-    }
-    go(pattern.as_bytes(), s.as_bytes())
+    p[pi..].iter().all(|&c| c == b'*')
 }
 
 /// A user's roles (`ConfigModel.mapSecurityRoles`): its own `opendistro_security_roles`, and every
@@ -446,6 +455,37 @@ mod tests {
     fn wildcards() {
         assert!(wildcard("esm-*", "esm-u1") && wildcard("b?", "b1") && !wildcard("b?", "b12"));
         assert!(wildcard("/b[0-9]+/", "b12") && !wildcard("/b[0-9]+/", "c1"));
+        assert!(wildcard("*", "") && wildcard("a*b?c*", "axxbycz") && !wildcard("a*b?c*", "axxbc") && wildcard("**a", "ba"));
+        // Linear in the stars: a mapping can't stall a request (or the node) on a long name.
+        let started = std::time::Instant::now();
+        assert!(!wildcard("*a*a*a*a*a*a*a*b", &"a".repeat(64)));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100), "{:?}", started.elapsed());
+    }
+
+    /// The configuration API opens only to roles that name its permission: a role with every
+    /// cluster permission (`*`) doesn't administer security, as on OpenSearch.
+    #[tokio::test]
+    async fn the_rest_api_needs_explicit_permissions() {
+        use base64::Engine;
+        let mut cfg = crate::cluster::ClusterConfig::new("os");
+        cfg.dialect = crate::cluster::Dialect::OpenSearch;
+        let c = Cluster::open(cfg, std::sync::Arc::new(crate::cluster::MemoryStore::new())).await.unwrap();
+        let call = |method: &str, uri: &str, body: &str, auth: Option<&str>| {
+            let mut req = if body.is_empty() { crate::rest::EsRequest::new(method, uri) } else { crate::rest::EsRequest::json(method, uri, body.to_string()) };
+            if let Some(a) = auth {
+                req.headers.push(("Authorization".into(), format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(a))));
+            }
+            crate::rest::handle(&c, req)
+        };
+        let api = "/_plugins/_security/api";
+        let role = r#"{"cluster_permissions":["*"],"index_permissions":[{"index_patterns":["*"],"allowed_actions":["*"]}]}"#;
+        assert_eq!(call("PUT", &format!("{api}/roles/ops"), role, None).await.status, 201);
+        assert_eq!(call("PUT", &format!("{api}/internalusers/opsuser"), r#"{"password":"correcthorsebattery","opendistro_security_roles":["ops"]}"#, None).await.status, 201);
+        let ops = Some("opsuser:correcthorsebattery");
+        assert_eq!(call("GET", "/_cluster/health", "", ops).await.status, 200, "the role grants cluster actions");
+        assert_eq!(call("GET", &format!("{api}/internalusers"), "", ops).await.status, 403);
+        let admin = r#"{"password":"correcthorsebattery","opendistro_security_roles":["ops"],"backend_roles":["admin"]}"#;
+        assert_eq!(call("PUT", &format!("{api}/internalusers/opsuser"), admin, ops).await.status, 403, "made itself an admin");
     }
 
     #[test]
