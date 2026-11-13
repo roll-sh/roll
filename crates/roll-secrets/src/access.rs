@@ -70,6 +70,13 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     fn untrusted(&self) -> bool {
         false
     }
+    /// Whether the caller may read repository `repo`'s (`owner/name`, on `project`'s canvas) code:
+    /// health's `code` check says something about a repository's contents. roll-access answers from
+    /// the caller's Grant (`code`, the repo in that project, `read`); here only the operator may.
+    fn reads_code(&self, project: &str, repo: &str) -> bool {
+        let _ = (project, repo);
+        false
+    }
 }
 
 /// The operator: everything.
@@ -78,6 +85,9 @@ pub struct Everything;
 
 impl Grants for Everything {
     fn allows(&self, _: Action, _: &Scope<'_>) -> bool {
+        true
+    }
+    fn reads_code(&self, _: &str, _: &str) -> bool {
         true
     }
 }
@@ -106,6 +116,9 @@ impl Grants for Narrowed {
     }
     fn untrusted(&self) -> bool {
         true
+    }
+    fn reads_code(&self, project: &str, repo: &str) -> bool {
+        self.0.reads_code(project, repo)
     }
 }
 

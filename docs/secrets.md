@@ -411,17 +411,23 @@ default branch, looked up in roll code's search index (rolld's `CodeRefs`; roll 
 files). A mention anywhere counts, as a case-sensitive substring, so a key that might be read is
 never flagged. It's a search per key and repository (up to 500 keys), so only on request, and any
 repository that can't be searched here (the index not ready, roll code off) makes the check say
-nothing at all rather than guess. In the
+nothing at all rather than guess. Whether a name appears in a repository says something about its contents,
+so the check is only for a caller who may read every repository on the canvas (`Grants::reads_code`:
+with roll-access, the caller's Grant for `code` read on that repository; until then, the operator):
+anyone else gets a 403 naming the repository. In the
 dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
 made in the browser) and an expired or expiring key's new date, each one change, or a change
 request where the environment is protected. The Health tab and the sidebar's Secrets entry carry
 the count of findings to fix now (expired, missing, exposed), and Home lists them across every
 project (`GET /v1/secrets/findings`, `roll secrets health --all`).
 
-Health, `POST …/leaks` and `GET /v1/secrets/search` filter each finding by the caller's own access,
-so roll-access lets a token limited to some environments or folders call them (they're marked
-`filters_itself` in its catalogue): its answer just leaves the rest out. Keep that filter in each:
-without it, the mark would let such a token see the whole project.
+Health, `POST …/leaks`, `GET /v1/secrets/search` and `GET /v1/secrets/findings` filter each
+finding by the caller's own access. With the roll-access swap (ready on `wip/secrets-on-mcp`, where
+roll secrets asks the caller's Grant), roll-access lets a token limited to some environments or
+folders call them (health and leaks are `filters_itself` in its catalogue, search and findings take
+any grant): its answer just leaves the rest out. Until then roll-access treats them as reads of the
+whole project, since the stopgap here sees a request it let through as the operator's. Keep the
+filter in each: without it, the mark would let such a token see the whole project.
 
 ### Compare and promote
 
