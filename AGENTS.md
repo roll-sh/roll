@@ -182,10 +182,11 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Review app tokens (`rla_…`) are always scoped to their repos, even on an open daemon.
     Webhooks only go to public addresses unless the config allows private ones
     (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only).
-  - Any URL a tenant chooses is fetched through a client with `review::apps::PublicOnly` and no
-    redirects, plus a literal-host check, because IP literals skip the resolver. That covers
-    webhooks, review apps and owners' own provider `base_url`
-    (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow). Bound what you read from it.
+  - Any URL a tenant chooses is fetched through a client with `roll_net::PublicOnly` (one crate,
+    `crates/roll-net`; code-control and the model gateway re-export it) and no redirects, plus
+    `roll_net::literal_private_host`, because IP literals skip the resolver. That covers webhooks,
+    review apps, owners' own provider `base_url` (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow),
+    gateway upstreams and MCP clients' metadata documents. Bound what you read from it.
   - Owner-management routes check `Code::manages`/`check_manage`, not `owns`/`check_write`:
     agent tokens (`agent:<name>`) work code but never manage the owner, and review only as their
     own agent.
@@ -272,6 +273,27 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - the cluster (several nodes in one process: routing, takeover, joining, draining):
       `code-control/tests/cluster.rs`
     - two nodes racing on one control database: `code-control/tests/concurrency.rs`
+- **Access and MCP (scoped tokens, docs/permissions.md, docs/mcp.md):**
+  - `roll_auth::scope` is the model (rules of product × resources × actions, `allow` or `ask`);
+    `crates/roll-access` is the store, the catalogue and the one evaluator, which rolld's gate hands
+    every request bearing a scoped (`rlt_`) or OAuth (`rlo_`) token. Products never check scopes
+    themselves: they see `roll_auth::Operator` plus a `roll_auth::Grant` (ask `Grant::allows` for a
+    second resource inside one request). Don't build a second permission system.
+  - Every route rolld serves needs a row in `roll-access/src/catalog.rs` (one action on one
+    product, how to find its resource, which answer fields are credentials) or a reason to stay the
+    operator's; `rolld/tests/auth.rs` fails otherwise. A new product adds its name to
+    `scope::PRODUCTS`, its rows, and a resolver in `rolld/src/access.rs` when its ids aren't in the
+    path (or take names).
+  - Grant secrets carry a checksum (`roll_access::checksum_ok`); a leaked one is revoked, never
+    just reported (`Access::revoke_leaked`: roll code's landings, GitHub's secret scanning).
+  - Grants are looked up on every request; never cache them.
+  - After touching access or MCP, run `pnpm test:code` (it runs roll-auth, roll-access, roll-mcp
+    and roll-net with roll code's suites; `--docker` runs them on Postgres too) and
+    `cargo test -p rolld --test auth` (every route classified). Read-only must be enforced by the
+    product (Postgres runs `read_only` SQL as a role that can only read), not by parsing.
+  - roll's MCP server is `crates/roll-mcp` (`/v1/mcp`): a tool is one route (`tools.rs`), called
+    through the gated router, its hints from the catalogue; list it in docs/mcp.md (a test checks).
+    Never call a service directly from a tool.
 - **Projects (the dashboard's workspace):** `crates/roll-workspace` stores projects and where each
   product resource sits on its canvas (docs/workspace.md); the resources themselves stay in their
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it
@@ -299,6 +321,13 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     (`pnpm test:apps --docker` prints them; the numbers live in docs/apps/README.md, "Measured").
   - After touching anything apps-related, run `pnpm test:apps` (`--docker` for real Docker). New
     tests go in `apps-control/tests/api.rs` (in process, fake runtime) or `tests/docker.rs`.
+- **Accounts (sign-in to roll.sh):** `crates/roll-accounts` (docs/accounts.md: invites, email
+  codes, GitHub, Google, TOTP), mounted by `crates/rolld/src/accounts.rs`. Sessions are hashed
+  cookies that rolld's gate (`roll_auth::check`) resolves on every request, never cached, with
+  `X-Roll-CSRF` on writes; it puts `roll_auth::SignedIn` on the request (an admin's also carries
+  `Operator`). A product that serves users reads `SignedIn`; everything else stays operator-only
+  (403 for users). Never log or echo a code, token or seed. Tests: `roll-accounts/tests/flows.rs`
+  (fake providers, file outbox) and `rolld/tests/auth.rs`.
 - **Agents (roll code agents: the agent harness on a canvas):**
   - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
     for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and

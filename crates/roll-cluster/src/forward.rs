@@ -1,7 +1,7 @@
 //! Forwarding requests to a key's owner, and accepting forwarded requests.
 
 use crate::cluster::{Cluster, Guard, Node, Route};
-use crate::sign::{self, CLIENT_HEADER, HEADERS, HOP_HEADER, UNAVAILABLE_HEADER, VerifyError};
+use crate::sign::{self, CLIENT_HEADER, Carried, DECIDED_HEADER, HEADERS, HOP_HEADER, UNAVAILABLE_HEADER, VerifyError};
 use crate::{Error, Result};
 use axum::body::{Body, HttpBody};
 use axum::extract::{ConnectInfo, OriginalUri, Request, State};
@@ -28,6 +28,31 @@ pub struct Forwarded {
     pub hops: u8,
     /// The original client's address, as the first node saw it.
     pub client: Option<String>,
+    /// The grant whose access decision the first node made ([`Decided`]).
+    pub decided: Option<String>,
+}
+
+/// Set by the node that decided a request's access (roll-access's evaluator, for a grant): a
+/// forward carries it signed, as [`Forwarded::decided`], so the owner doesn't ask a person again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decided(pub String);
+
+/// What a forward carries past this node: the client's address and the access decision.
+#[derive(Clone, Debug, Default)]
+struct Carry {
+    client: Option<String>,
+    decided: Option<String>,
+}
+
+impl Carry {
+    fn of(ext: &axum::http::Extensions) -> Carry {
+        let decided = ext.get::<Decided>().map(|d| d.0.clone()).or_else(|| ext.get::<Forwarded>().and_then(|f| f.decided.clone()));
+        Carry { client: client_from(ext), decided }
+    }
+
+    fn signed(&self) -> Carried<'_> {
+        Carried { client: self.client.as_deref(), decided: self.decided.as_deref() }
+    }
 }
 
 /// The client address to pass on when forwarding, if the application knows better than the TCP
@@ -129,12 +154,12 @@ impl Cluster {
         if hops >= MAX_HOPS {
             return loop_detected();
         }
-        let client = client_addr(&req);
+        let carry = Carry::of(req.extensions());
         let (parts, body) = req.into_parts();
         let pq = path_and_query(&parts.uri, &parts.extensions);
         if is_upgrade(&parts.headers) {
             for attempt in 0..2 {
-                match self.send_upgrade(to, &parts, &pq, hops, client.as_deref()).await {
+                match self.send_upgrade(to, &parts, &pq, hops, &carry).await {
                     Ok(r) => return r,
                     Err(Failed::Connect(e)) if attempt == 0 => tracing::debug!(to = %to.id, error = %e, "forward failed to connect; retrying"),
                     Err(Failed::Connect(e)) => return node_unreachable(to, &e),
@@ -150,7 +175,7 @@ impl Cluster {
                 Ok(b) => b,
                 Err(r) => return *r,
             };
-            let wait = match self.send(to, &parts, &pq, rb, replayable, hops, client.as_deref()).await {
+            let wait = match self.send(to, &parts, &pq, rb, replayable, hops, &carry).await {
                 Ok(r) => return r,
                 Err(Failed::Connect(e)) if attempt == 0 && replayable => {
                     tracing::debug!(to = %to.id, error = %e, "forward failed to connect; retrying");
@@ -176,7 +201,7 @@ impl Cluster {
         Fut: Future<Output = Response>,
     {
         let hops = hops(&req);
-        let client = client_addr(&req);
+        let carry = Carry::of(req.extensions());
         let (parts, body) = req.into_parts();
         let pq = path_and_query(&parts.uri, &parts.extensions);
         let mut body = Body2::Fresh(body);
@@ -214,7 +239,7 @@ impl Cluster {
                     let p = parts.as_ref().expect("parts are taken only on return");
                     if is_upgrade(&p.headers) {
                         // An upgrade (a WebSocket) carries no body: nothing to buffer or spend.
-                        match self.send_upgrade(&node, p, &pq, hops, client.as_deref()).await {
+                        match self.send_upgrade(&node, p, &pq, hops, &carry).await {
                             Ok(r) => return r,
                             Err(Failed::Connect(e)) => {
                                 self.forget(key);
@@ -239,7 +264,7 @@ impl Cluster {
                         Err(r) => return *r,
                     };
                     let p = parts.as_ref().expect("parts are taken only on return");
-                    match self.send(&node, p, &pq, rb, replayable, hops, client.as_deref()).await {
+                    match self.send(&node, p, &pq, rb, replayable, hops, &carry).await {
                         Ok(r) => return r,
                         Err(Failed::Connect(e)) => {
                             self.forget(key);
@@ -306,7 +331,7 @@ impl Cluster {
         body: reqwest::Body,
         buffered: bool,
         hops: u8,
-        client: Option<&str>,
+        carry: &Carry,
     ) -> std::result::Result<Response, Failed> {
         let url = match reqwest::Url::parse(&format!("{}{}", to.url.trim_end_matches('/'), pq)) {
             Ok(u) => u,
@@ -325,7 +350,7 @@ impl Cluster {
             headers.insert(header::HOST, a);
         }
         let me = &self.inner.cfg;
-        headers.extend(sign::sign(&me.secret, &me.node_id, &parts.method, &sent_pq, Some(hops + 1), client));
+        headers.extend(sign::sign(&me.secret, &me.node_id, &parts.method, &sent_pq, Some(hops + 1), carry.signed()));
         let req = self.inner.http.request(parts.method.clone(), url).headers(headers).body(body);
         match req.send().await {
             Ok(resp) => {
@@ -366,7 +391,7 @@ impl Cluster {
     /// its own; if it switches protocols, the client gets the 101 and, once both sides have
     /// upgraded, bytes are copied both ways until either side closes. Any other answer comes back
     /// as it is.
-    async fn send_upgrade(&self, to: &Node, parts: &Parts, pq: &str, hops: u8, client: Option<&str>) -> std::result::Result<Response, Failed> {
+    async fn send_upgrade(&self, to: &Node, parts: &Parts, pq: &str, hops: u8, carry: &Carry) -> std::result::Result<Response, Failed> {
         let url = match reqwest::Url::parse(&format!("{}{}", to.url.trim_end_matches('/'), pq)) {
             Ok(u) => u,
             Err(e) => return Ok(plain(StatusCode::BAD_GATEWAY, format!("bad node url {}: {e}\n", to.url))),
@@ -410,7 +435,7 @@ impl Cluster {
             headers.insert(header::HOST, a);
         }
         let me = &self.inner.cfg;
-        headers.extend(sign::sign(&me.secret, &me.node_id, &parts.method, &sent_pq, Some(hops + 1), client));
+        headers.extend(sign::sign(&me.secret, &me.node_id, &parts.method, &sent_pq, Some(hops + 1), carry.signed()));
         let mut req = axum::http::Request::builder().method(parts.method.clone()).uri(sent_pq.as_str());
         if let Some(h) = req.headers_mut() {
             *h = headers;
@@ -560,7 +585,7 @@ fn verify_request(cluster: &Cluster, req: &Request) -> std::result::Result<Forwa
     let node = cluster.verify(req.headers(), req.method(), &pq)?;
     let get = |h: &str| req.headers().get(h).and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty());
     let hops = get(HOP_HEADER).map_or(Ok(0), |h| h.parse::<u8>()).map_err(|_| VerifyError::Malformed(HOP_HEADER))?;
-    Ok(Forwarded { node, hops, client: get(CLIENT_HEADER).map(str::to_string) })
+    Ok(Forwarded { node, hops, client: get(CLIENT_HEADER).map(str::to_string), decided: get(DECIDED_HEADER).map(str::to_string) })
 }
 
 /// Middleware for the API router (`axum::middleware::from_fn_with_state(cluster,

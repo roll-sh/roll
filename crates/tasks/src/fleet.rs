@@ -560,9 +560,10 @@ impl TasksNode {
             Ok(r) => r,
             Err(r) => return *r,
         };
-        // The gate's mark doesn't travel with a forwarded request: check the token here.
-        if let Some(op) = &self.cfg.operator
-            && roll_auth::bearer(req.headers()).is_some_and(|b| op.matches(b))
+        // The gate's mark doesn't travel with a forwarded request: check the token here. A scoped
+        // token's request was decided by the gate of the node that forwarded it (signed).
+        if let Some(b) = roll_auth::bearer(req.headers())
+            && (self.cfg.operator.as_ref().is_some_and(|op| op.matches(b)) || roll_auth::is_grant_token(b))
         {
             req.extensions_mut().insert(roll_auth::Operator);
         }

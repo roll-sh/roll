@@ -153,7 +153,7 @@ async fn world_with(setup: impl FnOnce(&mut AppsConfig)) -> World {
 async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool) -> World {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
-    let project = ws.create("acme", "", None).unwrap().id;
+    let project = ws.create("", "acme", "", None).unwrap().id;
     let db = code_sql::Db::open_sqlite(&dir.path().join("apps.db"), code_sql::SqliteOptions { readers: 2, cache_kib: 1024 }).unwrap();
     let store = Store::new(db, Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).unwrap();
     let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
@@ -250,7 +250,7 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     assert_eq!(env["state"], "stopped", "health-checked at deploy, then back to zero: {env}");
     // On the project's canvas without anyone placing it.
     let ws = w.apps.deps.workspace.as_ref().unwrap();
-    assert!(ws.get(&w.project).unwrap().resources.iter().any(|r| r.r#ref == id));
+    assert!(ws.get(roll_workspace::Scope::All, &w.project).unwrap().resources.iter().any(|r| r.r#ref == id));
     // The first request wakes it; the instance sees roll's headers.
     let (st, body) = visit(&w, &host(&env["url"]), "/hello").await;
     assert_eq!(st, StatusCode::OK, "{body}");

@@ -1,0 +1,12 @@
+[package]
+name = "roll-net"
+description = "The one private-address guard for fetching URLs others chose (PublicOnly, literal_private_host)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+tokio.workspace = true
+url.workspace = true
