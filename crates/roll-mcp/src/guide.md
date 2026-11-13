@@ -24,8 +24,9 @@ can use at all; a tool being listed doesn't mean every resource is allowed.
 
 Some actions ask a person first. The call waits up to a minute, then returns
 `status: "approval_pending"` with an approval id and a link. Tell the user, then call the same tool
-again with the same arguments plus `"approval": "apr_…"`: it waits for the decision and runs once
-approved. `access_wait_approval` waits on an approval without running anything.
+again with the same arguments (adding `"approval": "apr_…"` is fine): it waits for the decision and
+runs once approved. Asking again never makes a second approval for the same call.
+`access_wait_approval` waits on an approval without running anything.
 
 ## When a call fails
 

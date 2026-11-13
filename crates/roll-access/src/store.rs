@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS approvals (
     expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS approvals_state ON approvals (state, created_at);
+CREATE INDEX IF NOT EXISTS approvals_request ON approvals (grant_id, request_hash);
 CREATE TABLE IF NOT EXISTS audit (
     id TEXT PRIMARY KEY,
     at INTEGER NOT NULL,
@@ -803,6 +804,20 @@ impl Store {
             a.state = "expired".into();
         }
         Ok(a)
+    }
+
+    /// The approval a grant already has for exactly this request, still pending or approved and
+    /// unused: sending the request again waits on it or runs with it, as `X-Roll-Approval` would.
+    pub fn open_approval(&self, grant: &str, request_hash: &str) -> Result<Option<Approval>> {
+        let now = code_sql::now_ms();
+        Ok(self.db.read(|c| {
+            c.query_row(
+                &format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE grant_id = ? AND request_hash = ? AND state IN ('pending', 'approved') AND expires_at > ? ORDER BY created_at DESC LIMIT 1"),
+                params![grant, request_hash, now],
+                approval_row,
+            )
+            .optional()
+        })?)
     }
 
     /// The newest approvals, in a state and of some grants when given (`Some(&[])`: none).

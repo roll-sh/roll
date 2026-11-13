@@ -138,7 +138,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   compressed, needs `write`, `delete` and `deploy`. Fetches are `read`. git sends the token as a Basic password (any user
   name), which the gate takes like a bearer token; roll code's git server then takes the gate's
   word (`code_git::Vouched`) and records the push as `token:<name>`. An `ask` push is bound to its
-  ref updates; resend it with `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
+  ref updates; push again once it's approved (the same push finds its approval), or wait on it with
+  `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
@@ -339,7 +340,8 @@ type Approval = {
 - The request waits up to 55 seconds for a decision. Approved, it runs exactly as sent and its answer
   is the request's answer. Denied, it gets `403 {"code": "denied"}`.
 - Still pending after the wait, it gets `403 {"code": "approval_pending", "approval": "apr_…",
-  "url": …}`. Sending the same request again with `X-Roll-Approval: apr_…` waits again, or runs it
+  "url": …}`. Sending the same request again (with `X-Roll-Approval: apr_…`, or without: the gate
+  finds the grant's open approval for exactly that request) waits again, or runs it
   once approved. An approval runs one request: the one whose method, path and body hash it holds.
   It can't be reused.
 - The person decides on the dashboard (a notification in the header, and the list under
