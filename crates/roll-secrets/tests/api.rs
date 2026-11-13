@@ -858,3 +858,54 @@ async fn a_folder_shared_by_another_project_reads_as_its_own_until_the_share_end
     let audit = api.ok(Method::GET, &theirs("/audit"), None).await;
     assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "exports.set"));
 }
+
+/// docs/secrets.md's HTTP table is the contract (and roll-access's catalogue is checked against
+/// it): every route the router serves is in it.
+#[tokio::test]
+async fn every_route_is_in_the_http_contract() {
+    let api = Api::new().await;
+    let text = format!("{:?}", roll_secrets::router(api.secrets.clone()));
+    let mut routes = vec![];
+    let mut rest = text.split("fallback_router:").next().unwrap_or_default();
+    while let Some(i) = rest.find("RouteId(") {
+        rest = &rest[i + "RouteId(".len()..];
+        let Some(after) = rest.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix("): \"") else { continue };
+        let Some(end) = after.find('"') else { break };
+        if after.starts_with("/v1/secrets") {
+            routes.push(after[..end].to_string());
+        }
+    }
+    // `{anything}` → `{}`; the project prefix and a query dropped, as the table writes them.
+    let norm = |p: &str| -> String {
+        let p = p.split('?').next().unwrap_or(p).trim_end_matches('/');
+        let p = p.strip_prefix("/v1/secrets/projects/{project}").map(|r| if r.is_empty() { "/".to_string() } else { r.to_string() }).unwrap_or_else(|| p.to_string());
+        let mut out = String::new();
+        let mut depth = 0;
+        for c in p.chars() {
+            match c {
+                '{' => {
+                    depth += 1;
+                    out.push_str("{}");
+                }
+                '}' => depth -= 1,
+                c if depth == 0 => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    };
+    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/secrets.md")).unwrap();
+    let documented: std::collections::HashSet<String> = doc
+        .lines()
+        .filter(|l| l.starts_with("| `"))
+        .filter_map(|l| l[3..].split('`').next())
+        // A method alone (`GET`) is the project itself.
+        .filter_map(|cell| match cell.split_once(' ') {
+            Some((_, path)) => Some(norm(path)),
+            None => ["GET", "PATCH", "PUT", "POST", "DELETE"].contains(&cell).then(|| "/".to_string()),
+        })
+        .collect();
+    let missing: Vec<String> = routes.iter().map(|r| norm(r)).filter(|r| !documented.contains(r)).collect();
+    assert!(routes.len() > 40, "the routes were read ({})", routes.len());
+    assert!(missing.is_empty(), "routes missing from docs/secrets.md's HTTP table: {missing:?}");
+}
