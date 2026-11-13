@@ -401,6 +401,22 @@ fn speed_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, S
     Some(if over.is_empty() { ("success", format!("{took}: within its budget")) } else { ("failure", format!("{took}: over its budget ({})", over.join(", "))) })
 }
 
+/// The comment's line on the visual review: waiting (with the way to it) or who accepted it.
+fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -> Option<String> {
+    let branch = branch_name(&v.branch);
+    let by: String = v.by.as_deref().unwrap_or("someone").chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(40).collect();
+    let link = dashboard.filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])).map(|u| format!(" [Review it in roll]({u})")).unwrap_or_default();
+    match v.state.as_str() {
+        "changed" => Some(format!(
+            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}.{link}\n\n",
+            v.percent.max(0.1),
+            if v.required { ", and it can't land until someone accepts them" } else { "" }
+        )),
+        "accepted" => Some(format!("Visual review: accepted by {by}.\n\n")),
+        _ => None,
+    }
+}
+
 /// The `roll/visual` status for a visual review: its state and description.
 fn visual_status(v: &crate::model::PreviewVisualReview) -> (&'static str, String) {
     let branch = branch_name(&v.branch);
@@ -612,6 +628,9 @@ fn preview_comment(c: &Change) -> String {
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
             ));
+            if let Some(line) = e.visual_review.as_ref().and_then(|v| review_line(v, e.dashboard_url.as_deref())) {
+                out.push_str(&line);
+            }
             if let Some(block) = page_checks(e) {
                 out.push_str(&block);
             }
@@ -728,6 +747,12 @@ mod preview_tests {
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
         assert_eq!(visual_status(&review("accepted", Some("ada"))), ("success", "Accepted by ada: differs from main by 8.0%".into()));
         assert_eq!(visual_status(&review("unchanged", None)).0, "success");
+        assert_eq!(
+            review_line(&review("changed", None), Some("https://roll.sh/dashboard/projects/prj_x/previews?preview=pv_1")).as_deref(),
+            Some("**Visual review:** its pages differ from `main` by 8.0%. [Review it in roll](https://roll.sh/dashboard/projects/prj_x/previews?preview=pv_1)\n\n")
+        );
+        assert_eq!(review_line(&review("accepted", Some("ada")), None).as_deref(), Some("Visual review: accepted by ada.\n\n"));
+        assert_eq!(review_line(&review("unchanged", None), None), None);
         // A speed budget: within it, then over it (load and size).
         let mut timed = p.environment.clone().unwrap();
         (timed.page_speed, timed.speed_budget) = (Some(sp(1200, None)), Some(crate::model::PreviewSpeedBudget { load_ms: 2000, bytes: 0 }));
