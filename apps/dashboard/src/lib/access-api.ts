@@ -161,6 +161,19 @@ function query(q: object): string {
   return s ? `?${s}` : "";
 }
 
+/** Where the audit log streams to (a SIEM): signed batches of new rows, in order. */
+export interface AuditSink {
+  id: string;
+  url: string;
+  status: "new" | "ok" | "error";
+  error: string | null;
+  /** When the last row it was sent happened. */
+  cursor_at: number;
+  delivered_at: number | null;
+  created_at: number;
+  created_by: string;
+}
+
 /** Where approvals are posted, and the chat user ids (Slack `U…`) the operator lets decide there. */
 export interface ChatTarget {
   install: string;
@@ -197,6 +210,10 @@ export const accessApi = {
     return res.blob();
   },
   /** The operator's rules for every token: at most `max_days`, and whether every token expires. */
+  sinks: () => call<AuditSink[]>("GET", "/v1/access/audit/sinks"),
+  addSink: (url: string, from_start = false) => call<{ sink: AuditSink; secret: string }>("POST", "/v1/access/audit/sinks", { url, from_start }),
+  retrySink: (id: string) => call<null>("POST", `/v1/access/audit/sinks/${encodeURIComponent(id)}/retry`),
+  removeSink: (id: string) => call<null>("DELETE", `/v1/access/audit/sinks/${encodeURIComponent(id)}`),
   policy: () => call<Policy>("GET", "/v1/access/policy"),
   setPolicy: (p: Policy) => call<Policy>("PUT", "/v1/access/policy", p),
   /** Where approvals are posted (Slack through roll code's chat ops), or `{chat: null}`. */

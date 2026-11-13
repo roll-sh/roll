@@ -457,6 +457,8 @@ async fn run() -> anyhow::Result<()> {
         workspace,
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
+    access::sinks(&access);
     // Approvals can be posted to a Slack channel through roll code's chat ops.
     if let Some(c) = &code {
         access::chat(&access, &c.code);

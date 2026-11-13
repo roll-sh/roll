@@ -277,16 +277,17 @@ Ranked; the top item is in progress. A watchdog reads this list.
    - search's `resolve_id` (async: through the runtime handle);
    - apps' services to their projects;
    - secrets' `Grant` swap and `roll_auth::Grants` for its syncs.
+   - secrets' audit sinks and access's (same wire contract already): one delivery module.
 2. **Users' own tokens (with accounts, #18):** a signed-in user who isn't an admin makes tokens for
    what they can reach (their roll code owner, agents and workspace projects), and their grants
    act as them, not as the operator. Built on `integrate/mcp-accounts` (both branches merged).
-3. **Audit sinks:** stream the audit log to a webhook (signed, through roll code's delivery queue)
-   for a SIEM, and keep a longer retention for that.
-4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+3. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-5. **Finer resources:** storage buckets in another account, apps' deploys by id.
+4. **Finer resources:** storage buckets in another account, apps' deploys by id.
 
-Done lately: per-token rate limits (docs/permissions.md, "Rate limits": GCRA per grant per node,
+Done lately: audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in
+signed batches, the same contract as roll secrets' sinks, checked live against a receiver that
+verifies signatures); per-token rate limits (docs/permissions.md, "Rate limits": GCRA per grant per node,
 `429` with `Retry-After` and `RateLimit-*`, an MCP message counted once, never above the maker's);
 the official TypeScript (`@modelcontextprotocol/sdk` 1.32.2, OAuth included) and
 Python (`mcp` 2.3.0) SDKs drive a live rolld end to end; the only thing they tripped on,

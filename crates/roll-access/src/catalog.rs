@@ -157,6 +157,9 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/oauth/authorize", "the consent screen is the operator's"),
     ("/v1/access/notify", "where approvals go is the operator's choice"),
     ("/v1/access/policy", "the rules for every token are the operator's"),
+    ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
+    ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
+    ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
 ];
 
 pub fn rows() -> &'static [Row] {

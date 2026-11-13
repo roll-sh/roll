@@ -550,3 +550,96 @@ async fn oauth_connects_an_mcp_client() {
     let (s, _) = d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
+
+/// A delivery: its headers and body.
+type Sent = (Vec<(String, String)>, Vec<u8>);
+
+/// Records what a sink would be sent; fails while `fail` is set.
+#[derive(Default)]
+struct FakeSink {
+    sent: std::sync::Mutex<Vec<Sent>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+impl roll_access::sinks::SinkTransport for FakeSink {
+    fn check(&self, url: &str) -> Result<(), String> {
+        if url.starts_with("https://") { Ok(()) } else { Err("a sink is an https URL".into()) }
+    }
+    fn seal(&self, id: &str, secret: &str) -> Result<String, String> {
+        Ok(format!("{id}|{secret}"))
+    }
+    fn open(&self, id: &str, sealed: &str) -> Result<String, String> {
+        sealed.strip_prefix(&format!("{id}|")).map(str::to_string).ok_or_else(|| "sealed for another sink".into())
+    }
+    fn post(&self, _url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let failing = self.fail.load(std::sync::atomic::Ordering::SeqCst);
+        if !failing {
+            self.sent.lock().unwrap().push((headers, body));
+        }
+        Box::pin(async move { if failing { Err("siem.example answered 503".to_string()) } else { Ok(()) } })
+    }
+}
+
+/// The audit log streams to a SIEM: only the operator adds a sink; rows arrive in order, signed
+/// with the secret shown once, each once; a failed batch is kept for later.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audit_log_streams_to_a_sink() {
+    let d = Daemon::new(50);
+    let fake = Arc::new(FakeSink::default());
+    let _ = d.access.sinks.set(fake.clone());
+    let (token, _) = d.token(json!([{ "product": "access", "resources": "*", "actions": { "admin": "allow", "read": "allow" } }]), json!({})).await;
+    let new = json!({ "url": "https://siem.example/roll", "from_start": true });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/audit/sinks", Some(new.clone())).await.0, StatusCode::FORBIDDEN, "a token never moves the log");
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/audit/sinks", Some(json!({ "url": "http://siem.example" }))).await.0, StatusCode::BAD_REQUEST);
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/audit/sinks", Some(new)).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    let (id, secret) = (made["sink"]["id"].as_str().unwrap().to_string(), made["secret"].as_str().unwrap().to_string());
+    assert!(!d.call(OPERATOR, Method::GET, "/v1/access/audit/sinks", None).await.1.to_string().contains(&secret), "the secret is shown once");
+
+    // Rows old enough to have settled (a row is written just after its request).
+    let old = code_sql::now_ms() - 60_000;
+    let row = |n: i64| roll_access::store::AuditEvent {
+        id: format!("aud_{n:03}"),
+        at: old + n,
+        grant_id: None,
+        grant_name: None,
+        source: "api".into(),
+        tool: None,
+        method: "GET".into(),
+        route: "/v1/projects".into(),
+        product: Some("postgres".into()),
+        action: Some("read".into()),
+        resource: None,
+        decision: "allow".into(),
+        approval: None,
+        status: 200,
+        args: None,
+        ip: None,
+        duration_ms: 1,
+    };
+    for n in 0..3 {
+        d.access.store.audit(&row(n));
+    }
+    fake.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 1));
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/audit/sinks", None).await;
+    assert_eq!((list[0]["status"].as_str(), list[0]["error"].as_str()), (Some("error"), Some("siem.example answered 503")));
+    // Kept for later: once the retry is due, the same rows go.
+    fake.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 0), "not before its retry");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/audit/sinks/{id}/retry"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (1, 0));
+    let (headers, body) = fake.sent.lock().unwrap()[0].clone();
+    let h = |n: &str| headers.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap();
+    assert_eq!(h("x-roll-sink"), id);
+    assert_eq!(h("x-roll-signature"), roll_access::sinks::signature(&secret, h("x-roll-timestamp").parse().unwrap(), &body));
+    let sent: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(ids(&sent["events"]), vec!["aud_000", "aud_001", "aud_002"]);
+    // Nothing twice; the next rows next time.
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 0));
+    d.access.store.audit(&row(3));
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (1, 0));
+    let sent: Value = serde_json::from_slice(&fake.sent.lock().unwrap()[1].1).unwrap();
+    assert_eq!(ids(&sent["events"]), vec!["aud_003"]);
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await.0, StatusCode::NO_CONTENT);
+}

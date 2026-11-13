@@ -30,6 +30,9 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/approvals/{id}/approve", post(approve))
         .route("/v1/access/approvals/{id}/deny", post(deny))
         .route("/v1/access/audit", get(audit))
+        .route("/v1/access/audit/sinks", get(sinks).post(create_sink))
+        .route("/v1/access/audit/sinks/{id}", axum::routing::delete(delete_sink))
+        .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
         .route("/v1/access/notify", get(notify).put(set_notify))
         .route("/v1/access/policy", get(policy).put(set_policy))
         .route("/v1/access/oauth/clients", get(clients))
@@ -385,6 +388,31 @@ async fn set_notify(State(a): S, ext: Extensions, Json(v): Json<Value>) -> crate
     let v2 = json!({ "chat": chat });
     blocking(a, move |a| a.store.set_setting("notify", &v2)).await?;
     Ok(Json(json!({ "chat": chat })))
+}
+
+/// Where the audit log streams to (docs/permissions.md, "Audit sinks").
+async fn sinks(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
+    operator_only(&a, &ext, "see where the audit log goes")?;
+    Ok(Json(json!(blocking(a, |a| a.list_sinks()).await?)))
+}
+
+async fn create_sink(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {
+    operator_only(&a, &ext, "send the audit log somewhere")?;
+    let n: crate::sinks::NewSink = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
+    let (sink, secret) = blocking(a, move |a| a.create_sink(n, "operator")).await?;
+    Ok((StatusCode::CREATED, Json(json!({ "sink": sink, "secret": secret }))).into_response())
+}
+
+async fn retry_sink(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<StatusCode> {
+    operator_only(&a, &ext, "retry an audit sink")?;
+    blocking(a, move |a| a.retry_sink(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_sink(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<StatusCode> {
+    operator_only(&a, &ext, "stop sending the audit log")?;
+    blocking(a, move |a| a.delete_sink(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The operator's rules for every grant: `{max_days, require_expiry}`.

@@ -306,6 +306,31 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
     })
 }
 
+pub(crate) const AUDIT_COLUMNS: &str = "id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms";
+
+pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
+    let a: Option<String> = r.get(14)?;
+    Ok(AuditEvent {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        grant_id: r.get(2)?,
+        grant_name: r.get(3)?,
+        source: r.get(4)?,
+        tool: r.get(5)?,
+        method: r.get(6)?,
+        route: r.get(7)?,
+        product: r.get(8)?,
+        action: r.get(9)?,
+        resource: r.get(10)?,
+        decision: r.get(11)?,
+        approval: r.get(12)?,
+        status: r.get::<_, i64>(13)? as u16,
+        args: a.and_then(|a| serde_json::from_str(&a).ok()),
+        ip: r.get(15)?,
+        duration_ms: r.get(16)?,
+    })
+}
+
 const APPROVAL_COLUMNS: &str = "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
@@ -370,6 +395,7 @@ fn check_rules(rules: &Scope) -> Result<()> {
 impl Store {
     pub fn new(db: Db) -> Result<Store> {
         db.ensure_schema(SCHEMA)?;
+        db.ensure_schema(crate::sinks::SCHEMA)?;
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
@@ -702,9 +728,7 @@ impl Store {
 
     pub fn audit_log(&self, q: &AuditQuery) -> Result<Vec<AuditEvent>> {
         let limit = q.limit.unwrap_or(100).clamp(1, 1000) as i64;
-        let mut sql = String::from(
-            "SELECT id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms FROM audit WHERE at < ?",
-        );
+        let mut sql = format!("SELECT {AUDIT_COLUMNS} FROM audit WHERE at < ?");
         let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Int(q.before.unwrap_or(i64::MAX))];
         for (col, v) in [("grant_id", &q.grant), ("product", &q.product), ("decision", &q.decision), ("source", &q.source)] {
             if let Some(v) = v.as_deref().filter(|v| !v.is_empty()) {
@@ -714,30 +738,7 @@ impl Store {
         }
         sql.push_str(" ORDER BY at DESC, id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
-        Ok(self.db.read(|c| {
-            c.query(&sql, args.as_slice(), |r| {
-                let a: Option<String> = r.get(14)?;
-                Ok(AuditEvent {
-                    id: r.get(0)?,
-                    at: r.get(1)?,
-                    grant_id: r.get(2)?,
-                    grant_name: r.get(3)?,
-                    source: r.get(4)?,
-                    tool: r.get(5)?,
-                    method: r.get(6)?,
-                    route: r.get(7)?,
-                    product: r.get(8)?,
-                    action: r.get(9)?,
-                    resource: r.get(10)?,
-                    decision: r.get(11)?,
-                    approval: r.get(12)?,
-                    status: r.get::<_, i64>(13)? as u16,
-                    args: a.and_then(|a| serde_json::from_str(&a).ok()),
-                    ip: r.get(15)?,
-                    duration_ms: r.get(16)?,
-                })
-            })
-        })?)
+        Ok(self.db.read(|c| c.query(&sql, args.as_slice(), audit_row))?)
     }
 
     /// Each grant's requests in the last day, by decision: `grant id → (allowed, denied, asked)`.

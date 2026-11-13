@@ -344,6 +344,27 @@ type AuditEvent = {
 - The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
 
+### Audit sinks
+
+The operator can stream the log to a SIEM (Datadog, Splunk, a Lambda): the audit page's "Stream to
+a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url, from_start?}`
+(`roll-access/src/sinks.rs`).
+
+- A sink is a public HTTPS URL (roll-net's guard, no redirects, 10 s, the answer read to 64 KiB).
+  It gets new rows in order, in batches of up to 200: `{sink, source: "access", events:
+  AuditEvent[]}`, signed as roll secrets' sinks and roll's webhooks are, so one receiver takes all
+  of them: `X-Roll-Sink: <id>`, `X-Roll-Timestamp: <unix seconds>`, `X-Roll-Signature:
+  sha256=<hex HMAC-SHA256 of "{timestamp}.{body}">`.
+- The signing secret (`whsec_…`) is shown once and kept sealed with `ROLL_SECRET_KEY`, bound to
+  its sink; without the key, streaming is off. `ROLL_ACCESS_SINK_ALLOW_PRIVATE` allows plain http
+  on a private address (local development only).
+- Each sink keeps a cursor (the last row's time and id). Every node sweeps every 10 seconds, sending batches until a
+  sink has no full one waiting (up to 5,000 rows a sink a sweep); a claim in the store keeps a
+  batch to one node, and only rows 30 seconds old go (a row is written
+  just after its request, so a cursor never passes one still being written). A failed batch is
+  sent again 5 minutes later, or at once with "Retry now" (`POST …/sinks/{id}/retry`). Rows the
+  log prunes before a sink catches up are gone. At most 10 sinks.
+
 ## Managing grants
 
 - The operator manages grants. A grant may too when it has `admin` on product `access`, and then
@@ -413,6 +434,10 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
+| `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
+| `POST /v1/access/audit/sinks/{id}/retry` | operator | a failed sink's batch at the next sweep → 204 |
+| `DELETE /v1/access/audit/sinks/{id}` | operator | stop streaming → 204 |
 | `GET /v1/access/policy` | operator | `{max_days, require_expiry}`: roll's rules for every grant |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
@@ -442,7 +467,7 @@ this list:
 | `/v1/code/agents/shares/{id}`, `/v1/code/names` | public pages |
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
-| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify` | the operator decides |
+| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
 
 Rows match a route by its shape, not its parameters' names (`…/secrets/{key}/value` finds the row
 written `…/secrets/{name}/value`), so renaming a parameter can never change an action. To check a

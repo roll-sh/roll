@@ -111,6 +111,21 @@ pub struct Edit {
 }
 
 #[derive(Subcommand)]
+pub enum SinkCmd {
+    /// Stream new audit rows to an https URL (signed batches; the secret is shown once).
+    Add {
+        url: String,
+        /// Send every row the log still has, not just new ones.
+        #[arg(long)]
+        from_start: bool,
+    },
+    /// Send a failed sink's batch now rather than after its wait.
+    Retry { id: String },
+    /// Stop streaming to a sink.
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
 pub enum Mcp {
     /// The config that connects an MCP client to roll's server (OAuth by default).
     Config {
@@ -146,6 +161,11 @@ pub enum Mcp {
         approver: Vec<String>,
         #[arg(long, conflicts_with_all = ["install", "channel"])]
         off: bool,
+    },
+    /// Where the audit log streams to (a SIEM): list them, or add, retry or remove one.
+    Sinks {
+        #[command(subcommand)]
+        what: Option<SinkCmd>,
     },
     /// Every request made with a token and every MCP tool call, newest first.
     Audit {
@@ -495,6 +515,30 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
         Mcp::Deny { id, reason } => {
             let a = api.post(&format!("/v1/access/approvals/{id}/deny"), json!({ "reason": reason })).await?;
             if json_out { println!("{}", serde_json::to_string_pretty(&a)?) } else { println!("denied: {}", s(&a["summary"])) }
+        }
+        Mcp::Sinks { what } => {
+            let out = match what {
+                Some(SinkCmd::Add { url, from_start }) => api.post("/v1/access/audit/sinks", json!({ "url": url, "from_start": from_start })).await?,
+                Some(SinkCmd::Retry { id }) => api.post(&format!("/v1/access/audit/sinks/{id}/retry"), json!({})).await?,
+                Some(SinkCmd::Rm { id }) => api.call(reqwest::Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await?,
+                None => api.get("/v1/access/audit/sinks").await?,
+            };
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if let Some(secret) = out["secret"].as_str() {
+                println!("streaming the audit log to {} as {}", s(&out["sink"]["url"]), s(&out["sink"]["id"]));
+                println!("signing secret (shown once): {secret}");
+            } else if let Some(list) = out.as_array() {
+                if list.is_empty() {
+                    println!("the audit log isn't streamed anywhere (roll mcp sinks add https://…)");
+                }
+                for k in list {
+                    let err = k["error"].as_str().map(|e| format!(" ({e})")).unwrap_or_default();
+                    println!("{}  {:<6} {}  sent {}{err}", s(&k["id"]), s(&k["status"]), s(&k["url"]), when(&k["delivered_at"]));
+                }
+            } else {
+                println!("done");
+            }
         }
         Mcp::Notify { install, channel, approver, off } => {
             let v = match (install, channel, off) {

@@ -15,6 +15,7 @@ pub mod catalog;
 pub mod evaluate;
 pub mod oauth;
 pub mod rate;
+pub mod sinks;
 pub mod redact;
 pub mod store;
 
@@ -209,6 +210,8 @@ pub struct Access {
     pub chat: std::sync::OnceLock<Arc<dyn ApprovalChat>>,
     /// Grants' request limits on this node.
     pub limiter: rate::Limiter,
+    /// Delivers audit sinks, when rolld can (it needs `ROLL_SECRET_KEY`).
+    pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
 }
 
 impl Access {
@@ -217,7 +220,7 @@ impl Access {
             code_sql::Target::Sqlite(path) => code_sql::Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
             code_sql::Target::Postgres { url, schema } => code_sql::Db::connect(url, schema, pg)?,
         };
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
