@@ -123,6 +123,8 @@ pub struct Grant {
     pub name: Arc<str>,
     pub kind: GrantKind,
     pub scope: Arc<scope::Scope>,
+    /// What `scope` doesn't allow asks a person instead of being refused.
+    pub ask_otherwise: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
