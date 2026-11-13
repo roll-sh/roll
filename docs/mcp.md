@@ -385,17 +385,21 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+1. **Resource templates for what an agent reads before it acts** (`resources/templates/list`):
+   `roll://projects/{project}` (a workspace project's canvas and what each resource is) and
+   `roll://tokens/{id}` (a token in words), read through the gate like `roll://access/me`, so a
+   client can attach context without a tool call; arguments completed like prompts' (in progress).
+2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
    (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
    project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
-2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+4. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Done lately: progress while a call waits (`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel); `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and you say so); prompts' arguments complete from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
