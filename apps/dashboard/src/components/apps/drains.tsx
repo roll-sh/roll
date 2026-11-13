@@ -2,7 +2,7 @@ import { Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { appsApi, type LogDrain } from "@/lib/apps-api";
 import { CopyButton, input, Panel, primary, useCopy } from "../ui";
-import { since, type Runner } from "./shared";
+import { since, SureButton, type Runner } from "./shared";
 
 /** A project's log drains: HTTPS endpoints its services' runtime output is POSTed to. */
 export function DrainsPanel({ project, projectName, runner }: { project: string; projectName: string; runner: Runner }) {
@@ -29,14 +29,15 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
               <li key={d.id} className="flex items-center gap-3 px-3 py-2">
                 <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{d.host}</span>
                 <span className="text-[11.5px] text-subtle">added {since(d.created_at, Date.now())}</span>
-                <button
+                <SureButton
                   className="p-1 text-subtle hover:text-fg"
-                  aria-label={`Remove the drain to ${d.host}`}
+                  label={`Remove the drain to ${d.host}`}
+                  sure="Sure? Remove"
                   disabled={runner.busy !== null}
-                  onClick={() => runner.run("drain", () => appsApi.removeDrain(project, d.id).then(load))}
+                  onSure={() => runner.run("drain", () => appsApi.removeDrain(project, d.id).then(load))}
                 >
                   <Trash2 className="size-3.5" />
-                </button>
+                </SureButton>
               </li>
             ))}
           </ul>

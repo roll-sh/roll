@@ -397,7 +397,7 @@ impl Runtime for Docker {
             .spawn()
             .context("running docker for a volume's backup")?;
         let out = child.stdout.take().context("no stdout")?;
-        Ok(Box::new(ChildReader { _child: child, out }))
+        Ok(Box::new(ChildReader { child: Some(child), out, exited: None }))
     }
 
     async fn write_volume(&self, name: &str, mut tar: super::VolumeStream) -> anyhow::Result<()> {
@@ -525,18 +525,41 @@ const CLI_ENV: [&str; 8] = ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOC
 
 /// The small image that reads or writes a volume for a backup or a restore.
 const VOLUME_IMAGE: &str = "busybox:1.37";
-/// A restore: empty the volume, then the backup's files (the tar on stdin).
-const RESTORE: &str = "find /data -mindepth 1 -delete && tar x -C /data";
+/// A restore: the backup (the tar on stdin) extracts into a staging directory on the volume, and
+/// only once it extracted whole do the old files go and the new ones move in; a cut-short or
+/// broken tar leaves the volume as it was (exit 3).
+const RESTORE: &str = r#"set -e; S=/data/.roll-restore; rm -rf "$S"; mkdir "$S"; if ! tar x -C "$S"; then rm -rf "$S"; exit 3; fi; find /data -mindepth 1 -maxdepth 1 ! -name .roll-restore -exec rm -rf {} +; find "$S" -mindepth 1 -maxdepth 1 -exec mv {} /data/ \;; rmdir "$S""#;
 
-/// A child's stdout, read while the child (killed when this drops) runs.
+type Exited = std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Send>>;
+
+/// A child's stdout, read while the child (killed when this drops) runs. Its end waits for the
+/// child: one that failed (a daemon error, an image it couldn't pull) is a read error, so a
+/// backup that stopped short is never stored as a good one.
 struct ChildReader {
-    _child: tokio::process::Child,
+    child: Option<tokio::process::Child>,
     out: tokio::process::ChildStdout,
+    exited: Option<Exited>,
 }
 
 impl tokio::io::AsyncRead for ChildReader {
     fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.out).poll_read(cx, buf)
+        use std::task::Poll;
+        if self.exited.is_none() {
+            let before = buf.filled().len();
+            match std::pin::Pin::new(&mut self.out).poll_read(cx, buf) {
+                Poll::Ready(Ok(())) if buf.filled().len() == before => {
+                    let mut child = self.child.take().expect("the child, until its end");
+                    self.exited = Some(Box::pin(async move { child.wait().await }));
+                }
+                other => return other,
+            }
+        }
+        match self.exited.as_mut().expect("set above").as_mut().poll(cx) {
+            Poll::Ready(Ok(s)) if s.success() => Poll::Ready(Ok(())),
+            Poll::Ready(Ok(s)) => Poll::Ready(Err(std::io::Error::other(format!("reading the volume failed ({s})")))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 

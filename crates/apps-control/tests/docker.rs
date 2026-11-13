@@ -271,3 +271,35 @@ async fn generated_node_python_and_go_images_build_and_answer() {
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
 }
+
+/// A volume's backup reads back as a tar that restores it; a cut-short backup restores nothing
+/// and leaves the volume as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_volume_restores_from_its_tar_and_a_broken_one_changes_nothing() {
+    use apps_control::runtime::Runtime;
+    use tokio::io::AsyncReadExt;
+    if std::env::var("ROLL_APPS_DOCKER").ok().as_deref() != Some("1") || !apps_control::runtime::docker::available().await {
+        eprintln!("skipped: set ROLL_APPS_DOCKER=1 with Docker running");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Docker::new(dir.path().join("scratch"));
+    let vol = format!("roll-apps-test-restore-{}", std::process::id());
+    let sh = |script: &str| {
+        let out = std::process::Command::new("docker").args(["run", "--rm", "-v", &format!("{vol}:/data"), "busybox:1.37", "sh", "-c", script]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    sh("mkdir -p /data/a && echo one > /data/a/f && echo dot > /data/.hidden");
+    let mut tar = Vec::new();
+    rt.read_volume(&vol).await.unwrap().read_to_end(&mut tar).await.unwrap();
+    sh("rm -rf /data/* /data/.hidden && echo later > /data/later");
+    // Cut short: refused, and the volume keeps what it had.
+    let err = rt.write_volume(&vol, Box::new(std::io::Cursor::new(tar[..700].to_vec()))).await;
+    assert!(err.is_err(), "a broken tar is refused");
+    assert_eq!(sh("ls -A /data"), "later\n");
+    // Whole: exactly the backup's files.
+    rt.write_volume(&vol, Box::new(std::io::Cursor::new(tar))).await.unwrap();
+    assert_eq!(sh("ls -A /data && cat /data/a/f"), ".hidden\na\none\n");
+    rt.remove_volume(&vol).await;
+}

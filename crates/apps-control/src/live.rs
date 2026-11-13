@@ -147,11 +147,25 @@ pub enum WakeError {
     Capped,
 }
 
+/// [`EnvLive::hold_asleep`]'s hold: let go when dropped, whatever happened.
+pub struct Held {
+    live: Arc<EnvLive>,
+    _lock: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.live.held.store(false, Ordering::SeqCst);
+    }
+}
+
 /// One deployment's answers during a canary step.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Served {
     pub requests: u64,
     pub errors: u64,
+    /// Its instances that crashed or failed their health check (no request sees those).
+    pub crashes: u64,
 }
 
 impl Served {
@@ -218,9 +232,10 @@ pub struct EnvLive {
     served: Mutex<HashMap<String, Served>>,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
-    /// The last failed wake and how many failed in a row: the requests behind it get its error
-    /// instead of each trying again, for a backoff that grows from 1 s to 30 s.
-    failed: Mutex<Option<(Instant, String, u32)>>,
+    /// The last failed wake, of which deployment, and how many failed in a row: the requests
+    /// behind it get its error instead of each trying again, for a backoff that grows from 1 s to
+    /// 30 s. A canary's failures don't hold back the active deployment's wakes.
+    failed: Mutex<Option<(String, Instant, String, u32)>>,
     /// Crashes of the last ten minutes: when, when in unix ms, why.
     crashes: Mutex<std::collections::VecDeque<(Instant, i64, String)>>,
     seq: AtomicU64,
@@ -307,15 +322,20 @@ impl EnvLive {
     /// The proxy's answer to a request `inst` served: counted per deployment while a canary
     /// runs (the rollout judges the new deployment by them).
     pub fn answered(&self, inst: &Inst, status: u16) {
+        self.count(&inst.deployment, |s| {
+            s.requests += 1;
+            if status >= 500 {
+                s.errors += 1;
+            }
+        });
+    }
+
+    /// `deployment`'s counts while a canary runs.
+    fn count(&self, deployment: &str, f: impl FnOnce(&mut Served)) {
         if self.canary.lock().is_none() {
             return;
         }
-        let mut s = self.served.lock();
-        let e = s.entry(inst.deployment.clone()).or_default();
-        e.requests += 1;
-        if status >= 500 {
-            e.errors += 1;
-        }
+        f(self.served.lock().entry(deployment.to_string()).or_default());
     }
 
     /// Answers since the last call, per deployment (and counting again from zero).
@@ -498,13 +518,22 @@ impl EnvLive {
         // instance half started (or a container half made); the wake finishes, and its lease,
         // if nobody takes it, is dropped there.
         let this = self.clone();
-        tokio::spawn(async move {
+        let routed = tpl.deployment.clone();
+        let r = tokio::spawn(async move {
             let r = this.wake_slow(began, tpl).await;
             this.waiters.fetch_sub(1, Ordering::SeqCst);
             r
         })
         .await
-        .unwrap_or_else(|e| Err(WakeError::Failed(e.to_string())))
+        .unwrap_or_else(|e| Err(WakeError::Failed(e.to_string())));
+        // A visitor sent to a canary that won't start got a 5xx the canary must answer for.
+        if let Err(WakeError::Failed(_) | WakeError::Timeout(_)) = &r {
+            self.count(&routed, |s| {
+                s.requests += 1;
+                s.errors += 1;
+            });
+        }
+        r
     }
 
     async fn wake_slow(self: &Arc<Self>, began: Instant, routed: Arc<Template>) -> Result<Lease, WakeError> {
@@ -524,7 +553,8 @@ impl EnvLive {
             l.waited = began.elapsed();
             return Ok(l);
         }
-        if let Some((at, why, n)) = self.failed.lock().clone()
+        if let Some((d, at, why, n)) = self.failed.lock().clone()
+            && d == dep
             && at.elapsed() < Duration::from_secs(1 << (n.saturating_sub(1)).min(5)).min(Duration::from_secs(30))
         {
             return Err(WakeError::Failed(why));
@@ -556,8 +586,8 @@ impl EnvLive {
             }
             Err(e) => {
                 let mut f = self.failed.lock();
-                let n = f.as_ref().map_or(0, |(_, _, n)| *n) + 1;
-                *f = Some((Instant::now(), e.to_string(), n));
+                let n = f.as_ref().filter(|(d, ..)| d == dep).map_or(0, |(.., n)| *n) + 1;
+                *f = Some((dep.to_string(), Instant::now(), e.to_string(), n));
                 return Err(e);
             }
         };
@@ -598,6 +628,7 @@ impl EnvLive {
     /// [`Self::crashed`], the stop giving requests in flight `grace` to finish.
     fn crashed_with(&self, inst: &Inst, why: &str, grace: Duration) {
         *inst.phase.lock() = Phase::Crashed;
+        self.count(&inst.deployment, |s| s.crashes += 1);
         let (runtime, name) = (self.runtime.clone(), inst.name.clone());
         *inst.stopping.lock() = Some(tokio::spawn(async move {
             let _ = runtime.stop(&name, grace).await;
@@ -717,6 +748,19 @@ impl EnvLive {
         Ok(Prepared { made, took: began.elapsed(), hold })
     }
 
+    /// An environment that was asleep stays asleep: the new deployment's healthy instances stop
+    /// (created, so the next request is only a start) before anything switches, so a deploy that
+    /// reads as done has nothing of it still running.
+    pub async fn rest_if_asleep(&self, tpl: &Template, prepared: &Prepared) {
+        if tpl.run.kind != RunType::Web || tpl.run.min_instances > 0 || self.awake_count() > 0 {
+            return;
+        }
+        for i in &prepared.made {
+            let _ = self.runtime.stop(&i.name, Duration::from_secs(5)).await;
+            *i.phase.lock() = Phase::Created;
+        }
+    }
+
     async fn discard(&self, insts: &[Arc<Inst>]) {
         for i in insts {
             let _ = self.runtime.stop(&i.name, Duration::from_secs(1)).await;
@@ -741,9 +785,17 @@ impl EnvLive {
         *self.template.lock() = Some(tpl.clone());
         // A canary of an earlier rollout (one this deploy superseded) goes with the old ones.
         *self.canary.lock() = None;
-        let old: Vec<Arc<Inst>> = std::mem::replace(&mut *self.insts.lock(), made.clone());
+        // Instances of this deployment already here stay: a request between the store's switch
+        // and this commit can adopt the deployment from the store and wake one.
+        let old: Vec<Arc<Inst>> = {
+            let mut insts = self.insts.lock();
+            let (same, old): (Vec<_>, Vec<_>) = std::mem::take(&mut *insts).into_iter().partition(|i| i.deployment == tpl.deployment);
+            *insts = made.iter().cloned().chain(same).collect();
+            old
+        };
+        // Asleep before: asleep after (the deploy path did this before its switch already).
         if tpl.run.kind == RunType::Web && was_awake == 0 && tpl.run.min_instances == 0 {
-            for i in &made {
+            for i in made.iter().filter(|i| matches!(i.phase(), Phase::Running(_))) {
                 let _ = self.runtime.stop(&i.name, Duration::from_secs(5)).await;
                 *i.phase.lock() = Phase::Created;
             }
@@ -843,9 +895,19 @@ impl EnvLive {
         self.capped.store(on, Ordering::SeqCst);
     }
 
-    /// Hold it asleep (a restore of its volume): no request or floor starts an instance.
-    pub fn set_held(&self, on: bool) {
-        self.held.store(on, Ordering::SeqCst);
+    /// Hold it asleep (a restore of its volume) until the guard drops: what runs stops, and no
+    /// request, floor, rollout or cron run starts an instance meanwhile (they wait for the wake
+    /// lock the guard keeps, or see `held`).
+    pub async fn hold_asleep(self: &Arc<Self>) -> Held {
+        self.held.store(true, Ordering::SeqCst);
+        let lock = self.wake.clone().lock_owned().await;
+        for i in self.instances() {
+            if i.awake() {
+                let _ = self.runtime.stop(&i.name, Duration::from_secs(10)).await;
+                *i.phase.lock() = Phase::Created;
+            }
+        }
+        Held { live: self.clone(), _lock: lock }
     }
 
     /// Stop every instance (they stay created); the next request wakes one.
@@ -930,20 +992,22 @@ impl EnvLive {
         if up > 0 || elapsed > 0.0 {
             self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
         }
-        if let Some(tpl) = self.template()
-            && tpl.run.kind == RunType::Web
-            && let Some(path) = tpl.run.health_path.as_deref()
-        {
-            let due = {
-                let mut last = self.last_health.lock();
-                let due = last.is_none_or(|t| now.duration_since(t) >= self.cfg.health_every);
-                if due {
-                    *last = Some(now);
-                }
-                due
-            };
+        let due = {
+            let mut last = self.last_health.lock();
+            let due = last.is_none_or(|t| now.duration_since(t) >= self.cfg.health_every);
             if due {
-                self.check_health(&insts, path, tpl.run.concurrency).await;
+                *last = Some(now);
+            }
+            due
+        };
+        // Each deployment's instances by its own health path (a canary's may differ).
+        let serving: Vec<Arc<Template>> = self.template().into_iter().chain(self.canary.lock().as_ref().map(|(t, _)| t.clone())).collect();
+        for tpl in serving.iter().filter(|_| due) {
+            if tpl.run.kind == RunType::Web
+                && let Some(path) = tpl.run.health_path.as_deref()
+            {
+                let mine: Vec<Arc<Inst>> = insts.iter().filter(|i| i.deployment == tpl.deployment).cloned().collect();
+                self.check_health(&mine, path, tpl.run.concurrency).await;
             }
         }
         if self.held.load(Ordering::SeqCst) {
@@ -1143,6 +1207,7 @@ impl EnvLive {
         made: impl FnOnce(&str),
     ) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        anyhow::ensure!(command.is_some() || tpl.spec.volume.is_none() || !self.held.load(Ordering::SeqCst), "its volume is being restored");
         if let Some(cmd) = command {
             tpl.spec.command = Some(cmd.to_string());
             tpl.spec.port = None;

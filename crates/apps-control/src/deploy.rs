@@ -498,20 +498,29 @@ impl Apps {
         } else {
             Some(prepared)
         };
+        if let Some(p) = &prepared {
+            live.rest_if_asleep(&tpl, p).await;
+        }
         let (sid, e, from, to, vh) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone());
-        // Epochs only grow on a backend that outlives the process; the in-memory one starts
-        // again at 1, and a fence kept in the store would then refuse every later switch.
-        // A node whose lease lapsed mid-rollout has no epoch: it isn't the owner any more and
-        // never switches (the node that took the service over does).
-        let epoch = match Some(&self.deps.cluster).filter(|c| c.backend_name() != "memory") {
-            Some(c) => Some(c.epoch(&crate::lease_key(&svc.id)).ok_or_else(|| anyhow::anyhow!("this node no longer holds the service; the node that took it over deploys"))?),
-            None => None,
-        };
-        let ready = (!made.is_empty()).then_some(took.as_millis() as i64);
-        let switched = self
-            .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh) }))
-            .await?;
-        if !switched {
+        let switched: anyhow::Result<()> = async {
+            // Epochs only grow on a backend that outlives the process; the in-memory one starts
+            // again at 1, and a fence kept in the store would then refuse every later switch.
+            // A node whose lease lapsed mid-rollout has no epoch: it isn't the owner any more and
+            // never switches (the node that took the service over does).
+            let epoch = match Some(&self.deps.cluster).filter(|c| c.backend_name() != "memory") {
+                Some(c) => Some(c.epoch(&crate::lease_key(&svc.id)).ok_or_else(|| anyhow::anyhow!("this node no longer holds the service; the node that took it over deploys"))?),
+                None => None,
+            };
+            let ready = (!made.is_empty()).then_some(took.as_millis() as i64);
+            let ok = self
+                .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh) }))
+                .await?;
+            anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
+            Ok(())
+        }
+        .await;
+        // Not switched, for whatever reason: nothing of this deployment keeps running or serving.
+        if let Err(e) = switched {
             match prepared {
                 Some(_) => {
                     for i in &made {
@@ -520,7 +529,7 @@ impl Apps {
                 }
                 None => live.abort_canary().await,
             }
-            anyhow::bail!("another deploy switched this environment meanwhile");
+            return Err(e);
         }
         match prepared {
             Some(p) => live.commit(tpl, p).await,
@@ -556,6 +565,7 @@ impl Apps {
                     let into = if dep == tpl.deployment { &mut new } else { &mut old };
                     into.requests += s.requests;
                     into.errors += s.errors;
+                    into.crashes += s.crashes;
                 }
                 if let Some(why) = judge(new, old, r.error_pct) {
                     sys.line(format!("canary: rolled back at {share}%: {why}"));
@@ -1063,8 +1073,15 @@ impl Apps {
                     self.judge_alerts(&l).await;
                 }
             }
+            if n.is_multiple_of(3600) && !self.backing_up.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // A volume's tar can take minutes: never on the reaper's own loop.
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.scheduled_backups().await;
+                    this.backing_up.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
             if n.is_multiple_of(3600) {
-                self.scheduled_backups().await;
                 let before = code_sql::now_ms() / 60_000 - 7 * 24 * 60;
                 let _ = self.db(move |s| s.prune_metrics(before)).await;
                 let day_ago = code_sql::now_ms() - 24 * 3_600_000;
@@ -1407,6 +1424,10 @@ impl Apps {
 /// [`Rollout::MIN_REQUESTS`] requests with a 5xx, and more often than the old one (an outage
 /// both share, a database down, isn't the new code's fault).
 fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8) -> Option<String> {
+    // Crashes no request saw (a failed health check, a process that exits).
+    if new.crashes >= 2 && new.crashes > old.crashes {
+        return Some(format!("its instances crashed {} times (the old deployment's {})", new.crashes, old.crashes));
+    }
     if new.requests < crate::model::Rollout::MIN_REQUESTS || new.error_pct() < error_pct as f64 || new.error_pct() <= old.error_pct() {
         return None;
     }

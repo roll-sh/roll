@@ -12,7 +12,7 @@ const ws = vi.hoisted(() => ({
   state: { status: "ready", projects: [], inventory: new Map(), kinds: new Set(["postgres", "redis", "service"]), spend: new Map(), staged: {} },
   make: vi.fn(),
 }));
-vi.mock("@/lib/workspace-store", () => ({ useWorkspace: () => ws.state, workspace: { make: ws.make }, refreshInventory: async () => {} }));
+vi.mock("@/lib/workspace-store", () => ({ useWorkspace: () => ws.state, workspace: { make: ws.make }, refreshInventory: async () => {}, PlaceError: class extends Error {} }));
 
 const project = { id: "prj_1", name: "shop", resources: [] } as unknown as WorkspaceProject;
 

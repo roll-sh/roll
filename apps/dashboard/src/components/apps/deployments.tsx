@@ -5,7 +5,7 @@ import { appsApi, followLog, formatMs, isPending, shortSha, stepDurations, TRIGG
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
-import { clock, DeployBadge, LogView, since, type Runner } from "./shared";
+import { clock, DeployBadge, LogView, since, SureButton, type Runner } from "./shared";
 
 const MAX_LINES = 5000;
 
@@ -92,7 +92,7 @@ export function Deployments({
                       </span>
                       {d.revision && <span className="font-mono text-[11.5px] text-muted">{shortSha(d.revision)}</span>}
                     </div>
-                    <p className="mt-1 truncate text-[13px]">{d.message || (d.rollback_of ? `Rollback to ${d.rollback_of}` : <span className="text-muted">No message</span>)}</p>
+                    <p className="mt-1 truncate text-[13px]">{d.message || (d.rollback_of ? `Roll back to ${d.rollback_of}` : <span className="text-muted">No message</span>)}</p>
                     <p className="mt-0.5 flex gap-2 font-mono text-[11px] text-subtle">
                       <span title={clock(d.created_at, true)}>{since(d.created_at, now)}</span>
                       {d.ready_ms != null && <span>ready in {formatMs(d.ready_ms)}</span>}
@@ -112,14 +112,15 @@ export function Deployments({
                       </button>
                     )}
                     {!active && !isPending(d.status) && d.image && d.status !== "removed" && (
-                      <button
+                      <SureButton
                         className={`${btn} opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100`}
                         disabled={runner.busy !== null}
-                        onClick={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id))}
+                        sure={`Sure? Roll ${env.name} back`}
+                        onSure={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id))}
                         title="Run this deployment's image again, without a build"
                       >
-                        <RotateCcw className="size-3.5" /> Rollback
-                      </button>
+                        <RotateCcw className="size-3.5" /> Roll back
+                      </SureButton>
                     )}
                   </div>
                 </div>

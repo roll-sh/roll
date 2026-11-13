@@ -76,28 +76,47 @@ impl Apps {
         Ok(Backup { id: at.to_string(), at, size })
     }
 
-    /// `POST …/volume/backups/{id}/restore`: the volume as it was then. The environment is held
-    /// asleep meanwhile (requests get a 503 a moment) and wakes on the next request.
+    /// `POST …/volume/backups/{id}/restore`: the volume as it was then. The backup is
+    /// downloaded whole and checked against its listed size before anything touches the volume;
+    /// then the environment is held asleep (requests get a 503 a moment; rollouts and cron runs
+    /// wait), and the runtime swaps the volume's files for the backup's only once it extracted
+    /// whole. On its own task, so a client that goes away can't leave it half done or held.
     pub async fn restore_volume(self: &Arc<Self>, service: &str, env: &str, id: &str) -> Result<Backup> {
         let volume = self.volume_of(service, env).await?;
         let objects = self.backup_store()?.clone();
         let Some(b) = self.backups(service, env).await?.into_iter().find(|b| b.id == id) else {
             return Err(Error::NotFound(format!("no backup {id} of {service} in {env}")));
         };
-        let live = self.live(service, env);
-        live.set_held(true);
-        live.sleep().await;
-        let key = format!("{}{}.tar", prefix(service, env), b.id);
-        let (reader, writer) = tokio::io::duplex(1 << 20);
-        let download = tokio::spawn(async move { objects.download(&key, writer).await });
-        let wrote = self.deps.runtime.write_volume(&volume, Box::new(reader)).await;
-        let read = download.await;
-        // Whatever happened, the environment wakes on its next request again.
-        live.set_held(false);
-        read.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::Internal(format!("reading the backup: {e:#}")))?;
-        wrote.map_err(|e| Error::Internal(format!("writing the volume: {e:#}")))?;
-        self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System).line(format!("volume restored from the backup of {}", b.id));
-        Ok(b)
+        let (this, service, env) = (self.clone(), service.to_string(), env.to_string());
+        tokio::spawn(async move {
+            let key = format!("{}{}.tar", prefix(&service, &env), b.id);
+            let dir = this.cfg.home.join("tmp");
+            tokio::fs::create_dir_all(&dir).await.map_err(|e| Error::Internal(e.to_string()))?;
+            let path = dir.join(format!("restore-{}.tar", crate::model::random(12).to_ascii_lowercase()));
+            let fetched = async {
+                let file = tokio::fs::File::create(&path).await?;
+                let n = objects.download(&key, file).await?;
+                anyhow::ensure!(n == b.size, "the backup came back with {n} of its {} bytes", b.size);
+                Ok(())
+            }
+            .await;
+            let restored = match fetched {
+                Ok(()) => {
+                    let _held = this.live(&service, &env).hold_asleep().await;
+                    match tokio::fs::File::open(&path).await {
+                        Ok(f) => this.deps.runtime.write_volume(&volume, Box::new(f)).await.map_err(|e| Error::Internal(format!("writing the volume (it's as it was): {e:#}"))),
+                        Err(e) => Err(Error::Internal(e.to_string())),
+                    }
+                }
+                Err(e) => Err(Error::Internal(format!("reading the backup (the volume is untouched): {e:#}"))),
+            };
+            let _ = tokio::fs::remove_file(&path).await;
+            restored?;
+            this.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System).line(format!("volume restored from the backup of {}", b.id));
+            Ok(b)
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
     }
 
     /// Once an hour, on the owner: a backup of each volume whose newest is a day old.

@@ -25,6 +25,8 @@ export interface Staged {
   y: number;
   phase: "staged" | "creating" | "failed";
   error?: string;
+  /** Made in its product but not placed yet: a retry places this one instead of making another. */
+  ref?: string;
 }
 
 export interface WorkspaceState {
@@ -74,6 +76,16 @@ function set(next: Partial<WorkspaceState>) {
 }
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/** A resource its product made that couldn't be placed on the canvas: `ref` exists. */
+export class PlaceError extends Error {
+  constructor(
+    readonly ref: string,
+    cause: unknown,
+  ) {
+    super(`made, but not placed on the canvas: ${errorText(cause)}`);
+  }
+}
 
 function withProject(id: string, f: (p: WorkspaceProject) => WorkspaceProject) {
   set({ projects: state.projects.map((p) => (p.id === id ? f(p) : p)) });
@@ -202,10 +214,14 @@ export const workspace = {
     set({ staged: { ...state.staged, [projectId]: (state.staged[projectId] ?? []).filter((s) => id !== undefined && s.id !== id) } });
   },
 
-  /** Creates a resource in its product and places it on the project's canvas at `at`; its ref. */
-  async make(projectId: string, kind: ResourceKind, name: string, at: { x: number; y: number }) {
-    const ref = await createResource(kind, name);
-    await workspaceApi.place(projectId, kind, ref, at.x, at.y);
+  /** Creates a resource in its product (unless `made` names one already) and places it on the project's canvas at `at`; its ref. A failed placing throws a {@link PlaceError} with the ref. */
+  async make(projectId: string, kind: ResourceKind, name: string, at: { x: number; y: number }, made?: string) {
+    const ref = made ?? (await createResource(kind, name));
+    try {
+      await workspaceApi.place(projectId, kind, ref, at.x, at.y);
+    } catch (e) {
+      throw new PlaceError(ref, e);
+    }
     withProject(projectId, (p) => ({ ...p, resources: [...p.resources, { kind, ref, x: at.x, y: at.y, added_at: Date.now() }] }));
     return ref;
   },
@@ -217,10 +233,10 @@ export const workspace = {
     await Promise.all(
       todo.map(async (s) => {
         try {
-          await workspace.make(projectId, s.kind, s.name, s);
+          await workspace.make(projectId, s.kind, s.name, s, s.ref);
           workspace.unstage(projectId, s.id);
         } catch (e) {
-          workspace.updateStaged(projectId, s.id, { phase: "failed", error: errorText(e) });
+          workspace.updateStaged(projectId, s.id, { phase: "failed", error: errorText(e), ...(e instanceof PlaceError ? { ref: e.ref } : {}) });
         }
       }),
     );

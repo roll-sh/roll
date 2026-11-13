@@ -4,7 +4,7 @@ import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceT
 import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { freeSpot, KIND_LABEL, resourceKey, suggestName, type ResourceView } from "@/lib/workspace-resources";
-import { refreshInventory, useWorkspace, workspace } from "@/lib/workspace-store";
+import { PlaceError, refreshInventory, useWorkspace, workspace } from "@/lib/workspace-store";
 import { LINKABLE } from "./variables";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
@@ -170,7 +170,11 @@ export function NewServiceSheet({
         const names = new Set([...ws.inventory.values()].map((v) => v.name));
         const at = freeSpot(taken);
         taken.push(at);
-        const ref = await workspace.make(project.id, k, suggestName(k, project.name, names), at);
+        // Made but not placed: it exists, so it's linked (and a retry doesn't make another).
+        const ref = await workspace.make(project.id, k, suggestName(k, project.name, names), at).catch((e: unknown) => {
+          if (e instanceof PlaceError) return e.ref;
+          throw e;
+        });
         fresh.push({ kind: k, ref });
         setMade([...fresh]);
         setMake((m) => {

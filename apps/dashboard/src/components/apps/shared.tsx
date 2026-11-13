@@ -206,3 +206,53 @@ export function useLatest<T>(v: T) {
 export const CPU = [0.25, 0.5, 1, 2, 4, 8];
 export const MEMORY = [256, 512, 1024, 2048, 4096, 8192, 16384];
 export const mb = (n: number) => (n >= 1024 ? `${n / 1024} GB` : `${n} MB`);
+
+/**
+ * A button for something that's hard to take back (a rollback, a removal, a restart): the first
+ * click arms it ("Sure? …" for four seconds), the second does it. Lighter than typing a name,
+ * for what doesn't destroy data.
+ */
+export function SureButton({
+  className,
+  disabled,
+  title,
+  label,
+  sure,
+  onSure,
+  children,
+}: {
+  className: string;
+  disabled?: boolean;
+  title?: string;
+  /** Its accessible name, armed or not (an icon-only button). */
+  label?: string;
+  /** What the armed button says. */
+  sure: string;
+  onSure: () => void;
+  children: ReactNode;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      type="button"
+      className={`${className} ${armed ? "!text-danger" : ""}`}
+      disabled={disabled}
+      title={title}
+      aria-label={label && (armed ? `${sure} (click again)` : label)}
+      onClick={() => {
+        if (!armed) return setArmed(true);
+        setArmed(false);
+        onSure();
+      }}
+      onBlur={() => setArmed(false)}
+    >
+      {armed ? <span className="text-[12px]">{sure}</span> : children}
+    </button>
+  );
+}
+

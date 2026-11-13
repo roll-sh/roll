@@ -4,7 +4,7 @@ import { appsApi, parseEnv, VARIABLE_NAME, type Environment, type Link, type Lin
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
-import { message, type Runner } from "./shared";
+import { message, SureButton, type Runner } from "./shared";
 
 const SOURCE_LABEL: Record<VariableSource, string> = { service: "service", secret: "secret", link: "link", roll: "roll" };
 const SOURCE_TONE: Record<VariableSource, string> = {
@@ -15,7 +15,8 @@ const SOURCE_TONE: Record<VariableSource, string> = {
 };
 
 /** Workspace kinds a service can link to, by their link kind. */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql" };
+/** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis" };
 
 type Edit = { name: string; value: string };
 
@@ -324,12 +325,13 @@ function Links({ service, project, runner, onChange }: { service: string; projec
             <span className="text-[12px] text-subtle">{l.kind}</span>
             {l.prefix && <span className="rounded border border-line-2 px-1.5 font-mono text-[10.5px] text-muted">{l.prefix}_</span>}
             <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted">{l.vars.join(" ")}</span>
-            <button
+            <SureButton
               className="p-1 text-subtle hover:text-fg"
-              aria-label="Unlink"
-              title="Unlink"
+              label="Unlink"
+              title="Unlink: its variables leave the next deploy"
+              sure="Sure? Unlink"
               disabled={runner.busy !== null}
-              onClick={async () => {
+              onSure={async () => {
                 if (await runner.run(`unlink:${l.ref}`, () => appsApi.unlink(service, l.kind, l.ref).then(() => true))) {
                   await load();
                   onChange();
@@ -337,7 +339,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
               }}
             >
               <Trash2 className="size-3.5" />
-            </button>
+            </SureButton>
           </li>
         ))}
       </ul>

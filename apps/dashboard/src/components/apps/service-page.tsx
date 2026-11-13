@@ -27,7 +27,7 @@ import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, POLL_STREAMED_MS, useDeployMark
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
-import { clock, StateBadge, until, useRunner } from "./shared";
+import { clock, StateBadge, SureButton, until, useRunner } from "./shared";
 import { UsageTab } from "./usage";
 import { VariablesTab } from "./variables";
 
@@ -276,13 +276,13 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               <Sun className="size-3.5" /> Wake
             </button>
           ) : (
-            <button className={`${btn} shrink-0`} disabled={busy || st !== "running"} onClick={() => runner.run("sleep", () => appsApi.sleep(service.id, envName))} title="Scale to zero now">
+            <SureButton className={`${btn} shrink-0`} disabled={busy || st !== "running"} sure="Sure? Stop it now" onSure={() => runner.run("sleep", () => appsApi.sleep(service.id, envName))} title="Scale to zero now">
               <Moon className="size-3.5" /> Sleep
-            </button>
+            </SureButton>
           )}
-          <button className={`${btn} shrink-0`} disabled={busy || !env?.active} onClick={() => runner.run("restart", () => appsApi.restart(service.id, envName))} title="Replace the instances with fresh ones">
+          <SureButton className={`${btn} shrink-0`} disabled={busy || !env?.active} sure="Sure? Restart" onSure={() => runner.run("restart", () => appsApi.restart(service.id, envName))} title="Replace the instances with fresh ones">
             <RotateCw className="size-3.5" /> Restart
-          </button>
+          </SureButton>
           {upload ? (
             <button className={`${primary} !py-1 !text-[12px]`} disabled={busy || !env?.active} onClick={redeploy} title="Run the live image again with the current variables and settings (new code: roll up)">
               <Rocket className="size-3.5" /> Redeploy

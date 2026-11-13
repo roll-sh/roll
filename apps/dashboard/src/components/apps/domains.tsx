@@ -2,7 +2,7 @@ import { ExternalLink, Globe, Lock, RefreshCw, ShieldAlert, Trash2 } from "lucid
 import { useState } from "react";
 import { appsApi, type Domain, type Environment } from "@/lib/apps-api";
 import { btn, CopyButton, input, panel, primary, useCopy } from "../ui";
-import type { Runner } from "./shared";
+import { SureButton, type Runner } from "./shared";
 
 const STATUS: Record<Domain["status"], { label: string; dot: string }> = {
   pending: { label: "Waiting for DNS", dot: "bg-accent pulse-dot" },
@@ -89,13 +89,14 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                         <RefreshCw className={`size-3.5 ${runner.busy === `verify:${d.hostname}` ? "animate-spin motion-reduce:animate-none" : ""}`} /> Verify
                       </button>
                     )}
-                    <button
+                    <SureButton
                       className={btn}
                       disabled={runner.busy !== null}
-                      onClick={() => runner.run(`remove:${d.hostname}`, () => appsApi.removeDomain(service, env.name, d.hostname))}
+                      sure="Sure? It stops answering"
+                      onSure={() => runner.run(`remove:${d.hostname}`, () => appsApi.removeDomain(service, env.name, d.hostname))}
                     >
                       <Trash2 className="size-3.5" /> Remove
-                    </button>
+                    </SureButton>
                   </span>
                 </div>
                 {d.status === "active" && (

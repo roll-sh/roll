@@ -175,6 +175,8 @@ pub struct Apps {
     /// A service changed (a deploy moved, someone changed something): its id, for the pages
     /// that follow it (`GET …/changes`). On the owner, as every such change is.
     changes: tokio::sync::broadcast::Sender<String>,
+    /// The hourly volume backups are running (on their own task).
+    backing_up: std::sync::atomic::AtomicBool,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
@@ -245,6 +247,7 @@ impl Apps {
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,
+            backing_up: std::sync::atomic::AtomicBool::new(false),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),

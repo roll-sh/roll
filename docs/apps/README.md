@@ -650,7 +650,11 @@ spread out). The proxy counts each deployment's answers and 5xx while a canary r
 rollout reads them every quarter of a step (5 s at most), and a step fails when the new
 deployment answered `error_pct` (default 5) or more of at least 20 requests with a 5xx and more
 often than the old one did. An outage both share, like a database that's down, isn't the new
-code's fault. A failure rolls it back: every request goes to the old deployment again, the new
+code's fault. What no answered request shows counts too: a request routed to the new deployment
+whose wake failed is one of its 5xx, and two or more crashes of its instances (a failed health
+check, a process that exits) roll it back when the old one crashed less. The wake backoff is per
+deployment, so a canary that won't start never holds back the old one's wakes, and each
+deployment's instances are health-checked on its own path. A failure rolls it back: every request goes to the old deployment again, the new
 one's instances drain, and the deploy fails with the numbers ("rolled back at 10% of requests:
 14 of its 40 requests were 5xx…"). After the last step, the store switches the active
 deployment (`switch_active`, the same compare-and-swap) and the old instances drain. Canceling
@@ -688,9 +692,16 @@ on demand (`POST …/volume/backups`) and once a day by its owner, the newest se
 Railway's volume backups and Render's and Fly's snapshots. A throwaway busybox container with no
 network mounts the volume read-only and streams `tar c` into `Objects::upload`, so nothing holds
 the volume in memory; it's the disk at that moment, so an app mid-write can leave a file half
-written, as any snapshot of a running disk. A restore (`…/backups/{id}/restore`) holds the
-environment asleep (requests get a 503 for that moment), empties the volume and untars the
-backup into it from `Objects::download`, then the next request wakes it. Both are in the audit
+written, as any snapshot of a running disk. The container's exit is checked at the end of the
+stream, so a backup that stopped short (a daemon error, an image it couldn't pull) fails instead
+of being stored, and never rotates a good one out. A restore (`…/backups/{id}/restore`)
+downloads the backup whole and checks it against its listed size before touching anything,
+then holds the environment asleep under its wake lock (requests get a 503 for that moment;
+rollouts and cron runs on the volume wait or refuse), extracts the tar into a staging directory
+on the volume, and only once it extracted whole swaps the old files for it; a broken tar leaves
+the volume as it was. It runs on its own task, so a client that goes away can't leave it half
+done or the environment held. The next request wakes it. The hourly backups run on their own
+task too, never on the reaper's loop. Both are in the audit
 trail. Without object storage on the node, backups answer 409. (Fargate has no volumes yet.)
 
 ## Log drains
@@ -874,19 +885,49 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 
 ## Next
 
-Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
-(security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
+Ranked; the top item not marked *waiting* is what's being worked on. A product review on
+2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
+earlier security, product and integration reviews).
 
-1. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+1. **Rough edges**: hide the link kinds that aren't wired yet (buckets, streams, NoSQL fail on
+   this node); volume backups and restore in the dashboard and CLI; confirmations for rollback,
+   removing a domain, unlinking, removing a drain, sleep and restart; the docs that disagree with
+   the product (static SPA fallback, the tab list).
+2. **Sticky rollouts**: a visitor stays on one deployment through a gradual rollout (a
+   `roll_bucket` cookie compared with the step's share, as Vercel's rolling releases), so the
+   numbers are clean and a page's client and server versions match.
+3. **Deploy hooks and image tag watching**: a secret deploy URL per environment (only its hash
+   stored; it can only deploy the service's own image repository), as Render's, and an opt-in
+   watch that redeploys an image service when its tag moves, as Railway's Image Auto Updates.
+4. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
+   environment's access token, and `no_traffic` deploys promoted later (Cloud Run's revision
+   tags, Vercel's deployment URLs).
+5. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
+   bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
+   (Render's and Vercel's static sites).
+6. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
+   (Cloud Run's `--use-http2`, Fly's `h2_backend`); then TCP services.
+7. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
+   by `roll up --all` with the plan shown first (Render's Blueprints), then importing a Compose
+   file's image services (Railway's).
+8. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
+   its stream consumer group's lag, which only roll can do natively.
+9. **Region**: the region shown on the overview and each environment, defaulting to the project's
+   databases', then a choice per environment once the fleet has a second region (Railway's,
+   Fly's). *Waiting on the fleet.*
+10. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
+    user's first AWS run.*
+11. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-2. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+12. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-3. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-4. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+13. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+14. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-5. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+15. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-6. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+16. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
