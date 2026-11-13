@@ -276,6 +276,23 @@ fn connection_of(cfg: &SearchConfig, name: &str) -> Value {
     json!({ "url": format!("{scheme}://{host}{port_part}"), "host": host, "port": port, "username": name })
 }
 
+/// What a link's credential may do: all of the indices' data and their templates, pipelines
+/// and lifecycle policies, as an app uses a cluster; no security (users, roles, keys).
+fn link_role() -> Value {
+    json!({
+        "cluster": ["monitor", "manage_index_templates", "manage_ingest_pipelines", "manage_ilm"],
+        "indices": [{ "names": ["*"], "privileges": ["all"] }]
+    })
+}
+
+/// A link's credential ([`Control::mint_link`]): its variables (unprefixed) and what revoking
+/// it takes.
+#[derive(Clone, Debug)]
+pub struct LinkCredential {
+    pub vars: Vec<(String, String)>,
+    pub kept: String,
+}
+
 /// `spec` with a secret nobody knows.
 fn locked_spec(spec: &ClusterSpec) -> ClusterSpec {
     let mut s = spec.clone();
@@ -1074,6 +1091,51 @@ impl Control {
         let resp = self.call(&c, req).await;
         let ct = resp.header("content-type").unwrap_or("application/json").to_string();
         Ok((resp.status, ct, resp.body))
+    }
+
+    /// A credential for one link of an app's service to cluster `id` (apps' `Resources::link`):
+    /// what a service needs to use the cluster's data, never the cluster's password and never
+    /// its security (the [`link_role`]). An Elasticsearch-flavor cluster gets an API key with that
+    /// role (`ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY`, sent as `Authorization: ApiKey`).
+    /// An OpenSearch-flavor cluster isn't linked yet (its clients need a user, which the
+    /// opensearch dialect can't make). `kept` is what [`Self::revoke_link`] takes.
+    pub async fn mint_link(&self, id: &str, owner: &str) -> Result<LinkCredential> {
+        let c = self.get(id).await?;
+        let url = connection_of(&self.cfg, &c.name)["url"].as_str().unwrap_or_default().to_string();
+        // OpenSearch clients don't send API keys, and the opensearch dialect has no security API
+        // to make a native user through: never fall back to the cluster's password.
+        if c.flavor == "opensearch" {
+            return Err(ControlError::Invalid(format!("links to the OpenSearch-flavor cluster {} aren't supported yet: use roll secrets' search link", c.name)));
+        }
+        let body = serde_json::to_vec(&json!({ "name": format!("link {owner}"), "role_descriptors": { "roll_link": link_role() } })).unwrap_or_default();
+        let resp = self.call(&c, EsRequest::json("POST", "/_security/api_key", body)).await;
+        let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
+        let (200, Some(key_id), Some(key)) = (resp.status, v["id"].as_str(), v["api_key"].as_str()) else {
+            return Err(ControlError::Internal(anyhow::anyhow!("making a link key of cluster {} failed ({})", c.name, resp.status)));
+        };
+        let api_key = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{key}", c.name));
+        Ok(LinkCredential { vars: vec![("ELASTICSEARCH_URL".into(), url), ("ELASTICSEARCH_API_KEY".into(), api_key)], kept: format!("key:{key_id}") })
+    }
+
+    /// Revokes what [`Self::mint_link`] made (`kept`), at once. Gone already (the key, the
+    /// user, the cluster) is done.
+    pub async fn revoke_link(&self, id: &str, kept: &str) -> Result<()> {
+        let c = match self.get(id).await {
+            Ok(c) => c,
+            Err(ControlError::NotFound(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        match kept.split_once(':') {
+            Some(("key", key_id)) => match self.delete_key(&c.id, key_id).await {
+                Ok(()) | Err(ControlError::NotFound(_)) => Ok(()),
+                Err(e) => Err(e),
+            },
+            Some(("user", user)) => {
+                let r = self.call(&c, EsRequest::new("DELETE", &format!("/_security/user/{}", urlencoding::encode(user)))).await;
+                if r.status < 300 || r.status == 404 { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("removing link user {user} of cluster {} failed ({})", c.name, r.status))) }
+            }
+            _ => Err(ControlError::Invalid(format!("not a link credential: {kept:?}"))),
+        }
     }
 
     /// A new API key of cluster `id` (the cluster's own `_security/api_key`), for a client that
