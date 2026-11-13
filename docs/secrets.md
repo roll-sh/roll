@@ -1507,6 +1507,9 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Import straight from another manager**: `roll secrets import --from doppler|vault|infisical`
+   reads an environment through that product's API with the user's own token (on their machine,
+   never through roll's server), then imports it as one change, as `import` does with a file.
 
 Waiting on other pull requests:
 
