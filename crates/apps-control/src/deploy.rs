@@ -390,9 +390,17 @@ impl Apps {
                     .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
                 let pinned = self.deps.runtime.pull(img, log, login.as_ref()).await?;
                 log.line(format!("pinned {pinned}"));
-                let (id, p) = (d.id.clone(), pinned.clone());
-                self.db(move |s| s.set_built(&id, &p, None, None)).await?;
-                (pinned, svc.run.clone())
+                // A preview's defaults (an image service has no roll.toml), frozen with it.
+                let (run, note) = crate::config::preview_defaults(svc.run.clone(), None);
+                if env.ephemeral
+                    && let Some(n) = &note
+                {
+                    log.line(n);
+                }
+                let run = if env.ephemeral { run } else { svc.run.clone() };
+                let (id, p, r) = (d.id.clone(), pinned.clone(), run.clone());
+                self.db(move |s| s.set_built(&id, &p, None, Some(&r))).await?;
+                (pinned, run)
             }
             None => {
                 if !self.db(move |s| s.set_status(&id, &[DeployStatus::Queued], DeployStatus::Building, None)).await? {
@@ -568,10 +576,15 @@ impl Apps {
             Some(r) => crate::model::in_tree(&tree, "the root directory", r, true)?,
             None => tree.clone(),
         };
-        // roll.toml `[app]` in the root: config as code, over the service's settings.
-        let (mut build_cfg, mut run) = match crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))? {
+        // roll.toml `[app]` in the root: config as code, over the service's settings; a preview
+        // environment's defaults last.
+        let (sid, e) = (svc.id.clone(), d.environment.clone());
+        let ephemeral = self.db(move |s| s.environment(&sid, &e)).await?.ephemeral;
+        let scope = crate::config::EnvScope { name: &d.environment, ephemeral };
+        let file = crate::config::read(&context).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (mut build_cfg, mut run) = match &file {
             Some(app) => {
-                let (b, r, said) = app.apply(&svc.build, &svc.run, Some(&d.environment)).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let (b, r, said) = app.apply(&svc.build, &svc.run, Some(scope)).map_err(|e| anyhow::anyhow!("{e}"))?;
                 for l in said {
                     log.line(l);
                 }
@@ -579,6 +592,13 @@ impl Apps {
             }
             None => (svc.build.clone(), svc.run.clone()),
         };
+        if ephemeral {
+            let note;
+            (run, note) = crate::config::preview_defaults(run, file.as_ref());
+            if let Some(n) = note {
+                log.line(n);
+            }
+        }
         // A root directory inside a JS workspace builds from the repo's root (the lockfile and the
         // workspace's packages are there), unless it brings its own Dockerfile.
         if let Some(r) = &root
@@ -994,7 +1014,11 @@ impl Apps {
             Some(rev) => self.app_config_at(svc, rev).await,
             None => None,
         };
-        file.and_then(|f| f.apply(&svc.build, &svc.run, Some(env)).ok()).map_or_else(|| svc.run.clone(), |(_, r, _)| r)
+        let (sid, e) = (svc.id.clone(), env.to_string());
+        let ephemeral = self.db(move |s| s.environment(&sid, &e)).await.is_ok_and(|r| r.ephemeral);
+        let scope = crate::config::EnvScope { name: env, ephemeral };
+        let run = file.as_ref().and_then(|f| f.apply(&svc.build, &svc.run, Some(scope)).ok()).map_or_else(|| svc.run.clone(), |(_, r, _)| r);
+        if ephemeral { crate::config::preview_defaults(run, file.as_ref()).0 } else { run }
     }
 
     /// `roll.toml` `[app]` at a pushed revision (in the service's root), if it reads.

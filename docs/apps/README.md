@@ -81,7 +81,11 @@ every deployment is immutable with instant rollback.
   file's other sections are roll code's; code-preview allows `[app]` in it. `[app.run]` sets any
   run setting (`type`, `port`, `min_instances`, `concurrency`, `cpu`, `memory_mb`, `schedule`,
   timings) but the volume, and `[app.environments.<name>]` (with its own `.run`) goes on top in
-  that environment only, as Railway's environment overrides do. A redeploy or a promotion
+  that environment only, as Railway's environment overrides do. `[app.previews]` (and `.run`)
+  goes on top in preview environments (ephemeral ones, `pv-<id>`), before a named block. A
+  preview scales to zero unless that block sets `min_instances`, whatever production keeps up,
+  so an open pull request costs nothing until someone opens it (Render's `previews.plan` and
+  `numInstances`); an image service's previews do the same. A redeploy or a promotion
   applies the file at the deployment's revision for the target environment, so neither drops
   what the file set. What a push can't touch stays the service's: its volume, domains, access
   and variables.
@@ -736,20 +740,40 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+1. **Why it crashed**: the exit code and out-of-memory in crash reasons and the crash-loop event,
+   and the memory limit on the Memory chart (Railway, Render show both).
+2. **Per-request HTTP logs** from the proxy (method, path, status, duration, instance, request
+   id), filterable by status and duration, `roll logs --http` (Railway's HTTP logs).
+3. **Metric alerts** through the notifier: memory near its limit, a 5xx rate, p95 latency
+   (Railway's monitors, Heroku's alerts).
+4. **Incident flow**: failed cron runs and jobs as events; "Roll back" in the crash banner;
+   `roll apps rollback` defaulting to the previous deployment; a confirmation for production
+   promotes and rollbacks.
+5. **Commit statuses and "wait for CI"**: a deploy reports to its commit (roll code's statuses,
+   GitHub's), and an environment can deploy a push only once its checks pass (Railway, Render).
+6. **SPA fallback** for static sites (client-side routes deep-link), then www↔apex redirects.
+7. **First five minutes**: templates (a service and its database), linking a database in New
+   service, link lines on the canvas.
+8. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).
+9. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
+    (Vercel's rolling releases, Cloud Run's traffic splits).
+10. Then: an audit trail from the event log (variables, settings, domains, reveals), cost
+    estimates in Settings, per-environment run settings in the dashboard, `roll apps metrics
+    --range`, CLI commands for drains and notifications.
+11. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-2. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+12. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-3. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+13. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-5. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+14. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+15. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-6. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+16. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-7. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+17. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

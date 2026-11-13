@@ -450,7 +450,11 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
     assert_eq!(w.api.clone().oneshot(req).await.unwrap().status(), StatusCode::CONFLICT, "the same key on another request");
     let d = settled(&w, &id, "pr-7", &ids[0]).await;
     assert_eq!((d["status"].as_str(), d["revision"].as_str()), (Some("active"), Some("c3c3c3c3c3c3")));
-    assert!(w.fake.instances(&id).iter().any(|(_, dep, st)| *dep == d["id"] && *st == FakeState::Running), "min_instances 1 keeps one up");
+    // A preview scales to zero though the service keeps one up (roll.toml [app.previews.run] could
+    // say otherwise): an open pull request costs nothing until someone opens it.
+    assert!(!w.fake.instances(&id).iter().any(|(_, dep, st)| *dep == d["id"] && *st == FakeState::Running), "{:?}", w.fake.instances(&id));
+    let (_, log) = call(&w.api, "GET", &format!("{base}/deploys/{}/logs", d["id"].as_str().unwrap()), None).await;
+    assert!(log.to_string().contains("a preview environment scales to zero"), "{log}");
     // Private, as previews are: its hostname answers only visitors with the token.
     let token = "aaaaaaaabbbbbbbbccccdddd";
     let (st, env) = call(&w.api, "PUT", &base, Some(json!({"access": {"token": token}}))).await;
