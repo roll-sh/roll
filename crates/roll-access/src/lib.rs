@@ -100,8 +100,9 @@ fn checksum(body: &str) -> String {
 }
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`) and other
-/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlh_`).
-pub const SECRET_PREFIXES: [&str; 4] = ["rlt_", "rlo_", "rlf_", "rlh_"];
+/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlk_`). (`rlh_` is roll code's
+/// automations' inbound webhook secrets: another shape, not ours.)
+pub const SECRET_PREFIXES: [&str; 4] = ["rlt_", "rlo_", "rlf_", "rlk_"];
 
 /// Whether `s` is shaped like a roll secret ([`SECRET_PREFIXES`]) whose checksum holds: what
 /// scanners look for. Secrets made before checksums don't pass, but still work.
@@ -413,7 +414,7 @@ impl Access {
     /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
     /// secret scanning): each live grant they open is revoked at once, with why, and logged.
     /// Returns the grants revoked.
-    /// A product's own leaked secrets (apps' deploy hooks, `rlh_`): found wherever roll's are
+    /// A product's own leaked secrets (apps' deploy hooks, `rlk_`): found wherever roll's are
     /// (roll code's landings, GitHub's secret scanning), revoked by `revoke`, which says what it
     /// revoked (`None`: nothing live).
     pub fn on_leaked(&self, prefix: &'static str, revoke: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static) {
@@ -437,7 +438,7 @@ impl Access {
                         tool: None,
                         method: "-".into(),
                         route: "leaked".into(),
-                        product: s.get(..4).and_then(|p| (p == "rlh_").then(|| "apps".to_string())),
+                        product: s.get(..4).and_then(|p| (p == "rlk_").then(|| "apps".to_string())),
                         action: Some("admin".into()),
                         resource: Some(format!("{what}, found in {found_at}").chars().take(300).collect()),
                         decision: "revoke".into(),

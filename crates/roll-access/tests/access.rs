@@ -714,10 +714,10 @@ async fn a_leaked_token_is_revoked() {
     assert!(d.access.revoke_leaked(&found, "again").unwrap().is_empty(), "once");
 
     // Another product's secret (apps' deploy hooks) found the same way goes to its revoker.
-    let hook = roll_access::new_secret("rlh_");
+    let hook = roll_access::new_secret("rlk_");
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let s2 = seen.clone();
-    d.access.on_leaked("rlh_", move |secret, why| {
+    d.access.on_leaked("rlk_", move |secret, why| {
         s2.lock().unwrap().push((secret.to_string(), why.to_string()));
         Some("svc_a's production deploy hook".into())
     });

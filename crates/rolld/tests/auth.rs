@@ -253,6 +253,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/code/agents/shares/{id}", "public shares"),
         ("/v1/code/mcp", "roll code's own MCP server: grants use /v1/mcp"),
         ("/v1/code/review-apps", "review apps: their own tokens"),
+        ("/v1/apps/hooks", "apps' deploy hooks: the secret in the URL"),
         ("/v1/code/names", "public name lookups"),
     ];
     let unscoped: Vec<_> = scoped
