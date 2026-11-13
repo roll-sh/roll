@@ -824,7 +824,8 @@ type Settings = {
     pending while a page differs and nobody has accepted it ("Differs from main by 8.0%: accept it
     in roll"), and success once someone has (the sheet's Accept, `roll preview accept`, `POST
     …/visual/accept`; "Accepted by ada"), or when the pages look the same. An acceptance is of one
-    screenshot's head: the next push is reviewed again, unless every page (desktop, phone, the
+    screenshot's head (the comment says it too: "**Visual review:** its pages differ from `main` by
+    8.0%. Review it in roll", then "accepted by ada"): the next push is reviewed again, unless every page (desktop, phone, the
     other pages) looks exactly as at the accepted head, when the acceptance carries over (as
     Chromatic carries accepted baselines forward). GitHub's branch protection can require
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
@@ -967,7 +968,8 @@ Ranked by what a person notices first. Done so far:
 - `roll preview screenshot` (any screenshot or diff to a file);
 - the settings' screenshot rules in a section of their own ("Screenshots and checks");
 - a second service in the live check (`wiki:/` taken in its own run and compared);
-- the diff against main in a public preview's comment (a signed link of its own);
+- the diff against main in a public preview's comment (a signed link of its own), and the
+  visual review's state in the comment, with the way to review it;
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;
