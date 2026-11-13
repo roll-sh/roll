@@ -160,11 +160,36 @@ pub enum AppsCmd {
         health: Option<String>,
         #[arg(long)]
         schedule: Option<String>,
+        /// `web`, `worker` or `cron`.
+        #[arg(long = "type", value_name = "TYPE")]
+        kind: Option<String>,
+        /// Requests one instance takes at once before another starts.
+        #[arg(long)]
+        concurrency: Option<u32>,
+        /// Idle seconds before an instance is suspended (0: never).
+        #[arg(long, value_name = "SECONDS")]
+        suspend_after: Option<u32>,
+        /// Idle seconds before it's stopped.
+        #[arg(long, value_name = "SECONDS")]
+        sleep_after: Option<u32>,
+        /// A cron run's limit, in seconds.
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u32>,
+        /// A volume, `<mount>:<size in GB>` (`/data:5`); `none` removes it.
+        #[arg(long)]
+        volume: Option<String>,
+        /// Deploy a push only when it touches these paths (comma-separated, gitignore-style);
+        /// `none`: every push.
+        #[arg(long)]
+        watch: Option<String>,
     },
-    /// Delete a service: its environments, instances, deployments and images.
+    /// Delete a service: its environments, instances, deployments and images (asks first;
+    /// `--yes` doesn't).
     Delete {
         #[command(flatten)]
         target: Target,
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Deployments, newest first.
     Deploys {
@@ -226,6 +251,10 @@ pub enum AppsCmd {
         /// Print the values.
         #[arg(long)]
         reveal: bool,
+        /// Set every `KEY=value` line of a `.env` file (`export`, comments and quotes as in a
+        /// shell's).
+        #[arg(long, value_name = "PATH")]
+        from_file: Option<PathBuf>,
     },
     /// Link a roll resource (`postgres <project>`, `redis <db>`): its connection variables go in.
     Link {
@@ -288,10 +317,12 @@ pub enum AppsCmd {
         #[arg(long)]
         variables_from: Option<String>,
     },
-    /// Tear an environment down.
+    /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
         #[command(flatten)]
         target: Target,
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 
@@ -392,7 +423,7 @@ fn pack(dir: &Path) -> anyhow::Result<Vec<u8>> {
         }
     }
     if !skipped_env.is_empty() {
-        eprintln!("not uploaded: {} (set variables with `roll apps set` instead)", skipped_env.join(", "));
+        eprintln!("not uploaded: {} (set variables with `roll apps vars --from-file .env` instead)", skipped_env.join(", "));
     }
     if files == 0 {
         bail!("{} has nothing to deploy", dir.display());
@@ -574,8 +605,65 @@ fn shell_join(args: &[String]) -> String {
         .join(" ")
 }
 
+/// Ask before deleting `name` (typed back), unless `--yes`. Without a terminal there's nobody to
+/// ask: `--yes` is required.
+fn confirm(yes: bool, name: &str, what: &str) -> anyhow::Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!("this deletes {what}: pass --yes to go ahead");
+    }
+    eprint!("This deletes {what}. Type {name} to go ahead: ");
+    std::io::stderr().flush()?;
+    let mut typed = String::new();
+    std::io::stdin().lock().read_line(&mut typed)?;
+    if typed.trim() != name {
+        bail!("not deleted");
+    }
+    Ok(())
+}
+
+/// `.env` text as variables, the way the dashboard reads it (`parseEnv`): `KEY=value` lines,
+/// `export` allowed, `#` comments and blank lines skipped, a value in single quotes as is, in
+/// double quotes with `\n` for a line break. The 1-based lines it can't read come back too.
+fn parse_env(text: &str) -> (Vec<(String, String)>, Vec<usize>) {
+    let (mut vars, mut bad) = (Vec::new(), Vec::new());
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        let line = line.strip_prefix("export ").map(str::trim_start).unwrap_or(line);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            bad.push(i + 1);
+            continue;
+        };
+        let k = k.trim();
+        if k.is_empty() || k.starts_with(|c: char| c.is_ascii_digit()) || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            bad.push(i + 1);
+            continue;
+        }
+        let v = v.trim();
+        let v = match (v.chars().next(), v.len() >= 2) {
+            (Some('\''), true) if v.ends_with('\'') => v[1..v.len() - 1].to_string(),
+            (Some('"'), true) if v.ends_with('"') => v[1..v.len() - 1].replace("\\n", "\n").replace("\\\"", "\""),
+            _ => v.to_string(),
+        };
+        vars.push((k.to_string(), v));
+    }
+    (vars, bad)
+}
+
 /// Print a log's lines (SSE `data:` JSON) until the stream ends.
 async fn follow(api: &Api, path: &str) -> anyhow::Result<()> {
+    follow_matching(api, path, None).await
+}
+
+/// [`follow`], printing only lines containing `grep` (case-insensitive, as `?q=` searches).
+async fn follow_matching(api: &Api, path: &str, grep: Option<&str>) -> anyhow::Result<()> {
+    let grep = grep.map(str::to_lowercase);
     let mut req = api.http.get(format!("{}{path}", api.base));
     if let Some(k) = &api.key {
         req = req.bearer_auth(k);
@@ -592,6 +680,7 @@ async fn follow(api: &Api, path: &str) -> anyhow::Result<()> {
             let line = String::from_utf8_lossy(&line);
             if let Some(data) = line.trim_end().strip_prefix("data:")
                 && let Ok(v) = serde_json::from_str::<Value>(data.trim())
+                && grep.as_ref().is_none_or(|g| s(&v["text"]).to_lowercase().contains(g))
             {
                 print_line(&v);
             }
@@ -704,6 +793,9 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         Some(b) => {
             let dep = if b == "latest" {
                 let all = api.get(&format!("{base}/deploys")).await?;
+                if all.as_array().is_none_or(Vec::is_empty) {
+                    bail!("{} has no deployments in {} yet", s(&svc["name"]), l.target.env);
+                }
                 s(&all[0]["id"])
             } else {
                 b.clone()
@@ -717,7 +809,7 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         None => String::new(),
     };
     if l.follow {
-        return follow(api, &format!("{path}?follow=1&tail={}{since}", l.tail)).await;
+        return follow_matching(api, &format!("{path}?follow=1&tail={}{since}", l.tail), l.grep.as_deref()).await;
     }
     let grep = l.grep.as_deref().map(|g| format!("&q={}", enc(g))).unwrap_or_default();
     let lines = api.get(&format!("{path}?tail={}{since}{grep}", l.tail)).await?;
@@ -876,8 +968,28 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch } => {
             let svc = service(api, &target).await?;
+            let volume = match volume.as_deref() {
+                None => None,
+                Some("none") => Some(Value::Null),
+                Some(v) => {
+                    let (mount, size) = v.rsplit_once(':').ok_or_else(|| anyhow::anyhow!("--volume is <mount>:<size in GB>, like /data:5"))?;
+                    let size: u32 = size.parse().map_err(|_| anyhow::anyhow!("--volume's size is a whole number of GB"))?;
+                    Some(json!({ "mount": mount, "size_gb": size }))
+                }
+            };
+            let mut body = serde_json::Map::new();
+            match watch.as_deref() {
+                None => {}
+                Some("none") => {
+                    body.insert("build".into(), json!({ "watch": null }));
+                }
+                Some(w) => {
+                    let paths: Vec<&str> = w.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+                    body.insert("build".into(), json!({ "watch": paths }));
+                }
+            }
             let mut run = serde_json::Map::new();
             for (k, v) in [
                 ("min_instances", min.map(Value::from)),
@@ -889,15 +1001,28 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("pre_deploy", pre_deploy.map(Value::from)),
                 ("health_path", health.map(Value::from)),
                 ("schedule", schedule.map(Value::from)),
+                ("type", kind.map(Value::from)),
+                ("concurrency", concurrency.map(Value::from)),
+                ("suspend_after_s", suspend_after.map(Value::from)),
+                ("sleep_after_s", sleep_after.map(Value::from)),
+                ("timeout_s", timeout.map(Value::from)),
+                ("volume", volume),
             ] {
                 if let Some(v) = v {
                     run.insert(k.into(), v);
                 }
             }
-            api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(json!({ "run": run }))).await?
+            if !run.is_empty() {
+                body.insert("run".into(), Value::Object(run));
+            }
+            if body.is_empty() {
+                bail!("nothing to change: see `roll apps set --help`");
+            }
+            api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(Value::Object(body))).await?
         }
-        AppsCmd::Delete { target } => {
+        AppsCmd::Delete { target, yes } => {
             let svc = service(api, &target).await?;
+            confirm(yes, &s(&svc["name"]), "every environment, instance, deployment and image of the service")?;
             api.call(reqwest::Method::DELETE, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), None).await?;
             json!({ "deleted": svc["id"] })
         }
@@ -958,18 +1083,26 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, reveal } => {
+        AppsCmd::Vars { target, set, unset, reveal, from_file } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
-            if !set.is_empty() || !unset.is_empty() {
-                let mut m = serde_json::Map::new();
+            let mut m = serde_json::Map::new();
+            if let Some(path) = &from_file {
+                let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+                let (vars, bad) = parse_env(&text);
+                if !bad.is_empty() {
+                    bail!("{}: lines {} aren't KEY=value", path.display(), bad.iter().map(usize::to_string).collect::<Vec<_>>().join(", "));
+                }
+                m.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
+            }
+            if !set.is_empty() || !unset.is_empty() || !m.is_empty() {
                 for kv in set {
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
                 }
                 api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset }))).await?;
                 if !json_out {
-                    eprintln!("saved; `roll deploy` (or `roll up`) puts them live");
+                    eprintln!("saved; `roll apps redeploy` puts them live (a new deploy or push does too)");
                 }
             }
             let v = if reveal { api.get(&format!("{base}/values")).await? } else { api.get(&base).await? };
@@ -1073,8 +1206,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(Value::Object(body))).await?
         }
-        AppsCmd::EnvDelete { target } => {
+        AppsCmd::EnvDelete { target, yes } => {
             let svc = service(api, &target).await?;
+            confirm(yes, &target.env, "the environment's instances, domains, variables and volume")?;
             api.call(reqwest::Method::DELETE, &env_path(&svc, &target.env), None).await?;
             json!({ "deleted": target.env })
         }
@@ -1090,6 +1224,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dot_env_file_reads_as_the_dashboard_reads_it() {
+        let (vars, bad) = parse_env("# db\nexport DATABASE_URL=postgres://x\nNAME='a b'\nMULTI=\"one\\ntwo\"\n\n1BAD=x\nnope\n");
+        assert_eq!(vars, [("DATABASE_URL".into(), "postgres://x".into()), ("NAME".into(), "a b".into()), ("MULTI".into(), "one\ntwo".into())]);
+        assert_eq!(bad, [6, 7]);
+    }
 
     #[test]
     fn roll_up_leaves_out_ignored_files_and_local_env_files() {
