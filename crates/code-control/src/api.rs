@@ -98,6 +98,7 @@ pub fn router(code: Arc<Code>) -> Router {
         .route(&repo("/blob/{rev}/{*path}"), get(blob))
         .route(&repo("/readme/{rev}"), get(readme))
         .route(&repo("/blame/{rev}/{*path}"), get(blame))
+        .route(&repo("/leaks"), get(scan_leaks))
         .route(&repo("/webhooks"), get(list_webhooks).post(create_webhook))
         .route(&repo("/webhooks/{id}"), get(get_webhook).patch(update_webhook).delete(delete_webhook))
         .route(&repo("/webhooks/{id}/ping"), post(ping_webhook))
@@ -384,6 +385,24 @@ async fn blame(
 }
 
 // ── webhooks and commit statuses ──
+
+/// Secrets' values in the default branch (docs/secrets.md, "Leaked secrets don't land"): where,
+/// never what. For the repo's managers: it confirms which line holds which secret.
+async fn scan_leaks(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, Q(q): Q<LeakQuery>) -> Result<Json<crate::leaks::LeakScan>> {
+    let r = code.writable(&caller, &owner, &repo)?;
+    code.check_manage(&caller, &r)?;
+    let history = q.history.unwrap_or(0);
+    if history > crate::leaks::SCAN_HISTORY_MAX {
+        return Err(Error::Invalid(format!("history is a number of commits, at most {}", crate::leaks::SCAN_HISTORY_MAX)));
+    }
+    Ok(Json(code.scan_leaks(&r, history).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct LeakQuery {
+    /// Also walk this many first-parent commits of the default branch.
+    history: Option<usize>,
+}
 
 async fn list_webhooks(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>) -> Result<Json<Vec<Value>>> {
     let r = code.writable(&caller, &owner, &repo)?;

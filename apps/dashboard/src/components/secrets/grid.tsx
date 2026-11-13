@@ -155,7 +155,7 @@ function CellView({ cell, letter, onClick }: { cell: Cell | null; letter?: strin
   return (
     <button
       onClick={onClick}
-      title={`v${cell.version} · ${ago(cell.updated_at)} · fingerprint ${cell.fp.slice(0, 8)}`}
+      title={`v${cell.version} · ${ago(cell.updated_at)} · fingerprint ${cell.fp.slice(0, 8)}${cell.misfit ? ` · ${cell.misfit}` : ""}`}
       className="flex h-8 w-full min-w-0 items-center gap-1.5 px-2 text-left transition-colors hover:bg-fg/[0.03]"
     >
       <span className={`size-1.5 shrink-0 rounded-full ${cell.source === "own" ? "bg-fg/70" : "border border-fg/50"}`} aria-label={cell.source === "own" ? "set" : `from ${cell.source}`} />
@@ -164,6 +164,11 @@ function CellView({ cell, letter, onClick }: { cell: Cell | null; letter?: strin
       {cell.reference && <RefMark />}
       {cell.personal && <PersonalMark />}
       {cell.comment && <CommentMark />}
+      {cell.misfit && (
+        <span className="rounded border border-danger/40 px-1 font-mono text-[10px] text-danger" title={cell.misfit}>
+          doesn&apos;t fit
+        </span>
+      )}
       <SourceMark source={cell.source} />
     </button>
   );

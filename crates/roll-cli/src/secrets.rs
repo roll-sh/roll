@@ -190,6 +190,9 @@ pub enum Secrets {
     /// Scoped tokens for CI and services: list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
+    /// Keys every standard environment must set, and what their values must be: list, add, rm.
+    #[command(subcommand)]
+    Required(RequiredCmd),
     /// Workload identities: CI jobs and clusters log in with their own OIDC token
     /// (`ROLL_IDENTITY`), no stored token: list, add, rm.
     #[command(subcommand)]
@@ -389,6 +392,31 @@ pub enum Tokens {
         ttl_days: Option<i64>,
     },
     Revoke { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum RequiredCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Require a key (in a folder), optionally typed: `add PORT --type port`.
+    Add {
+        key: String,
+        #[arg(long, default_value = "/")]
+        path: String,
+        /// url, int, port, bool, json or email.
+        #[arg(long = "type")]
+        kind: Option<String>,
+        /// A regular expression the whole value must match.
+        #[arg(long)]
+        pattern: Option<String>,
+        #[arg(long, default_value = "")]
+        comment: String,
+    },
+    Rm {
+        key: String,
+        #[arg(long, default_value = "/")]
+        path: String,
+    },
 }
 
 // Parsed once per run.
@@ -797,6 +825,44 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
+        Secrets::Required(r) => {
+            let url = format!("{}/required", c.base());
+            let list = c.call(Method::GET, &url, None).await?;
+            let mut rows: Vec<Value> = list.as_array().cloned().unwrap_or_default();
+            let same = |x: &Value, key: &str, path: &str| x["key"] == key && x["path"] == path;
+            let put = |rows: Vec<Value>| async move { c.call(Method::PUT, &format!("{}/required", c.base()), Some(Value::Array(rows))).await };
+            match r {
+                RequiredCmd::Ls => {
+                    if json_out {
+                        return print(&list);
+                    }
+                    for x in &rows {
+                        let rule = [x["type"].as_str().map(|t| format!("type {t}")), x["pattern"].as_str().map(|p| format!("/{p}/"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                        println!("{:<28} {:<12} {:<28} {}", s(&x["key"]), s(&x["path"]), rule, x["comment"].as_str().unwrap_or_default());
+                    }
+                }
+                RequiredCmd::Add { key, path, kind, pattern, comment } => {
+                    rows.retain(|x| !same(x, &key, &path));
+                    let mut row = json!({ "key": key, "path": path, "comment": comment });
+                    if let Some(k) = kind {
+                        row["type"] = json!(k);
+                    }
+                    if let Some(p) = pattern {
+                        row["pattern"] = json!(p);
+                    }
+                    rows.push(row);
+                    put(rows).await?;
+                    println!("Required {key}");
+                }
+                RequiredCmd::Rm { key, path } => {
+                    let before = rows.len();
+                    rows.retain(|x| !same(x, &key, &path));
+                    anyhow::ensure!(rows.len() < before, "{key} isn't required in {path}");
+                    put(rows).await?;
+                    println!("{key} isn't required any more");
+                }
+            }
+        }
         Secrets::Identities(i) => match i {
             Identities::Ls => {
                 let v = c.call(Method::GET, &format!("{}/identities", c.base()), None).await?;

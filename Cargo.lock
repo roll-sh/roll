@@ -6516,6 +6516,7 @@ dependencies = [
  "hkdf",
  "hmac 0.12.1",
  "http-body-util",
+ "regex",
  "ring",
  "roll-auth",
  "roll-workspace",

@@ -257,6 +257,19 @@ required key it lacks as a problem (`required, but staging doesn't set it`), so 
 and resolves refuse to start without it, as they do for an unresolved reference. An ephemeral
 environment counts what its base defines.
 
+**Typed keys.** A required key can also say what its value must be: a `type` (`url`, `int`,
+`port`, `bool`, `json`, `email`) and a `pattern` (a regular expression the whole value matches;
+at most 500 characters, checked when it's set). A write, an import, a promotion, a change request
+or a new ephemeral environment's overrides with a value that doesn't fit is refused with 400
+naming the key and the rule (`PORT must be a port (1–65535)`), never the value. A value with a
+reference is checked once resolved: reading the environment's values reports `PORT must be a port`
+as a problem, so `roll run` won't start with it. A rollback restores what was there, typed or not.
+Edit them in Environments → Required keys, or `roll secrets required add PORT --type port`.
+A type added after values exist doesn't change them: the overview grid marks each stored value
+that doesn't fit (`misfit` on its cell, the rule it breaks), for a caller who may reveal it.
+The dashboard's add and edit forms check a typed key's value as it's typed, with the same rules
+and messages (`apps/dashboard/src/lib/secrets-required.ts`).
+
 ### Insights
 
 `GET …/environments/{env}/insights?path=` shows, for each key of a folder, when it last changed
@@ -455,6 +468,15 @@ the change`. The blocker names keys and environments, never the value or the lin
   checked is caught when the head or its merge base moves. A repo on no project's canvas, or a
   server without roll secrets, gets no blocker; if roll secrets can't answer, the change isn't
   blocked and the check runs again next time.
+- **Values already in a repo.** A change is checked for what it adds, so a value that landed
+  before (before the repo was on the canvas, or before the secret was set) is found by a scan:
+  `GET /v1/code/repos/{owner}/{name}/leaks` (the repo's managers; in the Secrets surface, Access,
+  "Values in code") reads the default branch's head tree with the same candidates and limits
+  (text files up to 1 MiB, lines up to 4 KiB, 20,000 files and 200,000 candidates, then
+  `truncated`) and answers each match as `{key, environment, folder, path, line}`, never the value. With
+  `?history=N` (at most 1,000) it also reads what each of the last N first-parent commits added
+  and lists the commits that added a value, `{key, environment, folder, changeset, path}`: a value removed
+  since is still in the history anyone with the repo can read, so it's out and needs rotating.
 - **What it tells.** A blocker says a value is a secret's, so a writer of the repo could confirm a
   guess at a value they may not reveal by pushing it. That's accepted: they confirm a guess they
   already hold (never learn a value), only credential-like guesses count, every guess is a pushed
@@ -902,10 +924,10 @@ type Version = { version: number; seq: number; op: "set" | "delete"; what: strin
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
-type Required = { key: string; path: string; comment: string };
+type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
-type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean };
+type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
@@ -983,7 +1005,8 @@ streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll ru
 checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
 sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), audit
 sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
-previews, workload identities (OIDC logins for CI), and the fixes from two security reviews.
+previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
+for stored values, typed keys, and the fixes from two security reviews.
 Reviewed on 2026-11-13 against Infisical, Doppler, Vault, Vercel and 1Password Developer, and
 against the apps, previews, MCP and search branches (previews resolves untrusted; apps refuses
 dynamic links for services and uses the digest for `needs_deploy`). Ranked:
@@ -997,11 +1020,12 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
    `Secrets::values` as `app:<svc>` (whichever of #20 and #21 merges second).
 2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
-3. **Secret scanning beyond new changes**: scan a repo's existing tree and history once when it's
-   put on a project's canvas (bounded, in the background, on the repo's owner), reporting keys
-   and paths, never values; today only a change's added lines are checked.
-4. **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
+3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
+4. **Shared values across projects**: an import from another project's environment and folder
+   (`{project, environment, path}`), allowed only where the caller may read it there and audited
+   on both sides, so an organisation-wide value (an error tracker's DSN, a shared API key) lives
+   once; cycles across projects are caught like imports'; the grid marks where a value comes from.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

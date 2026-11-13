@@ -340,6 +340,9 @@ impl Secrets {
         // Workload identities (identities.rs) and the tokens their logins made.
         db.ensure_schema(identities::SCHEMA)?;
         db.add_column("tokens", "identity", "TEXT")?;
+        // Typed keys (required.rs).
+        db.add_column("required", "type", "TEXT")?;
+        db.add_column("required", "pattern", "TEXT")?;
         db.ensure_schema(notices::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default() })
     }

@@ -558,6 +558,10 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit(&self, project: &str, env_slug: &str, items: Vec<Item>, kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
         let warnings = self.warnings(project, env_slug, &items, caller);
+        // A rollback restores what was there, typed or not.
+        if kind != "rollback" {
+            self.check_types(project, &items)?;
+        }
         let prepared = self.prepare(project, env_slug, &items, caller)?;
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;

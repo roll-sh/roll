@@ -2,7 +2,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { ArrowLeftRight, ChevronRight, KeyRound, LayoutGrid, Lock, RefreshCw, ScrollText, Settings2, ShieldCheck } from "lucide-react";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { Link } from "@/components/link";
-import { secretsApi, type Environment, type Link as SecretLink, type SecretsApi } from "@/lib/secrets-api";
+import { secretsApi, type Environment, type Link as SecretLink, type Required, type SecretsApi } from "@/lib/secrets-api";
 import { stringifySearch, type Search } from "@/lib/search";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey } from "@/lib/workspace-resources";
@@ -35,6 +35,9 @@ type Ctx = {
   go: (next: Search, replace?: boolean) => void;
   /** A linked resource's name on the canvas, else its ref. */
   resourceName: (l: SecretLink) => string;
+  /** The project's required keys (typed ones say what a value must be). */
+  required: Required[];
+  reloadRequired: () => void;
 };
 
 const SecretsCtx = createContext<Ctx | null>(null);
@@ -67,6 +70,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   const ws = useWorkspace();
   const api = useMemo(() => secretsApi(project.id), [project.id]);
   const overview = useLoad(() => api.overview(), [api]);
+  const required = useLoad(() => api.required(), [api]);
   const envs = overview.data?.environments ?? [];
   const standard = envs.filter((e) => e.kind === "standard").sort((a, b) => a.position - b.position);
   const previews = envs.filter((e) => e.kind === "ephemeral");
@@ -82,6 +86,8 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
     search,
     go: (next, replace) => navigate({ href: secretsHref(project.id, next), replace }),
     resourceName: (l) => ws.inventory.get(resourceKey({ kind: l.kind as never, ref: l.ref }))?.name ?? l.ref,
+    required: required.data ?? [],
+    reloadRequired: required.reload,
   };
 
   const env = search.env ? envs.find((e) => e.slug === search.env) : undefined;

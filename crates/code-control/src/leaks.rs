@@ -3,11 +3,17 @@
 //! since its merge base are cut into candidate tokens, roll secrets matches them by fingerprint
 //! ([`crate::SecretEnv::leaks`]), and the answer is cached per (repo, head) with the merge base it
 //! was found from, as review facts are. Blockers name keys and environments, never a value or a line.
+//!
+//! A scan ([`Code::scan_leaks`], `GET …/repos/{owner}/{name}/leaks`, for the repo's managers)
+//! checks the default branch's whole head tree the same way, for values that landed before the
+//! repo was on a project's canvas or before the secret was set, and says where: path and line,
+//! never the value.
 
 use crate::model::{Blocker, Change, ChangeState, RepoRow};
 use crate::{Code, Result};
-use code_store::{ChangesetId, Mode};
-use std::collections::{BTreeMap, HashSet};
+use code_store::{ChangesetId, EntryKind, Mode};
+use serde::Serialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// The most candidate tokens checked per change.
@@ -16,6 +22,56 @@ const MAX_CANDIDATES: usize = 20_000;
 const MAX_LINE: usize = 4096;
 /// Files larger than this (bytes, either side) aren't diffed.
 const MAX_FILE: u64 = 1 << 20;
+
+/// The most files a scan reads, the most candidates it checks, and how many go to roll secrets at
+/// once.
+const SCAN_FILES: usize = 20_000;
+const SCAN_CANDIDATES: usize = 200_000;
+const SCAN_BATCH: usize = 20_000;
+/// Places reported per value.
+const SCAN_PLACES: usize = 5;
+/// The most first-parent commits a history scan walks.
+pub const SCAN_HISTORY_MAX: usize = 1000;
+
+/// Where a secret's value sits in the default branch.
+#[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Found {
+    pub key: String,
+    pub environment: String,
+    /// The secret's folder in its environment.
+    pub folder: String,
+    pub path: String,
+    /// 1-based.
+    pub line: usize,
+}
+
+/// A scan of the default branch's head for secrets' values.
+#[derive(Debug, Default, Serialize)]
+pub struct LeakScan {
+    /// The changeset scanned (none if nothing has landed).
+    pub head: Option<String>,
+    pub files: usize,
+    pub found: Vec<Found>,
+    /// Files not read, and why (over 1 MiB).
+    pub skipped: Vec<String>,
+    /// The scan stopped at its file or candidate limit: what's past it wasn't checked.
+    pub truncated: bool,
+    /// With `history`: the commits (first parent, newest first) that added a value, whether or
+    /// not it's still there. A value in history is out: rotate it.
+    pub history: Vec<InHistory>,
+    /// How many commits the history scan read.
+    pub commits: usize,
+}
+
+/// A commit that added a secret's value.
+#[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InHistory {
+    pub key: String,
+    pub environment: String,
+    pub folder: String,
+    pub changeset: String,
+    pub path: String,
+}
 
 /// (key, environment) of every secret whose value a change adds.
 pub(crate) type Leaks = Arc<Vec<(String, String)>>;
@@ -36,7 +92,7 @@ impl Code {
         }
         let found = match self.added_candidates(r, mb.as_ref(), &head).await {
             Ok(candidates) if candidates.is_empty() => Ok(Vec::new()),
-            Ok(candidates) => secrets.leaks(&r.full_name(), candidates).await,
+            Ok(candidates) => secrets.leaks(&r.full_name(), candidates).await.map(|l| l.into_iter().map(|(_, key, env, _)| (key, env)).collect()),
             Err(e) => Err(e.into()),
         };
         match found {
@@ -67,6 +123,126 @@ impl Code {
             .collect()
     }
 
+    /// Scan the default branch's head (see the module doc). Text files up to 1 MiB, lines up to
+    /// 4 KiB, the same candidates as a change; nothing about a value comes back but where it is.
+    pub async fn scan_leaks(&self, r: &RepoRow, history: usize) -> Result<LeakScan> {
+        let secrets = self.secret_env.get().cloned().ok_or_else(|| crate::Error::Invalid("roll secrets isn't on this server".into()))?;
+        let Some(head) = self.head(r)? else { return Ok(LeakScan::default()) };
+        let mut scan = LeakScan { head: Some(head.to_string()), ..Default::default() };
+        let mut files = Vec::new();
+        let mut dirs = vec![String::new()];
+        'walk: while let Some(d) = dirs.pop() {
+            for e in self.store.list_tree(&r.id, &head, &d)?.unwrap_or_default() {
+                match e.kind {
+                    EntryKind::Dir => dirs.push(e.path),
+                    EntryKind::File if files.len() >= SCAN_FILES => {
+                        scan.truncated = true;
+                        break 'walk;
+                    }
+                    EntryKind::File => files.push(e),
+                    _ => {}
+                }
+            }
+        }
+        // Each candidate once, with the first few places it's at.
+        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut places: Vec<Vec<(String, usize)>> = Vec::new();
+        let mut cands: Vec<String> = Vec::new();
+        'files: for f in &files {
+            if f.size.unwrap_or(u64::MAX) > MAX_FILE {
+                scan.skipped.push(format!("{}: over 1 MiB", f.path));
+                continue;
+            }
+            let Some(data) = self.store.get_blob(&r.id, &f.oid).await? else { continue };
+            if data.contains(&0) {
+                continue;
+            }
+            scan.files += 1;
+            for (n, line) in String::from_utf8_lossy(&data).lines().enumerate().filter(|(_, l)| l.len() <= MAX_LINE) {
+                let mut found = HashSet::new();
+                candidates(line, &mut found);
+                for c in found {
+                    let i = *index.entry(c.clone()).or_insert_with(|| {
+                        cands.push(c);
+                        places.push(Vec::new());
+                        cands.len() - 1
+                    });
+                    if places[i].len() < SCAN_PLACES {
+                        places[i].push((f.path.clone(), n + 1));
+                    }
+                }
+                if cands.len() >= SCAN_CANDIDATES {
+                    scan.truncated = true;
+                    break 'files;
+                }
+            }
+        }
+        for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
+            for (i, key, environment, folder) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
+                for (path, line) in places.get(b * SCAN_BATCH + i).into_iter().flatten() {
+                    scan.found.push(Found { key: key.clone(), environment: environment.clone(), folder: folder.clone(), path: path.clone(), line: *line });
+                }
+            }
+        }
+        scan.found.sort();
+        scan.found.dedup();
+        if history > 0 {
+            self.scan_history(r, &head, history.min(SCAN_HISTORY_MAX), &mut scan).await?;
+        }
+        Ok(scan)
+    }
+
+    /// What `n` first-parent commits from `head` added, each matched like a change's lines.
+    async fn scan_history(&self, r: &RepoRow, head: &ChangesetId, n: usize, scan: &mut LeakScan) -> Result<()> {
+        let secrets = self.secret_env.get().cloned().ok_or_else(|| crate::Error::Invalid("roll secrets isn't on this server".into()))?;
+        let mut commits = Vec::new();
+        let mut cursor = None;
+        while commits.len() < n {
+            let q = code_store::LogQuery { path: None, limit: (n - commits.len()).min(1000), cursor };
+            let page = self.store.log(&r.id, head, &q)?;
+            let Some(last) = page.last() else { break };
+            cursor = Some(last.id);
+            commits.extend(page.into_iter().map(|c| (c.id, c.short)));
+        }
+        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut places: Vec<Vec<(String, String)>> = Vec::new();
+        let mut cands: Vec<String> = Vec::new();
+        'commits: for (id, short) in &commits {
+            scan.commits += 1;
+            for d in self.store.diff(&r.id, id)? {
+                let Some(patch) = self.added_patch(r, &d).await? else { continue };
+                let mut found = HashSet::new();
+                for line in added_lines(&patch) {
+                    candidates(line, &mut found);
+                }
+                for c in found {
+                    let i = *index.entry(c.clone()).or_insert_with(|| {
+                        cands.push(c);
+                        places.push(Vec::new());
+                        cands.len() - 1
+                    });
+                    if places[i].len() < SCAN_PLACES {
+                        places[i].push((short.clone(), d.path.as_str().to_string()));
+                    }
+                }
+                if cands.len() >= SCAN_CANDIDATES {
+                    scan.truncated = true;
+                    break 'commits;
+                }
+            }
+        }
+        for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
+            for (i, key, environment, folder) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
+                for (changeset, path) in places.get(b * SCAN_BATCH + i).into_iter().flatten() {
+                    scan.history.push(InHistory { key: key.clone(), environment: environment.clone(), folder: folder.clone(), changeset: changeset.clone(), path: path.clone() });
+                }
+            }
+        }
+        scan.history.sort();
+        scan.history.dedup();
+        Ok(())
+    }
+
     /// The candidate tokens of the lines `head` adds since `mb`, bounded by [`MAX_CANDIDATES`].
     /// Binary files, files over [`MAX_FILE`] and lines over [`MAX_LINE`] are skipped.
     async fn added_candidates(&self, r: &RepoRow, mb: Option<&ChangesetId>, head: &ChangesetId) -> Result<Vec<String>> {
@@ -75,19 +251,8 @@ impl Code {
             if out.len() >= MAX_CANDIDATES {
                 break;
             }
-            if d.new_oid.is_none() || d.new_mode == Some(Mode::Gitlink) {
-                continue;
-            }
-            let size = |oid| self.store.blob_size(&r.id, &oid).ok().flatten().unwrap_or(u64::MAX);
-            if [d.old_oid, d.new_oid].into_iter().flatten().any(|o| size(o) > MAX_FILE) {
-                continue;
-            }
-            let patch = self.store.unified_diff(&r.id, &d).await?;
-            if patch.starts_with("Binary files") {
-                continue;
-            }
-            let added = patch.lines().skip_while(|l| !l.starts_with("@@")).filter_map(|l| l.strip_prefix('+'));
-            for line in added.filter(|l| l.len() <= MAX_LINE) {
+            let Some(patch) = self.added_patch(r, &d).await? else { continue };
+            for line in added_lines(&patch) {
                 candidates(line, &mut out);
                 if out.len() >= MAX_CANDIDATES {
                     break;
@@ -96,6 +261,25 @@ impl Code {
         }
         Ok(out.into_iter().take(MAX_CANDIDATES).collect())
     }
+
+    /// A file diff's unified patch, when it adds text worth reading: not a deletion, a
+    /// submodule, a binary file or a file over [`MAX_FILE`].
+    async fn added_patch(&self, r: &RepoRow, d: &code_store::FileDiff) -> Result<Option<String>> {
+        if d.new_oid.is_none() || d.new_mode == Some(Mode::Gitlink) {
+            return Ok(None);
+        }
+        let size = |oid| self.store.blob_size(&r.id, &oid).ok().flatten().unwrap_or(u64::MAX);
+        if [d.old_oid, d.new_oid].into_iter().flatten().any(|o| size(o) > MAX_FILE) {
+            return Ok(None);
+        }
+        let patch = self.store.unified_diff(&r.id, d).await?;
+        Ok((!patch.starts_with("Binary files")).then_some(patch))
+    }
+}
+
+/// The lines a unified patch adds (up to [`MAX_LINE`] bytes each).
+fn added_lines(patch: &str) -> impl Iterator<Item = &str> {
+    patch.lines().skip_while(|l| !l.starts_with("@@")).filter_map(|l| l.strip_prefix('+')).filter(|l| l.len() <= MAX_LINE)
 }
 
 /// Whether `s` could be a credential rather than ordinary configuration that's also kept as an

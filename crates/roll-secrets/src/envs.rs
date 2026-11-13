@@ -302,6 +302,7 @@ impl Secrets {
         }
         let items = crate::write::items(&path, &new.secrets, caller)?;
         self.check_items(project, &new.slug, &items, caller)?;
+        self.check_types(project, &items)?;
         let items = self.prepare(project, &new.slug, &items, caller)?;
         let env = self.db.write(|c| {
             if by_slug(c, project, &new.slug).is_ok() {

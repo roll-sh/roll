@@ -376,6 +376,27 @@ async fn the_grid_flags_differences_and_promote_copies_them() {
     let p = api.ok(Method::POST, "/environments/staging/promote?from=development", Some(json!({ "keys": ["NEW"] }))).await;
     assert_eq!(p["change"]["kind"], "promote");
     assert_eq!(api.values("staging", "/").await["values"], json!({ "NEW": "n", "SAME_OR_NOT": "a" }));
+
+    // Typed keys: a value that doesn't fit is refused by key (never echoed); one that only fits
+    // once resolved is checked then, so roll run won't start with it.
+    let (s, _) = api.call(Method::PUT, "/required", Some(json!([{ "key": "PORT", "type": "port" }, { "key": "REGION", "pattern": "[a-z]{2}-[a-z]+-[0-9" }]))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a pattern that doesn't compile");
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "PORT", "type": "port" }, { "key": "REGION", "pattern": "[a-z]{2}-[a-z]+-[0-9]" }]))).await;
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/PORT", Some(json!({ "value": "eighty-eighty" }))).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("PORT must be a port (1–65535)")));
+    let (s, _) = api.call(Method::POST, "/environments/staging/import", Some(json!({ "dotenv": "REGION=Europe\n" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    api.set("staging", "PORT", "8080").await;
+    api.set("staging", "REGION", "eu-west-1").await;
+    api.set("development", "WRONG", "not a port").await;
+    api.set("development", "PORT", "${WRONG}").await;
+    let problems = api.values("development", "/").await["problems"].clone();
+    assert!(problems.as_array().unwrap().iter().any(|p| p["key"] == "PORT" && p["problem"] == "PORT must be a port (1–65535)"), "{problems}");
+    // A type added after the values: the grid says which don't fit, to whoever may reveal them.
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "SAME_OR_NOT", "type": "int" }]))).await;
+    let grid = api.ok(Method::GET, "/grid", None).await;
+    let row = grid["rows"].as_array().unwrap().iter().find(|r| r["key"] == "SAME_OR_NOT").unwrap().clone();
+    assert_eq!(row["cells"]["production"]["misfit"], "SAME_OR_NOT must be an integer");
 }
 
 #[tokio::test]
