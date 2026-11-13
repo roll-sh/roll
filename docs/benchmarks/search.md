@@ -93,7 +93,7 @@ numbers are from its latest binary, Elasticsearch's and OpenSearch's from the th
 | indexing, http_logs (docs/s) | **160k** | 94k | 95k |
 | indexing, geonames (docs/s) | **67k** | 28k | 29k |
 | indexing, so (docs/s) | **39k** | 26k | 24k |
-| indexing, nyc_taxis (docs/s) | **45-51k** | 46k | 41k |
+| indexing, nyc_taxis (docs/s; `bench-search.sh ingest`, 1M docs, 8 clients) | **90k** | 66k | 60k |
 | http_logs `default` | **2.57** | 5.68 | 4.83 |
 | http_logs `hourly_agg` | **6.79** | 121.10 | 14.00 |
 | http_logs `terms_enum` | 1.12 | 3.43 | **0.57** |
@@ -1129,6 +1129,25 @@ Where roll stands (r4g run):
 
 RSS of the server process at the end of a round: roll 379–428 MiB, Elasticsearch 2.6–2.7 GiB
 (2 GiB of it is the configured heap).
+
+## Indexing nyc_taxis (2026-11-13)
+
+`scripts/bench-search.sh ingest --file …/nyc_taxis/documents-2000000.json --body <the track's
+mapping, 1 shard> --docs 1000000 --clients 1,8 --rounds 3`: each target in Docker on the same 4
+hardware threads (`10,11,28,29`) and 4 GiB, rotating, on a host at load 20-29. Median of 3 (min-max);
+CPU per document is the container's CPU time over the documents (then after the refresh settles).
+The run before this round's parser change had roll at 60-66k docs/s with 8 clients and 58-65 µs
+per document, behind Elasticsearch: nyc_taxis' `scaled_float` fields kept every document off the
+direct parser (tuning log).
+
+| clients | target | docs/s | p50 bulk ms | p99 bulk ms | CPU µs/doc |
+|---|---|---:|---:|---:|---:|
+| 1 | roll | **66,319** (51,465-73,882) | **72.6** | **174.2** | 39.7 (35.5-41.3) |
+| 1 | Elasticsearch 9.5.5 | 38,039 (29,139-43,840) | 123.3 | 226.7 | 34.9 (30.3-82.7) |
+| 1 | OpenSearch 3.9 | 32,187 (26,741-33,275) | 147.5 | 301.1 | 40.1 (35.0-75.1) |
+| 8 | roll | **90,195** (89,109-92,896) | **423.2** | **790.8** | **42.0** (39.9-42.9) |
+| 8 | Elasticsearch 9.5.5 | 66,346 (61,663-78,655) | 510.6 | 1,257.9 | 51.6 (47.8-58.7) |
+| 8 | OpenSearch 3.9 | 59,610 (49,214-64,886) | 641.4 | 1,200.7 | 62.5 (56.4-75.6) |
 
 ## Footprint and cold start
 
