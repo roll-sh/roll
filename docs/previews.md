@@ -720,9 +720,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+1. **Branch roles in pg-control, with its e2e test**: `POST /v1/projects/{id}/branches
+   {app_role: true}` makes the branch's own role (today `rolld`'s previews adapter does it through
+   the query route) and the branch answers with an `app_connection_uri`; an in-place reset keeps
+   it working. Then any branch, not only a preview's, can be handed to code without the
+   superuser, and `crates/pg-control/tests/e2e.rs` checks that the role migrates, is refused the
+   WAL and files, and is unknown on the parent (only `scripts/preview-cost.sh` checks it today).
+2. **A look at the Previews tab and sheet as they are now** (schema changes, logs, keep,
+   screenshots and masking were added one by one): a pass for density, order and empty states,
+   from screenshots of the real thing.
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
+
+Looked at and dropped: branching from a stopped parent without starting it. pg-control already
+copies a stopped parent's directory directly; the slow first numbers (9.6–16.8 s) were brand-new
+parents being initialized on their first start, and a preview of an existing project is ready in
+about 5 s (branch compute 1.3 s, its history's base backup 1.8 s, the other products about 1 s).
