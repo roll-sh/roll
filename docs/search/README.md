@@ -244,8 +244,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
 4. **Dashboard polish**: the index browser and console are on the per-index routes, and a
    cluster's Settings has an API keys panel (create with data or admin access and an expiry,
    shown once; list on request, so it doesn't wake the cluster; revoke, naming keys apps and roll
-   secrets made). Left: signed-in users (#18) seeing only the clusters and indices their access
-   allows; checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
+   secrets made). Left: a review against Elastic Cloud's and OpenSearch Dashboards' consoles.
+   Signed-in users who aren't admins follow accounts' phase 2: today every product but code,
+   agents and projects answers them 403 (docs/accounts.md), search included.
 5. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
