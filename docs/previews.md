@@ -631,21 +631,27 @@ Ranked by what a person notices first. Done so far:
 - Postgres column masking per preview (measured: the branch reads `user-…@example.invalid`, the
   parent the real address);
 - keeping a preview past its TTL (`POST …/keep`, the sheet, `roll preview keep`);
+- each thread checked live against its latest branch: roll secrets (`wip/previews-on-secrets`:
+  the one-call ensure, an untrusted environment expiring in 24 h, a dropped override gone, the
+  service seeing development's value), roll apps (`wip/previews-on-apps`: a preview ready only
+  once its deploy is live, the branch's Redis seen, nothing left after landing) and roll MCP
+  (`wip/previews-on-secrets-mcp`: a "Previews only" token reaches branches, never parents);
 - a third adversarial review and its fixes (no bypass for forks, rotation restarts nothing the
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The integration branch again**: `wip/previews-on-secrets-mcp` refreshed on the threads'
-   latest heads, with apps and search merged too, and the cross-thread run (a service on roll
-   apps reading a secret and a branch, a "Previews only" token) repeated. Needs the disk for one
-   more full build.
-2. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+1. **roll search live**: a scratch merge with `feature/roll-search`, a preview that branches a
+   search cluster, its documents seen and its cost read from `own_bytes`, nothing left after
+   landing. The adapter is written against roll search's API but has only run against fakes.
+2. **Unresolved secrets in the preview's activity**: roll secrets' `problems` (a reference that
+   doesn't resolve) are only logged; say which keys on the preview, as a check does.
+3. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page through the bypass, and the comment shows it (Vercel does). Store it in
    roll storage and drop it with the preview. Needs a host whose containers reach rolld (not
    ai-server's firewall) to verify.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+4. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
