@@ -611,7 +611,11 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 ### Runtime resolve for services (roll apps)
 
 roll apps (docs/apps/) deploys a service into an environment and injects that environment's
-secrets when the service starts. It uses one call:
+secrets when the service starts. rolld's `ForApps` (`crates/rolld/src/secrets.rs`) is apps'
+`SecretSource`: the service's own project's environment of the same name, resolved as
+`app:<svc>`, only where the project stands for the service (`Workspace::trusts`). A project or
+environment roll secrets doesn't have is no variables (a service needn't use secrets); an
+unresolved reference or a dynamic credential fails the deploy, saying which. It uses one call:
 
 - **In process**: `Secrets::values(project, env, path, true, Some("app:<service>"), &caller)`
   returns `Values`: a map of `Value`s (redacted in `Debug`, zeroized on drop), `problems` (fail a
@@ -1600,11 +1604,11 @@ Ranked (work that can start now):
    keep their trust configuration and OIDC verification here and mint short-lived `workload`
    grants (`Access::mint_workload`, 5–60 minutes, the identity's scope, owned by its creator; 409
    past 1,000 per owner). `TokenScope`, the `tokens` table's use and the built-in token check go.
-2. **roll apps' variables from roll secrets.** rolld's `SecretSource` for apps resolves the
-   service's project's environment as `app:<svc>` (`Secrets::values`, resolved), only where the
-   project trusts the service (`Workspace::trusts`); an environment roll secrets doesn't have is
-   no variables, never a failed deploy. apps' `variables?reveal` shows secrets' values: it needs
-   `reveal` on secrets too (a second resource in roll-access's catalogue row). With roll apps.
+2. **roll apps' variables from roll secrets**, on `feature/roll-secrets-apps` (after #20): rolld's
+   `ForApps` is apps' `SecretSource` (Runtime resolve for services, above). Left, with roll apps:
+   linked keys' addresses rewritten for a container (`Values.linked` → apps' `runtime.reach`, which
+   the trait can't carry yet); preview environments ensured from their base when apps makes one;
+   and apps' `variables?reveal`, which shows secrets' values, needing `reveal` on secrets too.
 3. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
    protected environment, and an approver grants it for minutes (the approval names the
    environment and folder).

@@ -635,6 +635,57 @@ impl roll_workspace::Owners for People {
     }
 }
 
+/// roll secrets for roll apps' deploys (`apps_control::integrations::SecretSource`), set once the
+/// store is open (it opens after roll apps starts).
+#[derive(Clone, Default)]
+pub struct ForApps(Arc<OnceLock<(Arc<Secrets>, Arc<roll_workspace::Workspace>)>>);
+
+impl ForApps {
+    pub fn set(&self, secrets: Arc<Secrets>, workspace: Arc<roll_workspace::Workspace>) {
+        let _ = self.0.set((secrets, workspace));
+    }
+}
+
+#[async_trait::async_trait]
+impl apps_control::integrations::SecretSource for ForApps {
+    fn name(&self) -> &'static str {
+        "roll secrets"
+    }
+
+    /// The service's project's `env`, resolved as `app:<svc>`. A project or environment roll
+    /// secrets doesn't have is no variables (a service needn't use secrets), and so is a project
+    /// that doesn't stand for the service (`Workspace::trusts`). An unresolved reference fails the
+    /// deploy, and so does a dynamic credential: it ends with its lease, and a service that scales
+    /// to zero can't renew it.
+    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
+        let (project, env, service) = (project.to_string(), env.to_string(), service.to_string());
+        tokio::task::spawn_blocking(move || {
+            let Ok(p) = ws.get(roll_workspace::Scope::All, &project) else { return Ok(Vec::new()) };
+            if !ws.trusts(&p, roll_workspace::Kind::Service, &service) {
+                tracing::warn!(%project, %service, "apps: the project doesn't stand for the service, so it gets none of the project's secrets");
+                return Ok(Vec::new());
+            }
+            let consumer = format!("app:{service}");
+            let caller = roll_secrets::Caller::consumer(&consumer);
+            match secrets.environment(&project, &env, &caller) {
+                Ok(_) => {}
+                Err(roll_secrets::Error::NotFound(_)) => return Ok(Vec::new()),
+                Err(e) => return Err(e.into()),
+            }
+            let v = secrets.values(&project, &env, "/", true, Some(&consumer), &caller)?;
+            if let Some(p) = v.problems.first() {
+                anyhow::bail!("{} of {env}'s secrets didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
+            }
+            if let Some(k) = v.dynamic.first() {
+                anyhow::bail!("{k} in {env} is a dynamic credential, which ends with its lease: link it as managed or live for a service");
+            }
+            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+        })
+        .await?
+    }
+}
+
 /// roll secrets for roll code's checks and sandboxes (`code_control::SecretEnv`), set once the
 /// store is open (it opens after roll code starts).
 #[derive(Clone, Default)]
@@ -740,6 +791,45 @@ mod tests {
     use axum::http::HeaderMap;
     use serde_json::{Value as Json, json};
     use std::sync::{Arc, Mutex};
+
+    /// A service's deploy gets its project's environment as `app:<svc>`; where roll secrets has no
+    /// such project or environment it gets nothing (a service needn't use secrets), never a failure.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_service_gets_its_projects_environment_and_nothing_where_there_is_none() {
+        use apps_control::integrations::SecretSource;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: None,
+            people: None,
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+        let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({ "value": "postgres://db/shop" }).to_string()))
+            .unwrap();
+        assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
+        let apps = super::ForApps::default();
+        apps.set(secrets.clone(), ws);
+        assert_eq!(apps.resolve(&project, "production", "svc_web").await.unwrap(), [("DB_URL".to_string(), "postgres://db/shop".to_string())]);
+        assert_eq!(apps.resolve(&project, "pr-9", "svc_web").await.unwrap(), []);
+        assert_eq!(apps.resolve("prj_gone", "production", "svc_web").await.unwrap(), []);
+        // The read is the service's in the audit log.
+        let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
+        assert!(audit.iter().any(|a| a.actor == "app:svc_web"), "{audit:?}");
+    }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.
     #[tokio::test(flavor = "multi_thread")]

@@ -8,7 +8,7 @@
 //! certificates from the edge (`ROLL_APPS_TLS`: Cloudflare for SaaS, or the active domains
 //! handed to the edge's HTTP-01 orders and their state handed back).
 
-use apps_control::integrations::{DomainTls, Doh, EdgeTls, Landing, NoSecrets, NoTls, Resources, Revision, Sources};
+use apps_control::integrations::{DomainTls, Doh, EdgeTls, Landing, NoTls, Resources, Revision, Sources};
 use apps_control::model::{LinkKind, TlsStatus};
 use apps_control::store::{Sealer, Store};
 use apps_control::{Apps, AppsConfig, Deps};
@@ -356,6 +356,7 @@ pub async fn start(
     code: Option<Arc<code_control::Code>>,
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    secrets: crate::secrets::ForApps,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -415,7 +416,8 @@ pub async fn start(
         runtime,
         builder,
         sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
-        secrets: Arc::new(NoSecrets),
+        // The project's secrets, once roll secrets is open (main.rs sets it).
+        secrets: Arc::new(secrets),
         resources: Arc::new(RollResources { postgres, redis }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
