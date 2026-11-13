@@ -64,6 +64,11 @@ docker_() {
 
 search_dev() {
   if [[ -n ${SEARCH_DEV:-} ]]; then
+    # A missing binary would be bind-mounted as a directory Docker creates as root.
+    if [[ ! -f $SEARCH_DEV ]]; then
+      echo "bench-search: SEARCH_DEV=$SEARCH_DEV is not a file" >&2
+      exit 1
+    fi
     echo "$SEARCH_DEV"
     return
   fi
