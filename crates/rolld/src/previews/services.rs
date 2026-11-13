@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 // ── Services: roll apps' catalog when the project has one, else roll.toml containers ──
 
+/// The longest a preview waits for a roll apps build and rollout.
+const DEPLOY_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
 /// roll apps (docs/apps/) over this node's API: a preview is an ephemeral environment
 /// `pv-<id>` of each of the project's services, deployed at the change's commit. roll apps
 /// injects the roll secrets environment of the same name; the branches' URLs are also set as
@@ -30,20 +33,47 @@ impl RollApps {
         Ok(list.as_array().into_iter().flatten().find(|x| x["name"] == name).and_then(|x| s(&x["id"])))
     }
 
-    /// The service of `preview` named `name`: one with an environment `pv-<id>`.
-    async fn find(&self, preview: &str, name: &str) -> Option<(String, String)> {
+    /// The service of `preview` named `name`: one with an environment `pv-<id>`. `Ok(None)` only
+    /// when roll apps answered and has none (or roll apps isn't on this node): an error isn't "gone".
+    async fn find(&self, preview: &str, name: &str) -> anyhow::Result<Option<(String, String)>> {
         let env = roll_previews::engine::env_name(preview);
         if let Some(id) = self.ids.lock().unwrap_or_else(|p| p.into_inner()).get(&(preview.to_string(), name.to_string())) {
-            return Some((id.clone(), env));
+            return Ok(Some((id.clone(), env)));
         }
-        let all = self.api.get("/v1/apps/services").await.ok()?;
-        let svc = all
-            .as_array()?
-            .iter()
-            .find(|x| x["name"] == name && x["environments"].as_array().is_some_and(|e| e.iter().any(|e| e["name"] == env.as_str())))?;
-        let id = s(&svc["id"])?;
+        let all = match self.api.get("/v1/apps/services").await {
+            Ok(a) => a,
+            Err(e) if is_404(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let found = all
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|x| x["name"] == name && x["environments"].as_array().is_some_and(|e| e.iter().any(|e| e["name"] == env.as_str())))
+            .and_then(|svc| s(&svc["id"]));
+        let Some(id) = found else { return Ok(None) };
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((preview.to_string(), name.to_string()), id.clone());
-        Some((id, env))
+        Ok(Some((id, env)))
+    }
+
+    /// Wait for a deployment roll apps accepted (202: queued) to finish: `Err` if it failed or
+    /// was canceled, so the preview says so and retries, rather than counting a queued build as
+    /// deployed.
+    async fn settle(&self, path: &str, mut d: Value) -> anyhow::Result<()> {
+        let deadline = std::time::Instant::now() + DEPLOY_WAIT;
+        loop {
+            let status = d["status"].as_str().unwrap_or("");
+            match status {
+                "queued" | "building" | "deploying" => {}
+                "failed" | "canceled" => anyhow::bail!("roll apps deploy {} {status}: {}", s(&d["id"]).unwrap_or_default(), s(&d["error"]).unwrap_or_else(|| "no reason given".into())),
+                // active, or already replaced by a newer one (superseded): done.
+                _ => return Ok(()),
+            }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "roll apps deploy {} still {status} after {} minutes", s(&d["id"]).unwrap_or_default(), DEPLOY_WAIT.as_secs() / 60);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let id = s(&d["id"]).ok_or_else(|| anyhow::anyhow!("a roll apps deployment without an id"))?;
+            d = self.api.get(&format!("{path}/deploys/{}", seg(&id))).await?;
+        }
     }
 
     fn env_path(id: &str, env: &str) -> String {
@@ -64,6 +94,8 @@ impl roll_previews::ports::Apps for RollApps {
             list.as_array()
                 .into_iter()
                 .flatten()
+                // An upload source deploys only what someone uploads: nothing for a preview to build.
+                .filter(|x| x["source"]["kind"] != "upload")
                 .map(|x| roll_previews::ports::CatalogService {
                     name: s(&x["name"]).unwrap_or_default(),
                     repo: (x["source"]["kind"] == "repo").then(|| s(&x["source"]["repo"])).flatten(),
@@ -104,8 +136,8 @@ impl roll_previews::ports::Apps for RollApps {
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let env = self.api.get(&path).await?;
         let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
-        if at_sha {
-            self.api.post(&format!("{path}/redeploy"), json!({ "message": format!("roll preview {}: new variables", t.preview) })).await?;
+        let deployment = if at_sha {
+            self.api.post(&format!("{path}/redeploy"), json!({ "message": format!("roll preview {}: new variables", t.preview) })).await?
         } else {
             let body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
@@ -122,25 +154,26 @@ impl roll_previews::ports::Apps for RollApps {
                 }
             }
             let key = format!("{}@{}@{h:016x}{}", t.environment, t.git.as_deref().unwrap_or("image"), if t.access_token.is_some() { "p" } else { "" });
-            self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&key)).await?;
-        }
+            self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&key)).await?
+        };
+        self.settle(&path, deployment).await?;
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
     }
 
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()> {
-        let (id, env) = self.find(preview, service).await.ok_or_else(|| anyhow::anyhow!("roll apps has no preview environment for {service}"))?;
+        let (id, env) = self.find(preview, service).await?.ok_or_else(|| anyhow::anyhow!("roll apps has no preview environment for {service}"))?;
         self.api.post(&format!("{}/wake", Self::env_path(&id, &env)), json!({})).await.map(|_| ())
     }
 
     async fn sleep(&self, preview: &str, service: &str) {
-        if let Some((id, env)) = self.find(preview, service).await {
+        if let Ok(Some((id, env))) = self.find(preview, service).await {
             let _ = self.api.post(&format!("{}/sleep", Self::env_path(&id, &env)), json!({})).await;
         }
     }
 
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
-        if let Some((id, env)) = self.find(preview, service).await {
+        if let Some((id, env)) = self.find(preview, service).await? {
             // Gone already counts as done; anything else is retried.
             self.api.delete(&Self::env_path(&id, &env)).await?;
         }
@@ -149,7 +182,7 @@ impl roll_previews::ports::Apps for RollApps {
     }
 
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
-        let Some((id, env)) = self.find(preview, service).await else { return Vec::new() };
+        let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
         let v = self.api.get(&format!("{}/logs?tail={lines}", Self::env_path(&id, &env))).await.unwrap_or(Value::Null);
         v.as_array().into_iter().flatten().filter_map(|l| s(&l["text"])).collect()
     }
@@ -185,7 +218,10 @@ impl roll_previews::ports::Apps for Services {
     }
 
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()> {
-        if self.apps.find(preview, service).await.is_some() { self.apps.wake(preview, service).await } else { self.runtime.wake(preview, service).await }
+        match self.apps.find(preview, service).await? {
+            Some(_) => self.apps.wake(preview, service).await,
+            None => self.runtime.wake(preview, service).await,
+        }
     }
 
     async fn sleep(&self, preview: &str, service: &str) {
@@ -202,11 +238,11 @@ impl roll_previews::ports::Apps for Services {
     }
 
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
-        if self.apps.find(preview, service).await.is_some() { self.apps.logs(preview, service, lines).await } else { self.runtime.logs(preview, service, lines).await }
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.logs(preview, service, lines).await } else { self.runtime.logs(preview, service, lines).await }
     }
 
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
-        if self.apps.find(preview, service).await.is_some() { None } else { self.runtime.follow(preview, service, lines).await }
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
     }
 
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
