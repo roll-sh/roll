@@ -19,6 +19,18 @@ impl<F: Fn(&str) -> Option<String> + Send + Sync + 'static> Resolver for Resolve
     }
 }
 
+/// roll secrets, once it's open (it opens after roll-access): an ephemeral environment is a
+/// preview to rules (`environments: ["preview"]`), whatever its slug (`pv-12`).
+#[derive(Clone, Default)]
+pub struct SecretsEnvs(pub Arc<std::sync::OnceLock<Arc<roll_secrets::Secrets>>>);
+
+impl Resolver for SecretsEnvs {
+    fn environment(&self, project: &str, env: &str) -> Option<String> {
+        let e = self.0.get()?.environment(project, env, &roll_secrets::Caller::operator()).ok()?;
+        (e.kind == roll_secrets::EnvironmentKind::Ephemeral).then(|| "preview".to_string())
+    }
+}
+
 /// The products whose ids the evaluator can't read off a path.
 pub struct Products<'a> {
     pub postgres: Option<Arc<pg_control::Control>>,
@@ -26,10 +38,12 @@ pub struct Products<'a> {
     pub nosql: Option<Arc<nosql_control::Control>>,
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub code: Option<&'a Arc<code_control::Code>>,
+    pub secrets: SecretsEnvs,
 }
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
     let mut r = Resolvers { workspace: Some(Arc::new(WorkspaceResolver(workspace))), ..Default::default() };
+    r.environments.insert("secrets", Arc::new(p.secrets));
     if let Some(pg) = p.postgres {
         // A project by its id; an endpoint is in its project.
         r.by_kind.insert("endpoint", Arc::new(ResolveFn(move |id: &str| pg.endpoint_or_404(id).ok().map(|e| e.project_id))));

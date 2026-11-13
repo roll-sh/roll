@@ -448,6 +448,7 @@ async fn run() -> anyhow::Result<()> {
     let workspace = workspace::open(&args, &home)?;
     router = router.merge(roll_workspace::router(workspace.clone()));
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
+    let secrets_envs = access::SecretsEnvs::default();
     let access = access::open(
         &args,
         &home,
@@ -458,6 +459,7 @@ async fn run() -> anyhow::Result<()> {
             nosql: nosql.as_ref().map(|n| n.control.clone()),
             streams: streams.as_ref().map(|s| s.broker.clone()),
             code: code.as_ref().map(|c| &c.code),
+            secrets: secrets_envs.clone(),
         },
         workspace.clone(),
     )?;
@@ -467,6 +469,7 @@ async fn run() -> anyhow::Result<()> {
     let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants))?;
     code_secrets.set(secrets.clone(), workspace.clone());
+    let _ = secrets_envs.0.set(secrets.clone());
     router = router.merge(roll_secrets::router(secrets));
     products_api.set(router.clone());
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
