@@ -349,6 +349,26 @@ pub struct Run {
     pub sleep_after_s: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<Volume>,
+    /// When its metrics notify (`alert.*` events), over five minutes.
+    pub alerts: Alerts,
+}
+
+/// Metric alerts (Railway's monitors): each 0 is off. Judged every minute over the last five.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Alerts {
+    /// Memory at or above this share of the limit, per instance, every minute of the five.
+    pub memory_pct: u8,
+    /// 5xx answers at or above this share of the five minutes' requests (at least 20 of them).
+    pub error_pct: u8,
+    /// p95 latency at or above this in three of the five minutes.
+    pub p95_ms: u32,
+}
+
+impl Default for Alerts {
+    fn default() -> Self {
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0 }
+    }
 }
 
 impl Default for Run {
@@ -370,6 +390,7 @@ impl Default for Run {
             suspend_after_s: 30,
             sleep_after_s: 600,
             volume: None,
+            alerts: Alerts::default(),
         }
     }
 }
@@ -378,6 +399,9 @@ impl Run {
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
+        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 {
+            return Err(Error::BadRequest("alerts.memory_pct and alerts.error_pct are 0–100 (0 is off)".into()));
+        }
         let bad = |m: &str| Err(Error::BadRequest(format!("run.{m}")));
         if !(0.25..=8.0).contains(&self.cpu) || !self.cpu.is_finite() {
             return bad("cpu is 0.25–8 vCPU");

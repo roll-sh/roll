@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 5] = ["deploy.failed", "crash_loop", "deploy.active", "spend.alert", "spend.limit"];
-const DEFAULT_EVENTS: [&str; 4] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit"];
+pub const EVENTS: [&str; 8] = ["deploy.failed", "crash_loop", "deploy.active", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency"];
+const DEFAULT_EVENTS: [&str; 7] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency"];
 /// Targets per project.
 const MAX_TARGETS: usize = 20;
 /// After the first try: the waits before the next ones.
@@ -239,6 +239,9 @@ impl Apps {
                     (format!("{project}: spending limit reached"), format!("${usd:.2} this month reached the ${limit:.2} limit: its services are stopped until the limit is raised or the month ends."))
                 }
             }
+            "alert.memory" => (format!("{what}: memory"), format!("Its instances used {}% of their {} MB limit for five minutes (the alert is at {}%).", e.data["value"], e.data["limit_mb"], e.data["threshold"])),
+            "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
+            "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "crash_loop" => (format!("{what}: crashing"), format!("{} crashes in 10 minutes; the last because {}.", e.data["crashes"], e.data["last_error"].as_str().unwrap_or("it exited"))),
             other => (format!("{what}: {other}"), String::new()),
         }

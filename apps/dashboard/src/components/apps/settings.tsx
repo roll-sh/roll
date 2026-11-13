@@ -40,6 +40,9 @@ interface Form {
   memory: number;
   healthPath: string;
   healthTimeout: string;
+  alertMemory: string;
+  alertErrors: string;
+  alertP95: string;
   suspendAfter: string;
   sleepAfter: string;
   volumeMount: string;
@@ -74,6 +77,9 @@ export function formOf(s: Service): Form {
     memory: s.run.memory_mb,
     healthPath: str(s.run.health_path),
     healthTimeout: str(s.run.health_timeout_s),
+    alertMemory: str(s.run.alerts?.memory_pct),
+    alertErrors: str(s.run.alerts?.error_pct),
+    alertP95: str(s.run.alerts?.p95_ms),
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
@@ -120,6 +126,8 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.memory !== before.memory) run.memory_mb = f.memory;
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95)
+    run.alerts = { memory_pct: Number(f.alertMemory) || 0, error_pct: Number(f.alertErrors) || 0, p95_ms: Number(f.alertP95) || 0 };
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
   if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize)
@@ -128,7 +136,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["port", "timeout", "min", "max", "concurrency", "healthTimeout", "suspendAfter", "sleepAfter", "volumeSize"];
+const NUMERIC: (keyof Form)[] = ["port", "timeout", "min", "max", "concurrency", "healthTimeout", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95"];
 
 /** Source, build and run settings, saved together; deleting the service at the bottom. */
 export function SettingsTab({
@@ -308,8 +316,17 @@ export function SettingsTab({
               <Field label="Sleep after (s)" hint="idle; stopped costs nothing">
                 {t("sleepAfter", "600")}
               </Field>
+              <Field label="Alert: 5xx share (%)" hint="of five minutes' requests; 0 off">
+                {t("alertErrors", "5")}
+              </Field>
+              <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
+                {t("alertP95", "0")}
+              </Field>
             </>
           )}
+          <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
+            {t("alertMemory", "90")}
+          </Field>
           <Field label="Volume mount" hint="optional; one instance at most">
             {t("volumeMount", "/data")}
           </Field>

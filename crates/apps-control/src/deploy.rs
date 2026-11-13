@@ -882,6 +882,51 @@ impl Apps {
         }
     }
 
+    /// Metric alerts: the last five finished minutes against the deployment's `run.alerts`. An
+    /// alert is an event once, when it starts; it can start again once it has cleared.
+    pub async fn judge_alerts(self: &Arc<Self>, l: &crate::live::EnvLive) {
+        let Some(tpl) = l.template() else { return };
+        let (a, limit_mb) = (tpl.run.alerts, tpl.run.memory_mb);
+        let now = code_sql::now_ms() / 60_000;
+        let (sid, e) = (l.service.clone(), l.env.clone());
+        let Ok(rows) = self.db(move |s| s.minutes(&sid, &e, now - 5)).await else { return };
+        let rows: Vec<_> = rows.into_iter().filter(|r| r.minute < now).collect();
+        let mut firing: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        if a.memory_pct > 0 && rows.len() >= 5 {
+            let share = |r: &crate::store::MinuteRow| r.memory_bytes as f64 / r.instances.max(1) as f64 / (limit_mb as f64 * 1048576.0) * 100.0;
+            if rows.iter().all(|r| r.instances > 0 && share(r) >= a.memory_pct as f64) {
+                let value = rows.iter().map(share).fold(0.0, f64::max).round();
+                firing.push(("alert.memory", serde_json::json!({ "value": value, "threshold": a.memory_pct, "limit_mb": limit_mb })));
+            }
+        }
+        let (requests, errors): (i64, i64) = rows.iter().fold((0, 0), |(q, e), r| (q + r.requests, e + r.errors));
+        if a.error_pct > 0 && requests >= 20 && errors * 100 >= a.error_pct as i64 * requests {
+            firing.push(("alert.errors", serde_json::json!({ "value": (errors * 100 / requests), "threshold": a.error_pct, "requests": requests })));
+        }
+        if a.p95_ms > 0 {
+            let slow = rows.iter().filter(|r| r.requests > 0 && r.p95_ms >= a.p95_ms as f64).count();
+            if slow >= 3 {
+                let value = rows.iter().map(|r| r.p95_ms).fold(0.0, f64::max).round();
+                firing.push(("alert.latency", serde_json::json!({ "value": value, "threshold": a.p95_ms })));
+            }
+        }
+        for kind in ["alert.memory", "alert.errors", "alert.latency"] {
+            let key = format!("{}/{}/{kind}", l.service, l.env);
+            match firing.iter().find(|(k, _)| *k == kind) {
+                Some((_, data)) => {
+                    if self.looping.lock().insert(key) {
+                        let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), data.clone());
+                        let _ = self.db(move |s| s.add_event(kind, &sid, &e, Some(&dep), &d)).await;
+                        l.log.stream(Stream::System).line(format!("alert: {kind} {data}"));
+                    }
+                }
+                None => {
+                    self.looping.lock().remove(&key);
+                }
+            }
+        }
+    }
+
     /// The reaper: every second, each owned environment's tick; every minute, the meters.
     async fn reaper(self: Arc<Self>) {
         let mut every = tokio::time::interval(Duration::from_secs(1));
@@ -914,6 +959,9 @@ impl Apps {
             }
             if n.is_multiple_of(60) {
                 self.sweep_uploads().await;
+                for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+                    self.judge_alerts(&l).await;
+                }
             }
             if n.is_multiple_of(3600) {
                 let before = code_sql::now_ms() / 60_000 - 7 * 24 * 60;

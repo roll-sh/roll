@@ -59,6 +59,8 @@ export interface Run {
   suspend_after_s: number;
   sleep_after_s: number;
   volume?: { mount: string; size_gb: number };
+  /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number };
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -290,7 +292,7 @@ export interface NotifyTarget {
   secret?: string;
 }
 
-export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit";
+export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency";
 
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
 export interface LogDrain {
