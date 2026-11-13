@@ -79,11 +79,16 @@ pub enum CopyFrom {
     Body(&'static str),
     /// A query parameter.
     Query(&'static str),
+    /// Each `(environment, path)` the JSON body lists (`None`: the request's own path).
+    Each(fn(&Value) -> Sources),
 }
+
+/// Environments (and paths inside them, `None`: the request's own) a request copies from.
+pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_)))
+        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -541,6 +546,24 @@ fn bulk_action(b: &[u8]) -> Action {
     Action::Write
 }
 
+/// Secrets' imports (`[{project?, environment, path}]`): importing another project's folder is
+/// admin on the importing folder (that project's admin exports it too); in-project ones are write,
+/// plus reveal on each source ([`secrets_import_sources`]).
+fn secrets_imports_action(b: &Value) -> Action {
+    let list = b.as_array().map(Vec::as_slice).unwrap_or_default();
+    if list.iter().any(|i| i.get("project").is_some_and(|p| !p.is_null())) { Action::Admin } else { Action::Write }
+}
+
+/// The in-project folders an imports body reads from: every reader of the importing folder will
+/// read them.
+fn secrets_import_sources(b: &Value) -> Sources {
+    let list = b.as_array().map(Vec::as_slice).unwrap_or_default();
+    list.iter()
+        .filter(|i| i.get("project").is_none_or(Value::is_null))
+        .filter_map(|i| Some((i.get("environment")?.as_str()?.to_string(), i.get("path").and_then(Value::as_str).map(str::to_string))))
+        .collect()
+}
+
 /// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
 /// a Slack or Discord one answers none, so `write`.
 fn apps_notification_action(b: &Value) -> Action {
@@ -864,6 +887,11 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("PATCH", "/v1/secrets/projects/{project}/environments/{env}", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("PUT", "/v1/secrets/projects/{project}/environments/order", "secrets", ADMIN, one(&["project"], "project")),
+    // Imports: write, reveal on each in-project source, admin for another project's folder.
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/imports", "secrets", Act::Body(secrets_imports_action), one(&["project"], "project"))
+        .env(EnvFrom::Param("env"))
+        .path_query("path")
+        .copies_from(CopyFrom::Each(secrets_import_sources)),
     // Promote copies the selected keys' values from `?from=` into `{env}`: reveal there too.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/promote", "secrets", W, one(&["project"], "project"))
         .env(EnvFrom::Param("env"))

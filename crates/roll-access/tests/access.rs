@@ -69,6 +69,7 @@ fn postgres() -> Router {
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
 }
 
 impl Daemon {
@@ -841,6 +842,16 @@ async fn approvals_can_be_remembered() {
     let (s, e) = promote("production").await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
     assert_eq!(promote("development").await.0, StatusCode::OK);
+    // Imports read each in-project source (reveal there); another project's folder is admin.
+    let import = |list: Value| {
+        let (d, t) = (&d, promoter.clone());
+        async move { d.call(&t, Method::PUT, "/v1/secrets/projects/prj_s/environments/staging/imports?path=/api", Some(list)).await }
+    };
+    let (s, e) = import(json!([{ "environment": "development", "path": "/" }, { "environment": "production", "path": "/" }])).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    assert_eq!(import(json!([{ "environment": "development", "path": "/" }])).await.0, StatusCode::OK);
+    let (s, e) = import(json!([{ "project": "prj_o", "environment": "development", "path": "/" }])).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("admin")), "{e}");
 
     // Remembered where it was asked: development's values, never production's.
     let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;
