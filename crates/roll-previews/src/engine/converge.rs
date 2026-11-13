@@ -83,6 +83,13 @@ impl Engine {
             .iter()
             .filter_map(|res| Kind::of_workspace(res.kind).map(|k| (k, res.r#ref.clone())))
             .filter_map(|(k, parent)| s.mode_of(k, &parent).map(|m| (k, parent, m)))
+            // A fork's code connects to Postgres with the project's role, which can read a branch's
+            // WAL and so the values masking replaced: a masked Postgres resource is structure-only
+            // for it (no rows at all).
+            .map(|(k, parent, m)| {
+                let masked = k == Kind::Postgres && s.masking.get(&format!("postgres:{parent}")).is_some_and(|c| !c.is_empty());
+                (k, parent.clone(), if masked && !r.trusted { Mode::Schema } else { m })
+            })
             .collect();
         // A resource whose rule changed (branch ↔ schema) is branched again in its new mode: a
         // project that moves to structure-only stops keeping full copies at once.
@@ -106,8 +113,28 @@ impl Engine {
         let asked: Vec<String> = r.reset_requested.clone().unwrap_or_default();
         let mut reset_any = false;
         let mut problems: Vec<String> = Vec::new();
+        let reset_of = |x: &ResourceRow| x.r#ref.is_some() && (reset_due || asked.iter().any(|a| a == "*" || *a == format!("{}:{}", x.kind.as_str(), x.parent)));
+        // A masked Postgres resource is reset by branching it again (a new endpoint, masked before
+        // any service is pointed at it), not in place, where anything still connected would read
+        // the unmasked rows until the mask commits.
+        for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres && reset_of(x) && mask_digest(&s, x) != mask_digest(&Settings::default(), x)) {
+            self.delete_branch(&r.id, &res, &name).await?;
+            self.store.drop_resource(&r.id, res.kind, &res.parent)?;
+            self.store.log(&r.id, &format!("postgres:{} is masked: reset by branching it again", res.parent))?;
+            reset_any = true;
+        }
+        self.store.want_resources(&r.id, &wanted)?;
+        // Rules that changed reach branches already masked: masked again, nothing serving meanwhile.
+        let mut remask = false;
+        for res in self.store.resources(&r.id)? {
+            if res.r#ref.is_some() && res.state == ResourceState::Ready && self.store.mask_digest(&r.id, res.kind, &res.parent)?.unwrap_or_default() != mask_digest(&s, &res) {
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Pending)?;
+                self.store.log(&r.id, &format!("{}:{}: the masking rules changed: masking again", res.kind.as_str(), res.parent))?;
+                remask = true;
+            }
+        }
         // Nothing serves data while it's replaced (and until its seed and masks have run again).
-        let resetting = self.store.resources(&r.id)?.iter().any(|x| x.r#ref.is_some() && (reset_due || asked.iter().any(|a| a == "*" || *a == format!("{}:{}", x.kind.as_str(), x.parent))));
+        let resetting = remask || self.store.resources(&r.id)?.iter().any(reset_of);
         if resetting {
             for svc in self.store.services(&r.id)? {
                 self.apps.sleep(&r.id, &svc.name).await;
@@ -216,6 +243,10 @@ impl Engine {
 
         // 3. The secrets environment: its base, the project's overrides, the branches' URLs.
         if is_production(&s.secrets.base) && (!s.secrets.allow_production || !r.trusted) {
+            // Nothing keeps running with what it may no longer have.
+            for svc in self.store.services(&r.id)? {
+                self.apps.sleep(&r.id, &svc.name).await;
+            }
             anyhow::bail!("this preview may not inherit the production environment {:?}", s.secrets.base);
         }
         let urls = self.resource_env(&r.id).await?;
@@ -291,6 +322,7 @@ impl Engine {
             }
         }
         let mut keep: Vec<String> = Vec::new();
+        let mut still_deploying = false;
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
@@ -299,7 +331,7 @@ impl Engine {
             // next request, roll apps redeploys it.
             // The bypass only matters to a backend that checks access itself (roll apps): the
             // runtime's gate reads it on each request, so a rotation restarts nothing there.
-            let fingerprint = config_fingerprint(&vars, access_token.is_some(), bypass.as_deref().filter(|_| on_apps));
+            let fingerprint = config_fingerprint(&vars, access_token.is_some(), bypass.as_deref().filter(|_| on_apps), trusted);
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved {
                 let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
@@ -330,6 +362,11 @@ impl Engine {
                         self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
                         self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
                     }
+                    // Accepted, not live yet: no slot waits on a build; come back and ask again.
+                    Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
+                        self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
+                        still_deploying = true;
+                    }
                     Err(e) => {
                         let msg = format!("{e:#}");
                         self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
@@ -337,6 +374,11 @@ impl Engine {
                     }
                 }
             }
+        }
+        if still_deploying {
+            let again = self.store.now_ms()? + DEPLOY_POLL_MS;
+            self.store.update(&r.id, |row| row.next_at = if row.generation == r.generation { again } else { 0 })?;
+            return Ok(());
         }
         for svc in self.store.services(&r.id)? {
             if !keep.contains(&svc.name) {
@@ -419,10 +461,14 @@ impl Engine {
     }
 
     pub(super) async fn mask(&self, id: &str, b: &Arc<dyn Brancher>, key: &str, branch: &str, s: &Settings) -> anyhow::Result<()> {
-        let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) else { return Ok(()) };
-        let parent = key.split_once(':').map_or("", |(_, p)| p);
-        b.mask(parent, branch, cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
-        self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
+        let (kind, parent) = key.split_once(':').unwrap_or((key, ""));
+        let kind = Kind::parse(kind)?;
+        let digest = mask_digest_of(s.masking.get(key));
+        if let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) {
+            b.mask(parent, branch, cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
+            self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
+        }
+        self.store.set_mask_digest(id, kind, parent, &digest)?;
         Ok(())
     }
 

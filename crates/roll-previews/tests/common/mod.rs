@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use roll_previews::engine::Config;
-use roll_previews::ports::{Apps, Branched, Brancher, ChangeInfo, NoSecrets, ServiceSpec, Source, Target, Usage};
+use roll_previews::ports::{Apps, Branched, Brancher, ChangeInfo, ServiceSpec, Source, Target, Usage};
 use roll_previews::{Engine, Kind, Mode, Preview, ServiceState, Settings, Store};
 use roll_workspace::Workspace;
 
@@ -75,6 +75,8 @@ pub struct FakeData {
     pub fail_next: AtomicUsize,
     /// What `schema` answers: (the parent's lines, the branch's).
     pub schema: Mutex<Option<(Vec<String>, Vec<String>)>>,
+    /// Masks applied: (branch, columns).
+    pub masks: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
 }
 
 impl FakeData {
@@ -86,6 +88,7 @@ impl FakeData {
             made: AtomicUsize::new(0),
             fail_next: AtomicUsize::new(0),
             schema: Mutex::new(None),
+            masks: Mutex::new(Vec::new()),
         })
     }
 }
@@ -106,6 +109,10 @@ impl Brancher for FakeData {
             self.made.fetch_add(1, Ordering::SeqCst);
         }
         Ok(Branched::plain(id))
+    }
+    async fn mask(&self, _parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        self.masks.lock().push((branch.to_string(), columns.clone()));
+        Ok(())
     }
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
@@ -145,6 +152,9 @@ pub struct FakeApps {
     /// Every seed or release run: (its command, the revision), and how many services were
     /// deployed at that revision when it ran.
     pub runs: Mutex<Vec<(String, String, usize)>>,
+    /// The next deploys that answer "still deploying", then the next that fail.
+    pub still: AtomicUsize,
+    pub fail_deploy: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
@@ -154,6 +164,14 @@ impl Apps for FakeApps {
     async fn deploy(&self, t: &Target) -> anyhow::Result<Option<String>> {
         if let Some(f) = self.on_deploy.lock().as_ref() {
             f();
+        }
+        if self.still.load(Ordering::SeqCst) > 0 {
+            self.still.fetch_sub(1, Ordering::SeqCst);
+            return Err(roll_previews::ports::StillDeploying("building".into()).into());
+        }
+        if self.fail_deploy.load(Ordering::SeqCst) > 0 {
+            self.fail_deploy.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the build failed");
         }
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
         Ok(None)
@@ -182,7 +200,28 @@ impl Apps for FakeApps {
     }
 }
 
+/// roll secrets as previews see it: every `ensure` (environment, trusted).
+#[derive(Default)]
+pub struct FakeSecrets {
+    pub ensured: Mutex<Vec<(String, bool)>>,
+}
+
+#[async_trait]
+impl roll_previews::ports::Secrets for FakeSecrets {
+    async fn ensure(&self, _: &str, env: &str, _: &str, _: &[(String, String)], trusted: bool, _: i64) -> anyhow::Result<()> {
+        self.ensured.lock().push((env.to_string(), trusted));
+        Ok(())
+    }
+    async fn resolve(&self, _: &str, _: &str, _: bool) -> anyhow::Result<roll_previews::ports::Resolved> {
+        Ok(Default::default())
+    }
+    async fn delete(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 pub struct Env {
+    pub secrets: Arc<FakeSecrets>,
     pub _dir: tempfile::TempDir,
     pub ws: Arc<Workspace>,
     pub engine: Arc<Engine>,
@@ -225,6 +264,7 @@ pub fn env(settings: serde_json::Value) -> Env {
     let pg = FakeData::new(Kind::Postgres, &["prj_db"]);
     let redis = FakeData::new(Kind::Redis, &["rdb_cache"]);
     let apps = Arc::new(FakeApps::default());
+    let secrets = Arc::new(FakeSecrets::default());
     let engine = Engine::new(
         Config { domain: "preview.test".into(), ..Config::default() },
         store,
@@ -232,9 +272,9 @@ pub fn env(settings: serde_json::Value) -> Env {
         code.clone(),
         vec![pg.clone(), redis.clone()],
         apps.clone(),
-        Arc::new(NoSecrets),
+        secrets.clone(),
         Box::new(|| true),
     );
-    Env { _dir: dir, ws, engine, code, pg, redis, apps, project: p.id }
+    Env { secrets, _dir: dir, ws, engine, code, pg, redis, apps, project: p.id }
 }
 

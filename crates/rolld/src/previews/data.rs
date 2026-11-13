@@ -98,14 +98,17 @@ impl Brancher for Postgres {
     /// tables so the rows as they were leave the branch's files (`roll_previews::mask`). Run again
     /// it's harmless: masked values stay masked.
     async fn mask(&self, parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
-        let plan = roll_previews::mask::postgres(columns).map_err(|e| anyhow::anyhow!(e))?;
+        let mut salt = [0u8; 16];
+        getrandom::fill(&mut salt).map_err(|e| anyhow::anyhow!("randomness: {e}"))?;
+        let salt: String = salt.iter().map(|b| format!("{b:02x}")).collect();
+        let plan = roll_previews::mask::postgres(columns, &salt).map_err(|e| anyhow::anyhow!(e))?;
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
         let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
         anyhow::ensure!(!b["parent_id"].is_null(), "refusing to mask {branch}: it isn't a branch of {parent}");
         let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
         let query = format!("/v1/endpoints/{}/query", seg(&ep));
         self.0.post(&query, json!({ "sql": plan.update })).await?;
-        for v in &plan.vacuum {
+        for v in &plan.after {
             self.0.post(&query, json!({ "sql": v })).await?;
         }
         Ok(())

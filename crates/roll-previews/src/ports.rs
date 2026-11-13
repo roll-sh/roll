@@ -184,6 +184,19 @@ pub struct Target {
     pub bypass_sha256: Option<String>,
 }
 
+/// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
+/// the service deploying and comes back soon, asking again (the deploy call is idempotent).
+#[derive(Debug)]
+pub struct StillDeploying(pub String);
+
+impl std::fmt::Display for StillDeploying {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "still deploying: {}", self.0)
+    }
+}
+
+impl std::error::Error for StillDeploying {}
+
 /// A branched resource's kind and parent, and its own variables (unprefixed).
 pub type BranchVars = (Kind, String, Vec<(String, String)>);
 

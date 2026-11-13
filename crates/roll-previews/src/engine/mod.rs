@@ -222,11 +222,8 @@ impl Engine {
         while set.join_next().await.is_some() {}
         Ok(())
     }
-
 }
 
-
-/// What a service is deployed with, as a digest (FNV-1a: change detection, not a secret).
 impl Engine {
     /// The preview's secrets resolved as its code gets them, unresolved keys said once in its
     /// activity (a check fails on them; a preview starts without them, saying which).
@@ -244,14 +241,37 @@ impl Engine {
     }
 }
 
+/// How soon a converge comes back to a deploy that wasn't live yet.
+const DEPLOY_POLL_MS: i64 = 10_000;
+
 /// How long a preview's secrets environment outlives its last converge (roll secrets deletes it
 /// then, revoking its leases): a preview converges every few minutes while it exists.
 const SECRETS_ENV_MARGIN_MS: i64 = 24 * 3_600_000;
 
+/// What a resource is masked with under `s` (empty: nothing): a branch masked with other rules is
+/// masked again.
+pub(super) fn mask_digest(s: &Settings, res: &ResourceRow) -> String {
+    mask_digest_of(s.masking.get(&format!("{}:{}", res.kind.as_str(), res.parent)))
+}
+
+pub(super) fn mask_digest_of(cols: Option<&BTreeMap<String, String>>) -> String {
+    let Some(cols) = cols.filter(|c| !c.is_empty()) else { return String::new() };
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (k, v) in cols {
+        for b in k.bytes().chain([0]).chain(v.bytes()).chain([0]) {
+            h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{h:016x}")
+}
+
 /// The shares of `max_usd_month` (percent) a project is told about, once a month each.
 const BUDGET_LEVELS: [u32; 2] = [80, 100];
 
-fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>) -> String {
+/// What a service is deployed with (its variables, its access, whether it may read protected
+/// secrets), as a digest (FNV-1a: change detection, not a secret): a change to any redeploys it,
+/// so a service that lost trust drops what it read.
+fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>, trusted: bool) -> String {
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
     sorted.sort();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -261,7 +281,7 @@ fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&
             h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
         }
     }
-    format!("{h:016x}{}", if private { "p" } else { "" })
+    format!("{h:016x}{}{}", if private { "p" } else { "" }, if trusted { "t" } else { "" })
 }
 
 /// Whether a change gets a preview under the project's rules (approval aside).

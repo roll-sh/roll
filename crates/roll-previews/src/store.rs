@@ -328,6 +328,9 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
+        if !db.has_column("resources", "mask_digest")? {
+            db.add_column("resources", "mask_digest", "TEXT")?;
+        }
         if !db.has_column("previews", "kept_until")? {
             db.add_column("previews", "kept_until", "INTEGER")?;
         }
@@ -749,7 +752,21 @@ impl Store {
         })
     }
 
-    /// Whether the preview's branches were told it's idle (and nothing used it since).
+    /// The masking rules a branch was last masked with (`crate::engine::mask_digest`).
+    pub fn mask_digest(&self, id: &str, kind: Kind, parent: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .read(|c| c.query_row("SELECT mask_digest FROM resources WHERE preview_id = ? AND kind = ? AND parent = ?", [id, kind.as_str(), parent], |r| r.get(0)).optional())?
+            .flatten())
+    }
+
+    pub fn set_mask_digest(&self, id: &str, kind: Kind, parent: &str, digest: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE resources SET mask_digest = ? WHERE preview_id = ? AND kind = ? AND parent = ?", [digest, id, kind.as_str(), parent])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// Until when the preview is kept past its TTL (`None`: its rules decide).
     pub fn kept_until(&self, id: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT kept_until FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
@@ -763,6 +780,7 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the preview's branches were told it's idle (and nothing used it since).
     pub fn idled(&self, id: &str) -> Result<bool> {
         Ok(self.db.read(|c| c.query_row("SELECT idled FROM previews WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional())?.unwrap_or(0) != 0)
     }

@@ -30,8 +30,9 @@ impl roll_previews::ports::Secrets for Secrets {
         match self.0.call(Method::PUT, &path, Some(body.clone())).await {
             Ok(_) => Ok(()),
             Err(e) if is_404(&e) => Ok(()),
-            // The only conflict an ensure has.
-            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::CONFLICT) => {
+            // A different base or trust only (roll secrets' `mismatch`): any other conflict is an
+            // error, never a reason to delete the environment.
+            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::CONFLICT && r.code.as_deref() == Some("mismatch")) => {
                 self.0.delete(&format!("{path}?confirm={}", seg(env))).await?;
                 self.0.call(Method::PUT, &path, Some(body)).await.map(|_| ())
             }

@@ -316,14 +316,28 @@ logged and read again on the next converge; it never fails the preview.
 - **Masked columns.** `masking` masks columns of a preview's branches each time one is made or
   reset, before anything serves it; the parent is untouched.
   - Postgres (`"postgres:<ref>": {"schema.table.column": rule}`): the columns are rewritten in
-    the branch. Rules: `null`, `redact` (`***`), `hash` (`md5` of the value), `email`
-    (`user-<12 hex>@example.invalid`, the same for the same input, so joins on it still match),
-    `fixed:<value>`. One transaction rewrites every masked column (names and values quoted
-    whatever they hold), then `VACUUM (FULL, ANALYZE)` of those tables, so the rows as they were
-    leave the branch's files. A mask that fails (a rule a column's type can't take) fails the
-    preview and is retried; nothing serves the branch meanwhile. What masking can't reach: the
-    branch's own WAL history keeps pages from before the rewrite. Only the operator's Postgres
-    routes (restore, history) read it, never a preview's services or a "Previews only" token.
+    the branch's `main` database. Rules: `null`, `redact` (`***`), `hash` (`md5` of a random
+    per-run salt and the value), `email` (`user-<12 hex>@example.invalid`, from the same salted
+    hash, so within a branch the same input gives the same output and joins on it still match),
+    `fixed:<value>`. One transaction rewrites every masked column, with names and values quoted
+    whatever they hold, `standard_conforming_strings` on, and the tables' triggers off
+    (`session_replication_role = replica`), so no audit trigger copies the old values into
+    another table and nothing fires outward. Then each masked table's `VACUUM (FULL, ANALYZE)`,
+    every materialized view refreshed, and a checkpoint.
+    - A masked branch is never reset in place: it's branched again (a new endpoint, masked before
+      any service is pointed at it), so nothing still connected reads the unmasked rows.
+    - Rules that change reach open previews: a branch masked with other rules is masked again,
+      its services asleep meanwhile.
+    - A mask that fails (a rule a column's type can't take) fails the preview and is retried;
+      nothing serves the branch meanwhile. Large tables can take long: a mask request has the
+      adapter's 600 s budget.
+    - **What masking can't do: stop the preview's own code.** Its `DATABASE_URL` connects as the
+      project's role, which on roll's Postgres is a superuser: it can read the branch's WAL, which
+      holds the pages from before the rewrite. So masking keeps real values out of what a trusted
+      change's code reads by accident (pages, exports, screenshots), not out of hostile code. A
+      fork's code is hostile by assumption: for an untrusted change, a masked Postgres resource is
+      always structure-only (no rows at all). A role of its own per branch, without superuser, is
+      in `## Next`.
   - NoSQL: column masks (Cassandra 5's mask functions) added to the branch's read policy, on top
     of what it inherits.
   - Other products: a `seed` anonymises the rows instead.
@@ -539,8 +553,8 @@ type Preview = {
   share_url: string | null;           // url with its access token (link access): the one to hand out
   services: Service[]; resources: Resource[];
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
-  schema_changes: string[] | null;
-  kept_until: number | null;          // kept past its TTL until then (POST …/keep)    // "+ …"/"- …" against the parents, once read at `head`; null: not known
+  schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
+  kept_until: number | null;          // kept past its TTL until then (POST …/keep)
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
   created_by: string; created_at: number; updated_at: number;
 };
@@ -648,17 +662,26 @@ Ranked by what a person notices first. Done so far:
   stays);
 - unresolved secrets named in the preview's activity;
 - `roll preview wait` for CI outside GitHub (and `create --wait`);
+- a fourth adversarial review and its fixes (forks get masked Postgres structure-only, masks
+  without triggers and with a salt, masked branches reset by branching again, changed rules
+  masking open previews again, deploys checked again instead of awaited, a failed deploy retried
+  as a new one, trust in the deploy fingerprint, `wait` that can't pass on an older push);
 - a third adversarial review and its fixes (no bypass for forks, rotation restarts nothing the
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+1. **A Postgres role per preview branch, without superuser**: the branch's `DATABASE_URL` signs
+   in as a role that owns the app's objects but can't read files, WAL or other databases, and
+   isn't valid on the parent's endpoint. Then masking holds against the preview's own code too,
+   and a fork's preview can have masked rows instead of none. A pg-control change (roles per
+   branch, `pg_read_server_files` and friends withheld).
+2. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page through the bypass, and the comment shows it (Vercel does). Store it in
    roll storage and drop it with the preview. Needs a host whose containers reach rolld (not
    ai-server's firewall) to verify.
-2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

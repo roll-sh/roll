@@ -180,49 +180,93 @@ fn print_preview(p: &Value) {
     }
 }
 
-/// `roll preview wait`: poll the preview until it's ready (or sleeping: ready and idle), print
-/// the URL; a failed or deleted preview, or the timeout, is an error (exit 1).
+/// `roll preview wait`: poll the preview until it's ready (or sleeping: ready and idle) at the
+/// change's current head, print the URL. A failure that lasts, a deleted preview, no URL, or the
+/// timeout is an error (exit 1); a passing failure (the reconciler retries) or an API hiccup
+/// isn't.
 async fn wait(api: &Api, as_json: bool, preview: Option<String>, change: Option<String>, service: Option<String>, timeout: u64) -> anyhow::Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
-    let mut told = String::new();
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(timeout);
+    let (mut told, mut failing_since, mut last) = (String::new(), None::<std::time::Instant>, String::new());
     loop {
-        let found = match (&preview, &change) {
-            (Some(id), _) => Some(api.get(&format!("/v1/previews/{id}")).await?),
-            (None, Some(chg)) => api.get("/v1/previews").await?.as_array().into_iter().flatten().find(|p| p["change"].as_str() == Some(chg.as_str())).cloned(),
-            (None, None) => bail!("say which preview, or --change"),
+        let found = match look(api, preview.as_deref(), change.as_deref()).await {
+            Ok(f) => f,
+            Err(e) => {
+                last = format!("{e:#}");
+                None
+            }
         };
-        if let Some(p) = &found {
+        if let Some((p, at_head)) = &found {
             let state = p["state"].as_str().unwrap_or_default();
-            if state != told && !as_json {
-                eprintln!("{}: {state}", s(&p["id"]));
-                told = state.to_string();
+            let shown = if *at_head { state.to_string() } else { format!("{state}, at an older push") };
+            if shown != told && !as_json {
+                eprintln!("{}: {shown}", s(&p["id"]));
+                told = shown;
+            }
+            if p["desired"] == "deleted" || state == "deleting" {
+                bail!("the preview is being deleted");
             }
             match state {
-                "ready" | "sleeping" => {
+                "sleeping" if !p["error"].is_null() => bail!("the preview is stopped: {}", s(&p["error"])),
+                "ready" | "sleeping" if *at_head => {
                     let url = match &service {
                         Some(name) => p["services"].as_array().into_iter().flatten().find(|x| x["name"] == name.as_str()).and_then(|x| x["url"].as_str()),
                         None => p["url"].as_str(),
                     };
+                    let Some(url) = url.filter(|u| !u.is_empty()) else {
+                        bail!("the preview has no {}", service.as_deref().map_or("service".to_string(), |n| format!("service {n}")));
+                    };
                     if as_json {
                         println!("{}", serde_json::to_string_pretty(p)?);
                     } else {
-                        println!("{}", url.unwrap_or(""));
+                        println!("{url}");
                     }
                     return Ok(());
                 }
-                "failed" => bail!("the preview failed: {}", s(&p["error"])),
-                "deleting" => bail!("the preview is being deleted"),
-                _ => {}
-            }
-            if p["desired"] == "deleted" {
-                bail!("the preview is being deleted");
+                "failed" => {
+                    let since = *failing_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= WAIT_FAILED_FOR {
+                        bail!("the preview failed: {}", s(&p["error"]));
+                    }
+                }
+                _ => failing_since = None,
             }
         }
         if std::time::Instant::now() >= deadline {
-            bail!("not ready after {timeout}s{}", found.map(|p| format!(" (it's {})", s(&p["state"]))).unwrap_or_else(|| " (no preview yet)".into()));
+            let at = match &found {
+                Some((p, _)) => format!(" (it's {})", s(&p["state"])),
+                None if !last.is_empty() => format!(" ({last})"),
+                None => " (no preview yet)".into(),
+            };
+            bail!("not ready after {timeout}s{at}");
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
+}
+
+/// How long a preview may stay failed before `wait` gives up (the reconciler retries).
+const WAIT_FAILED_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The preview to wait for, and whether it's at its change's current head (a preview of a branch
+/// always is: it follows the branch).
+async fn look(api: &Api, preview: Option<&str>, change: Option<&str>) -> anyhow::Result<Option<(Value, bool)>> {
+    let p = match (preview, change) {
+        (Some(id), _) => api.get(&format!("/v1/previews/{id}")).await?,
+        (None, Some(chg)) => {
+            let all = api.get("/v1/previews").await?;
+            match all.as_array().into_iter().flatten().find(|p| p["change"].as_str() == Some(chg) && p["desired"] != "deleted") {
+                Some(p) => p.clone(),
+                None => return Ok(None),
+            }
+        }
+        (None, None) => bail!("say which preview, or --change"),
+    };
+    let Some(chg) = p["change"].as_str() else { return Ok(Some((p, true))) };
+    let head = api.get(&format!("/v1/code/changes/{chg}")).await.ok().and_then(|c| c["head"].as_str().map(str::to_string));
+    let ours = p["head"].as_str().unwrap_or_default();
+    // Unknown (no roll code here): trust the preview's own state.
+    let at_head = head.is_none_or(|h| !h.is_empty() && (ours == h || ours.starts_with(&h) || h.starts_with(ours)));
+    Ok(Some((p, at_head)))
 }
 
 /// `a.b=v` into `{"a": {"b": v}}`; `v` as JSON when it parses, else a string.

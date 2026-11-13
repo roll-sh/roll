@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 // ── Services: roll apps' catalog when the project has one, else roll.toml containers ──
 
-/// The longest a preview waits for a roll apps build and rollout.
-const DEPLOY_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+/// How long one converge waits for a roll apps build and rollout before coming back later.
+const DEPLOY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// roll apps (docs/apps/) over this node's API: a preview is an ephemeral environment
 /// `pv-<id>` of each of the project's services, deployed at the change's commit. roll apps
@@ -56,9 +56,9 @@ impl RollApps {
         Ok(Some((id, env)))
     }
 
-    /// Wait for a deployment roll apps accepted (202: queued) to finish: `Err` if it failed or
-    /// was canceled, so the preview says so and retries, rather than counting a queued build as
-    /// deployed.
+    /// Wait a little for a deployment roll apps accepted (202: queued) to finish: `Err` if it
+    /// failed or was canceled (the preview says so and retries), `StillDeploying` if it's still
+    /// going after [`DEPLOY_WAIT`] (the converge comes back; nothing holds a slot for a build).
     async fn settle(&self, path: &str, mut d: Value) -> anyhow::Result<()> {
         let deadline = std::time::Instant::now() + DEPLOY_WAIT;
         loop {
@@ -69,7 +69,9 @@ impl RollApps {
                 // active, or already replaced by a newer one (superseded): done.
                 _ => return Ok(()),
             }
-            anyhow::ensure!(std::time::Instant::now() < deadline, "roll apps deploy {} still {status} after {} minutes", s(&d["id"]).unwrap_or_default(), DEPLOY_WAIT.as_secs() / 60);
+            if std::time::Instant::now() >= deadline {
+                return Err(roll_previews::ports::StillDeploying(format!("roll apps deploy {} is {status}", s(&d["id"]).unwrap_or_default())).into());
+            }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let id = s(&d["id"]).ok_or_else(|| anyhow::anyhow!("a roll apps deployment without an id"))?;
             d = self.api.get(&format!("{path}/deploys/{}", seg(&id))).await?;
@@ -153,7 +155,14 @@ impl roll_previews::ports::Apps for RollApps {
                     h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
                 }
             }
-            let key = format!("{}@{}@{h:016x}{}", t.environment, t.git.as_deref().unwrap_or("image"), if t.access_token.is_some() { "p" } else { "" });
+            let mut key = format!("{}@{}@{h:016x}{}", t.environment, t.git.as_deref().unwrap_or("image"), if t.access_token.is_some() { "p" } else { "" });
+            // After a failed or canceled deploy, a retry is a new deploy (a registry timeout
+            // doesn't fail the preview until the next push); a crash's retry still finds its own.
+            if matches!(env["latest"]["status"].as_str(), Some("failed" | "canceled"))
+                && let Some(failed) = s(&env["latest"]["id"])
+            {
+                key.push_str(&format!("~{failed}"));
+            }
             self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&key)).await?
         };
         self.settle(&path, deployment).await?;

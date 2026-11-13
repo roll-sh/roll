@@ -141,6 +141,8 @@ pub struct Api {
 pub struct Refused {
     pub status: StatusCode,
     pub error: String,
+    /// The API's machine-readable reason (`{"code": "mismatch"}`), when it gave one.
+    pub code: Option<String>,
 }
 
 impl std::fmt::Display for Refused {
@@ -190,7 +192,8 @@ impl Api {
         let v: Value = if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
         if !status.is_success() {
             let error = v["error"].as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
-            return Err(Refused { status, error }.into());
+            let code = v["code"].as_str().map(str::to_string);
+            return Err(Refused { status, error, code }.into());
         }
         Ok(v)
     }

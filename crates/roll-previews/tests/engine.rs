@@ -249,3 +249,74 @@ async fn a_changed_rule_reaches_existing_previews() {
     assert_eq!(e.pg.made.load(Ordering::SeqCst), 2, "branched again in its new mode");
     assert_eq!(e.pg.branches.lock().len(), 1, "the full copy is gone");
 }
+
+#[tokio::test]
+async fn masked_postgres_is_masked_before_it_serves_structure_only_for_forks_and_new_rules_reach_it() {
+    let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.code.open(change("chg_m", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    assert_eq!(p.state, State::Ready);
+    let masks = e.pg.masks.lock().clone();
+    assert_eq!(masks.len(), 1, "masked once, before Ready: {masks:?}");
+    assert!(masks[0].0.starts_with("prj_db~") && masks[0].1.contains_key("public.users.email"));
+    // A new rule reaches the open preview: masked again, without waiting for a reset.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.masking.insert("postgres:prj_db".into(), [("public.users.email".to_string(), "email".to_string()), ("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.pg.masks.lock().len(), 2, "the changed rules were applied");
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // A fork's code could read what masking replaced (it connects as the project's role): its
+    // masked Postgres is structure-only.
+    e.code.open(ChangeInfo { trusted: false, approved: true, ..change("chg_f", 5) });
+    e.engine.pass().await.unwrap();
+    let f = e.engine.store.row_by_change("chg_f").unwrap().unwrap();
+    let pg = e.engine.store.resources(&f.id).unwrap().into_iter().find(|r| r.kind == Kind::Postgres).unwrap();
+    assert_eq!(pg.mode, roll_previews::Mode::Schema);
+}
+
+#[tokio::test]
+async fn the_secrets_environment_is_trusted_only_for_trusted_changes_where_production_is_allowed() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_t", 6));
+    e.code.open(ChangeInfo { trusted: false, approved: true, ..change("chg_u", 7) });
+    e.engine.pass().await.unwrap();
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.secrets.allow_production = true;
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    for c in ["chg_t", "chg_u"] {
+        let id = e.engine.store.row_by_change(c).unwrap().unwrap().id;
+        e.engine.store.update(&id, |r| r.next_at = 0).unwrap();
+    }
+    e.engine.pass().await.unwrap();
+    let env_of = |c: &str| format!("pv-{}", &e.engine.store.row_by_change(c).unwrap().unwrap().id[3..]);
+    let ensured = e.secrets.ensured.lock().clone();
+    let trust = |c: &str| ensured.iter().filter(|(env, _)| *env == env_of(c)).map(|(_, t)| *t).collect::<Vec<_>>();
+    assert_eq!(trust("chg_t"), [false, true], "trusted only once the project allows production");
+    assert!(trust("chg_u").iter().all(|t| !t), "a fork's never is: {:?}", trust("chg_u"));
+}
+
+#[tokio::test]
+async fn a_deploy_still_going_is_checked_again_and_a_failed_one_fails_the_preview() {
+    let e = env(json!({ "enabled": true }));
+    e.apps.still.store(1, Ordering::SeqCst);
+    e.code.open(change("chg_d", 8));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_d").unwrap().unwrap();
+    assert_ne!(p.state, State::Failed, "a build in progress isn't a failure");
+    assert_eq!(p.attempts, 0);
+    assert!(p.next_at < i64::MAX && p.next_at > 0, "it comes back soon: {}", p.next_at);
+    assert!(e.engine.store.services(&p.id).unwrap().iter().any(|s| s.state == roll_previews::ServiceState::Deploying));
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready, "live on the next look");
+    // A failed build fails the preview (shown, retried), never "deployed".
+    e.apps.fail_deploy.store(1, Ordering::SeqCst);
+    e.code.edit("chg_d", |c| c.head = "cs_8b".into());
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row(&p.id).unwrap();
+    assert_eq!(p.state, State::Failed);
+    assert!(p.error.as_deref().unwrap_or("").contains("the build failed"), "{:?}", p.error);
+}

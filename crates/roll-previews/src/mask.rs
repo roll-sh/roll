@@ -8,16 +8,20 @@ use std::collections::BTreeMap;
 pub const RULES: &str = "null, redact, hash, email or fixed:<value>";
 
 /// What masking a branch runs: one statement that rewrites every masked column (one `UPDATE`
-/// per table, all in one transaction), then the tables to `VACUUM FULL`, so the rows as they
-/// were leave the branch's files too.
+/// per table, all in one transaction, with the tables' triggers off so none copies the old
+/// values elsewhere), then each table's `VACUUM FULL` (the rows as they were leave the branch's
+/// files), every materialized view refreshed (none keeps the old values), and a checkpoint.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     pub update: String,
-    pub vacuum: Vec<String>,
+    pub after: Vec<String>,
 }
 
-/// The plan for `columns` (`schema.table.column` → rule), or why a rule can't be one.
-pub fn postgres(columns: &BTreeMap<String, String>) -> Result<Plan, String> {
+/// The plan for `columns` (`schema.table.column` → rule), or why a rule can't be one. `salt`
+/// (random per run) keys `hash` and `email`, so a value can't be found again by hashing guesses;
+/// within one run the same input still gives the same output, so joins on it match.
+pub fn postgres(columns: &BTreeMap<String, String>, salt: &str) -> Result<Plan, String> {
+    let salt = literal(salt);
     let mut tables: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     for (path, rule) in columns {
         let parts: Vec<&str> = path.split('.').collect();
@@ -29,8 +33,8 @@ pub fn postgres(columns: &BTreeMap<String, String>) -> Result<Plan, String> {
         let value = match rule.trim() {
             "null" => "NULL".to_string(),
             "redact" => format!("CASE WHEN {c} IS NULL THEN NULL ELSE '***' END"),
-            "hash" => format!("md5({c}::text)"),
-            "email" => format!("CASE WHEN {c} IS NULL THEN NULL ELSE 'user-' || left(md5({c}::text), 12) || '@example.invalid' END"),
+            "hash" => format!("md5({salt} || {c}::text)"),
+            "email" => format!("CASE WHEN {c} IS NULL THEN NULL ELSE 'user-' || left(md5({salt} || {c}::text), 12) || '@example.invalid' END"),
             r => match r.strip_prefix("fixed:") {
                 Some(v) => literal(v),
                 None => return Err(format!("{path}: {rule:?} isn't a rule ({RULES})")),
@@ -38,15 +42,23 @@ pub fn postgres(columns: &BTreeMap<String, String>) -> Result<Plan, String> {
         };
         tables.entry((schema.to_string(), table.to_string())).or_default().push(format!("{c} = {value}"));
     }
-    let mut update = String::from("BEGIN;\n");
-    let mut vacuum = Vec::new();
+    // Literals as written whatever the database says; no trigger (an audit log's copy of OLD, a
+    // notification) runs for the rewrite.
+    let mut update = String::from("BEGIN;\nSET LOCAL standard_conforming_strings = on;\nSET LOCAL session_replication_role = replica;\n");
+    let mut after = Vec::new();
     for ((schema, table), sets) in &tables {
         let t = format!("{}.{}", ident(schema), ident(table));
         update.push_str(&format!("UPDATE {t} SET {};\n", sets.join(", ")));
-        vacuum.push(format!("VACUUM (FULL, ANALYZE) {t}"));
+        after.push(format!("VACUUM (FULL, ANALYZE) {t}"));
     }
     update.push_str("COMMIT;");
-    Ok(Plan { update, vacuum })
+    after.push(
+        "DO $$ DECLARE v record; BEGIN FOR v IN SELECT schemaname, matviewname FROM pg_matviews WHERE ispopulated LOOP \
+         EXECUTE format('REFRESH MATERIALIZED VIEW %I.%I', v.schemaname, v.matviewname); END LOOP; END $$"
+            .into(),
+    );
+    after.push("CHECKPOINT".into());
+    Ok(Plan { update, after })
 }
 
 /// Whether `rule` is one a Postgres column can have.
@@ -79,12 +91,14 @@ mod tests {
         .into_iter()
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
-        let p = super::postgres(&cols).unwrap();
+        let p = super::postgres(&cols, "s4lt").unwrap();
         assert!(p.update.starts_with("BEGIN;\n") && p.update.ends_with("COMMIT;"), "{}", p.update);
+        assert!(p.update.contains("SET LOCAL session_replication_role = replica"), "no trigger copies the old values: {}", p.update);
+        assert!(p.update.contains("md5('s4lt' || \"email\"::text)"), "salted: {}", p.update);
         assert!(p.update.contains(r#"UPDATE "public"."users" SET "email" = CASE WHEN "email" IS NULL"#), "{}", p.update);
         assert!(p.update.contains(r#""name" = 'it''s; DROP TABLE users; --'"#), "a value stays one literal: {}", p.update);
         assert!(p.update.contains(r#"UPDATE "app"."we""ird" SET "ip" = NULL"#), "a quote in a name stays a name: {}", p.update);
-        assert_eq!(p.vacuum.len(), 2);
-        assert!(super::postgres(&[("a.b.c".to_string(), "mask_default()".to_string())].into_iter().collect()).is_err());
+        assert_eq!(p.after.len(), 4, "two tables' vacuums, the views, a checkpoint");
+        assert!(super::postgres(&[("a.b.c".to_string(), "mask_default()".to_string())].into_iter().collect(), "s").is_err());
     }
 }
