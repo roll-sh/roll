@@ -82,6 +82,14 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
    const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
    ```
+
+   In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
+   its own OIDC token as `roll run` does (`ROLL_IDENTITY`):
+
+   ```go
+   c, err := secrets.FromEnv(ctx)
+   err = c.Watch(ctx, "production", secrets.Watch{OnChange: func(v *secrets.Values) error { return reload(v.Values) }})
+   ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
@@ -1597,10 +1605,9 @@ Ranked (work that can start now):
 2. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
    protected environment, and an approver grants it for minutes (the approval names the
    environment and folder).
-3. **Runtime clients beyond TypeScript.** `@roll/secrets` (packages/secrets) already fetches an
-   environment's values with a token, opens sealed exports, watches the digest and renews dynamic
-   leases. Go and Python clients with the same surface (and a workload identity's login built in),
-   as Doppler's and Infisical's SDKs have.
+3. **A Python client** with the same surface as `@roll/secrets` and `sdk/go/secrets` (values,
+   sealed resolve, digest, watch, workload identity login), as Doppler's and Infisical's SDKs
+   have. The Go client is on `feature/roll-secrets-sdk`.
 4. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
 5. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),

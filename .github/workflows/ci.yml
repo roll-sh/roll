@@ -86,6 +86,23 @@ jobs:
           filter: dashboard...
       - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/3
 
+  # The Go client for roll secrets (sdk/go/secrets): standard library only.
+  sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    defaults:
+      run:
+        working-directory: sdk/go/secrets
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
   scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -107,7 +124,7 @@ jobs:
           fi
 
   ci:
-    needs: [rust, web, dashboard, scripts]
+    needs: [rust, web, dashboard, sdk, scripts]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
