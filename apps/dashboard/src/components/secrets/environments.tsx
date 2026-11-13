@@ -266,7 +266,7 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
   const rows = required;
   const keyOk = SECRET_KEY.test(adding.key) && adding.path.startsWith("/");
   return (
-    <Section title="Required keys" aside={<span className="text-[11.5px] text-subtle">Every standard environment must set these; typed ones must fit.</span>}>
+    <Section title="Required keys" aside={<span className="text-[11.5px] text-subtle max-sm:hidden">Every standard environment must set these; typed ones must fit.</span>}>
       {rows.length > 0 && (
         <div className={`${card} mb-2 divide-y divide-line`}>
           {rows.map((r) => (
@@ -302,7 +302,7 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
         </label>
         <div>
           <span className={label}>Type</span>
-          <Select label="Type" value={adding.type ?? ""} onChange={(v) => setAdding({ ...adding, type: (v || undefined) as KeyType | undefined })} options={[{ value: "", label: "any" }, ...KEY_TYPES.map((t) => ({ value: t, label: TYPE_LABEL[t] }))]} className="h-7 w-28" />
+          <Select label="Type" value={adding.type ?? "any"} onChange={(v) => setAdding({ ...adding, type: v === "any" ? undefined : (v as KeyType) })} options={[{ value: "any", label: "any" }, ...KEY_TYPES.map((t) => ({ value: t, label: TYPE_LABEL[t] }))]} className="h-7 w-28" />
         </div>
         <label className="min-w-40 flex-1">
           <span className={label}>Pattern (optional)</span>

@@ -557,7 +557,7 @@ function SecretRow({
             title={onSelect ? undefined : "Read-only here: it comes from elsewhere"}
             className={`shrink-0 accent-[var(--accent)] transition-opacity ${selected ? "" : "opacity-40 group-hover/row:opacity-100 focus-visible:opacity-100"} disabled:opacity-0`}
           />
-          <span className={`truncate font-mono text-[12px] ${own ? "text-fg" : "text-muted"}`} title={s.key}>
+          <span className={`max-w-[70%] shrink-0 truncate font-mono text-[12px] ${own ? "text-fg" : "text-muted"}`} title={s.key}>
             {s.key}
           </span>
           {personal && <PersonalMark title="Your personal value: only you see it" />}

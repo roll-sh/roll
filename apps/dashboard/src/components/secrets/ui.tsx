@@ -160,16 +160,16 @@ export function SourceMark({ source, onOpen }: { source: Secret["source"] | Cell
   const title = kind === "import" ? `Imported${from ? ` from ${from}` : ""}: read-only here` : `Inherited from the base environment${from ? ` ${from}` : ""}`;
   const body = (
     <>
-      {kind === "import" ? <ImportIcon className="size-3" /> : <CornerDownRight className="size-3" />}
-      {from || kind}
+      {kind === "import" ? <ImportIcon className="size-3 shrink-0" /> : <CornerDownRight className="size-3 shrink-0" />}
+      <span className="truncate">{from || kind}</span>
     </>
   );
   return onOpen ? (
-    <button type="button" onClick={onOpen} title={title} aria-label={kind === "import" ? `Show the import from ${from}` : `Open the base, ${from}`} className="inline-flex shrink-0 items-center gap-1 rounded text-[11px] text-subtle transition-colors hover:text-accent hover:underline">
+    <button type="button" onClick={onOpen} title={title} aria-label={kind === "import" ? `Show the import from ${from}` : `Open the base, ${from}`} className="inline-flex min-w-0 items-center gap-1 rounded text-[11px] text-subtle transition-colors hover:text-accent hover:underline">
       {body}
     </button>
   ) : (
-    <span title={title} className="inline-flex items-center gap-1 text-[11px] text-subtle">
+    <span title={title} className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle">
       {body}
     </span>
   );
