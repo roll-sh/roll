@@ -632,6 +632,32 @@ does the same, as `heroku rollback`. A failed or timed-out cron run is a `cron.f
 notified by default; a failed one-off job is `job.failed`, off by default (someone ran it and saw
 it). Both carry the exit code.
 
+## Gradual rollouts
+
+`run.rollout` (Vercel's rolling releases, Cloud Run's traffic splits): `steps` are increasing
+percents (`[10, 50]`, at most five), each lasting `step_s` (default 120). After the new
+deployment's instances pass their health check, they join the old ones instead of replacing
+them, and the proxy sends each step's share of requests to them by turns (request *n* goes to
+the new one when `(n × 37) mod 100 < share`, so each hundred requests sends exactly that many,
+spread out). The proxy counts each deployment's answers and 5xx while a canary runs. The
+rollout reads them every quarter of a step (5 s at most), and a step fails when the new
+deployment answered `error_pct` (default 5) or more of at least 20 requests with a 5xx and more
+often than the old one did. An outage both share, like a database that's down, isn't the new
+code's fault. A failure rolls it back: every request goes to the old deployment again, the new
+one's instances drain, and the deploy fails with the numbers ("rolled back at 10% of requests:
+14 of its 40 requests were 5xx…"). After the last step, the store switches the active
+deployment (`switch_active`, the same compare-and-swap) and the old instances drain. Canceling
+the deploy, or Roll back on the service page, does the same as a failed step. The environment
+shows `canary` (deployment and share) while one runs, and each step is in the deployment's
+steps (`canary_10`).
+
+A rollout splits requests, so it needs a web service whose old deployment is running. The first
+deployment, an environment that's asleep, a worker and a cron service switch at once, and a
+service with a volume refuses `steps` (one instance writes it). The state lives on the owner.
+If the owner changes mid-rollout, the new owner runs the deploy again from the start, like any
+other deploy it takes over. A visitor isn't pinned to one deployment yet: within a step, their
+requests can reach either.
+
 ## A service and its database
 
 Railway's and Render's templates make an app and its database together. roll does it without a
@@ -830,24 +856,22 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
-    (Vercel's rolling releases, Cloud Run's traffic splits).
-2. **Per-environment run settings**: an environment's own size, instances and sleep from the
+1. **Per-environment run settings**: an environment's own size, instances and sleep from the
    API, the CLI and the dashboard (today only roll.toml's `[app.environments.<name>.run]`).
-3. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+2. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-4. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+3. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-5. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+4. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-6. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-7. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+5. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+6. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-8. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+7. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-9. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+8. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

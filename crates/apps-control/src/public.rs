@@ -283,11 +283,13 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
             // Nothing listens any more (killed, out of memory): the next request starts a
             // fresh instance.
             live.connect_failed(&lease.inst);
+            live.answered(&lease.inst, 503);
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 503, 0);
             access.write(503, began, 0, &instance, &request_id, cold, waited_ms);
             return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Restarting", "The instance stopped; the next request starts it again."));
         }
         Err(e) => {
+            live.answered(&lease.inst, 502);
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 502, 0);
             access.write(502, began, 0, &instance, &request_id, cold, waited_ms);
             // What went wrong is the owner's to read (the environment's log), not a visitor's.
@@ -348,7 +350,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
             }
         }
     });
-    let done = Done { live: live.clone(), began, status, counted, access: Some((access, instance, request_id, cold, waited_ms)), _lease: lease };
+    let done = Done { live: live.clone(), began, status, counted, access: Some((access, instance, request_id, cold, waited_ms)), lease };
     let stream = stream.chain(futures::stream::once(async move {
         drop(done);
         Ok(bytes::Bytes::new())
@@ -364,12 +366,13 @@ struct Done {
     counted: Arc<AtomicU64>,
     /// Its access line: where it goes, the instance, the request id, a cold start's wait.
     access: Option<(Access, String, String, bool, u64)>,
-    _lease: crate::live::Lease,
+    lease: crate::live::Lease,
 }
 
 impl Drop for Done {
     fn drop(&mut self) {
         let bytes = self.counted.load(Ordering::Relaxed);
+        self.live.answered(&self.lease.inst, self.status);
         self.live.meter.lock().request(code_sql::now_ms(), self.began.elapsed().as_secs_f64() * 1000.0, self.status, bytes);
         if let Some((a, instance, id, cold, waited)) = self.access.take() {
             a.write(self.status, self.began, bytes, &instance, &id, cold, waited);

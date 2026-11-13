@@ -601,9 +601,13 @@ impl Apps {
 
     async fn environment_view(self: &Arc<Self>, r: EnvRow) -> Result<Environment> {
         let summary = self.summary(&r).await?;
-        let (instances, crash_loop) = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
-            Some(l) => (l.instances().iter().map(|i| Instance { id: i.name.clone(), deployment: i.deployment.clone(), state: i.state(), started_at: i.started_at(), in_flight: i.in_flight() }).collect(), l.crash_loop()),
-            None => (Vec::new(), None),
+        let (instances, crash_loop, canary) = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
+            Some(l) => (
+                l.instances().iter().map(|i| Instance { id: i.name.clone(), deployment: i.deployment.clone(), state: i.state(), started_at: i.started_at(), in_flight: i.in_flight() }).collect(),
+                l.crash_loop(),
+                l.canary().map(|(deployment, share)| crate::model::Canary { deployment, share }),
+            ),
+            None => (Vec::new(), None, None),
         };
         let domains = self.domains(&r.service, &r.name).await?;
         let sid = r.service.clone();
@@ -638,6 +642,7 @@ impl Apps {
             private,
             next_run_at,
             crash_loop,
+            canary,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
             created_at: r.created_at,

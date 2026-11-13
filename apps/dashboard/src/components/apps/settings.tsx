@@ -44,6 +44,9 @@ interface Form {
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
+  rolloutSteps: string;
+  rolloutStep: string;
+  rolloutErrors: string;
   suspendAfter: string;
   sleepAfter: string;
   volumeMount: string;
@@ -81,6 +84,9 @@ export function formOf(s: Service): Form {
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
+    rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
+    rolloutStep: str(s.run.rollout?.step_s),
+    rolloutErrors: str(s.run.rollout?.error_pct),
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
@@ -129,6 +135,8 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95)
     run.alerts = { memory_pct: Number(f.alertMemory) || 0, error_pct: Number(f.alertErrors) || 0, p95_ms: Number(f.alertP95) || 0 };
+  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors)
+    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
   if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize)
@@ -137,7 +145,15 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["port", "timeout", "min", "max", "concurrency", "healthTimeout", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95"];
+const NUMERIC: (keyof Form)[] = ["port", "timeout", "min", "max", "concurrency", "healthTimeout", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors"];
+
+/** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
+export function rolloutSteps(v: string): number[] | null {
+  const parts = v.split(/[,\s%]+/).filter(Boolean);
+  const steps = parts.map(Number);
+  const ok = steps.length <= 5 && steps.every((n, i) => Number.isInteger(n) && n >= 1 && n <= 99 && (i === 0 || n > steps[i - 1]!));
+  return ok ? steps : null;
+}
 
 /** Source, build and run settings, saved together; deleting the service at the bottom. */
 export function SettingsTab({
@@ -327,6 +343,19 @@ export function SettingsTab({
               <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                 {t("alertP95", "0")}
               </Field>
+              {!form.volumeMount.trim() && (
+                <Field label="Gradual rollout (%)" hint={rolloutSteps(form.rolloutSteps) ? "shares of requests a new deployment takes in turn; empty: at once" : "increasing percents, 1–99, up to five"}>
+                  {t("rolloutSteps", "10, 50")}
+                </Field>
+              )}
+              {!form.volumeMount.trim() && form.rolloutSteps.trim() && (
+                <>
+                  <Field label="Each step (s)">{t("rolloutStep", "120")}</Field>
+                  <Field label="Roll back at 5xx (%)" hint="of its requests in a step, and more than the old one">
+                    {t("rolloutErrors", "5")}
+                  </Field>
+                </>
+              )}
             </>
           )}
           <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
@@ -346,7 +375,7 @@ export function SettingsTab({
         </button>
         <button
           className={primary}
-          disabled={!dirty || !SERVICE_NAME.test(form.name) || runner.busy !== null}
+          disabled={!dirty || !SERVICE_NAME.test(form.name) || rolloutSteps(form.rolloutSteps) === null || runner.busy !== null}
           onClick={() => runner.run("settings", () => appsApi.update(service.id, patch))}
         >
           {runner.busy === "settings" ? <span className="shimmer">Saving…</span> : "Save"}

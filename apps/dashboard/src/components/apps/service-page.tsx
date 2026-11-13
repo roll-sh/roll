@@ -366,6 +366,21 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         </div>
       )}
 
+      {env?.canary && (
+        <div role="status" className="rise mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-line bg-panel px-4 py-3 text-[13px]">
+          <span className="flex items-center gap-2 font-medium">
+            <span className="size-1.5 animate-pulse rounded-full bg-accent motion-reduce:animate-none" />
+            Rolling out
+          </span>
+          <span className="min-w-0 flex-1 text-muted">
+            {env.canary.deployment.slice(-6)} takes {env.canary.share}% of requests; it rolls back by itself if it answers more 5xx than allowed.
+          </span>
+          <button type="button" className={btn} disabled={busy} onClick={() => runner.run("cancel", () => appsApi.cancel(service.id, envName, env.canary!.deployment))}>
+            Roll back
+          </button>
+        </div>
+      )}
+
       <nav className="mt-6 flex gap-1 overflow-x-auto border-b border-line [scrollbar-width:none]" aria-label="Service">
         {SERVICE_TABS.map((t) => (
           <button

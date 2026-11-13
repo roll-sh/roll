@@ -1,7 +1,8 @@
 //! One environment's instances on its service's owner (docs/apps/README.md, "The runtime"):
 //! the waking proxy's side ([`EnvLive::acquire`]), the reaper that suspends, stops and scales
 //! ([`EnvLive::tick`]), and the two halves of a rollout ([`EnvLive::prepare`] and
-//! [`EnvLive::commit`]).
+//! [`EnvLive::commit`]), or of a gradual one ([`EnvLive::begin_canary`], then
+//! [`EnvLive::promote_canary`] or [`EnvLive::abort_canary`]).
 //!
 //! The state lives only in the owner's memory: a new owner starts from the store (the active
 //! deployment) and makes instances again.
@@ -13,6 +14,7 @@ use crate::runtime::{InstanceSpec, Runtime};
 use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -145,6 +147,19 @@ pub enum WakeError {
     Capped,
 }
 
+/// One deployment's answers during a canary step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Served {
+    pub requests: u64,
+    pub errors: u64,
+}
+
+impl Served {
+    pub fn error_pct(&self) -> f64 {
+        if self.requests == 0 { 0.0 } else { self.errors as f64 * 100.0 / self.requests as f64 }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveConfig {
     pub wake_timeout: Duration,
@@ -195,6 +210,12 @@ pub struct EnvLive {
     capped: AtomicBool,
     /// Its volume is being restored: nothing starts until it's done.
     held: AtomicBool,
+    /// A gradual rollout's new deployment and the percent of requests it takes.
+    canary: Mutex<Option<(Arc<Template>, u8)>>,
+    /// Requests routed so far (the canary's share is taken by turns).
+    routed: AtomicU64,
+    /// Requests answered and 5xx answers per deployment while a canary runs.
+    served: Mutex<HashMap<String, Served>>,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
     /// The last failed wake and how many failed in a row: the requests behind it get its error
@@ -230,6 +251,9 @@ impl EnvLive {
             closed: AtomicBool::new(false),
             capped: AtomicBool::new(false),
             held: AtomicBool::new(false),
+            canary: Mutex::new(None),
+            routed: AtomicU64::new(0),
+            served: Mutex::new(HashMap::new()),
             waiters: AtomicU32::new(0),
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
@@ -250,6 +274,58 @@ impl EnvLive {
 
     pub fn instances(&self) -> Vec<Arc<Inst>> {
         self.insts.lock().clone()
+    }
+
+    /// The deployment a request goes to: the canary's share of them, by turns (37 is coprime
+    /// with 100, so each hundred requests sends exactly that many, spread out), else the active
+    /// one.
+    fn route(&self) -> Option<Arc<Template>> {
+        if let Some((c, share)) = self.canary.lock().clone() {
+            let n = self.routed.fetch_add(1, Ordering::Relaxed) % 100;
+            if (n * 37) % 100 < share as u64 {
+                return Some(c);
+            }
+        }
+        self.template()
+    }
+
+    /// `deployment`'s template while it still serves (the active one or the canary).
+    fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
+        if let Some((c, _)) = self.canary.lock().as_ref()
+            && c.deployment == deployment
+        {
+            return Some(c.clone());
+        }
+        self.template().filter(|t| t.deployment == deployment)
+    }
+
+    /// The canary's deployment and share, while a gradual rollout runs.
+    pub fn canary(&self) -> Option<(String, u8)> {
+        self.canary.lock().as_ref().map(|(t, s)| (t.deployment.clone(), *s))
+    }
+
+    /// The proxy's answer to a request `inst` served: counted per deployment while a canary
+    /// runs (the rollout judges the new deployment by them).
+    pub fn answered(&self, inst: &Inst, status: u16) {
+        if self.canary.lock().is_none() {
+            return;
+        }
+        let mut s = self.served.lock();
+        let e = s.entry(inst.deployment.clone()).or_default();
+        e.requests += 1;
+        if status >= 500 {
+            e.errors += 1;
+        }
+    }
+
+    /// Answers since the last call, per deployment (and counting again from zero).
+    pub fn take_served(&self) -> HashMap<String, Served> {
+        std::mem::take(&mut *self.served.lock())
+    }
+
+    /// How many instances are up or starting.
+    pub fn awake(&self) -> usize {
+        self.awake_count()
     }
 
     pub fn state(&self) -> InstanceState {
@@ -343,11 +419,12 @@ impl EnvLive {
         Ok(addr)
     }
 
-    /// A running instance with room under `concurrency` (the least busy), leased.
-    fn pick(&self, concurrency: u32, over: bool) -> Option<Lease> {
+    /// A running instance of `deployment` with room under `concurrency` (the least busy), leased.
+    fn pick(&self, deployment: &str, concurrency: u32, over: bool) -> Option<Lease> {
         let insts = self.insts.lock();
         let best = insts
             .iter()
+            .filter(|i| i.deployment == deployment)
             .filter_map(|i| match i.phase() {
                 Phase::Running(Some(a)) => Some((i, a)),
                 _ => None,
@@ -370,12 +447,16 @@ impl EnvLive {
         Some(std::mem::replace(&mut *phase, Phase::Stopping))
     }
 
-    fn running_count(&self) -> usize {
-        self.insts.lock().iter().filter(|i| matches!(i.phase(), Phase::Running(_))).count()
+    fn running_count(&self, deployment: &str) -> usize {
+        self.insts.lock().iter().filter(|i| i.deployment == deployment && matches!(i.phase(), Phase::Running(_))).count()
     }
 
     fn awake_count(&self) -> usize {
         self.insts.lock().iter().filter(|i| i.awake()).count()
+    }
+
+    fn awake_of(&self, deployment: &str) -> usize {
+        self.insts.lock().iter().filter(|i| i.deployment == deployment && i.awake()).count()
     }
 
     /// An instance to send a request to: one that's up, else a suspended one resumed, else one
@@ -392,20 +473,20 @@ impl EnvLive {
         if self.held.load(Ordering::SeqCst) {
             return Err(WakeError::Busy);
         }
-        let tpl = self.template().ok_or(WakeError::NoDeployment)?;
+        let tpl = self.route().ok_or(WakeError::NoDeployment)?;
         if tpl.run.kind != RunType::Web {
             return Err(WakeError::NotWeb);
         }
-        let run = &tpl.run;
-        if let Some(l) = self.pick(run.concurrency, false) {
+        let (run, dep) = (&tpl.run, tpl.deployment.as_str());
+        if let Some(l) = self.pick(dep, run.concurrency, false) {
             return Ok(l);
         }
         // Everything is busy but something's running: scale out behind it, and go to the least
         // busy.
-        if self.running_count() > 0 && (self.awake_count() as u32) < run.max_instances {
-            let this = self.clone();
-            tokio::spawn(async move { this.scale_up().await });
-            if let Some(l) = self.pick(run.concurrency, true) {
+        if self.running_count(dep) > 0 && (self.awake_of(dep) as u32) < run.max_instances {
+            let (this, t) = (self.clone(), tpl.clone());
+            tokio::spawn(async move { this.scale_up(t).await });
+            if let Some(l) = self.pick(dep, run.concurrency, true) {
                 return Ok(l);
             }
         }
@@ -418,7 +499,7 @@ impl EnvLive {
         // if nobody takes it, is dropped there.
         let this = self.clone();
         tokio::spawn(async move {
-            let r = this.wake_slow(began).await;
+            let r = this.wake_slow(began, tpl).await;
             this.waiters.fetch_sub(1, Ordering::SeqCst);
             r
         })
@@ -426,14 +507,20 @@ impl EnvLive {
         .unwrap_or_else(|e| Err(WakeError::Failed(e.to_string())))
     }
 
-    async fn wake_slow(self: &Arc<Self>, began: Instant) -> Result<Lease, WakeError> {
+    async fn wake_slow(self: &Arc<Self>, began: Instant, routed: Arc<Template>) -> Result<Lease, WakeError> {
         let deadline = began + self.cfg.wake_timeout;
         let _g = tokio::time::timeout_at(deadline.into(), self.wake.lock()).await.map_err(|_| WakeError::Timeout(self.cfg.wake_timeout))?;
         if self.closed.load(Ordering::SeqCst) {
             return Err(WakeError::NoDeployment);
         }
-        let tpl = self.template().ok_or(WakeError::NoDeployment)?;
-        if let Some(mut l) = self.pick(tpl.run.concurrency, self.awake_count() as u32 >= tpl.run.max_instances) {
+        // Read again under the lock: the deployment it was routed to may have been switched,
+        // promoted or rolled back meanwhile.
+        let tpl = match self.serving(&routed.deployment) {
+            Some(t) => t,
+            None => self.template().ok_or(WakeError::NoDeployment)?,
+        };
+        let dep = tpl.deployment.as_str();
+        if let Some(mut l) = self.pick(dep, tpl.run.concurrency, self.awake_of(dep) as u32 >= tpl.run.max_instances) {
             l.waited = began.elapsed();
             return Ok(l);
         }
@@ -443,12 +530,12 @@ impl EnvLive {
             return Err(WakeError::Failed(why));
         }
         // A frozen one first: milliseconds.
-        let suspended = self.insts.lock().iter().find(|i| matches!(i.phase(), Phase::Suspended(_))).cloned();
+        let suspended = self.insts.lock().iter().find(|i| i.deployment == dep && matches!(i.phase(), Phase::Suspended(_))).cloned();
         if let Some(i) = suspended {
             let Phase::Suspended(addr) = i.phase() else { unreachable!() };
             if self.runtime.resume(&i.name).await.is_ok() {
                 *i.phase.lock() = Phase::Running(addr);
-                if let Some(mut l) = self.pick(tpl.run.concurrency, true) {
+                if let Some(mut l) = self.pick(dep, tpl.run.concurrency, true) {
                     l.waited = began.elapsed();
                     return Ok(l);
                 }
@@ -477,7 +564,7 @@ impl EnvLive {
         let ms = woke.elapsed().as_secs_f64() * 1000.0;
         self.meter.lock().cold_start(now_ms(), ms);
         self.log.stream(Stream::System).line(format!("cold start: {} answered in {ms:.0} ms", inst.name));
-        let mut l = self.pick(tpl.run.concurrency, true).ok_or_else(|| WakeError::Failed("the instance stopped again".into()))?;
+        let mut l = self.pick(dep, tpl.run.concurrency, true).ok_or_else(|| WakeError::Failed("the instance stopped again".into()))?;
         l.waited = began.elapsed();
         l.cold = true;
         Ok(l)
@@ -561,10 +648,10 @@ impl EnvLive {
         Ok(i)
     }
 
-    async fn scale_up(self: Arc<Self>) {
+    async fn scale_up(self: Arc<Self>, routed: Arc<Template>) {
         let Ok(_g) = self.wake.try_lock() else { return };
-        let Some(tpl) = self.template() else { return };
-        if self.awake_count() as u32 >= tpl.run.max_instances {
+        let Some(tpl) = self.serving(&routed.deployment) else { return };
+        if self.awake_of(&tpl.deployment) as u32 >= tpl.run.max_instances {
             return;
         }
         let Ok(inst) = self.ready_instance(&tpl).await else { return };
@@ -652,6 +739,8 @@ impl EnvLive {
         }
         let was_awake = self.awake_count();
         *self.template.lock() = Some(tpl.clone());
+        // A canary of an earlier rollout (one this deploy superseded) goes with the old ones.
+        *self.canary.lock() = None;
         let old: Vec<Arc<Inst>> = std::mem::replace(&mut *self.insts.lock(), made.clone());
         if tpl.run.kind == RunType::Web && was_awake == 0 && tpl.run.min_instances == 0 {
             for i in &made {
@@ -665,6 +754,11 @@ impl EnvLive {
                 self.insts.lock().push(i);
             }
         }
+        self.drain(old);
+    }
+
+    /// Instances out of rotation finish their requests (up to `drain`), then go.
+    fn drain(&self, old: Vec<Arc<Inst>>) {
         let runtime = self.runtime.clone();
         let drain = self.cfg.drain;
         tokio::spawn(async move {
@@ -677,6 +771,57 @@ impl EnvLive {
                 runtime.remove(&i.name).await;
             }
         });
+    }
+
+    /// A gradual rollout begins: the new deployment's healthy instances join the active one's,
+    /// and `share` percent of requests go to them.
+    pub async fn begin_canary(self: &Arc<Self>, tpl: Arc<Template>, prepared: Prepared, share: u8) {
+        let _g = self.wake.lock().await;
+        if self.closed.load(Ordering::SeqCst) {
+            self.discard(&prepared.made).await;
+            return;
+        }
+        self.served.lock().clear();
+        self.insts.lock().extend(prepared.made);
+        *self.canary.lock() = Some((tpl, share));
+    }
+
+    /// The canary's next step.
+    pub fn set_share(&self, share: u8) {
+        if let Some((_, s)) = self.canary.lock().as_mut() {
+            *s = share;
+        }
+    }
+
+    /// The canary takes every request and becomes the active deployment; the old instances
+    /// drain.
+    pub async fn promote_canary(self: &Arc<Self>) {
+        let _g = self.wake.lock().await;
+        let Some((tpl, _)) = self.canary.lock().take() else { return };
+        *self.template.lock() = Some(tpl.clone());
+        let old: Vec<Arc<Inst>> = {
+            let mut insts = self.insts.lock();
+            let (keep, old) = std::mem::take(&mut *insts).into_iter().partition(|i| i.deployment == tpl.deployment);
+            *insts = keep;
+            old
+        };
+        self.served.lock().clear();
+        self.drain(old);
+    }
+
+    /// The canary is rolled back: every request goes to the active deployment again, and the
+    /// canary's instances drain.
+    pub async fn abort_canary(self: &Arc<Self>) {
+        let _g = self.wake.lock().await;
+        let Some((tpl, _)) = self.canary.lock().take() else { return };
+        let gone: Vec<Arc<Inst>> = {
+            let mut insts = self.insts.lock();
+            let (gone, keep) = std::mem::take(&mut *insts).into_iter().partition(|i| i.deployment == tpl.deployment);
+            *insts = keep;
+            gone
+        };
+        self.served.lock().clear();
+        self.drain(gone);
     }
 
     /// Set the active deployment without starting anything (a new owner taking the service).
@@ -736,6 +881,7 @@ impl EnvLive {
     pub async fn shutdown(&self) {
         let _g = self.wake.lock().await;
         self.closed.store(true, Ordering::SeqCst);
+        *self.canary.lock() = None;
         let all: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
         self.discard(&all).await;
         *self.template.lock() = None;

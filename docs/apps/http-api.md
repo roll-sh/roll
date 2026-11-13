@@ -167,6 +167,11 @@ type Run = {
   sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min
   volume?: { mount: string; size_gb: number };
   alerts: { memory_pct: number; error_pct: number; p95_ms: number }; // default 90, 5, 0 (0 off): `alert.*` events over five minutes
+  /** A gradual rollout (README "Gradual rollouts"): increasing percents 1–99 (at most five; []
+   *  switches at once, the default), each for step_s (1–3600, default 120); a step whose 5xx
+   *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
+   *  back. Web services only; refused with a volume. */
+  rollout: { steps: number[]; step_s: number; error_pct: number };
 };
 
 type Service = {
@@ -224,6 +229,7 @@ type Environment = EnvironmentSummary & {
   private: boolean;          // its hostnames answer only visitors with its access token
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
+  canary: { deployment: string; share: number } | null; // a gradual rollout under way: the percent of requests the new deployment takes
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
   created_at: number;

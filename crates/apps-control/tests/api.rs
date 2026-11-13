@@ -1232,3 +1232,68 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": "ftp://x"}))).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": "https://hooks.example.com/x", "events": ["nope"]}))).await.0, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gradual_rollout_shares_requests_and_rolls_back_a_deployment_that_errors() {
+    let w = world().await;
+    let run = json!({"port": 80, "min_instances": 1, "rollout": {"steps": [50], "step_s": 1, "error_pct": 20}});
+    // The first deployment has nothing to share requests with: it switches at once.
+    let (svc, d1) = image_service(&w, "api", run).await;
+    assert_eq!(d1["status"], "active", "{d1}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    let h = host(&env["url"]);
+    // Traffic all along, as a live site has: what answered, by deployment.
+    let traffic = |w: &World, stop: Arc<std::sync::atomic::AtomicBool>| {
+        let (public, h) = (w.public.clone(), h.clone());
+        tokio::spawn(async move {
+            let mut seen: Vec<(u16, String)> = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let req = Request::builder().uri("/").header("host", &h).body(Body::empty()).unwrap();
+                let resp = public.clone().oneshot(req).await.unwrap();
+                let st = resp.status().as_u16();
+                let b = resp.into_body().collect().await.unwrap().to_bytes();
+                let v: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
+                seen.push((st, v["deployment"].as_str().unwrap_or("").to_string()));
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            seen
+        })
+    };
+
+    // A good deployment takes half the requests for its step, then all of them.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let t = traffic(&w, stop.clone());
+    let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
+    assert_eq!(d2["status"], "active", "{d2}");
+    assert!(d2["steps"].as_array().unwrap().iter().any(|s| s["step"] == "canary_50"), "{d2}");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let seen = t.await.unwrap();
+    assert!(seen.iter().all(|(st, _)| *st == 200), "no request failed during the rollout");
+    let old = seen.iter().filter(|(_, d)| *d == d1["id"]).count();
+    let new = seen.iter().filter(|(_, d)| *d == d2["id"]).count();
+    assert!(old > 20 && new > 20, "both answered during the step: {old} old, {new} new");
+    for _ in 0..5 {
+        let (st, v) = visit(&w, &h, "/").await;
+        assert_eq!((st, v["deployment"].clone()), (StatusCode::OK, d2["id"].clone()));
+    }
+
+    // One that answers 5xx is rolled back mid-step; the old one never stopped serving.
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_UNHEALTHY": "1"}}))).await;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let t = traffic(&w, stop.clone());
+    let (_, d3) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    t.await.unwrap();
+    assert_eq!(d3["status"], "failed", "{d3}");
+    assert!(d3["error"].as_str().unwrap().contains("rolled back at 50%"), "{d3}");
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    assert_eq!(env["active"]["id"], d2["id"]);
+    let (st, v) = visit(&w, &h, "/").await;
+    assert_eq!((st, v["deployment"].clone()), (StatusCode::OK, d2["id"].clone()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(w.fake.instances(&id).iter().all(|(_, dep, _)| *dep == d2["id"]), "the canary's instances are gone");
+}

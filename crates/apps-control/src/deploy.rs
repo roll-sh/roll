@@ -5,7 +5,7 @@
 //! Also the owner's background loops: the reaper and meter, deploy-on-push from roll code's
 //! land log, cron schedules, and custom domains' DNS checks.
 
-use crate::live::Template;
+use crate::live::{EnvLive, Template};
 use crate::logs::{LogSink, Stream};
 use crate::model::*;
 use crate::runtime::{BuildJob, InstanceSpec};
@@ -330,9 +330,9 @@ impl Apps {
     }
 
     /// A deployment's step began (for its summary; a failed write only loses the summary).
-    async fn step(self: &Arc<Self>, deployment: &str, step: &'static str) {
-        let id = deployment.to_string();
-        let _ = self.db(move |s| s.mark_step(&id, step)).await;
+    async fn step(self: &Arc<Self>, deployment: &str, step: &str) {
+        let (id, step) = (deployment.to_string(), step.to_string());
+        let _ = self.db(move |s| s.mark_step(&id, &step)).await;
     }
 
     async fn run(self: &Arc<Self>, d: Deployment) {
@@ -477,6 +477,22 @@ impl Apps {
         if !made.is_empty() {
             log.stream(Stream::System).line(format!("healthy after {:.1} s", took.as_secs_f64()));
         }
+        // A gradual rollout needs something to split: the old deployment running and taking
+        // requests. Asleep, it switches at once (nothing would judge the new one).
+        let gradual = !tpl.run.rollout.steps.is_empty() && tpl.run.kind == RunType::Web && env.active.is_some() && live.awake() > 0;
+        if !tpl.run.rollout.steps.is_empty() && !gradual && tpl.run.kind == RunType::Web {
+            log.stream(Stream::System).line("nothing else is running, so it switches at once");
+        }
+        let prepared = if gradual {
+            live.begin_canary(tpl.clone(), prepared, tpl.run.rollout.steps[0]).await;
+            if let Err(e) = self.canary(&svc.id, &d.id, &live, &tpl, log, &cancel).await {
+                live.abort_canary().await;
+                return Err(e);
+            }
+            None
+        } else {
+            Some(prepared)
+        };
         let (sid, e, from, to, vh) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone());
         // Epochs only grow on a backend that outlives the process; the in-memory one starts
         // again at 1, and a fence kept in the store would then refuse every later switch.
@@ -491,12 +507,61 @@ impl Apps {
             .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh) }))
             .await?;
         if !switched {
-            for i in &made {
-                self.deps.runtime.remove(&i.name).await;
+            match prepared {
+                Some(_) => {
+                    for i in &made {
+                        self.deps.runtime.remove(&i.name).await;
+                    }
+                }
+                None => live.abort_canary().await,
             }
             anyhow::bail!("another deploy switched this environment meanwhile");
         }
-        live.commit(tpl, prepared).await;
+        match prepared {
+            Some(p) => live.commit(tpl, p).await,
+            None => {
+                live.promote_canary().await;
+                log.stream(Stream::System).line("the new deployment takes every request");
+            }
+        }
+        Ok(())
+    }
+
+    /// A gradual rollout's steps (docs/apps/README.md, "Gradual rollouts"): each share of
+    /// requests for `step_s`, judged as it goes. An error when it's rolled back, canceled or the
+    /// service moved; the caller takes the canary out.
+    async fn canary(self: &Arc<Self>, service: &str, id: &str, live: &Arc<EnvLive>, tpl: &Template, log: &LogSink, cancel: &CancellationToken) -> anyhow::Result<()> {
+        let r = &tpl.run.rollout;
+        let every = Duration::from_millis((r.step_s as u64 * 250).min(5000));
+        let sys = log.stream(Stream::System);
+        for &share in &r.steps {
+            live.set_share(share);
+            live.take_served();
+            self.step(id, &format!("canary_{share}")).await;
+            sys.line(format!("canary: the new deployment takes {share}% of requests for {} s", r.step_s));
+            let until = tokio::time::Instant::now() + Duration::from_secs(r.step_s as u64);
+            let (mut new, mut old) = (crate::live::Served::default(), crate::live::Served::default());
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(every) => {}
+                    _ = cancel.cancelled() => anyhow::bail!("canceled"),
+                }
+                anyhow::ensure!(self.owns(service), "this node no longer holds the service; the node that took it over deploys");
+                for (dep, s) in live.take_served() {
+                    let into = if dep == tpl.deployment { &mut new } else { &mut old };
+                    into.requests += s.requests;
+                    into.errors += s.errors;
+                }
+                if let Some(why) = judge(new, old, r.error_pct) {
+                    sys.line(format!("canary: rolled back at {share}%: {why}"));
+                    anyhow::bail!("rolled back at {share}% of requests: {why}");
+                }
+                if tokio::time::Instant::now() >= until {
+                    break;
+                }
+            }
+            sys.line(format!("canary: {share}% passed ({} requests, {:.1}% 5xx)", new.requests, new.error_pct()));
+        }
         Ok(())
     }
 
@@ -1326,3 +1391,20 @@ impl Apps {
         self.stop.cancel();
     }
 }
+
+/// Whether a canary step fails: the new deployment answered `error_pct` or more of at least
+/// [`Rollout::MIN_REQUESTS`] requests with a 5xx, and more often than the old one (an outage
+/// both share, a database down, isn't the new code's fault).
+fn judge(new: crate::live::Served, old: crate::live::Served, error_pct: u8) -> Option<String> {
+    if new.requests < crate::model::Rollout::MIN_REQUESTS || new.error_pct() < error_pct as f64 || new.error_pct() <= old.error_pct() {
+        return None;
+    }
+    Some(format!(
+        "{} of its {} requests were 5xx ({:.1}%; the old deployment {:.1}%)",
+        new.errors,
+        new.requests,
+        new.error_pct(),
+        old.error_pct()
+    ))
+}
+

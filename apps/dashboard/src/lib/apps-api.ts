@@ -63,6 +63,9 @@ export interface Run {
   volume?: { mount: string; size_gb: number };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number };
+  /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
+   *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
+  rollout?: { steps: number[]; step_s: number; error_pct: number };
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -197,6 +200,8 @@ export interface Environment extends EnvironmentSummary {
   next_run_at: number | null;
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
+  /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
+  canary?: { deployment: string; share: number } | null;
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -582,7 +587,7 @@ export function stepDurations(d: Pick<Deployment, "created_at" | "steps">, now =
   const out: { label: string; ms: number | null }[] = [{ label: "Queued", ms: steps[0].at - d.created_at }];
   steps.forEach((s, i) => {
     const end = steps[i + 1]?.at ?? (s.step === "live" || s.step === "failed" ? null : now);
-    out.push({ label: STEP_LABEL[s.step] ?? s.step, ms: end === null ? null : end - s.at });
+    out.push({ label: STEP_LABEL[s.step] ?? (s.step.startsWith("canary_") ? `${s.step.slice(7)}% of requests` : s.step), ms: end === null ? null : end - s.at });
   });
   return out;
 }

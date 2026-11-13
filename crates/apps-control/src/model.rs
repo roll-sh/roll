@@ -356,6 +356,32 @@ pub struct Run {
     pub volume: Option<Volume>,
     /// When its metrics notify (`alert.*` events), over five minutes.
     pub alerts: Alerts,
+    /// How a new deployment takes over: at once, or a share of requests at a time.
+    pub rollout: Rollout,
+}
+
+/// A gradual rollout (Vercel's rolling releases, Cloud Run's traffic splits): the new
+/// deployment takes each of `steps` percent of requests for `step_s` seconds, next to the old
+/// one, then all of them. A step in which the new deployment answers `error_pct` or more of its
+/// requests (at least 20) with a 5xx, and more than the old one does, rolls it back.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Rollout {
+    /// Increasing percents, 1–99, at most five; empty (the default) switches at once.
+    pub steps: Vec<u8>,
+    pub step_s: u32,
+    pub error_pct: u8,
+}
+
+impl Default for Rollout {
+    fn default() -> Self {
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5 }
+    }
+}
+
+impl Rollout {
+    /// The fewest requests a step judges by.
+    pub const MIN_REQUESTS: u64 = 20;
 }
 
 /// Metric alerts (Railway's monitors): each 0 is off. Judged every minute over the last five.
@@ -396,6 +422,7 @@ impl Default for Run {
             sleep_after_s: 600,
             volume: None,
             alerts: Alerts::default(),
+            rollout: Rollout::default(),
         }
     }
 }
@@ -408,6 +435,16 @@ impl Run {
             return Err(Error::BadRequest("alerts.memory_pct and alerts.error_pct are 0–100 (0 is off)".into()));
         }
         let bad = |m: &str| Err(Error::BadRequest(format!("run.{m}")));
+        let r = &self.rollout;
+        if r.steps.len() > 5 || r.steps.iter().any(|s| !(1..=99).contains(s)) || r.steps.windows(2).any(|w| w[0] >= w[1]) {
+            return bad("rollout.steps is up to five increasing percents, 1–99");
+        }
+        if !(1..=3600).contains(&r.step_s) {
+            return bad("rollout.step_s is 1–3600");
+        }
+        if !(1..=100).contains(&r.error_pct) {
+            return bad("rollout.error_pct is 1–100");
+        }
         if !(0.25..=8.0).contains(&self.cpu) || !self.cpu.is_finite() {
             return bad("cpu is 0.25–8 vCPU");
         }
@@ -449,6 +486,13 @@ impl Run {
             }
             self.max_instances = 1;
             self.min_instances = self.min_instances.min(1);
+            if !self.rollout.steps.is_empty() {
+                return bad("rollout: a service with a volume switches at once (one instance writes it)");
+            }
+        }
+        if self.kind != RunType::Web {
+            // Only requests can be split: a worker or a cron run switches at once.
+            self.rollout.steps.clear();
         }
         match self.kind {
             RunType::Cron => {
@@ -493,6 +537,12 @@ pub fn merge<T: Serialize + serde::de::DeserializeOwned>(base: &T, patch: Option
         }
     }
     serde_json::from_value(v).map_err(|e| Error::BadRequest(format!("{what}: {e}")))
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Canary {
+    pub deployment: String,
+    pub share: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -569,6 +619,8 @@ pub struct Environment {
     pub next_run_at: Option<i64>,
     /// Its instances keep crashing: three or more in the last ten minutes.
     pub crash_loop: Option<CrashLoop>,
+    /// A gradual rollout under way: the new deployment and the percent of requests it takes.
+    pub canary: Option<Canary>,
     /// A push deploys only once its commit's checks pass (Railway's "Wait for CI").
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.

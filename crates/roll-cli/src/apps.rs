@@ -191,6 +191,16 @@ pub enum AppsCmd {
         /// `none`: every push.
         #[arg(long)]
         watch: Option<String>,
+        /// A gradual rollout: the shares of requests a new deployment takes in turn (`10,50`);
+        /// `none` switches at once.
+        #[arg(long, value_name = "PERCENTS")]
+        rollout: Option<String>,
+        /// How long each rollout step lasts.
+        #[arg(long, value_name = "SECONDS")]
+        rollout_step: Option<u32>,
+        /// A step whose 5xx share reaches this (and beats the old deployment's) rolls back.
+        #[arg(long, value_name = "PERCENT")]
+        rollout_errors: Option<u8>,
     },
     /// Delete a service: its environments, instances, deployments and images (asks first;
     /// `--yes` doesn't).
@@ -1041,8 +1051,31 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors } => {
             let svc = service(api, &target).await?;
+            // The service's rollout with what was given replaced (the API takes it whole).
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
+                let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
+                match rollout.as_deref() {
+                    None => {}
+                    Some("none") => {
+                        r.insert("steps".into(), json!([]));
+                    }
+                    Some(v) => {
+                        let steps = v.split(',').map(|p| p.trim().trim_end_matches('%').parse::<u8>()).collect::<Result<Vec<_>, _>>().map_err(|_| anyhow::anyhow!("--rollout is percents like 10,50, or none"))?;
+                        r.insert("steps".into(), json!(steps));
+                    }
+                }
+                if let Some(n) = rollout_step {
+                    r.insert("step_s".into(), json!(n));
+                }
+                if let Some(n) = rollout_errors {
+                    r.insert("error_pct".into(), json!(n));
+                }
+                Some(Value::Object(r))
+            } else {
+                None
+            };
             let volume = match volume.as_deref() {
                 None => None,
                 Some("none") => Some(Value::Null),
@@ -1080,6 +1113,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("sleep_after_s", sleep_after.map(Value::from)),
                 ("timeout_s", timeout.map(Value::from)),
                 ("volume", volume),
+                ("rollout", rollout),
             ] {
                 if let Some(v) = v {
                     run.insert(k.into(), v);
