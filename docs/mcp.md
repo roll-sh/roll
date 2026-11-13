@@ -322,7 +322,8 @@ previews are listed once those products are on.
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
-| `apps_rollback` | Roll an environment back to an earlier deploy. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
+| `apps_rollback` | Roll an environment back to an earlier deploy, with the variables it went live with. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
+| `apps_rollback_previous` | Put back the deploy that was live before this one. | `POST /v1/apps/services/{service}/environments/{env}/rollback` |
 | `apps_logs` | Recent logs of a service's environment, or with `http` its requests (filter by `status`, `min_ms`). | `GET /v1/apps/services/{service}/environments/{env}/logs` |
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
@@ -347,13 +348,12 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with feature/roll-secrets
-   merged; lands after #20 and #25): a person's canvas stands only for what's theirs in project
-   rules (`Workspace::trusted_projects_of`), and people's tokens reach secrets. Keep it merged
-   with secrets' swap (`feature/roll-secrets-access`: `rlst_` gone, tokens on `/v1/access/tokens`,
-   identity logins on `mint_workload`; merged there and green). The canvas check costs nothing
-   measurable (`gate_latency`, release, pinned, A/B twice: a token's one-resource request 83–115 µs
-   p50 with it, 105–116 µs without).
+1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+   lands after #20, #25 and #30): kept merged both ways. Waits on secrets' fixes from the tenth
+   review: an admin's token reaching operator projects, a workload's scope taken from its
+   identity, project metadata filtered per environment. The canvas check costs nothing measurable
+   (`gate_latency`, release, pinned, A/B twice: a token's one-resource request 83–115 µs p50 with
+   it, 105–116 µs without).
 2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
 3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
@@ -372,11 +372,17 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); every open sibling's routes
-classified, built with #25 (apps-next #26, previews-next #28 and search #29 pass rolld's route
-test); a preview's share link is reveal (`previews_share`); search's index mapping, settings,
-refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own tokens for its
-caller through the token route's own function) and tokens listed by what they were made for
+revoked as leaked, about to expire; only their own, never a secret); the integration branch on
+Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token
+over MCP reads their own secrets project, the operator's answers 404, disabled it stops;
+`users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for
+products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their
+own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a
+deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open
+sibling's routes classified, built with #25 (apps-next #26, previews-next #28 and search #29 pass
+rolld's route test); a preview's share link is reveal (`previews_share`); search's index mapping,
+settings, refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own tokens
+for its caller through the token route's own function) and tokens listed by what they were made for
 (`?product=&resource=`), for secrets retiring `rlst_`; taking an apps web service off the internet
 or putting it on (`run.public`) is deploy; a token's rate is the fleet's (each node enforces its
 share, the rate over the live nodes), not N times it; a worker's scaling stream needs read on it; a

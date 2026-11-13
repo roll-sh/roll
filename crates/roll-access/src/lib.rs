@@ -642,13 +642,6 @@ impl Access {
         Ok(true)
     }
 
-    /// A short-lived token for a workload that proved who it is (roll secrets' identity logins: a
-    /// CI job's OIDC token): `rules` within `within` (the identity's scope), for `minutes`
-    /// ([`store::WORKLOAD_MINUTES`]), owned by whoever set the identity up (`user`, or the
-    /// operator). The login is the authentication, so there's no caller to gate; a person who
-    /// can't sign in any more gets none. Left out of the token list and the checkup, outside the
-    /// tokens' caps, and pruned a day after it ends; what it does is audited as any token's, and
-    /// each mint is a row.
     /// Stop a workload token now (its identity deleted or changed): only a workload grant, with
     /// why, and an audit row. Whether it was live; an unknown or other grant is left alone.
     pub fn revoke_workload(&self, id: &str, why: &str) -> Result<bool> {
@@ -680,6 +673,13 @@ impl Access {
         Ok(revoked)
     }
 
+    /// A short-lived token for a workload that proved who it is (roll secrets' identity logins: a
+    /// CI job's OIDC token): `rules` within `within` (the identity's scope), for `minutes`
+    /// ([`store::WORKLOAD_MINUTES`]), owned by whoever set the identity up (`user`, or the
+    /// operator). The login is the authentication, so there's no caller to gate; a person who
+    /// can't sign in any more gets none. Left out of the token list and the checkup, outside the
+    /// tokens' caps, and pruned a day after it ends; what it does is audited as any token's, and
+    /// each mint is a row.
     pub async fn mint_workload(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>) -> Result<(store::Grant, String)> {
         if !within.covers(&new.rules) {
             return Err(Error::Forbidden("a workload's rules must be within its identity's".into()));
@@ -918,8 +918,15 @@ impl Access {
 }
 
 impl roll_auth::Grants for Access {
+    /// A grant as it is now, for a product's background work (a sync a token made): `None` once
+    /// it's revoked or expired, or (a person's own) once its person can't sign in, as the
+    /// evaluator answers their requests. Blocking; looked up on every call.
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
         let g = self.store.get(id).ok()?;
+        if let Some(user) = g.user.as_deref() {
+            let people = self.people.get()?;
+            people.person_now(user).ok()??;
+        }
         g.live(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
     }
 }

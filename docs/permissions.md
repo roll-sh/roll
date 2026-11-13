@@ -334,7 +334,9 @@ The decision is the same wherever the request comes from: the HTTP API, the CLI,
 A request forwarded to another node is evaluated again there, which is cheap (one indexed
 read): roll code's repo owners get the request as it was, and the signed hops to storage's metadata
 owner and the tasks cell's leader (`/internal/storage/control`, `/internal/tasks`) are decided as
-the original request their header carries (`x-roll-storage-uri`, `x-roll-tasks-uri`). Those routes
+the original request their header carries (`x-roll-storage-uri`, `x-roll-tasks-uri`), and only
+their own product's (a storage hop carrying a workspace route is refused: another product's row
+would decide while storage's handler ran it). Those routes
 take only signed requests, so nobody outside the cluster can put a path there. On the owner:
 
 - the client's address is the one the first node saw (`x-roll-code-client`, signed), so IP
@@ -527,6 +529,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   consent screen. A token theirs makes is theirs too.
 - **It acts as them, never as more.** On every request the evaluator looks the person up as they
   are now (`roll_auth::Sessions::person`, never cached): disabled or gone, the token answers 401.
+  A product's own background work that looks a stored grant up (`roll_auth::Grants::grant`: a
+  sync a token made) gets `None` for it then too (`Sessions::person_now`).
   An admin's token runs as the operator's, narrowed. Anyone else's token runs as their session
   would: only routes their session may call (the gate's `User`, `Product` and `Public` rules, which
   it hands the evaluator as `roll_auth::RouteAccess`), as them (`roll_auth::SignedIn`, no

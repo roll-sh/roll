@@ -326,8 +326,8 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
     // A signed hop to an owner or leader: the request it carries is the one to decide.
-    let hop = catalog::FORWARDS.iter().any(|(r, _)| *r == ctx.route);
-    if let Some((_, h)) = catalog::FORWARDS.iter().find(|(r, _)| *r == ctx.route) {
+    let hop = catalog::FORWARDS.iter().find(|(r, _, _)| *r == ctx.route).map(|(_, _, p)| *p);
+    if let Some((_, h, _)) = catalog::FORWARDS.iter().find(|(r, _, _)| *r == ctx.route) {
         match req.headers().get(*h).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<axum::http::Uri>().ok()) {
             Some(u) => original = u,
             None => return deny(StatusCode::BAD_REQUEST, "bad_request", "a forwarded request without its path".into(), json!({})),
@@ -338,8 +338,14 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         return deny(StatusCode::FORBIDDEN, "operator_only", format!("{} {} is the operator's: no token can call it", ctx.method, ctx.route), json!({}));
     };
     let row = found.row;
+    // A hop carries its own product's routes only: anything else would be decided by another
+    // product's row while this one's handler runs it.
+    if hop.is_some_and(|p| p != row.product) {
+        ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
+        return deny(StatusCode::FORBIDDEN, "forbidden", format!("a {} hop carries only {} routes", hop.unwrap_or_default(), hop.unwrap_or_default()), json!({}));
+    }
     // A user's token on a signed hop: the request it carries must be one their session may call too.
-    if as_user && hop {
+    if as_user && hop.is_some() {
         let carried = req.extensions().get::<roll_auth::RouteRules>().map(|r| r.access(row.route));
         if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_))) {
             ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
