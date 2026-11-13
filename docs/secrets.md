@@ -1590,21 +1590,15 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **`roll run --fallback FILE`**, as Doppler's CLI has: every successful fetch also writes the
-   values to `FILE`, encrypted (AES-256-GCM, a key derived from the token, or
-   `ROLL_FALLBACK_KEY` for a workload identity's changing tokens) and 0600; when rolld can't be
-   reached (a network error or a 5xx, never a 401 or 403: a revoked token stops), `roll run` starts
-   from it, saying so and how old it is, up to `--fallback-max-age`. A deploy or a cron job keeps
-   starting through an outage.
-2. **`roll_secrets_token` in Terraform** once #30 lands (a project's token as a roll-access grant).
-3. **A Kubernetes operator** (pull, not push): a `RollSecret` resource names a project and
+1. **`roll_secrets_token` in Terraform** once #30 lands (a project's token as a roll-access grant).
+2. **A Kubernetes operator** (pull, not push): a `RollSecret` resource names a project and
    environment, and the operator keeps a Secret in step, logging in with the pod's own service
    account token (a workload identity), as Infisical's and Doppler's operators do. Today the
    `kubernetes` sync pushes from roll instead.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
    Waits on products serving signed-in people (today they're the operator's).
-5. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
+4. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
    a project has members besides its owner. Tokens already ask through roll-access (`ask` rules,
    approvals for a while); a project's one owner reaches all of it.
 
@@ -1620,6 +1614,8 @@ Open pull requests after this one:
 - **#33, a Terraform provider** (after #20): environments, keys (a value or a link), identities,
   syncs and values.
 - **#34, a GitHub Action** (after #20): a job's environment through its own OIDC token, masked.
+- **#35, `roll run --fallback`** (after #20): an encrypted copy of the last values, used through an
+  outage.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
