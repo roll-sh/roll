@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 struct Server {
     api: String,
+    store: Arc<roll_previews::Store>,
     _home: tempfile::TempDir,
     _rt: tokio::runtime::Runtime,
 }
@@ -27,6 +28,7 @@ fn server() -> Server {
         let shop = ws.create("", "shop", "", None).unwrap();
         ws.place(roll_workspace::Scope::All, &shop.id, roll_workspace::Kind::Repo, "acme/web", 0.0, 0.0).unwrap();
         let store = Arc::new(roll_previews::Store::open(&code_sql::Target::Sqlite(path.join("previews.db")), Default::default()).unwrap());
+        let store_for_test = store.clone();
         let source = roll_previews::code::CodeSource::new(code.clone());
         let runtime = roll_previews::runtime::Runtime::new(Default::default(), Arc::new(code_preview::docker::Docker), source.clone(), store.clone());
         let engine = roll_previews::Engine::new(
@@ -39,13 +41,15 @@ fn server() -> Server {
             Arc::new(roll_previews::ports::NoSecrets),
             Box::new(|| false),
         );
+        let kept = store_for_test.clone();
         let router = roll_previews::api::router(engine).merge(roll_workspace::router(ws));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(l, router).await });
-        format!("http://{addr}")
+        (format!("http://{addr}"), kept)
     });
-    Server { api, _home: home, _rt: rt }
+    let (api, store) = api;
+    Server { api, store, _home: home, _rt: rt }
 }
 
 impl Server {
@@ -90,6 +94,15 @@ fn settings_create_list_and_remove_a_branch_preview() {
     // says where it got to; so is a preview being deleted.
     let (ok, _, err) = s.roll(&["wait", &id, "--timeout", "0"]);
     assert!(!ok && err.contains("not ready after 0s (it's creating)"), "{err}");
+
+    // Its screenshot to a file, byte for byte; none to save is an error that says so.
+    let out = s._home.path().join("shot.png");
+    let (ok, _, err) = s.roll(&["screenshot", &id, "-o", out.to_str().unwrap()]);
+    assert!(!ok && err.contains("no screenshot"), "{err}");
+    let png = b"\x89PNG\r\n\x1a\nnot really".to_vec();
+    s.store.set_screenshot(&id, "cs_1", &png, None, None).unwrap();
+    s.ok(&["screenshot", &id, "-o", out.to_str().unwrap()]);
+    assert_eq!(std::fs::read(&out).unwrap(), png);
 
     s.ok(&["rm", &id]);
     assert_eq!(s.json(&["show", &id])["desired"], "deleted");

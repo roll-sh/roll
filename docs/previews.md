@@ -811,7 +811,9 @@ type Settings = {
     what differs, the area only one of them has included; the sheet's Diff shows it against main
     (else the push before), so whoever accepts a visual change sees what they accept. Diffs are
     made on request one at a time, up to 2048 × 8192, so asking for many can't add up to
-    gigabytes of decoded screenshots.
+    gigabytes of decoded screenshots. `roll preview screenshot <id> -o shot.png` saves any of them
+    (`--page`, `--phone`, `--base`, `--previous`, `--diff base|previous`), for scripts and for the
+    agents that drive the CLI; MCP's `previews_screenshot` returns them as images.
     With `visual_review` (`off` by default, `check` or `required`) a change's pages are reviewed as
     Chromatic's UI Review does: once compared with the baseline, the change has `visual_review`
     (the most any page differs, at either width), and a `roll/visual` commit status that's
@@ -958,6 +960,7 @@ Ranked by what a person notices first. Done so far:
 - a speed budget per project (`github.budget`, the `roll/speed` status);
 - screenshot comparisons off the async runtime, and a test for reading a run's pages;
 - the previews waiting for a visual review first in the list, tagged "to review";
+- `roll preview screenshot` (any screenshot or diff to a file);
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;
@@ -1000,28 +1003,25 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **`roll preview screenshot`**: the CLI (and the agents that drive it) can't save a preview's
-   screenshot or diff; `roll preview screenshot <id> [--diff base|previous] [--page …] [--phone]
-   -o file.png`.
-2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+4. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

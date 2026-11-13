@@ -73,6 +73,24 @@ pub enum Preview {
     /// Accept how a change's pages look at its latest screenshot (the `roll/visual` status,
     /// `github.visual_review`); each new push is reviewed again.
     Accept { preview: String },
+    /// Save its screenshot (a PNG) to --out: the first page, --page another of `github.pages`,
+    /// --phone at a phone's width, --base the default branch's it was compared with, --previous
+    /// the one before, or --diff base|previous where it differs from those.
+    Screenshot {
+        preview: String,
+        #[arg(long, short)]
+        out: std::path::PathBuf,
+        #[arg(long)]
+        page: Option<String>,
+        #[arg(long)]
+        phone: bool,
+        #[arg(long, conflicts_with_all = ["previous", "diff"])]
+        base: bool,
+        #[arg(long, conflicts_with = "diff")]
+        previous: bool,
+        #[arg(long, value_parser = ["base", "previous"])]
+        diff: Option<String>,
+    },
     /// A link for someone outside the team, open for --hours (24 unless said; at most 720); the
     /// link is printed once. --list shows them, --revoke ends one.
     Share {
@@ -383,6 +401,25 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Sleep { preview } => api.post(&format!("/v1/previews/{preview}/sleep"), json!({})).await?,
         Preview::Wake { preview } => api.post(&format!("/v1/previews/{preview}/wake"), json!({})).await?,
         Preview::Refresh { preview } => api.post(&format!("/v1/previews/{preview}/refresh"), json!({})).await?,
+        Preview::Screenshot { preview, out, page, phone, base, previous, diff } => {
+            let mut q: Vec<String> = Vec::new();
+            if let Some(p) = &page {
+                let enc: String = p.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+                q.push(format!("page={enc}"));
+            }
+            for (on, kv) in [(phone, "view=phone"), (base, "base=1"), (previous, "previous=1")] {
+                if on {
+                    q.push(kv.into());
+                }
+            }
+            if let Some(d) = &diff {
+                q.push(format!("diff={d}"));
+            }
+            let path = format!("/v1/previews/{preview}/screenshot{}{}", if q.is_empty() { "" } else { "?" }, q.join("&"));
+            let png = api.open_stream(&path).await?.bytes().await?;
+            std::fs::write(&out, &png).map_err(|e| anyhow::anyhow!("writing {}: {e}", out.display()))?;
+            json!({ "saved": out.display().to_string(), "bytes": png.len() })
+        }
         Preview::Accept { preview } => api.post(&format!("/v1/previews/{preview}/visual/accept"), json!({})).await?,
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
         Preview::Share { preview, hours, list, revoke } => {
