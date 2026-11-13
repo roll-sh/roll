@@ -1273,6 +1273,10 @@ every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<deli
   there, through roll storage in process: a compliance archive with the bucket's own lifecycle,
   versioning and Object Lock. A retried batch is the same delivery, so it writes the same object
   again, never a second one.
+- **Into a roll stream**: a sink `stream:<stream id>/<topic>` (a stream on the canvas, checked at
+  every delivery like a bucket) produces each audit event to that topic as one record, keyed by its
+  audit `id`, through roll streams in process: consumers react as it's written. A retried batch can
+  produce an event again, so a consumer dedupes by key.
 
 
 ## HTTP API
@@ -1361,7 +1365,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
-| `POST /audit/sinks` | `{url, from_start?}` (an HTTPS endpoint, or `bucket:<name>` on the canvas) | 201 `Sink & {secret}` (shown once) |
+| `POST /audit/sinks` | `{url, from_start?}` (an HTTPS endpoint, `bucket:<name>` or `stream:<id>/<topic>` on the canvas) | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
@@ -1543,8 +1547,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **The audit log into a roll stream**: a sink `stream:<id>/<topic>` producing each audit event
-   to a topic of a roll stream on the canvas, for consumers that react as it's written.
 
 Waiting on other pull requests:
 

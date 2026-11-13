@@ -313,6 +313,13 @@ impl roll_secrets::Deliver for AuditDeliver {
             let key = format!("roll-secrets/audit/{id}/{delivery}.json");
             return self.1.call(axum::http::Method::PUT, &format!("/v1/storage/buckets/{}/upload?key={}", urlencoding::encode(bucket), urlencoding::encode(&key)), Some(body.clone())).map(|_| ());
         }
+        // A topic of a roll stream: one record per event, keyed by its audit id (a retried batch may
+        // produce an event again: consumers dedupe by key).
+        if let Some(rest) = url.strip_prefix(roll_secrets::sinks::STREAM) {
+            let (stream, topic) = rest.split_once('/').ok_or_else(|| Error::BadRequest(format!("{url}: stream:<id>/<topic>")))?;
+            let records: Vec<Json> = body["events"].as_array().into_iter().flatten().map(|e| serde_json::json!({ "key": e["id"].to_string(), "value": e })).collect();
+            return self.1.call(axum::http::Method::POST, &format!("/v1/streams/{}/topics/{}/records", urlencoding::encode(stream), urlencoding::encode(topic)), Some(serde_json::json!({ "records": records }))).map(|_| ());
+        }
         let u = self.0.url(url)?;
         // A retried batch (or notice) is the same body: the same delivery.
         let delivery = delivery_id(&format!("{id}:{body}"));

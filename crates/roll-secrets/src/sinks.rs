@@ -97,6 +97,17 @@ fn sink_row(r: &code_sql::Row<'_>) -> code_sql::Result<Sink> {
 /// A sink URL naming a roll bucket instead of an endpoint: `bucket:<name>`. Each batch becomes an
 /// object `roll-secrets/audit/<sink>/<delivery>.json` there.
 pub const BUCKET: &str = "bucket:";
+/// A sink URL naming a topic of a roll stream: `stream:<stream id>/<topic>`. Each audit event
+/// becomes one record there, keyed by its audit id.
+pub const STREAM: &str = "stream:";
+
+/// The roll resource (kind, ref) a sink URL names, if it names one.
+pub fn roll_target(url: &str) -> Option<(&'static str, &str)> {
+    if let Some(b) = url.strip_prefix(BUCKET) {
+        return Some(("bucket", b));
+    }
+    url.strip_prefix(STREAM).map(|s| ("stream", s.split('/').next().unwrap_or_default()))
+}
 
 impl Secrets {
     fn deliver(&self) -> Result<&Arc<dyn Deliver>> {
@@ -114,10 +125,16 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::project(project))?;
         // A roll bucket of the project's own canvas (an archive with the bucket's retention and
         // Object Lock), or an HTTPS endpoint.
-        match n.url.strip_prefix(BUCKET) {
-            Some(bucket) => {
-                if !self.members(project)?.contains(&("bucket".to_string(), bucket.to_string())) {
-                    return Err(Error::BadRequest(format!("{bucket} isn't a bucket on this project's canvas")));
+        match roll_target(&n.url) {
+            Some((kind, name)) => {
+                if let Some(rest) = n.url.strip_prefix(STREAM) {
+                    let topic = rest.split_once('/').map(|(_, t)| t).unwrap_or_default();
+                    if topic.is_empty() || topic.len() > 249 || !topic.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+                        return Err(Error::BadRequest("a stream sink is stream:<stream id>/<topic>".into()));
+                    }
+                }
+                if !self.members(project)?.contains(&(kind.to_string(), name.to_string())) {
+                    return Err(Error::BadRequest(format!("{name} isn't a {kind} on this project's canvas")));
                 }
                 self.deliver()?;
             }
@@ -208,7 +225,7 @@ impl Secrets {
             let last = rows.last().map(|r| r.id).unwrap_or(cursor);
             // A bucket must still be on the project's canvas: one moved to another project, or
             // removed, gets nothing more.
-            let gone = url.strip_prefix(BUCKET).is_some_and(|b| !self.members(&project).map(|m| m.contains(&("bucket".to_string(), b.to_string()))).unwrap_or(false));
+            let gone = roll_target(&url).is_some_and(|(kind, name)| !self.members(&project).map(|m| m.contains(&(kind.to_string(), name.to_string()))).unwrap_or(false));
             let sent = if gone { Err(Error::BadRequest(format!("{url} isn't on this project's canvas any more"))) } else { Ok(()) };
             let sent = sent.and_then(|_| self.project(&project)).and_then(|dek| dek.open(&sink_aad(&project, &id), &sealed).map_err(Error::from)).and_then(|secret| {
                 let body = json!({ "sink": id, "project": project, "events": rows });

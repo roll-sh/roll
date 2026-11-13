@@ -776,6 +776,13 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/bucket/audit-archive"), Some(json!({ "x": 0, "y": 0 }))).await;
     let bucket = api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "bucket:audit-archive" }))).await;
     assert_eq!(bucket["url"], "bucket:audit-archive");
+    // A topic of a stream on the canvas, the same way.
+    let (s, _) = api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "stream:st_x/audit" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/stream/st_x"), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (s, _) = api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "stream:st_x/bad topic" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "stream:st_x/audit" }))).await;
     // Taken off the canvas later, it gets nothing more: checked at every delivery.
     api.ok(Method::DELETE, &format!("/v1/workspace/projects/{p}/resources/bucket/audit-archive"), None).await;
     api.set("production", "AFTER", "x").await;
