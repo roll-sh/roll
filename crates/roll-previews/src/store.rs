@@ -311,6 +311,8 @@ fn json_list(v: &Option<Vec<String>>) -> Option<String> {
 impl Store {
     pub fn open(target: &Target, pg: code_sql::PgOptions) -> Result<Store> {
         let db = match target {
+            // Tests run on Postgres too (`ROLL_CODE_TEST_DATABASE`), as a cluster's store does.
+            Target::Sqlite(_) if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|u| !u.is_empty()) => Db::open_or_test(target, "previews")?,
             Target::Sqlite(path) => Db::open_sqlite(path, code_sql::SqliteOptions { readers: 2, cache_kib: 2 << 10 })?,
             Target::Postgres { url, schema } => Db::connect(url, schema, pg)?,
         };
