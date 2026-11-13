@@ -279,9 +279,9 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **Third security review** (in progress): an independent review of everything since the second
-   one (rate limits, audit sinks, leaked tokens and the GitHub endpoint, remembered approvals, the
-   idle limit, storage accounts, the signed hop decision) and of users' own tokens. Fix what it finds.
+1. **Hop hardening** (the third review's note): on a signed hop, check a user's token against the
+   route the hop carries, not only `/internal/…`'s class (safe today: the first node checked, and
+   unsigned hops are refused after the gate).
 2. **As the sibling branches merge** (secrets #20, apps #21, search #22, previews #23): rerun
    `extract-routes.py` and `examples/classify` on their routers (every route at their heads has a
    row today), and wire their lookups in `rolld/src/access.rs`:
@@ -300,7 +300,7 @@ Ranked; the top item is in progress. A watchdog reads this list.
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 5. **Finer resources:** apps' deploys by id (once #21 is on main).
 
-Done lately: tokens about to expire are named in the list and posted to the approvals channel daily; `apps_deploy` takes an `idempotency_key` (sent as `Idempotency-Key`); an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
+Done lately: the third security review's findings (remembered approvals keep their environment and path, every MCP tool call counts against a rate limit, GitHub key fetching single-flight with fallback, the leak scanner skips unreadable files under a budget and hides private repos, per-person and live-only token caps, admin tokens owned by the admin); tokens about to expire are named in the list and posted to the approvals channel daily; `apps_deploy` takes an `idempotency_key` (sent as `Idempotency-Key`); an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
 one action on one resource, a while never made permanent through a child token); leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
 secrets, roll code's landings scanned from the land log, GitHub's secret scanning partner
 endpoint); audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in
