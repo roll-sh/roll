@@ -166,7 +166,21 @@ pub fn selector_ok(s: &str) -> bool {
     !s.trim().is_empty() && s.len() <= 200 && !s.contains(['{', '}', '<', ';', '\\']) && !s.contains("/*") && s.chars().all(|c| !c.is_control())
 }
 
-pub const MAX_PAGES: usize = 5;
+pub const MAX_PAGES: usize = 10;
+
+/// A `github.pages` entry: a path of the first service's, or `<service>:<path>` of another's
+/// (Percy snapshots each app). `None` when it's neither.
+pub fn page_entry(e: &str) -> Option<(Option<&str>, &str)> {
+    if let Some((svc, _)) = e.split_once(":/")
+        && !svc.is_empty()
+        && svc.len() <= 63
+        && svc.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        let path = &e[svc.len() + 1..];
+        return page_path_ok(path).then_some((Some(svc), path));
+    }
+    page_path_ok(e).then_some((None, e))
+}
 
 /// Whether `p` is a page path the screenshot may visit: absolute, on the service's own origin.
 pub fn page_path_ok(p: &str) -> bool {
@@ -351,8 +365,10 @@ impl Settings {
             return bad("github.budget: load_ms up to 600000, bytes up to 10 GiB".into());
         }
         let pages = &self.github.pages;
-        if pages.len() > MAX_PAGES || pages.iter().any(|p| !page_path_ok(p) || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {
-            return bad(format!("github.pages: at most {MAX_PAGES} different paths besides /, each starting with / (up to 200 characters, no #, quotes or spaces)"));
+        if pages.len() > MAX_PAGES || pages.iter().any(|p| page_entry(p).is_none() || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {
+            return bad(format!(
+                "github.pages: at most {MAX_PAGES} different paths besides /, each starting with / or naming a service (admin:/users), up to 200 characters, no #, quotes or spaces"
+            ));
         }
         Ok(())
     }
@@ -416,7 +432,10 @@ mod tests {
         assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["time", ".clock, #ad"] } })).is_ok());
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["a} body {display:none"] } })).is_err());
-        for pages in [json!(["//evil.example/"]), json!(["pricing"]), json!(["/a\"b"]), json!(["/a", "/a"]), json!(["/1", "/2", "/3", "/4", "/5", "/6"])] {
+        assert!(Settings::default().patched(&json!({ "github": { "pages": ["/pricing", "admin:/", "admin:/users"] } })).is_ok());
+        assert_eq!(page_entry("admin:/users"), Some((Some("admin"), "/users")));
+        assert_eq!(page_entry("/a:/b"), Some((None, "/a:/b")));
+        for pages in [json!(["Admin:/"]), json!(["admin://evil.example/"]), json!(["pricing"]), json!(["/a\"b"]), json!(["/a", "/a"]), json!(["/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/10", "/11"])] {
             assert!(Settings::default().patched(&json!({ "github": { "pages": pages } })).is_err(), "{pages}");
         }
         let schema = Settings::default().patched(&json!({ "data": "schema" })).unwrap();

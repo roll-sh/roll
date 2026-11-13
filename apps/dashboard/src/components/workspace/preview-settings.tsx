@@ -388,7 +388,7 @@ function Form({
           </Field>
         )}
         {s.github.screenshot && (
-          <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 5 paths: /pricing, /login).">
+          <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 10: /pricing, or another service's, admin:/users).">
             <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="/ only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
           </Field>
         )}

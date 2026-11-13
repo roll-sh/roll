@@ -507,13 +507,31 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        let opts = self.store.settings(&r.project_id).map(|s| crate::ports::ShotOptions { pages: s.github.pages, hide: s.github.hide }).unwrap_or_default();
-        let pages = opts.pages.clone();
+        let (entries, hide) = self.store.settings(&r.project_id).map(|s| (s.github.pages, s.github.hide)).unwrap_or_default();
+        // The first service's own pages go in its run; another service's in a run of its own.
+        let mine = |svc: Option<&str>| svc.is_none_or(|s| s == first.name);
+        let first_paths: Vec<String> = entries.iter().filter_map(|e| crate::settings::page_entry(e)).filter(|(s, p)| mine(*s) && *p != "/").map(|(_, p)| p.to_string()).collect();
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone() };
         match self.apps.screenshot(&r.id, &first.name, &opts).await {
             Ok(Some(shot)) => {
+                // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
+                let mut pages: Vec<crate::ports::PageShot> = shot
+                    .pages
+                    .iter()
+                    .filter_map(|p| {
+                        let entry = entries.iter().find(|e| crate::settings::page_entry(e).is_some_and(|(s, path)| mine(s) && path == p.path))?;
+                        Some(crate::ports::PageShot { path: entry.clone(), ..p.clone() })
+                    })
+                    .collect();
+                // `<first>:/` is the screenshot itself (which service is first isn't the person's to know).
+                if let Some(e) = entries.iter().find(|e| crate::settings::page_entry(e) == Some((Some(first.name.as_str()), "/"))) {
+                    let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
+                    pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors });
+                }
+                pages.extend(self.other_services_pages(r, &first.name, &entries, &hide).await);
                 let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
                     && self.store.set_page_report(&r.id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok()
-                    && self.store.set_page_shots(&r.id, r.build(), &shot.pages, &pages).is_ok();
+                    && self.store.set_page_shots(&r.id, r.build(), &pages, &entries).is_ok();
                 if kept && r.change_id.is_some() {
                     self.compare_with_default_branch(r).await;
                     if self.store.carry_acceptance(&r.id).unwrap_or(false) {
@@ -548,6 +566,40 @@ impl Engine {
                 false
             }
         }
+    }
+
+    /// The pages `github.pages` names on the preview's other services (`admin:/`, `admin:/users`),
+    /// a screenshot run per service in that service's own network. Best effort: a service that
+    /// can't be taken is logged and its pages wait for the next head.
+    async fn other_services_pages(&self, r: &Row, first: &str, entries: &[String], hide: &[String]) -> Vec<crate::ports::PageShot> {
+        let mut by_service: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (svc, path) in entries.iter().filter_map(|e| crate::settings::page_entry(e)) {
+            if let Some(svc) = svc.filter(|s| *s != first) {
+                by_service.entry(svc).or_default().push(path);
+            }
+        }
+        let services = self.store.services(&r.id).unwrap_or_default();
+        let mut out = Vec::new();
+        for (svc, paths) in by_service {
+            if !services.iter().any(|s| s.name == svc) {
+                continue;
+            }
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec() };
+            match self.apps.screenshot(&r.id, svc, &opts).await {
+                Ok(Some(shot)) => {
+                    if paths.contains(&"/") {
+                        let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
+                        out.push(crate::ports::PageShot { path: format!("{svc}:/"), png: shot.png.clone(), errors });
+                    }
+                    out.extend(shot.pages.into_iter().map(|p| crate::ports::PageShot { path: format!("{svc}:{}", p.path), ..p }));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = self.store.log(&r.id, &format!("couldn't take {svc}'s pages: {e:#}"));
+                }
+            }
+        }
+        out
     }
 
     /// A change's screenshot against the project's preview of its repo's default branch, when it

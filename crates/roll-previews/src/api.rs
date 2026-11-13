@@ -296,7 +296,7 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
     // `page=/pricing`: another of the project's pages (`github.pages`), at the desktop width.
     let page = q.get("page").cloned();
     if let Some(p) = &page
-        && (!crate::settings::page_path_ok(p) || phone)
+        && (crate::settings::page_entry(p).is_none() || phone)
     {
         return Err(Error::BadRequest("page: a path from github.pages (desktop only)".into()));
     }

@@ -783,8 +783,9 @@ type Settings = {
     The same session then takes the page at a phone's width (390 × 844 at twice the density,
     `GET …/screenshot?view=phone`, the sheet's Desktop/Phone), with its own change since the push
     before ("At a phone's width: 3.4%" in the comment), as Percy and Chromatic check widths.
-    Then it takes the project's other pages (`github.pages`, up to 5 paths on the service's own
-    origin, as Percy's snapshot list), at the desktop width: each is kept with the one before it
+    Then it takes the project's other pages (`github.pages`, up to 10 paths on the service's own
+    origin, as Percy's snapshot list; `admin:/users` names another service's, taken in a run of
+    its own in that service's network, as Percy snapshots each app), at the desktop width: each is kept with the one before it
     and how much it changed, compared with the baseline's page at the same path, and counts what
     went wrong while it loaded (`pages` on the preview, `GET …/screenshot?page=/pricing`, a page
     switcher on the sheet, "2 more pages, most changed /pricing by 40.0%" in the comment's
@@ -947,7 +948,8 @@ Ranked by what a person notices first. Done so far:
 - a phone-width screenshot with its own visual change;
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
-- screenshots of the project's other pages (`github.pages`), each compared like the first;
+- screenshots of the project's other pages (`github.pages`), each compared like the first, other
+  services' included (`admin:/users`);
 - a visual review per push (`visual_review`: the `roll/visual` status, Accept in roll, and
   `required` keeping the change from landing in roll);
 - comparisons with main at the change's merge base (the baseline's last 10 heads kept);
@@ -996,23 +998,20 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Screenshots of every service** (Percy snapshots each app): a project with a web app and an
-   admin gets only the first service's pages taken. Per-service pages (`github.pages` entries
-   naming a service), each compared the same way.
-2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+4. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

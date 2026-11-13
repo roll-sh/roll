@@ -137,7 +137,7 @@ async fn previews_beyond_the_limit_wait_and_start_as_others_go() {
 
 #[tokio::test]
 async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_changes_with() {
-    let e = env(json!({ "enabled": true, "max_previews": 1, "github": { "screenshot": true, "pages": ["/pricing"] } }));
+    let e = env(json!({ "enabled": true, "max_previews": 1, "github": { "screenshot": true, "pages": ["/pricing", "api:/", "api:/health"] } }));
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
@@ -161,9 +161,9 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     let compared = compared.expect("compared with the baseline");
     assert_eq!((compared.branch.as_str(), compared.percent), ("main", 0.0));
     assert_eq!(e.engine.store.base_change(&e.engine.store.row_by_change("chg_1").unwrap().unwrap().id).unwrap().and_then(|b| b.head).as_deref(), Some("cs_web0"), "at its merge base");
-    // Its other pages too, each against the baseline's at the same path.
+    // Its other pages too, another service's included, each against the baseline's at the same path.
     let pages: Vec<_> = e.code.last_report("chg_1").pages.iter().map(|p| (p.path.clone(), p.base_percent)).collect();
-    assert_eq!(pages, vec![("/pricing".to_string(), Some(0.0))]);
+    assert_eq!(pages, vec![("/pricing".to_string(), Some(0.0)), ("api:/".to_string(), Some(0.0)), ("api:/health".to_string(), Some(0.0))]);
     // It lasts while there are changes, whatever its age, and goes when the rule is off.
     e.engine.store.update(&base.id, |r| r.last_active_at = 0).unwrap();
     e.engine.pass().await.unwrap();
