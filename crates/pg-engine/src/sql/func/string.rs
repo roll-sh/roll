@@ -1066,15 +1066,79 @@ fn like_tokens_match(toks: &[LikeTok], n: usize, at: impl Fn(usize) -> char) -> 
 /// A LIKE pattern compiled once (`exec::kernel::K::Like`): what `like_match` matches, the
 /// pattern's tokens kept (shareable with a parallel scan's workers).
 #[derive(Clone)]
-pub struct LikePattern(Box<[LikeTok]>);
+pub struct LikePattern(Box<[LikeTok]>, Option<LikeSegs>);
+
+/// A pattern of literals and `%` only, as its literal runs: the string starts with `head`
+/// (none when the pattern starts with `%`), ends with `tail` after it (none when it ends with
+/// `%`), and holds the `mid` runs in order between them. Valid UTF-8 matched by bytes is
+/// matched by characters: a literal's bytes are whole characters, so every match starts and
+/// ends at a character boundary.
+#[derive(Clone)]
+struct LikeSegs {
+    head: Option<Box<str>>,
+    /// Each middle run's searcher, built once with the pattern.
+    mid: Box<[memchr::memmem::Finder<'static>]>,
+    tail: Option<Box<str>>,
+}
+
+impl LikeSegs {
+    fn of(toks: &[LikeTok]) -> Option<LikeSegs> {
+        let mut runs: Vec<String> = vec![String::new()];
+        for t in toks {
+            match t {
+                LikeTok::Lit(c) => runs.last_mut()?.push(*c),
+                LikeTok::Any => runs.push(String::new()),
+                LikeTok::One | LikeTok::EndEscape => return None,
+            }
+        }
+        // (No `%`: the string is the literal; one run is both its head and its tail.)
+        if runs.len() == 1 {
+            return None;
+        }
+        let tail = runs.pop().filter(|r| !r.is_empty()).map(Into::into);
+        let head = Some(runs.remove(0)).filter(|r| !r.is_empty()).map(Into::into);
+        let mid = runs.into_iter().filter(|r| !r.is_empty()).map(|r| memchr::memmem::Finder::new(r.as_bytes()).into_owned()).collect();
+        Some(LikeSegs { head, mid, tail })
+    }
+
+    fn matches(&self, mut s: &str) -> bool {
+        if let Some(h) = &self.head {
+            match s.strip_prefix(&**h) {
+                Some(r) => s = r,
+                None => return false,
+            }
+        }
+        if let Some(t) = &self.tail {
+            match s.strip_suffix(&**t) {
+                Some(r) => s = r,
+                None => return false,
+            }
+        }
+        // (A run's bytes are whole characters: where it is found, and after it, are
+        // character boundaries.)
+        let mut b = s.as_bytes();
+        for m in &self.mid {
+            match m.find(b) {
+                Some(at) => b = &b[at + m.needle().len()..],
+                None => return false,
+            }
+        }
+        true
+    }
+}
 
 impl LikePattern {
     pub fn new(pat: &str, escape: Option<char>) -> Result<LikePattern> {
-        Ok(LikePattern(like_tokens(pat, escape)?.to_vec().into_boxed_slice()))
+        let toks = like_tokens(pat, escape)?;
+        let segs = LikeSegs::of(&toks);
+        Ok(LikePattern(toks.to_vec().into_boxed_slice(), segs))
     }
 
     /// `st LIKE pattern` (an error where `like_match`'s would be).
     pub fn matches(&self, st: &str) -> Result<bool> {
+        if let Some(segs) = &self.1 {
+            return Ok(segs.matches(st));
+        }
         if st.is_ascii() {
             let b = st.as_bytes();
             return like_tokens_match(&self.0, b.len(), |i| b[i] as char);
@@ -2778,4 +2842,31 @@ pub(super) fn pure(imp: super::FnImpl) -> Option<super::ops::PureFn> {
     let table: [(super::FnImpl, super::ops::PureFn); 3] =
         [(like, p_like), (bp_like, p_like), (not_like, p_not_like)];
     table.iter().find(|(f, _)| std::ptr::fn_addr_eq(*f, imp)).map(|(_, p)| *p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A compiled pattern matches as `like_match` does, for every pattern of up to five of
+    /// `a`, `b`, `é`, `%`, `_` against every string of up to five of `a`, `b`, `é`.
+    #[test]
+    fn compiled_like_matches_like_match() {
+        fn all(alpha: &[char], max: usize) -> Vec<String> {
+            let mut out = vec![String::new()];
+            let mut last = vec![String::new()];
+            for _ in 0..max {
+                last = last.iter().flat_map(|s| alpha.iter().map(move |c| format!("{s}{c}"))).collect();
+                out.extend(last.iter().cloned());
+            }
+            out
+        }
+        let strings = all(&['a', 'b', 'é'], 5);
+        for pat in all(&['a', 'b', 'é', '%', '_'], 5) {
+            let p = LikePattern::new(&pat, Some('\\')).unwrap();
+            for s in &strings {
+                assert_eq!(p.matches(s).unwrap(), like_match(s, &pat, Some('\\'), false).unwrap(), "{s:?} LIKE {pat:?}");
+            }
+        }
+    }
 }

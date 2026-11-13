@@ -5521,6 +5521,7 @@ dependencies = [
  "itoa",
  "libc",
  "md-5 0.10.6",
+ "memchr",
  "mimalloc",
  "num-bigint",
  "num-traits",
