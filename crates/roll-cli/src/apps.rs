@@ -930,10 +930,22 @@ struct ProjectFile {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AppEntry {
-    /// The directory `roll up` uploads (relative to the file).
+    /// The directory `roll up` uploads (relative to the file), or with `repo` the directory
+    /// in the repo that builds.
     root: Option<String>,
     /// Or a public image.
     image: Option<String>,
+    /// Or a roll code repo (`owner/name`): it deploys on each landing on `branch`.
+    repo: Option<String>,
+    branch: Option<String>,
+    /// `web`, `worker` or `cron`.
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    start: Option<String>,
+    /// A cron service's five fields (UTC).
+    schedule: Option<String>,
+    /// Any other run setting, as `[app.run]` takes it (checked by the API).
+    run: Option<toml::Table>,
     /// Databases below, by name: their connection variables go in.
     #[serde(default)]
     links: Vec<String>,
@@ -972,16 +984,52 @@ fn parse_project(text: &str) -> anyhow::Result<ProjectFile> {
     }
     for (n, a) in &f.apps {
         anyhow::ensure!(valid_name(n), "app {n:?}: a name is a-z, 0-9 and -, at most 32");
-        match (&a.root, &a.image) {
-            (Some(r), None) => anyhow::ensure!(!r.starts_with('/') && !r.split('/').any(|c| c == ".."), "app {n}: root is a directory inside this one"),
-            (None, Some(_)) => {}
-            _ => bail!("app {n}: give root (a directory to upload) or image, not both"),
+        if let Some(r) = &a.root {
+            anyhow::ensure!(!r.starts_with('/') && !r.split('/').any(|c| c == ".."), "app {n}: root is a directory inside this one (or the repo)");
         }
+        match (&a.root, &a.image, &a.repo) {
+            (Some(_), None, None) | (None, Some(_), None) | (_, None, Some(_)) => {}
+            _ => bail!("app {n}: give one of root (a directory to upload), image, or repo (with root inside it)"),
+        }
+        anyhow::ensure!(a.branch.is_none() || a.repo.is_some(), "app {n}: branch is for a repo");
+        anyhow::ensure!(a.kind.as_deref().is_none_or(|k| ["web", "worker", "cron"].contains(&k)), "app {n}: type is web, worker or cron");
         for l in &a.links {
             anyhow::ensure!(f.databases.contains_key(l), "app {n} links {l}, which isn't in [databases]");
         }
     }
     Ok(f)
+}
+
+/// The run settings an entry names (its `run` table, then `type`, `start`, `schedule` and
+/// `port` over it): what a new service is made with, and what an existing one is set to.
+fn entry_run(a: &AppEntry) -> anyhow::Result<serde_json::Map<String, Value>> {
+    let mut run = match &a.run {
+        Some(t) => match serde_json::to_value(t)? {
+            Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        },
+        None => serde_json::Map::new(),
+    };
+    for (k, v) in [("type", a.kind.clone()), ("start", a.start.clone()), ("schedule", a.schedule.clone())] {
+        if let Some(v) = v {
+            run.insert(k.into(), json!(v));
+        }
+    }
+    if let Some(p) = a.port {
+        run.insert("port".into(), json!(p));
+    }
+    Ok(run)
+}
+
+/// The kind of source an entry makes.
+fn entry_kind(a: &AppEntry) -> &'static str {
+    if a.repo.is_some() {
+        "repo"
+    } else if a.image.is_some() {
+        "image"
+    } else {
+        "upload"
+    }
 }
 
 /// What `--all` will do, as lines: `+` made, `=` already there, `~` linked, `↑` deployed.
@@ -992,7 +1040,11 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
         out.push(format!("{} {} database {n}", if have { "=" } else { "+" }, d.kind));
     }
     for (n, a) in &f.apps {
-        let from = a.root.as_ref().map(|r| format!("from {r}")).unwrap_or_else(|| format!("image {}", a.image.as_deref().unwrap_or("")));
+        let from = match (&a.repo, &a.image, &a.root) {
+            (Some(r), _, root) => format!("repo {r}{}", root.as_ref().map(|d| format!(" at {d}")).unwrap_or_default()),
+            (None, Some(i), _) => format!("image {i}"),
+            (None, None, r) => format!("from {}", r.as_deref().unwrap_or(".")),
+        };
         let have = services.get(n);
         out.push(format!("{} service {n} ({from})", if have.is_some() { "=" } else { "+" }));
         for l in &a.links {
@@ -1002,8 +1054,15 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
                 out.push(format!("~ link {n} to {l}"));
             }
         }
+        // An existing service's settings that the file names differently.
+        if let (Some(s), Ok(run)) = (have, entry_run(a)) {
+            let differs: Vec<&String> = run.iter().filter(|(k, v)| s["run"].get(k.as_str()) != Some(*v)).map(|(k, _)| k).collect();
+            if !differs.is_empty() {
+                out.push(format!("~ settings {n} ({})", differs.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
+            }
+        }
         let image_moved = a.image.as_ref().is_some_and(|i| have.is_some_and(|s| s["source"]["image"].as_str() != Some(i.as_str())));
-        if a.root.is_some() || image_moved {
+        if (a.root.is_some() && a.repo.is_none()) || image_moved {
             out.push(format!("↑ deploy {n}"));
         }
     }
@@ -1164,7 +1223,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
     for (n, a) in &f.apps {
         if let Some(svc) = services.get(n) {
             let kind = s(&svc["source"]["kind"]);
-            let want = if a.image.is_some() { "image" } else { "upload" };
+            let want = entry_kind(a);
             anyhow::ensure!(kind == want, "service {n} exists with a {kind} source; the file makes it {want}: rename one");
         }
     }
@@ -1206,25 +1265,43 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
         let svc = match services.get(n) {
             Some(svc) => svc.clone(),
             None => {
-                let source = match &a.image {
-                    Some(i) => json!({ "kind": "image", "image": i }),
-                    None => json!({ "kind": "upload" }),
+                let source = match (&a.repo, &a.image) {
+                    (Some(r), _) => {
+                        let mut src = json!({ "kind": "repo", "repo": r });
+                        if let Some(root) = &a.root {
+                            src["root"] = json!(root);
+                        }
+                        src
+                    }
+                    (None, Some(i)) => json!({ "kind": "image", "image": i }),
+                    (None, None) => json!({ "kind": "upload" }),
                 };
                 let made_links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
                 let mut body = json!({ "project": project, "name": n, "source": source, "links": made_links });
-                if let Some(p) = a.port {
-                    body["run"] = json!({ "port": p });
+                let run = entry_run(a)?;
+                if !run.is_empty() {
+                    body["run"] = Value::Object(run);
                 }
                 if !a.variables.is_empty() {
                     body["variables"] = json!(a.variables);
                 }
                 let svc = api.post("/v1/apps/services", body).await?;
                 eprintln!("made service {n}");
+                if let Some(b) = &a.branch {
+                    api.call(reqwest::Method::PUT, &env_path(&svc, &u.target.env), Some(json!({ "branch": b }))).await?;
+                }
                 svc
             }
         };
         let id = s(&svc["id"]);
         if !fresh {
+            // The settings the file names, where they differ (the rest stay as they are).
+            let run = entry_run(a)?;
+            let differs: serde_json::Map<String, Value> = run.into_iter().filter(|(k, v)| svc["run"].get(k.as_str()) != Some(v)).collect();
+            if !differs.is_empty() {
+                api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&id)), Some(json!({ "run": differs }))).await?;
+                eprintln!("set {n}'s settings");
+            }
             for l in &a.links {
                 let kind = &f.databases[l].kind;
                 let r = &dbs[&(kind.clone(), l.clone())];
@@ -1235,7 +1312,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             }
         }
         let dep = match (&a.root, &a.image) {
-            (Some(root), _) => {
+            (Some(root), _) if a.repo.is_none() => {
                 let tree = dir.join(root);
                 let bundle = tokio::task::spawn_blocking(move || pack(&tree)).await??;
                 let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(&svc, &u.target.env))).header("content-type", "application/gzip").body(bundle);
@@ -1999,6 +2076,13 @@ mod tests {
             plan_lines(&f, &services, &dbs, &links),
             ["+ redis database cache", "= postgres database db", "= service proxy (image nginx:1.27)", "+ service web (from apps/web)", "~ link web to db", "~ link web to cache", "↑ deploy web"]
         );
+        // A repo worker whose settings in the file differ from the service's.
+        let f2 = parse_project("[apps.jobs]\nrepo = \"acme/shop\"\nroot = \"jobs\"\nbranch = \"main\"\ntype = \"worker\"\n[apps.jobs.run]\nmin_instances = 2\n").unwrap();
+        let mut have = std::collections::BTreeMap::new();
+        have.insert("jobs".to_string(), serde_json::json!({ "source": { "kind": "repo" }, "run": { "type": "worker", "min_instances": 1 } }));
+        assert_eq!(plan_lines(&f2, &have, &dbs, &links), ["= service jobs (repo acme/shop at jobs)", "~ settings jobs (min_instances)"]);
+        assert!(parse_project("[apps.web]\nimage = \"a\"\nrepo = \"b/c\"\n").is_err(), "one source");
+        assert!(parse_project("[apps.web]\nimage = \"a\"\nbranch = \"main\"\n").is_err(), "a branch is a repo's");
         for bad in ["[apps.web]\nroot = \"../x\"\n", "[apps.web]\nroot = \"a\"\nimage = \"b\"\n", "[apps.web]\nroot = \"a\"\nlinks = [\"nope\"]\n", "[apps.Web]\nroot = \"a\"\n", "[apps.web]\nroot = \"a\"\n[databases.db]\nkind = \"mysql\"\n", "[apps.web]\nroot = \"a\"\nreplicas = 1\n"] {
             assert!(parse_project(bad).is_err(), "{bad}");
         }
