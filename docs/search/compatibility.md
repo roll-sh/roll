@@ -252,9 +252,9 @@ the discovery/store plugins.
 | `stack` | `x-pack/plugin/stack` | security | 6 | 6 | 6 | 6 | 0 |
 | `transform` | `x-pack/plugin/transform` | security | 109 | 108 | 108 | 108 | 0 |
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
-| `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 5 | 5 | 4 |
+| `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 9 | 9 | 0 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1025 | 1025 | 387 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1030 | 1030 | 382 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 544 | 544 | 5 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
@@ -266,7 +266,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 4286 | 4286 | 1255 |
+| **total** | | | 6044 | 5541 | 4295 | 4295 | 1246 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -307,18 +307,18 @@ the discovery/store plugins.
 <!-- test-search: stack >= 6 -->
 <!-- test-search: transform >= 108 -->
 <!-- test-search: watcher >= 89 -->
-<!-- test-search: watcher-security >= 5 -->
+<!-- test-search: watcher-security >= 9 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 1025 -->
+<!-- test-search: platinum >= 1030 -->
 <!-- test-search: esql >= 544 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 340/618, `analytics` 113/114, `spatial`
-92/105, `security` 93/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
+92/105, `security` 97/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
 `api_key` 32/32, `aggregate-metrics` 26/28, `inference` 1/23, `search.vectors` 22/23, `wildcard`
 22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
 `counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
 `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
-6/6, `async_search` 4/5, `redact` 5/5, `sql` 5/5, `user_profile` 4/5, `authenticate` 4/4, `logsdb`
+6/6, `async_search` 4/5, `redact` 5/5, `sql` 5/5, `user_profile` 5/5, `authenticate` 4/4, `logsdb`
 2/4, `role_mapping` 4/4, `search-business-rules` 4/4, `dlm` 0/3, `monitoring` 0/3,
 `searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2, `service_accounts` 1/2,
 `set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1, `health` 0/1,
@@ -333,9 +333,16 @@ CCR, Fleet APIs, SLM, the `normalize_for_stream` processor (`ingest-otel`),
 (its license is always `enterprise`), so `rank-rrf-license`'s licence errors are missing; the
 privileges of `manage_autoscaling`, `manage_search_application`, `watcher_manager` and other
 x-pack cluster privileges don't map to their actions (`autoscaling`, `ent-search` run as such
-users). `watcher-security`'s last 4 need run-as (`es-security-runas-user`), which roll doesn't
-support, and Elasticsearch's leniency for indices a user may not read (a watch's search with
-`ignore_unavailable` skips them; roll answers 403, so the watch fails instead of finding nothing).
+users). `platinum`'s `security` misses ES|QL's `METRICS_INFO` and `TS_INFO` commands (4 tests
+that check them under field level security), and `service_accounts` the file-based service
+tokens (`config/service_tokens`).
+
+Run-as (`es-security-runas-user`) is checked against the authenticating user's `run_as`
+privilege, then the request is authorized as the run-as user; `_authenticate` shows the
+authenticating realm as `authentication_realm` and the run-as user's as `lookup_realm`. API keys
+and service accounts ignore the header, as in Elasticsearch. A search with `ignore_unavailable`
+leaves out the explicitly named indices its user may not read (without it they are refused);
+ES|QL and SQL name their indices strictly either way.
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
 
