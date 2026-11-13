@@ -9815,6 +9815,106 @@ decompressed (zstd) and decoded again each time, where pgrust copies an uncompre
        more CPU.
     4. q13 / q22 (the row path: LIKE, the probe, the merge; 219's for the merge).
 
+## Point reads, round 4 (agent 221)
+
+BENCH.md "Point reads, round 4" has the measurements (lane A, two cores: prepared point
+selects at 8 clients -12.7% user instructions and -13.5% cycles a read, +10.3% ops/s; roll
+0.75x pgrust and 1.31x PostgreSQL there, from 0.67x at the round's start) and pgrust's
+per-phase profile from a source build with symbols. What changed, three commits:
+
+- *A unique key's index scan reads its entry and row by one probe and sends the row from
+  its stored values* (`exec/scan.rs`). `ScanNode::point_probe`: at the start of a `point`
+  scan (`unique_point`), the key's entry by `first_snap` and its row by `fetch_stored`,
+  handed over as `next_raw`'s run of one has them (the entry's key columns passed to the
+  dead-entry marker first); `next` and `each_picked` take that row and their loops go on as
+  before (the range ended at the row as `next` ends it, the marker done when the scan ends).
+  It declines (nothing done) where `probe_point` would; no entry, or an entry whose row the
+  snapshot doesn't see, leaves the state `probe_point` / `fetch_entries` leave, and the loop
+  reads on (the range as a scan). It skipped `next_raw_ref` / `next_raw` / `next_entry` /
+  `next_indexed` / `read_entries` / `fetch_entries` and their key copies. `each_picked` takes
+  point scans (`each_picked_point`, `#[inline(never)]`, so the range's per-row loop is
+  compiled as it was; `pick` is `#[inline(always)]` in both) and, without a projection above
+  the scan, whole rows (`whole_rows`: no dropped or virtual column, every column decoded,
+  no key or system columns; the benchmark's `SELECT id, owner, balance, note, created` is
+  such a scan). `put_data_row_stored` writes text and varchar (a UTF-8 client, valid UTF-8)
+  and date values in binary from the stored bytes as well (textsend / date_send's bytes),
+  next to agent 215's text-format values. A kept scan's rescan writes its key into the last
+  range's buffers (`ranges_again`; `park` keeps one range; debug builds compare with
+  `ranges`), keeps its dead-entry marker across executions while it has nothing left to
+  mark (`Kills::idle`: no position, nothing queued, so dropping it does nothing; a new one
+  cloned the heap model's `VisWatch`, an `Arc` whose count every session's scans write), and
+  `PointReader` reserves its key buffers once at its first read (a key grown into them entry
+  by entry reallocated each a few times). `execute_msg` holds the portal's statement instead
+  of copying its text. Tests: `tests/wire.rs` `point_lookups_go_out_as_decoded_ones` (every
+  DataRow and CommandComplete of prepared point lookups the same as the same lookups' under
+  a LIMIT, in four format sets, keys present, updated, deleted, missing, an int8 parameter,
+  Execute with a row limit; and `scan::POINT_PICKS` counts the probes, so the path being
+  lost fails it); `roll-point-select.spec` (READ COMMITTED, REPEATABLE READ and SERIALIZABLE
+  readers of a kept point plan against concurrent updates, write skew through it, a deleted
+  and re-inserted key, NULL and int8 keys, a column added between executions, RLS and
+  column privileges under SET ROLE: PostgreSQL 18.6's output).
+- *A transaction that wrote nothing commits without the write path's setup*
+  (`Txn::commit`): no writes, runs, catalog, id, SSI transaction, prepared state, loads or
+  moved rows: the visible timestamp, `finish_xid`, `release_locks`, `ssi_finish`, as the path
+  below does with nothing to write, without its vectors, closures and two references to the
+  database.
+- *Prepared statements and portals looked up in hashbrown maps* (`Session::prepared`,
+  `prepared_meta`, `portals`: foldhash instead of SipHash, several lookups a Bind and
+  Execute).
+
+Not done (leads 1 and 3 as the brief put them): a Bind/Execute path without the executor
+tree. The probe path above gets the executor part of it while keeping the statement
+machinery (`run_query`'s locks, snapshot, permission checks, pg_stat, pg_stat_statements,
+auto_explain, logging) as it is, so none of the side effects listed in the brief changes;
+what remains of `run_query` around the executor is 19% of a read (below).
+
+**Where a read goes now** (8 clients, BENCH.md): storage 22% (the probe's `first_raw`
+positions every source twice, `smallest_key` then `newest`; the row's `get_raw`; one SST
+file and the memtable here), `run_query` around the executor 19% (relation locks 5%:
+`perms::check` locks the plan's relations a second time through `lock_relations` after
+`lock_named_relations`, each new lock copying its key twice in `Txn::lock`, agent 218's
+area; `begin_statement` 3%; the `ExecCtx` 3.5%), the message read 14% (polling the socket
+in user mode), the transaction's end 9%, Bind 8%, the restart 6% (`bind_scan`'s
+`count_index_scan` and `Kills` reuse, `Fetcher::new` per execution since `park` drops it).
+pgrust's btree descent and heap fetch take about half of what roll's two point reads take
+(18% of its read against 22% of a read 1.5x as long), and its Bind and Execute around them
+less than `run_query`'s statement machinery; roll's transaction end is the cheaper one.
+
+**Next**, by size: (1) the storage reads: in `first_raw` the `newest` seek after
+`smallest_key` is only an eighth of the probe; positioning each source (`find_block`,
+`block_with`, `Block::seek` rebuilding keys entry by entry from the restart) is the rest, for
+the probe and again for the row's `get_raw` in another key range, so a faster in-block search
+or a per-session block position kept across reads (agent 205 found sharing a `PointReader`
+gave fewer instructions but no fewer cycles: measure at 8 clients) is where pgrust's lead
+is; (2) `run_query`'s second `lock_relations` over relations it already holds, and
+`Txn::lock`'s key copies, with agent 218; (3) `Fetcher` kept across `park` while its id table
+and heap model are still the current ones (`Fetcher::new` per execution, 1.4% of a read).
+
+Not this round's: `roll-point-select` had a ninth permutation, a SERIALIZABLE reader of id 2
+while another transaction updates id 1 and the reader then updates id 2: PostgreSQL 18.6
+fails the reader's commit (read/write dependencies among transactions; likely through the
+btree leaf page both scans predicate-lock, which the non-HOT updates' new entries go to),
+roll commits it; the base binary does the same, so the permutation was
+left out (the SSI page model, not the point path, which predicate-locked reads don't take).
+
+Verification: on `64a9b4820` (the three commits' tree before their rebase over agent 216's and 220's
+commits): release build; release Clippy 19 warnings, none in a file changed here; release lib
+tests; golden (in-process, wire, shuffled); kept_plans in release and debug; wire; twophase;
+crash_random seeds 1-30; the isolation suite and the engine's own specs against a private
+PostgreSQL 18.6 (a221-pgref, max_prepared_transactions 10): 141/143 specs (intra-grant-inplace
+as before; `roll-point-select`'s ninth permutation, left out as above); the regress files
+test_setup, select, prepare, plancache, portals, privileges, rowsecurity, transactions,
+btree_index, insert, update: 4530/4530 units. The verification train on origin's head
+`66fb5dc38` (with these commits): release crate tests, Clippy 20 warnings (none in a file
+changed here), crash_random seeds 1-30 x 4, the power stage (power_cut 4 passed, seeds 1-30 x
+4 with and without async commit), debug crate tests, the full regression suite (no newly
+differing unit), isolation 1647/1648 permutations, pg_dump_tap 14609 passed, 0 failed (run
+again once the dump client container ran as this user: as root its directory-format output
+was unreadable to the TAP glob checks, 4 failures). An earlier train on `877024ec3` was cut
+short by the disk filling; its release step failed `wire_waits` (a SERIALIZABLE READ ONLY
+DEFERRABLE transaction no longer waited for its safe snapshot), which passed on this round's
+commit `29e94da4c` alone and on `66fb5dc38`: another commit between, since fixed.
+
 ## Point reads, round 3 (agent 210)
 
 BENCH.md "Point reads, round 3" has the measurements. At 8 clients a prepared point select

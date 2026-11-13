@@ -455,6 +455,108 @@ At 256 MB, a block not cached costs its zstd decompression (q06: 25.6% of the cy
 the OS page cache: 12-22% of its cycles in the kernel's copy). PostgreSQL with
 `shared_buffers = 2GB`: 1,204-1,243 MB on the same four.
 
+## Point reads, round 4 (2026-11-12, agent 221)
+
+HANDOFF.md "Point reads, round 4" has what changed. Harness: agent 210's (`~/.cache/a221/bench`),
+moved to **lane A**: servers on CPUs 6,7,24,25 (two cores), clients on 8,9,26,27, every run
+holding `~/.cache/lane-a.lock`; dist builds in a container (8 GiB, swap off), 100,000
+accounts, 2 s warmup, 10 s measured; user instructions and cycles per operation from
+`perf stat --per-thread` of the connections' threads from 1 s into the run to 1 s before
+its end (a window from the run's start missed the threads of 32 clients' connections made
+after it began); a run waits at most 60 s for quiet CPUs and a pair whose foreign load went
+above 1.0 core would be flagged (none was). Two cores instead of round 3's four: absolute
+numbers are not comparable with rounds 1-3. **base1** is `01da1c495` (agent 215's range
+reads round 7, the head these commits are on).
+
+**Three servers, same day** (`sb4`: two rounds, each server started once a round; roll is
+this round's code, PostgreSQL 18.6 and pgrust `malisper/pgrust:v0.4-beta-amd64` as before;
+medians; one roll run at 8 clients was left out for foreign load):
+
+| workload | clients | server | ops/s | CPU µs/op (user+sys) | p50 / p99 ms | peak MiB | roll ÷PG | roll ÷pgrust |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| prepared point select | 1 | roll | 20,384 | 46.5 (21.6+24.8) | 0.042 / 0.098 | 122 | 2.07x | 1.66x |
+| | | PostgreSQL | 9,860 | 60.9 (28.3+32.6) | 0.087 / 0.257 | 191 | | |
+| | | pgrust | 12,284 | 46.4 (24.1+22.3) | 0.080 / 0.144 | 398 | | |
+| prepared point select | 8 | roll | 89,701 | 39.7 (23.0+16.7) | 0.080 / 0.192 | 128 | 1.31x | 0.75x |
+| | | PostgreSQL | 68,244 | 52.1 (23.9+28.3) | 0.107 / 0.289 | 215 | | |
+| | | pgrust | 119,348 | 29.4 (15.1+14.4) | 0.057 / 0.141 | 437 | | |
+| prepared point select | 32 | roll | 91,246 | 42.9 (25.5+17.4) | 0.264 / 1.138 | 128 | 1.33x | 0.75x |
+| | | PostgreSQL | 68,652 | 57.3 (27.8+29.5) | 0.442 / 1.223 | 255 | | |
+| | | pgrust | 121,318 | 32.6 (17.4+15.2) | 0.246 / 0.657 | 519 | | |
+| pgbench -S prepared | 32 | roll | 92,157 | 41.5 (24.8+16.7) | 0.209 / 3.503 | 128 | 1.34x | 0.75x |
+| | | PostgreSQL | 68,983 | 55.3 (27.2+28.0) | 0.416 / 1.226 | 266 | | |
+| | | pgrust | 123,559 | 30.8 (16.8+13.9) | 0.226 / 0.637 | 532 | | |
+
+At the round's start on the same lane (`sb0`, the head before 215's round, one round): roll
+79,786 / pgrust 119,483 at 8 clients (0.67x), user 27.0 µs a read against 15.1.
+
+**pgrust per phase.** Built from source at the image's commit (`v0.4-beta`, `38634b408`),
+`--profile dist-prof` (the dist profile's codegen with symbols), image `a221-pgrust`; LBR call
+stacks of cycles:u on the server CPUs, its backend threads only. That build runs at 26.8 µs
+user a read against the published image's 15.8 (80.6k against 112.3k ops/s): the published
+binary is PGO-built (`benchmarks/pgo`, the training scripts are not in the public tree), so
+these are shares of a non-PGO build, scaled to the published binary's user time:
+
+| phase (pgrust, 8 clients) | share | µs at 15.1 |
+|---|---:|---:|
+| Bind (`exec_bind_message`: plan cache, portal, its point path's probe set up, `open_kept`) | 31% | 4.7 |
+| Execute (`exec_execute_message`: the point portal's step; btree descent and heap fetch 18%, DataRow 3%) | 28% | 4.2 |
+| transaction end (`CommitTransactionCommand`: `PreCommit_Portals` / `PortalDrop` 8%, lock release 3%) | 20% | 3.0 |
+| the message loop's rest (read, flush, dispatch) | 21% | 3.2 |
+
+Roll's read at 8 clients (this round's code, LBR profile, 28.7 µs user in that run): the
+storage reads 22% (the index entry's probe 12.5%, the row's point read 10%: one SST file and
+the memtable), the executor's restart 6% (`rescan_index` 5%), Bind 8% (the implicit
+transaction's begin 4%), the transaction's end 9%, `run_query` around the executor 19%
+(relation locks 5%, `begin_statement` 3%, the execution context 3.5%), the message read 14%
+(user-mode polling of the socket while cores are free: roll counts it as user CPU, pgrust
+sleeps). Against pgrust's phases roll loses most in the storage reads (about twice its btree
+and heap fetch) and in `run_query`'s statement machinery, and wins at the transaction's end.
+
+**The change** (three commits, measured as one; HANDOFF has each): against base1, alternating
+pairs of dist builds:
+
+| cell | pairs | Δ ops/s | Δ CPU/op | Δ instr/op | Δ cycles/op | instr by pair |
+|---|---:|---:|---:|---:|---:|---|
+| point select, 8 clients | 5 | +10.3% | -9.9% | -12.7% | -13.5% | -12.2% to -12.8% |
+| point select, 1 client | 3 | +7.8% | -8.2% | -11.0% | -11.7% | -8.1% to -11.5% |
+| point select, 32 clients | 3 | +9.8% | -8.9% | -12.8% | -12.3% | -12.3% to -12.8% |
+| pgbench -S prepared, 32 clients | 3 | +7.7% | -7.0% | -11.3% | -10.6% | -10.5% to -11.6% |
+| range read (100 rows), 8 clients | 5 | +1.6% | -1.1% | -0.5% | -0.8% | -0.9% to -0.4% |
+| short transactions, 8 clients | 6 | +0.6% | -1.0% | -1.8% | -1.1% | -8.9% to +3.2% |
+
+Point select, 8 clients, every pair:
+
+| pair | base1 ops/s | cand ops/s | Δ ops/s | base1 µs/op | cand µs/op | Δ CPU | base1 instr | cand instr | Δ instr | Δ cycles |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 75,211 | 82,948 | +10.3% | 47.6 | 42.7 | -10.1% | 54,188 | 47,266 | -12.8% | -13.5% |
+| 2 | 75,013 | 81,644 | +8.8% | 47.9 | 44.0 | -8.3% | 53,828 | 47,258 | -12.2% | -13.9% |
+| 3 | 75,931 | 84,557 | +11.4% | 47.8 | 43.1 | -9.9% | 53,657 | 46,937 | -12.5% | -13.0% |
+| 4 | 78,049 | 87,954 | +12.7% | 46.5 | 41.5 | -10.8% | 54,235 | 47,370 | -12.7% | -12.9% |
+| 5 | 77,676 | 85,663 | +10.3% | 46.3 | 42.0 | -9.3% | 53,680 | 46,855 | -12.7% | -13.8% |
+
+Short transactions' instructions per transaction vary by ±5% between runs of one binary
+(292k to 313k on base1), so six pairs; their medians are within the gate.
+
+Footprint (fresh server each, cgroup anon+shmem 25 s into 100 idle sessions, alternating):
+base1 36.8 / 37.0 MB, the change 36.9 / 36.9 MB; fresh data directory 3.03 MB each. Round 3's
+0.3 MB isn't taken back.
+
+DataRows: `~/.cache/a221/edge/pointscan.py` (raw protocol: 7 prepared point lookups over a
+table of fixed-width, text, varchar, date, NULL, non-ASCII, out-of-stack-row and added
+columns and the two benchmark tables, keys present, updated, deleted and missing, Execute
+with and without a row limit, binary / text / two mixed formats, three rounds each): every
+DataRow, PortalSuspended and CommandComplete byte-identical between base1, the change and
+PostgreSQL 18.6.
+
+On the way (on round 3's head `f25031031`, base0): the probe path alone (`point_pick` from
+`each_picked` only) was taken in one pair of three: the benchmark's `SELECT id, owner,
+balance, note, created` is the table's whole row, planned without a projection above the
+scan, which `each_picked` didn't take; with whole rows: -11.0% instructions, +9.3% ops/s at
+8 clients, but range reads +0.6% then +1.0% instructions (`pick` no longer inlined into the
+range's row loop, and point readers' key buffers made up front), both fixed before base1's
+measurements.
+
 ## Range reads, round 7 (2026-11-11, agent 215)
 
 HANDOFF.md, "Range reads round 7", has what changed: a kept index scan's rows go to a text-format
