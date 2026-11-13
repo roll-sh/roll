@@ -134,6 +134,11 @@ pub trait LinkProvider: Send + Sync {
         let _ = r#ref;
         Ok(false)
     }
+    /// One managed credential per resource in the whole project (the resource's own state, such
+    /// as which of two roles is in use, can't be shared between environments).
+    fn exclusive(&self) -> bool {
+        false
+    }
 }
 
 /// The providers rolld registered, by kind.

@@ -80,6 +80,16 @@ struct State {
     generation: BTreeMap<String, u64>,
 }
 
+fn state_of(c: &code_sql::Conn<'_>, id: &str) -> Result<State> {
+    let s: String = c.query_row("SELECT state FROM outside_dbs WHERE id = ?", [id], |r| r.get(0))?;
+    Ok(serde_json::from_str(&s).unwrap_or_default())
+}
+
+fn save(c: &code_sql::Conn<'_>, id: &str, st: &State) -> Result<()> {
+    c.execute("UPDATE outside_dbs SET state = ? WHERE id = ?", params![serde_json::to_string(st).expect("state"), id])?;
+    Ok(())
+}
+
 fn aad(project: &str, id: &str) -> String {
     format!("roll-secrets:outside_postgres:{project}:{id}:url")
 }
@@ -122,8 +132,20 @@ impl Provider {
     }
 
     fn state(&self, id: &str) -> Result<State> {
-        let s: String = self.db.read(|c| c.query_row("SELECT state FROM outside_dbs WHERE id = ?", [id], |r| r.get(0)))?;
-        Ok(serde_json::from_str(&s).unwrap_or_default())
+        self.db.read(|c| state_of(c, id))
+    }
+
+    /// `role` (at `generation`, unless another issue took it since) is next to hand out.
+    fn free(&self, id: &str, role: &str, generation: u64, idx: usize, to: u64) -> Result<()> {
+        self.db.write(|c| {
+            let mut st = state_of(c, id)?;
+            if st.generation.get(role).copied() == Some(generation) {
+                st.next = idx;
+                st.generation.insert(role.to_string(), to);
+                save(c, id, &st)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -155,19 +177,24 @@ impl LinkProvider for Provider {
             return Err(Error::Link(format!("database {ref} needs two roles to take turns", ref = r#ref)));
         }
         // Claim the turn first (the database only): two issues never get the same role.
-        let (role, generation) = self.db.write(|c| {
-            let s: String = c.query_row("SELECT state FROM outside_dbs WHERE id = ?", [r#ref], |r| r.get(0))?;
-            let mut st: State = serde_json::from_str(&s).unwrap_or_default();
-            let role = roles[st.next % 2].clone();
-            st.next = (st.next + 1) % 2;
+        let (idx, role, generation) = self.db.write(|c| {
+            let mut st = state_of(c, r#ref)?;
+            let idx = st.next % 2;
+            let role = roles[idx].clone();
+            st.next = (idx + 1) % 2;
             let g = st.generation.entry(role.clone()).or_default();
             *g += 1;
             let generation = *g;
-            c.execute("UPDATE outside_dbs SET state = ? WHERE id = ?", params![serde_json::to_string(&st).expect("state"), r#ref])?;
-            Ok::<_, Error>((role, generation))
+            save(c, r#ref, &st)?;
+            Ok::<_, Error>((idx, role, generation))
         })?;
         let pw = Value::new(password());
-        self.outside.set_password(url.expose(), ca.as_deref(), &role, pw.expose()).map_err(|why| Error::Link(format!("setting {role}'s password: {why}")))?;
+        if let Err(why) = self.outside.set_password(url.expose(), ca.as_deref(), &role, pw.expose()) {
+            // The role kept its password: give the turn back, or the next issue would take the
+            // role in use.
+            self.free(r#ref, &role, generation, idx, generation - 1)?;
+            return Err(Error::Link(format!("setting {role}'s password: {why}")));
+        }
         let parts = BTreeMap::from([("username".to_string(), Value::new(role.clone())), ("password".to_string(), pw)]);
         Ok(Issued { parts, handle: json!({ "role": role, "generation": generation }) })
     }
@@ -179,8 +206,17 @@ impl LinkProvider for Provider {
         if self.state(r#ref)?.generation.get(role).copied() != Some(generation) {
             return Ok(());
         }
-        let (url, ca, _) = self.open(r#ref)?;
-        self.outside.set_password(url.expose(), ca.as_deref(), role, &password()).map_err(|why| Error::Link(format!("retiring {role}'s password: {why}")))
+        let (url, ca, roles) = self.open(r#ref)?;
+        self.outside.set_password(url.expose(), ca.as_deref(), role, &password()).map_err(|why| Error::Link(format!("retiring {role}'s password: {why}")))?;
+        // Its latest handout is gone (a grace that ended, or an issue whose write failed): it's
+        // the role to hand out next, never the other, which may be in use.
+        let idx = roles.iter().position(|r| r == role).unwrap_or(0);
+        self.free(r#ref, role, generation, idx, generation)
+    }
+
+    /// One database's credential at a time: two environments would hand out each other's roles.
+    fn exclusive(&self) -> bool {
+        true
     }
 }
 

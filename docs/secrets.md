@@ -566,8 +566,12 @@ It's the link kind `outside_postgres` with fields `username` and `password`, one
 handed out last a new 40-character password and hands it out, so the role in use keeps working
 until its grace period ends; then its password is replaced by one nobody knows. Each role's
 generation is kept with the database and carried in the credential's handle, so a retirement that
-ends after the same role was handed out again does nothing. Rotating twice within one grace period
-cuts the older login's grace short (both roles are then in their newest hands).
+ends after the same role was handed out again does nothing, and a role whose latest handout is
+retired (its grace ended, or the write that issued it failed) is the next one handed out, never the
+one in use. A rotation the server refuses changes nothing: the turn goes back. Rotating twice within
+one grace period cuts the older login's grace short (both roles are then in their newest hands).
+The two roles serve one credential, so a database is linked in one environment only (409 elsewhere;
+a link provider says so with `exclusive()`): give staging and production a pair of roles each.
 
 rolld connects the way it fetches anything a tenant chose: it resolves the host itself, refuses a
 private address (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` allows them for local development), and connects

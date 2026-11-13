@@ -126,15 +126,18 @@ impl roll_secrets::Deliver for Sent {
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 
-/// A Postgres server outside roll: each role's current password.
+/// A Postgres server outside roll: each role's current password; `down` refuses every change.
 #[derive(Default)]
-struct Outside(std::sync::Mutex<BTreeMap<String, String>>);
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool);
 
 impl roll_secrets::outside::OutsideDb for Outside {
     fn check(&self, url: &str, _: Option<&str>, roles: &[String]) -> Result<(), String> {
         if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
     }
     fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
+        if self.1.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("connection refused".into());
+        }
         self.0.lock().unwrap().insert(role.into(), password.into());
         Ok(())
     }
@@ -1028,8 +1031,18 @@ async fn a_database_outside_roll_hands_out_two_logins_in_turn() {
     api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
-    assert_eq!(password("app_blue"), Some(blue2.1));
+    assert_eq!(password("app_blue"), Some(blue2.1.clone()));
     assert_ne!(password("app_green"), Some(green.1));
+    // A rotation the server refused hands out the free role next time, never the one in use.
+    api.outside.1.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (s, _) = api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
+    assert!(!s.is_success());
+    api.outside.1.store(false, std::sync::atomic::Ordering::Relaxed);
+    api.ok(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
+    assert_eq!((login().await.0.as_str(), password("app_blue")), ("app_green", Some(blue2.1)));
+    // Its two roles serve one environment.
+    let (s, v) = api.call(Method::PUT, "/environments/staging/secrets/DB_USER", Some(json!({ "link": link("username") }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
 
     let (s, _) = api.call(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");

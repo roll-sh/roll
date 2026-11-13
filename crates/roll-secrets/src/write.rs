@@ -536,6 +536,13 @@ impl Secrets {
                 let entry = match shared {
                     Some((_, state)) => (open_parts(&dek, project, state)?, state.clone()),
                     None => {
+                        if let Ok(p) = self.links.get(&link.kind)
+                            && p.exclusive()
+                            && let Some(other) = self.holder(project, env_slug, &link, items)?
+                        {
+                            result = Err(Error::Conflict("in_use", format!("{} {} already issues {other}'s credential: one environment per resource of this kind", link.kind, p.name(&link.r#ref).unwrap_or_else(|| link.r#ref.clone()))));
+                            break;
+                        }
                         let label = format!("roll secrets {env_slug} {}", item.key);
                         match self.links.get(&link.kind).and_then(|p| p.issue(&link.r#ref, &cred, &link, &label, None)) {
                             Ok(i) => {
@@ -582,6 +589,23 @@ impl Secrets {
         out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
         out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, _)| (crate::outside::KIND.to_string(), id)));
         Ok(out)
+    }
+
+    /// Another environment (or another credential here, not rewritten by `items`) that holds a
+    /// managed credential of `link`'s resource.
+    fn holder(&self, project: &str, env_slug: &str, link: &Link, items: &[Item]) -> Result<Option<String>> {
+        let rows: Vec<(String, String, String, String, String)> = self.db.read(|c| {
+            Ok::<_, Error>(c.query(
+                "SELECT e.slug, s.path, s.key, s.owner, s.link FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.link_state IS NOT NULL AND s.link LIKE ? AND s.link LIKE ?",
+                params![project, format!("%\"kind\":\"{}\"%", link.kind), format!("%\"ref\":\"{}\"%", link.r#ref)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?)
+        })?;
+        Ok(rows.into_iter().find_map(|(env, path, key, owner, l)| {
+            let l: Link = serde_json::from_str(&l).ok()?;
+            let rewritten = env == env_slug && items.iter().any(|i| i.path == path && i.key == key && i.owner == owner);
+            (l.kind == link.kind && l.r#ref == link.r#ref && !rewritten && (env != env_slug || l.options != link.options)).then_some(env)
+        }))
     }
 
     /// Why `kind ref` isn't something `project` may reach.
