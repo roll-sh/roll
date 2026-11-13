@@ -18,6 +18,8 @@ pub struct Settings {
     pub branches: Vec<String>,
     /// Previews for draft changes too.
     pub drafts: bool,
+    /// Only changes whose title asks (`[preview]`) get one (Render's manual mode).
+    pub manual: bool,
     /// Gitignore-style patterns (CODEOWNERS'): a change gets a preview only when it touches a path
     /// one matches (empty: any path) …
     pub paths: Vec<String>,
@@ -116,6 +118,7 @@ impl Default for Settings {
             enabled: false,
             branches: vec!["*".into()],
             drafts: false,
+            manual: false,
             paths: Vec::new(),
             ignore_paths: Vec::new(),
             resources: BTreeMap::new(),

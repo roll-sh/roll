@@ -127,6 +127,7 @@ function Form({
           <input value={branches} onChange={(e) => setBranches(e.target.value)} className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
         </Field>
         <Toggle label="Draft changes too" checked={s.drafts} onChange={(v) => set("drafts", v)} />
+        <Toggle label="Only when asked" note="Only changes with [preview] in their title get one." checked={s.manual} onChange={(v) => set("manual", v)} />
         <Field label="Paths" note="A change must touch one of these, gitignore-style (apps/web/, *.ts). Empty is any path.">
           <input value={paths} onChange={(e) => setPaths(e.target.value)} placeholder="any path" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
         </Field>

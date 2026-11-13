@@ -105,6 +105,8 @@ export interface PreviewSettings {
   /** Globs on the change's branch. */
   branches: string[];
   drafts: boolean;
+  /** Only changes whose title asks (`[preview]`) get one. */
+  manual: boolean;
   /** Gitignore-style patterns: a change must touch a path one matches (`[]`: any path)… */
   paths: string[];
   /** …that none of these match. */

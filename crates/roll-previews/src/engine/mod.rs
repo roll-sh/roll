@@ -392,7 +392,7 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     }
     match title_says(&c.title) {
         Some(asked) => asked,
-        None => (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")),
+        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")),
     }
 }
 
@@ -472,6 +472,9 @@ mod tests {
         assert!(!wants(&s, &ChangeInfo { title: "Fix typo [Skip Preview]".into(), ..ch.clone() }));
         assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
+        let manual = Settings { manual: true, ..s.clone() };
+        assert!(!wants(&manual, &ch));
+        assert!(wants(&manual, &ChangeInfo { title: "Try the nav [Preview]".into(), ..ch.clone() }));
         let paths = |v: &[&str]| v.iter().map(|p| p.to_string()).collect::<Vec<_>>();
         let docs = Settings { ignore_paths: paths(&["docs/", "*.md"]), ..s.clone() };
         assert!(!touches(&docs, &paths(&["docs/a/b.txt", "README.md"])));

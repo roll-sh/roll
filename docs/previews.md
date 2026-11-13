@@ -72,6 +72,8 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     path, when it's empty) and `ignore_paths` doesn't: Render's build filters, Vercel's ignored
     build step. A change's paths are everything since its merge base with the default branch,
     as reviews read them, so a change that later only touches ignored paths loses its preview.
+  - `manual` (Render's manual mode) turns that around: only a change whose title asks with
+    `[preview]` gets one.
   - The change's title can say otherwise (Render's `[skip render]`): `[skip preview]` (or
     `[no preview]`) skips it, and deletes the preview it has; `[preview]` asks for one the
     `branches`, `drafts` or path rules would leave out. A fork still waits for `approve-run`. GitHub
@@ -612,6 +614,7 @@ type Settings = {
   enabled: boolean;
   branches: string[];                 // globs on the change's branch; ["*"]
   drafts: boolean;                    // previews for draft changes (false)
+  manual: boolean;                    // only changes whose title asks ([preview]) get one (false)
   paths: string[];                    // what a change must touch (gitignore-style); [] is anything
   ignore_paths: string[];             // touching only these doesn't count ([])
   resources: Record<string, "branch" | "schema" | "skip">;   // "<kind>:<ref>" → mode; unlisted: `data`
@@ -729,7 +732,7 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
-- `[skip preview]` and `[preview]` in a change's title, and path filters (`paths`,
+- `[skip preview]` and `[preview]` in a change's title, a `manual` mode, and path filters (`paths`,
   `ignore_paths`) on what a change touches since its merge base, and pushes that touch only
   ignored paths keep the running services;
 - the same branch across a project's repos (another repo runs its own branch of the change's name,
@@ -752,11 +755,14 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
+1. **A warning before a preview expires**: a preview unused for `ttl_hours` goes without notice.
+   Say when it will (the pull request comment, the change, the sheet) a day ahead, with how to
+   keep it, as Render's and Heroku's review apps do.
+2. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
    words do now. roll code changes have no labels yet; GitHub's go through the mirror.
-2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
