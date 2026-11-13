@@ -82,6 +82,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/leaks"), post(scan_leaks))
         .route(&format!("{P}/health"), get(project_health))
         .route("/v1/secrets/findings", get(all_health))
+        .route(&format!("{P}/kms"), get(kms_key).put(set_kms_key).delete(unset_kms_key))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
         .route(&format!("{P}/required"), get(required).put(set_required))
@@ -834,6 +835,27 @@ async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {
 async fn project_health(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Q) -> crate::Result<Response> {
     let code = flag(&q, "code", false);
     Ok(ok(blocking(s, move |s| s.project_health(&project, &c, code)).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KmsBody {
+    key: String,
+}
+
+/// The customer-managed key wrapping the project's data key (`{key: null}` when none).
+async fn kms_key(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(json!({ "key": blocking(s, move |s| s.kms_key(&project, &c)).await? })))
+}
+
+async fn set_kms_key(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let k: KmsBody = body(&b)?;
+    Ok(ok(json!({ "key": blocking(s, move |s| s.set_kms_key(&project, Some(k.key), &c)).await? })))
+}
+
+async fn unset_kms_key(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    blocking(s, move |s| s.set_kms_key(&project, None, &c)).await?;
+    Ok(ok(json!({ "key": null })))
 }
 
 async fn rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

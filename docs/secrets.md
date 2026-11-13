@@ -86,6 +86,26 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
 
+## Customer-managed keys
+
+A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
+Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
+admin). Opening it then needs both roll's deployment key and the customer's key, so the customer
+can make the project's values unreadable to roll at once by revoking roll's grant or disabling the
+key. The values themselves aren't re-encrypted; only the data key is wrapped.
+
+- **The key policy** grants roll's role `kms:Encrypt` and `kms:Decrypt` with the condition
+  `kms:EncryptionContext:roll = secrets` (and `…:project = prj_…` to tie it to one project).
+  Setting a key encrypts and decrypts with it first, so a key roll can't use is refused (400).
+- **Format**: `kms:v1:<key>:<ciphertext>`, wrapping the data key as roll's deployment key seals it;
+  the KMS encryption context is `{roll: secrets, project: <id>}`, in the key's own region.
+- **Revocation** takes effect within a minute: an unwrapped key (still sealed by the deployment
+  key) is kept in memory for 60 s, so a request doesn't wait on KMS. After that the project answers
+  503, naming the key and KMS's reason, never a value.
+- **Rotating the deployment key** reseals the inner key and wraps it again with the same customer
+  key. `DELETE …/kms` unwraps it (KMS must still answer). Every change is in the audit log
+  (`project.kms`).
+
 ## Where it runs
 
 roll secrets is always on, like workspace projects: it is not a product in `ROLL_PRODUCTS`.
@@ -1411,6 +1431,9 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
+| `PUT /kms` | `{key}` (a KMS key's ARN) | `{key}` after encrypting and decrypting with it (admin; 400 when roll can't use it) |
+| `DELETE /kms` | | `{key: null}`: the data key sealed by roll's deployment key alone again (admin) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -1590,16 +1613,13 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **Customer-managed keys per project** (BYOK): a project's data key sealed by a KMS key in the
-   customer's own AWS account (cross-account, grants they can revoke), as Infisical's external KMS;
-   revoking it makes the project's values unreadable to roll at once.
-2. **A Helm chart for the operator** (#36), the way most clusters install one.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+1. **A Helm chart for the operator** (#36), the way most clusters install one.
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    and the deploy notice when apps reads secrets (#31), refreshed once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
    Waits on products serving signed-in people (today they're the operator's).
-5. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
+4. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
    a project has members besides its owner.
 
 Open pull requests after this one:
