@@ -1590,16 +1590,13 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **roll apps, the rest** (with roll apps): `may_reveal` in `ForApps` once #26 lands (apps'
-   `variables/values` asks secrets whether the caller may reveal a `secret`-sourced variable,
-   from a `Secrets::caller_of(operator, user, grant)` factored out of `caller()`), and linked keys'
-   addresses rewritten for a container (`Values.linked` → apps' `runtime.reach`; asked roll apps
-   which side does it). The wiring itself is #31.
+1. **A Terraform provider** (`roll_secrets_environment`, `roll_secret` for a key's value or link,
+   `roll_secrets_token` through roll-access, data sources for values), as Doppler's and
+   Infisical's; it speaks the same HTTP API the CLI and clients do.
 2. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
-3. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),
-   as Doppler's and Infisical's.
-4. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
+   Waits on products serving signed-in people (today they're the operator's).
+3. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
    a project has members besides its owner. Tokens already ask through roll-access (`ask` rules,
    approvals for a while); a project's one owner reaches all of it.
 
@@ -1607,7 +1604,10 @@ Open pull requests after this one:
 
 - **#30, one permission system** (after #20 and #25): a project's tokens are roll-access grants,
   identities' logins get `workload` tokens, `rlst_` is gone.
-- **#31, roll apps' deploys get their project's secrets** (after #20): rolld's `ForApps`.
+- **#31, roll apps' deploys get their project's secrets** (after #20 and #26): `ForApps`, linked
+  keys marked for apps to rewrite, `may_reveal` by secrets' own rules (`Secrets::caller_of`).
+  #30 and #31 both change `caller()`: whichever lands second keeps #30's (no `rlst_`) with
+  #31's `caller_of` split.
 - **#32, Go and Python clients** (after #20): `sdk/go/secrets`, `sdk/python/roll_secrets`.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
