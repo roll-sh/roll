@@ -329,8 +329,8 @@ impl Secrets {
             }
         }
         self.expire_shares()?;
+        self.sweep_identity_logins()?;
         self.sweep_retention()?;
-        self.sweep_identity_tokens()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
         let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;

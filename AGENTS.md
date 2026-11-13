@@ -342,6 +342,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     Anything that touches a second environment (a reference, an import, a base, a promote's
     source) checks the caller through `Caller::allows`; checks, sandboxes and previews resolve
     untrusted (`Secrets::untrusted`, `"untrusted": true`): never a protected environment.
+  - Tokens are roll-access's: a project's token is a grant with one secrets rule made through
+    `POST /v1/access/tokens`, and identities' logins get `workload` grants (`Workloads`). Never
+    add a token store to secrets; it asks the caller's `Grant` (`GrantGrants`).
   - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
     canvas proves nothing about who owns what's on it: anything acting on a resource through a
     project asks `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll

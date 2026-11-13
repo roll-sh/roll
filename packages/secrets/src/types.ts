@@ -162,7 +162,6 @@ export type Token = {
   created_at: number;
   created_by: string;
   last_used_at: number | null;
-  prefix: string;
   /** Client addresses (CIDRs) it works from; null: any. */
   allowed_ips: string[] | null;
 };

@@ -5,7 +5,7 @@ import type { ExportFormat, Lease, SealedValues, Values } from "./types.js";
 export type ClientOptions = {
   /** rolld's API, e.g. `https://api.roll.example` (no trailing `/v1`). */
   api: string;
-  /** A scoped token (`rlst_…`) or the operator token. */
+  /** A roll token (`rlt_…`) with a rule on the project, or the operator token. */
   token: string;
   /** The project's id (`prj_…`). A scoped token knows its own project, so it may be left out. */
   project?: string;

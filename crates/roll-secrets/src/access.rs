@@ -3,10 +3,9 @@
 //! The roll-wide permission model (docs/permissions.md) classifies each request in rolld's gate.
 //! Inside the product, the checks that the gate can't make from the request alone (a second
 //! environment, a path inside a batch, each finding of a filtered answer) go through [`Grants`]:
-//! the operator (everything), a roll-access grant (`rlt_…`/`rlo_…`, [`GrantGrants`]) or one of the
-//! project's own scoped tokens (`rlst_…`, [`TokenScope`]).
+//! the operator (everything), a roll-access grant (`rlt_…`/`rlo_…`, [`GrantGrants`]; a person's
+//! own as them, [`Within`]) or a signed-in person ([`OwnProjects`]).
 
-use crate::names;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -143,7 +142,7 @@ pub fn is_person(principal: &str) -> bool {
     principal.starts_with("usr_")
 }
 
-/// A grant a person made, acting as them: what its rules allow, and only on the person's own
+/// A person's own grant, acting as them: what its rules allow, and only on the person's own
 /// projects (a person's token never reaches further than their session does).
 #[derive(Debug)]
 pub struct Within(pub GrantGrants, pub OwnProjects);
@@ -212,43 +211,45 @@ impl Grants for Narrowed {
     }
 }
 
-/// A scoped token's grants: one project; environments and folders (prefixes) or all; actions.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TokenScope {
-    pub project: String,
-    pub environments: Option<Vec<String>>,
-    pub paths: Option<Vec<String>>,
-    pub actions: Vec<Action>,
-}
-
-impl Grants for TokenScope {
-    fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
-        if at.project != self.project || !self.actions.contains(&action) {
-            return false;
-        }
-        // A token limited to some environments or folders only acts on project-wide things it
-        // can read (the list of environments); everything else names its environment.
-        if let Some(envs) = &self.environments {
-            match at.env {
-                Some(e) if envs.iter().any(|x| x == e) => {}
-                None if action == Action::Read => {}
-                _ => return false,
-            }
-        }
-        if let Some(paths) = &self.paths {
-            match at.path {
-                Some(p) if paths.iter().any(|x| names::under(p, x)) => {}
-                None if action == Action::Read => {}
-                _ => return false,
-            }
-        }
-        true
-    }
-
-    fn project(&self) -> Option<&str> {
-        Some(&self.project)
+/// One rule of roll-access's model for secrets: `project`, its environments and folders (all
+/// when `None`), these actions allowed. What a token made from secrets' page, and a workload
+/// identity's login, may do.
+pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<String>>, actions: &[Action]) -> roll_auth::scope::Rule {
+    use roll_auth::scope;
+    let action = |a: Action| match a {
+        Action::Read => scope::Action::Read,
+        Action::Reveal => scope::Action::Reveal,
+        Action::Write => scope::Action::Write,
+        Action::Delete => scope::Action::Delete,
+        Action::Admin => scope::Action::Admin,
+    };
+    scope::Rule {
+        product: "secrets".into(),
+        resources: scope::Resources::Some(vec![scope::Selector::Project { project: project.into() }]),
+        environments,
+        paths,
+        actions: actions.iter().map(|a| (action(*a), scope::Effect::Allow)).collect(),
     }
 }
+
+/// Short-lived roll-access tokens for workload identities' logins (rolld: `Access::mint_workload`).
+/// The login is the proof, so there's no caller to gate: roll-access checks the rule is within the
+/// identity's scope and that its owner can still sign in.
+pub trait Workloads: Send + Sync {
+    /// A token for `minutes` with `rule`, from `ip_allow` only, owned by `owner` (`None`: the
+    /// operator).
+    fn mint(&self, name: &str, rule: roll_auth::scope::Rule, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> crate::Result<Minted>;
+    /// End one at once (its identity was deleted).
+    fn revoke(&self, id: &str) -> crate::Result<()>;
+}
+
+/// A workload token: its grant's id, the secret (shown once) and when it ends (Unix ms).
+pub struct Minted {
+    pub id: String,
+    pub secret: String,
+    pub expires_at: i64,
+}
+
 
 /// A roll-access grant (`rlt_…` tokens and OAuth connections, docs/permissions.md): rolld's gate
 /// classified the request already; this answers the second resources the product checks itself.
@@ -265,7 +266,11 @@ impl Grants for GrantGrants {
             Action::Delete => scope::Action::Delete,
             Action::Admin => scope::Action::Admin,
         };
-        let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), ..Default::default() };
+        // A read of the project as a whole (its environments' names, health, findings) answers only
+        // what the grant reaches in each environment and folder: a rule limited to some of them
+        // takes part in it, as roll-access's `filters_itself` routes do.
+        let whole = at.env.is_none() && action == scope::Action::Read;
+        let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: whole, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
     }
@@ -352,14 +357,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_scopes_narrow_by_environment_path_and_action() {
-        let t = TokenScope { project: "prj_a".into(), environments: Some(vec!["production".into()]), paths: Some(vec!["/api".into()]), actions: vec![Action::Read, Action::Reveal] };
-        assert!(t.allows(Action::Reveal, &Scope::at("prj_a", "production", "/api/stripe")));
-        assert!(!t.allows(Action::Reveal, &Scope::at("prj_a", "production", "/apix")));
-        assert!(!t.allows(Action::Reveal, &Scope::at("prj_a", "staging", "/api")));
-        assert!(!t.allows(Action::Write, &Scope::at("prj_a", "production", "/api")));
-        assert!(!t.allows(Action::Read, &Scope::at("prj_b", "production", "/api")));
-        assert!(t.allows(Action::Read, &Scope::project("prj_a")), "lists the environments");
-        assert!(!t.allows(Action::Reveal, &Scope::env("prj_a", "production")), "a reveal names its folder");
+    fn a_secrets_rule_names_its_project_environments_folders_and_actions() {
+        let r = rule("prj_a", Some(vec!["production".into()]), Some(vec!["/api".into()]), &[Action::Read, Action::Reveal]);
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["product"], "secrets");
+        assert_eq!(json["resources"], serde_json::json!([{ "project": "prj_a" }]));
+        assert_eq!((json["environments"].clone(), json["paths"].clone()), (serde_json::json!(["production"]), serde_json::json!(["/api"])));
+        assert_eq!(json["actions"], serde_json::json!({ "read": "allow", "reveal": "allow" }));
     }
 }

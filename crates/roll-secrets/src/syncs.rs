@@ -7,7 +7,7 @@
 //! sync remembers a stamp per name it pushed (ids, versions, fingerprints: never a value), so a
 //! push says what changed and what was removed.
 
-use crate::access::{Action, Caller, Everything, Scope, TokenScope};
+use crate::access::{Action, Caller, Everything, Scope};
 use crate::read::Resolver;
 use crate::{Error, Result, Secrets, Value, audit, envs, from_json, json, names};
 use code_sql::{OptionalExtension, params};
@@ -447,36 +447,10 @@ impl Secrets {
             c.principal = principal;
             return Ok(c);
         }
+        // A roll-access grant: as it is now, or gone once revoked or expired (a person's acts as them).
         let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
-        // A token a person made (or a token's token): only while they still reach the project.
-        if !self.maker_reaches(&r.info.created_by, &r.project)? {
-            return Err(gone());
-        }
-        let now = self.db.now_ms()?;
-        let ours: bool = self.db.read(|c| c.query_row("SELECT 1 FROM tokens WHERE id = ? AND project_id = ?", [token, r.project.as_str()], |_| Ok(())).optional())?.is_some();
-        // A roll-access grant: as it is now, or gone once revoked or expired.
-        if !ours {
-            let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
-            return Ok(Caller { principal, grants: Arc::new(crate::access::GrantGrants(g)), ip: None });
-        }
-        type Grants = (Option<String>, Option<String>, String, Option<i64>, Option<i64>);
-        let found: Option<Grants> = self.db.read(|c| {
-            c.query_row("SELECT environments, paths, actions, expires_at, revoked_at FROM tokens WHERE id = ? AND project_id = ?", [token, r.project.as_str()], |x| {
-                Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?, x.get(4)?))
-            })
-            .optional()
-        })?;
-        let (environments, paths, actions, expires_at, revoked_at) = found.ok_or_else(gone)?;
-        if revoked_at.is_some() || expires_at.is_some_and(|at| at <= now) {
-            return Err(gone());
-        }
-        let scope = TokenScope {
-            project: r.project.clone(),
-            environments: environments.and_then(|e| serde_json::from_str(&e).ok()),
-            paths: paths.and_then(|p| serde_json::from_str(&p).ok()),
-            actions: from_json(&actions),
-        };
-        Ok(Caller { principal, grants: Arc::new(scope), ip: None })
+        let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
+        Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None })
     }
 
     /// One pass over the syncs (the sweeper): push those whose environment changed.
