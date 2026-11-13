@@ -456,7 +456,8 @@ type AuditEvent = {
   strings and headers are not.
 - Arguments are redacted before they're stored: any field named like a password, secret, token,
   key, credential or value has its value replaced with `"[redacted]"`, and strings are cut at 2 KiB.
-- The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`) and read through `/v1/access/audit`,
+- The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`; older rows are deleted 5,000 at a time,
+  so a large prune never holds the database's write lock) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
 
 Each node writes its audit rows through one writer, which takes what's queued and writes it in one
