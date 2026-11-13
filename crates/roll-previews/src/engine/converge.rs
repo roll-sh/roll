@@ -508,7 +508,7 @@ impl Engine {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
         match self.apps.screenshot(&r.id, &first.name).await {
             Ok(Some(shot)) => {
-                let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok() && self.store.set_page_health(&r.id, shot.health.as_ref()).is_ok();
+                let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok() && self.store.set_page_report(&r.id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok();
                 if kept {
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
                 }

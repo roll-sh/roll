@@ -311,6 +311,24 @@ pub struct PreviewEnvironment {
     /// What went wrong while that page loaded (the page's own words: untrusted, one line each).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_health: Option<PreviewPageHealth>,
+    /// What a screen reader can't name on that page, and what the document misses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_a11y: Option<PreviewPageA11y>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageA11y {
+    /// `images`, `fields`, `buttons`, `links`: a count and the first one's markup (untrusted).
+    pub issues: Vec<PreviewA11yIssue>,
+    pub lang: bool,
+    pub title: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewA11yIssue {
+    pub kind: String,
+    pub count: u32,
+    pub first: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

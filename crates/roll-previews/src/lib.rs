@@ -218,6 +218,8 @@ pub struct Preview {
     pub page_speed: Option<PageSpeedView>,
     /// What went wrong while that page loaded (at the latest screenshot's head).
     pub page_health: Option<PageHealth>,
+    /// What a screen reader can't name on that page (at the latest screenshot's head).
+    pub page_a11y: Option<PageA11y>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -280,6 +282,57 @@ impl PageHealth {
             one.trim().to_string()
         };
         Some(PageHealth { errors: r.errors.len().min(50) as u32, first_error: r.errors.first().map(line), failed: r.failed.len().min(50) as u32, first_failed: r.failed.first().map(line) })
+    }
+}
+
+/// What a screen reader can't name on the page, and what the document misses, counted by the
+/// browser that took the screenshot. The examples are the page's own markup: one bounded line.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct PageA11y {
+    /// `images` (no alt), `fields` (no label), `buttons` and `links` (no name), with a count and
+    /// the first one's markup; only kinds that have any.
+    pub issues: Vec<A11yIssue>,
+    /// The document has a language (`<html lang>`) and a title.
+    pub lang: bool,
+    pub title: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct A11yIssue {
+    pub kind: String,
+    pub count: u32,
+    pub first: Option<String>,
+}
+
+impl PageA11y {
+    /// From what the browser wrote (its `a11y`), if it wrote that.
+    pub fn parse(json: &str) -> Option<PageA11y> {
+        #[derive(serde::Deserialize)]
+        struct Kind {
+            count: u32,
+            first: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            images: Kind,
+            fields: Kind,
+            buttons: Kind,
+            links: Kind,
+            lang: bool,
+            title: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct Report {
+            a11y: Raw,
+        }
+        let r = serde_json::from_str::<Report>(json.trim()).ok()?.a11y;
+        let line = |s: Option<String>| s.map(|s| s.chars().map(|c| if c.is_control() { ' ' } else { c }).filter(|c| *c != '`').take(120).collect::<String>()).filter(|s| !s.trim().is_empty());
+        let issues = [("images", r.images), ("fields", r.fields), ("buttons", r.buttons), ("links", r.links)]
+            .into_iter()
+            .filter(|(_, k)| k.count > 0)
+            .map(|(kind, k)| A11yIssue { kind: kind.into(), count: k.count.min(10_000), first: line(k.first) })
+            .collect();
+        Some(PageA11y { issues, lang: r.lang, title: r.title })
     }
 }
 
@@ -482,6 +535,11 @@ mod tests {
         let h = PageHealth::parse(r#"{"ttfb_ms":1,"fcp_ms":null,"load_ms":2,"bytes":0,"errors":["TypeError: x is undefined\n    at app.js:3","`second`"],"failed":["500 http://127.0.0.1/api/cart"]}"#).unwrap();
         assert_eq!((h.errors, h.first_error.as_deref(), h.failed, h.first_failed.as_deref()), (2, Some("TypeError: x is undefined"), 1, Some("500 http://127.0.0.1/api/cart")));
         assert_eq!(PageHealth::parse(r#"{"ttfb_ms":1,"load_ms":2,"bytes":0}"#), None, "an operator's own command that times nothing");
+        // What a screen reader can't name: only kinds that have any, the first one's markup flat.
+        let a = PageA11y::parse(r#"{"errors":[],"failed":[],"a11y":{"images":{"count":3,"first":"<img src=\"a.png\">"},"fields":{"count":0,"first":null},"buttons":{"count":1,"first":"<button>\n</button>"},"links":{"count":0,"first":null},"lang":false,"title":true}}"#).unwrap();
+        assert_eq!(a.issues.iter().map(|i| (i.kind.as_str(), i.count)).collect::<Vec<_>>(), [("images", 3), ("buttons", 1)]);
+        assert_eq!(a.issues[1].first.as_deref(), Some("<button> </button>"));
+        assert!(!a.lang && a.title);
         assert_eq!(PageSpeed::parse(""), None);
     }
 

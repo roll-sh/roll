@@ -85,6 +85,8 @@ export interface Preview {
   page_speed?: { now: PageSpeed; before: PageSpeed | null } | null;
   /** What went wrong while that page loaded (the page's own words: shown as text only). */
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null } | null;
+  /** What a screen reader can't name on that page (`first`: its markup, shown as text only). */
+  page_a11y?: { issues: { kind: "images" | "fields" | "buttons" | "links"; count: number; first: string | null }[]; lang: boolean; title: boolean } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -127,6 +129,16 @@ export interface PageSpeed {
   fcp_ms: number | null;
   load_ms: number;
   bytes: number;
+}
+
+/** A preview page's accessibility problems in words ("3 images without alt text", "no title"). */
+export function a11yWords(a: NonNullable<Preview["page_a11y"]>): string[] {
+  const what = { images: "without alt text", fields: "without a label", buttons: "without a name", links: "without a name" } as const;
+  const noun = { images: ["image", "images"], fields: ["form field", "form fields"], buttons: ["button", "buttons"], links: ["link", "links"] } as const;
+  const words = a.issues.filter((i) => i.count > 0).map((i) => `${i.count} ${noun[i.kind][i.count === 1 ? 0 : 1]} ${what[i.kind]}`);
+  if (!a.lang) words.push("no page language");
+  if (!a.title) words.push("no title");
+  return words;
 }
 
 /** "1.2 s" or "380 ms". */

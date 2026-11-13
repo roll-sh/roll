@@ -377,7 +377,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -983,10 +983,16 @@ impl Store {
     }
 
     /// What went wrong while the latest screenshot's page loaded (after `set_screenshot`).
-    pub fn set_page_health(&self, id: &str, health: Option<&crate::PageHealth>) -> Result<()> {
+    pub fn set_page_report(&self, id: &str, health: Option<&crate::PageHealth>, a11y: Option<&crate::PageA11y>) -> Result<()> {
         let health = health.and_then(|h| serde_json::to_string(h).ok());
-        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ? WHERE preview_id = ?", params![health, id])?))?;
+        let a11y = a11y.and_then(|a| serde_json::to_string(a).ok());
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ?, a11y = ? WHERE preview_id = ?", params![health, a11y, id])?))?;
         Ok(())
+    }
+
+    pub fn page_a11y(&self, id: &str) -> Result<Option<crate::PageA11y>> {
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row("SELECT a11y FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|s| serde_json::from_str(&s).ok()))
     }
 
     pub fn page_health(&self, id: &str) -> Result<Option<crate::PageHealth>> {
@@ -1315,6 +1321,7 @@ impl Store {
         let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
         let page_speed = self.page_speed(&r.id)?;
         let page_health = self.page_health(&r.id)?;
+        let page_a11y = self.page_a11y(&r.id)?;
         let screenshot_link = self.screenshot_link(&r.id)?;
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
@@ -1360,6 +1367,7 @@ impl Store {
             phone_screenshot,
             page_speed,
             page_health,
+            page_a11y,
             screenshot_link,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,

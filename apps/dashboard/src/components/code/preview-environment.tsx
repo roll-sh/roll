@@ -3,6 +3,7 @@ import type { PreviewEnvironment } from "@/lib/code-api";
 import type { PreviewKind } from "@/lib/previews-api";
 import { PREVIEW_KIND_ICON } from "../workspace/preview-sheet";
 import { host, money, STATE_LABEL, StateDot } from "../workspace/previews-common";
+import { a11yWords } from "@/lib/previews-api";
 
 /**
  * A change's preview environment (roll previews): every service's URL, the data branches, what
@@ -54,6 +55,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.page_health.first_error ? ` (${env.page_health.first_error})` : ""}
         </p>
       )}
+      {env.page_a11y && a11yWords(env.page_a11y).length > 0 && <p className="text-[12px] text-muted">Accessibility: {a11yWords(env.page_a11y).join(", ")}</p>}
       {env.page_speed && (
         <p className="font-mono text-[11px] text-subtle tabular-nums">
           load {env.page_speed.load_ms < 1000 ? `${env.page_speed.load_ms} ms` : `${(env.page_speed.load_ms / 1000).toFixed(1)} s`}

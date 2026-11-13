@@ -60,6 +60,21 @@ listeners.add((m) => {
   else if (m.method === "Network.responseReceived" && p.response?.status >= 400) keep(failed, `${p.response.status} ${p.response.url}`);
   else if (m.method === "Network.loadingFailed" && !p.canceled) keep(failed, `${p.errorText} ${p.requestId}`);
 });
+// What a screen reader can't name, and what a document misses (WCAG's most common failures).
+const A11Y = `JSON.stringify((() => {
+  const named = (el) => (el.getAttribute("aria-label") || "").trim() || el.getAttribute("aria-labelledby") || (el.getAttribute("title") || "").trim();
+  const text = (el) => (el.textContent || "").trim() || [...el.querySelectorAll("img[alt]")].some((i) => i.alt.trim());
+  const snip = (el) => el.outerHTML.slice(0, 120);
+  const out = (list) => ({ count: list.length, first: list[0] ? snip(list[0]) : null });
+  const images = [...document.querySelectorAll("img:not([alt])")].filter((i) => !named(i));
+  const fields = [...document.querySelectorAll("input, select, textarea")].filter((f) => {
+    if (["hidden", "submit", "button", "reset", "image"].includes((f.getAttribute("type") || "").toLowerCase())) return false;
+    return !named(f) && !f.closest("label") && !(f.id && document.querySelector('label[for="' + CSS.escape(f.id) + '"]'));
+  });
+  const buttons = [...document.querySelectorAll("button, [role=button]")].filter((b) => !named(b) && !text(b));
+  const links = [...document.querySelectorAll("a[href]")].filter((a) => !named(a) && !text(a));
+  return { images: out(images), fields: out(fields), buttons: out(buttons), links: out(links), lang: !!document.documentElement.getAttribute("lang"), title: !!document.title.trim() };
+})())`;
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -79,6 +94,10 @@ listeners.add((m) => {
   } catch {}
   report.errors = errors;
   report.failed = failed;
+  const a11y = await send("Runtime.evaluate", { expression: A11Y, returnByValue: true }, sessionId).catch(() => null);
+  try {
+    report.a11y = JSON.parse(a11y?.result?.value || "null");
+  } catch {}
   fs.writeFileSync(process.env.OUT + ".json", JSON.stringify(report));
   // The same page at a phone's width (390 × 844, at twice the density), to $OUT.phone.png. Best
   // effort: the desktop one is kept whatever happens here.

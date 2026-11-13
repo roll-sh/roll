@@ -288,6 +288,37 @@ fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static
     }
 }
 
+/// The comment's line on what a screen reader can't name on the first page. The markup is the
+/// page's own: in code spans it can't leave.
+fn a11y_line(a: &crate::model::PreviewPageA11y) -> String {
+    let mut parts: Vec<String> = a
+        .issues
+        .iter()
+        .filter(|i| i.count > 0)
+        .map(|i| {
+            let what = match (i.kind.as_str(), i.count == 1) {
+                ("images", true) => "image without alt text",
+                ("images", false) => "images without alt text",
+                ("fields", true) => "form field without a label",
+                ("fields", false) => "form fields without a label",
+                ("buttons", true) => "button without a name",
+                ("buttons", false) => "buttons without a name",
+                ("links", true) => "link without a name",
+                (_, _) => "links without a name",
+            };
+            let first = i.first.as_deref().map(|t| t.replace('`', "").replace('\n', " ").chars().take(120).collect::<String>()).filter(|t| !t.trim().is_empty()).map(|t| format!(" (first: `{t}`)")).unwrap_or_default();
+            format!("{} {what}{first}", i.count)
+        })
+        .collect();
+    if !a.lang {
+        parts.push("no page language".into());
+    }
+    if !a.title {
+        parts.push("no title".into());
+    }
+    if parts.is_empty() { "No accessibility problems found on its first page.\n\n".into() } else { format!("**Accessibility:** {}.\n\n", parts.join("; ")) }
+}
+
 /// The comment's line on what went wrong while the first page loaded. The page's own words go
 /// in code spans they can't leave.
 fn health_line(h: &crate::model::PreviewPageHealth) -> String {
@@ -400,6 +431,9 @@ fn preview_comment(c: &Change) -> String {
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
             ));
+            if let Some(line) = e.page_a11y.as_ref().map(a11y_line) {
+                out.push_str(&line);
+            }
             if let Some(line) = e.page_health.as_ref().map(health_line) {
                 out.push_str(&line);
             }
@@ -469,6 +503,7 @@ mod preview_tests {
             visual_change: None,
             page_speed: None,
             page_health: None,
+            page_a11y: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -496,5 +531,9 @@ mod preview_tests {
         let h = |errors, failed| crate::model::PreviewPageHealth { errors, first_error: Some("TypeError: `x` is undefined".into()), failed, first_failed: Some("500 http://x/api".into()) };
         assert_eq!(health_line(&h(2, 1)), "**While its first page loaded:** 2 errors (first: `TypeError: x is undefined`); 1 failed request (first: `500 http://x/api`).\n\n");
         assert_eq!(health_line(&h(0, 0)), "Its first page loaded without errors.\n\n");
+        let issue = |kind: &str, count, first: &str| crate::model::PreviewA11yIssue { kind: kind.into(), count, first: Some(first.into()) };
+        let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
+        assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
+        assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
     }
 }

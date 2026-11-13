@@ -765,6 +765,11 @@ type Settings = {
     The same session then takes the page at a phone's width (390 × 844 at twice the density,
     `GET …/screenshot?view=phone`, the sheet's Desktop/Phone), with its own change since the push
     before ("At a phone's width: 3.4%" in the comment), as Percy and Chromatic check widths.
+    The same session checks what a screen reader can't name (images without alt text, form
+    fields without a label, buttons and links with no name) and whether the document has a
+    language and a title (`page_a11y`, counts and the first one's markup, bounded; "**Accessibility:**
+    3 images without alt text …" in the comment), the most common WCAG failures, as Vercel's
+    toolbar and Netlify's checks show.
     The same session catches what went wrong while the page loaded: uncaught exceptions,
     `console.error`s, and requests that failed or answered 4xx/5xx (`page_health`, counts and the
     first of each, one bounded line each because they're the page's own words; "**While its
@@ -872,6 +877,7 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- accessibility per push (what a screen reader can't name, a missing language or title);
 - a phone-width screenshot with its own visual change;
 - what went wrong while the page loaded (exceptions, console errors, failed requests);
 - expiring share links for people outside the team (revocable, shown once);
@@ -908,24 +914,19 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Accessibility per push** (Vercel's toolbar and Netlify's accessibility checks): the same
-   session counts what a screen reader can't name (images without alt text, form fields without
-   a label, buttons and links with no name) and missing document language and title, and the pull
-   request comment lists them with the first of each, so a change that makes the page harder to
-   use shows.
-2. **Compared with the default branch** (Chromatic's baseline): when the project has a preview of
+1. **Compared with the default branch** (Chromatic's baseline): when the project has a preview of
    its default branch, a change's screenshot (and its phone-width one) is also compared with that
    one, which says what the change does to the page overall, not only since its last push.
-3. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
