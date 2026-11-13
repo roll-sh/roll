@@ -100,8 +100,25 @@ fn http_logs_documents_take_the_fast_path() {
     ] {
         assert!(agree(&idx, &plan, doc), "not taken: {doc}");
     }
-    // Malformed addresses and objects stay with the general path (its errors).
-    for doc in [r#"{"clientip": "1.2.3"}"#, r#"{"clientip": 1}"#, r#"{"geoip": {"city_name": "x"}}"#] {
+    // Plain objects are walked too, in document order, with their fields' full names.
+    for doc in [
+        r#"{"geoip": {"city_name": "x"}}"#,
+        r#"{"status": 200, "geoip": {"country_name": "NL", "location": [4.9, 52.37], "city_name": ["a", "b"]}, "size": 1}"#,
+        r#"{"geoip": {}}"#,
+    ] {
+        assert!(agree(&idx, &plan, doc), "not taken: {doc}");
+    }
+    // Malformed addresses stay with the general path (its errors), and so do objects it does
+    // more with: null, arrays of objects, unknown or repeated keys, a value where an object is.
+    for doc in [
+        r#"{"clientip": "1.2.3"}"#,
+        r#"{"clientip": 1}"#,
+        r#"{"geoip": null}"#,
+        r#"{"geoip": [{"city_name": "x"}]}"#,
+        r#"{"geoip": {"zip": "x"}}"#,
+        r#"{"geoip": {"city_name": "x", "city_name": "y"}}"#,
+        r#"{"geoip": "x"}"#,
+    ] {
         assert!(plan.parse(doc.as_bytes()).is_none(), "taken: {doc}");
     }
 }
@@ -198,6 +215,7 @@ const TYPES: &str = r#"{"properties":{
     "g":{"type":"geo_point"},
     "f":{"type":"float"},
     "o":{"properties":{"x":{"type":"keyword"}}},
+    "o2":{"properties":{"p":{"properties":{"y":{"type":"long"}}},"z":{"type":"scaled_float","scaling_factor":10}}},
     "c":{"type":"keyword","copy_to":"t"},
     "ip":{"type":"ip"},
     "mot":{"type":"match_only_text","fields":{"raw":{"type":"keyword","ignore_above":4}}}
@@ -252,7 +270,7 @@ fn scalar(r: &mut Rng) -> String {
         0 => r.pick(&strings).to_string(),
         1 => r.pick(&nums).to_string(),
         2 => r.pick(&["true", "false", "null"]).to_string(),
-        _ => r.pick(&["[1.5, 2.5]", "[-200, 0]", "[0, 95]", "[1, 2, 3]", "\"1,2\"", "{\"x\": \"a\"}", "[]", "[\"a\", [\"b\"]]", "[1, \"x\"]"]).to_string(),
+        _ => r.pick(&["[1.5, 2.5]", "[-200, 0]", "[0, 95]", "[1, 2, 3]", "\"1,2\"", "{\"x\": \"a\"}", "[]", "[\"a\", [\"b\"]]", "[1, \"x\"]", "{\"x\": [\"a\", 1]}", "{\"x\": null}", "{}", "{\"x\": \"a\", \"x\": \"b\"}", "{\"p\": {\"y\": 3}, \"z\": 1.25}", "{\"z\": [0.05, -2.25], \"p\": {}}", "{\"p\": {\"y\": 1.5}}"]).to_string(),
     }
 }
 
@@ -260,7 +278,7 @@ fn scalar(r: &mut Rng) -> String {
 fn random_documents_agree() {
     let idx = index(TYPES, &[]);
     let plan = FastPlan::new(&idx).unwrap();
-    let keys = ["t", "k", "kn", "l", "i", "s", "b", "d", "bo", "dt", "de", "dn", "dk", "g", "f", "o", "c", "zz", "ip", "mot"];
+    let keys = ["t", "k", "kn", "l", "i", "s", "b", "d", "bo", "dt", "de", "dn", "dk", "g", "f", "o", "o2", "c", "zz", "ip", "mot"];
     let mut r = Rng(0x9E37_79B9_7F4A_7C15);
     let seeds: u64 = std::env::var("FAST_DOCS").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
     let (mut fast, mut total) = (0, 0);
