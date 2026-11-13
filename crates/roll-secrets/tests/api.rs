@@ -1043,6 +1043,10 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 #[tokio::test]
 async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     let api = Api::new().await;
+    // A password with a # unencoded: parsers disagree on where it ends, so it's refused, never
+    // shown as the host.
+    let (s, e) = api.call(Method::POST, "/outside-databases", Some(json!({ "name": "x", "url": "postgres://admin:abc#def@db.example/app", "roles": ["app_blue", "app_green"] }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains("abc"), "{e}");
     let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require", "roles": ["app_blue", "app_green"], "group": "app_rw" });
     let d = api.ok(Method::POST, "/outside-databases", Some(new)).await;
     assert_eq!((d["host"].as_str(), d.get("url")), (Some("db.example:5432"), None), "the admin URL stays sealed: {d}");
@@ -1057,26 +1061,56 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     assert_eq!((blue.0.as_str(), password("app_blue")), ("app_blue", Some(blue.1.clone())));
 
     // Each rotation hands out the other role; the one in use keeps working through the grace.
-    api.ok(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None);
+    assert!(rotate().await.0.is_success());
     let green = login().await;
     assert_eq!((green.0.as_str(), password("app_green"), password("app_blue")), ("app_green", Some(green.1.clone()), Some(blue.1.clone())));
-    api.ok(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
-    let blue2 = login().await;
-    assert_eq!(blue2.0, "app_blue");
-    // Both graces end: green's password goes, but blue's first retirement doesn't undo its reissue.
-    let p = api.project.clone();
-    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
-    let s = api.secrets.clone();
-    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
-    assert_eq!(password("app_blue"), Some(blue2.1.clone()));
-    assert_ne!(password("app_green"), Some(green.1));
-    // A rotation the server refused hands out the free role next time, never the one in use.
+    // Both roles are taken (green in use, blue in its grace): another rotation waits, resetting
+    // nothing, even once the issue's own short hold on green is over.
+    let id = d["id"].as_str().unwrap().to_string();
+    let unhold = || {
+        let id = id.clone();
+        api.db
+            .write(move |c| {
+                let s: String = c.query_row("SELECT state FROM outside_dbs WHERE id = ?", [id.as_str()], |r| r.get(0))?;
+                let mut v: Value = serde_json::from_str(&s).unwrap();
+                v["held"] = json!({});
+                c.execute("UPDATE outside_dbs SET state = ? WHERE id = ?", [v.to_string().as_str(), id.as_str()])
+            })
+            .unwrap()
+    };
+    unhold();
+    assert_eq!(rotate().await.0, StatusCode::CONFLICT);
+    assert_eq!((login().await, password("app_blue")), (green.clone(), Some(blue.1.clone())));
+    // Blue's grace ends: its password goes, and it's free again.
+    let expire = |cond: &'static str| {
+        let p = api.project.clone();
+        api.db.write(move |c| c.execute(&format!("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND {cond}"), [p.as_str()])).unwrap();
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    expire("1 = 1").await;
+    assert_ne!(password("app_blue"), Some(blue.1.clone()));
+    // A rotation the server refused changes nothing, and the next one takes the free role.
     api.outside.1.store(true, std::sync::atomic::Ordering::Relaxed);
-    let (s, _) = api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
-    assert!(!s.is_success());
+    assert!(!rotate().await.0.is_success());
     api.outside.1.store(false, std::sync::atomic::Ordering::Relaxed);
-    api.ok(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
-    assert_eq!((login().await.0.as_str(), password("app_blue")), ("app_green", Some(blue2.1)));
+    assert_eq!((login().await, password("app_green")), (green.clone(), Some(green.1.clone())));
+    assert!(rotate().await.0.is_success());
+    let blue2 = login().await;
+    assert_eq!((blue2.0.as_str(), password("app_green")), ("app_blue", Some(green.1.clone())));
+    // A retirement that comes late (blue's first) doesn't undo blue's reissue.
+    let (p, late) = (api.project.clone(), json!({ "kind": "outside_database", "ref": d["id"], "field": "username", "mode": "managed" }).to_string());
+    api.db
+        .write(move |c| {
+            c.execute(
+                "INSERT INTO leases (id, project_id, env_id, key, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES ('lse_late', ?, '', '', 'retired', ?, '{\"role\":\"app_blue\",\"generation\":1}', 'test', 0, 1, NULL)",
+                [p.as_str(), late.as_str()],
+            )
+        })
+        .unwrap();
+    expire("id = 'lse_late'").await;
+    assert_eq!(password("app_blue"), Some(blue2.1.clone()));
     // Its two roles serve one environment.
     let (s, v) = api.call(Method::PUT, "/environments/staging/secrets/DB_USER", Some(json!({ "link": link("username") }))).await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");

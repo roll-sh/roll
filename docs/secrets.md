@@ -575,10 +575,13 @@ It's the link kind `outside_database` with fields `username` and `password`, one
 handed out last a new 40-character password and hands it out, so the role in use keeps working
 until its grace period ends; then its password is replaced by one nobody knows. Each role's
 generation is kept with the database and carried in the credential's handle, so a retirement that
-ends after the same role was handed out again does nothing, and a role whose latest handout is
-retired (its grace ended, or the write that issued it failed) is the next one handed out, never the
-one in use. A rotation the server refuses changes nothing: the turn goes back. Rotating twice within
-one grace period cuts the older login's grace short (both roles are then in their newest hands).
+ends after the same role was handed out again does nothing. An issue never takes a busy role: the
+one a stored credential uses, one an unrevoked lease still covers (the previous login in its
+grace), or one another issue or retirement is changing (each holds its role for two minutes at
+most), all worked out in the write that claims it. So two rotations racing (two nodes' sweepers, a
+person and the schedule) can't reset the login in use; rotating again within the grace period is
+a 409 until it ends. A rotation the server refuses changes nothing, and a role whose handout is
+retired (its grace ended, or the write that issued it failed) is free again.
 The two roles serve one credential, so a database is linked in one environment only (409 elsewhere;
 a link provider says so with `exclusive()`): give staging and production a pair of roles each.
 
