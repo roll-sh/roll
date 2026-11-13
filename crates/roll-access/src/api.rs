@@ -145,12 +145,13 @@ struct Check {
 /// token", and an agent asking before it tries. Same catalogue and resolvers as a real request;
 /// a nested or catch-all route is matched by its path, as the gate matches it.
 async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Result<Json<Value>> {
-    let scope = match (who(&a, &ext)?, &c.token) {
-        (Who::Grant(g), None) => g.scope.as_ref().clone(),
+    let (scope, ask_otherwise) = match (who(&a, &ext)?, &c.token) {
+        (Who::Grant(g), None) => (g.scope.as_ref().clone(), g.ask_otherwise),
         (Who::Grant(_), Some(_)) => return Err(Error::Forbidden("a token checks only itself".into())),
         (Who::Operator, Some(id)) => {
             let id = id.clone();
-            blocking(a.clone(), move |a| a.store.get(&id)).await?.effective_rules(code_sql::now_ms())
+            let g = blocking(a.clone(), move |a| a.store.get(&id)).await?;
+            (g.effective_rules(code_sql::now_ms()), g.ask_otherwise)
         }
         (Who::Operator, None) => return Ok(Json(json!({ "decision": "allow", "why": "the operator may do everything" }))),
     };
@@ -166,8 +167,17 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     let target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &axum::http::HeaderMap::new()))
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
-    let action = row.action(&method, &params, c.body.as_ref());
-    let outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
+    let mut action = row.action(&method, &params, c.body.as_ref());
+    let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    if let Some((copied, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, c.body.as_ref(), &scope).await
+        && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
+    {
+        (outcome, action) = (copied, Action::Reveal);
+    }
+    if outcome == Outcome::Deny && ask_otherwise && catalog::placement(row, &params).is_none() {
+        outcome = Outcome::Ask;
+    }
     // What a path resolves to (an endpoint's project, a replica's database) only for what the
     // token reaches.
     let resource = if outcome == Outcome::Deny { None } else { crate::evaluate::describe(&target) };

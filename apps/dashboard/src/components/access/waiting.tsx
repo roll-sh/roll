@@ -1,6 +1,6 @@
 import { Hand } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { accessApi, productName, type Approval } from "@/lib/access-api";
+import { accessApi, productName, RISKY, type Approval } from "@/lib/access-api";
 import { Link } from "../link";
 import { usePending } from "./use-access";
 
@@ -90,22 +90,34 @@ function Waiting({ a, onDecided }: { a: Approval; onDecided: () => void }) {
       setBusy(false);
     }
   };
-  const risky = a.action === "delete" || a.action === "deploy";
+  const risky = RISKY.includes(a.action);
+  // A request that carries a body (a bulk, a push's refs, a copy) is reviewed on its page first.
+  const review = a.args !== null && a.args !== undefined;
+  const where = [a.environment, a.scope_path && a.scope_path !== "/" ? a.scope_path : null].filter(Boolean).join(" · ");
   return (
     <li className="space-y-1.5 px-3 py-2.5 text-[12px]">
       <p className="text-muted">
         <b className="font-medium text-fg">{a.grant_name}</b> wants to <b className={`font-medium ${risky ? "text-danger" : "text-fg"}`}>{a.action}</b> {productName(a.product)}
       </p>
-      <p className="truncate font-mono text-[11px] text-subtle">{a.resource ?? `${a.method} ${a.route}`}</p>
+      <p className="truncate font-mono text-[11px] text-subtle">
+        {a.resource ?? `${a.method} ${a.route}`}
+        {where && ` · ${where}`}
+      </p>
       <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void decide(true)}
-          className={`rounded-md border px-2 py-0.5 transition-colors duration-150 ${risky ? "border-danger/50 text-danger hover:border-danger" : "border-fg/30 text-fg hover:border-fg/60"}`}
-        >
-          Approve
-        </button>
+        {review ? (
+          <Link href={`/dashboard/access/approvals?id=${encodeURIComponent(a.id)}`} className="rounded-md border border-fg/30 px-2 py-0.5 text-fg hover:border-fg/60">
+            Review
+          </Link>
+        ) : (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void decide(true)}
+            className={`rounded-md border px-2 py-0.5 transition-colors duration-150 ${risky ? "border-danger/50 text-danger hover:border-danger" : "border-fg/30 text-fg hover:border-fg/60"}`}
+          >
+            Approve
+          </button>
+        )}
         <button type="button" disabled={busy} onClick={() => void decide(false)} className="rounded-md border border-line px-2 py-0.5 text-muted hover:border-line-2 hover:text-fg">
           Deny
         </button>

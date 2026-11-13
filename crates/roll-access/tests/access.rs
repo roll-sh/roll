@@ -800,6 +800,9 @@ async fn approvals_can_be_remembered() {
     assert_eq!(approve(apr, json!("always")).await.0, StatusCode::OK);
     assert_eq!(d.call(&asks, Method::DELETE, "/v1/projects/pd", None).await.0, StatusCode::OK);
     assert_eq!(d.call(&asks, Method::GET, "/v1/unclassified", None).await.1["code"], "operator_only");
+    // Its dry run says what the gate would: ask.
+    let (_, c) = d.call(&asks, Method::POST, "/v1/access/check", Some(json!({ "method": "DELETE", "path": "/v1/projects/pz" }))).await;
+    assert_eq!(c["decision"], "ask", "{c}");
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{asks_id}"), None).await;
     assert_eq!(g["rules"].as_array().map(Vec::len), Some(2), "{g}");
     // Only a token that asks may make one that asks.
@@ -817,6 +820,12 @@ async fn approvals_can_be_remembered() {
     let (s, e) = put(json!("production")).await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
     assert_eq!(put(json!("dev")).await.0, StatusCode::OK);
+    // Where a copy asks, the approval is about the environment copied from.
+    let (copier, _) = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "write": "allow", "reveal": "ask" } }]), json!({})).await;
+    let (_, pending) = d.call(&copier, Method::PUT, "/v1/apps/services/svc_a/environments/staging", Some(json!({ "variables_from": "production" }))).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
+    assert_eq!((asked["action"].as_str(), asked["environment"].as_str()), (Some("reveal"), Some("production")), "{asked}");
     assert_eq!(d.call(&dev, Method::PUT, "/v1/apps/services/svc_a/environments/dev2", Some(json!({}))).await.0, StatusCode::OK);
 
     // Remembered where it was asked: development's values, never production's.

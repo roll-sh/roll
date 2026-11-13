@@ -243,10 +243,6 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
     }
     let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None };
-    if !decided_before {
-        let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
-        tokio::task::spawn_blocking(move || a.store.touch(&id, ip.as_deref()));
-    }
     if !ctx.grant.ip_allow.is_empty() {
         let nets = crate::store::parse_ip_allow(&ctx.grant.ip_allow).unwrap_or_default();
         if !ip.is_some_and(|ip| nets.iter().any(|n| n.contains(&ip))) {
@@ -254,6 +250,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             let shown = ip.map_or_else(|| "an unknown address".to_string(), |i| i.to_string());
             return deny(StatusCode::FORBIDDEN, "ip_not_allowed", format!("this token can't be used from {shown}"), json!({}));
         }
+    }
+    // Used: from an address it may be used from (a refused address neither keeps it from idling
+    // nor becomes its last address).
+    if !decided_before {
+        let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
+        tokio::task::spawn_blocking(move || a.store.touch(&id, ip.as_deref()));
     }
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
@@ -341,16 +343,14 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
     }
     // Copying another environment's values (apps' `variables_from`) is reading them: it needs
-    // reveal on the same resource there too, and the request gets the weaker of the two.
-    if let (Some(field), Target::One(r)) = (row.copies_from, &target)
-        && let Some(src) = json_body.as_ref().and_then(|b| b.get(field)).and_then(Value::as_str)
+    // reveal on the same resource there too, and the request gets the weaker of the two. When the
+    // copy decides, the approval is about the environment copied from.
+    let mut asked_env: Option<String> = None;
+    if let Some((copied, from)) = copy_outcome(&access, row, &params, &target, json_body.as_ref(), &scope).await
+        && rank(copied) < rank(outcome)
     {
-        let mut from = r.clone();
-        from.environment = Some(access.resolvers.environment(row.product, r.id.as_deref().unwrap_or(""), src));
-        let copied = scope.outcome(&Target::One(from), Action::Reveal);
-        if rank(copied) < rank(outcome) {
-            (outcome, action) = (copied, Action::Reveal);
-        }
+        (outcome, action) = (copied, Action::Reveal);
+        asked_env = Some(from);
     }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
     // were refused before any rule; a move between projects stays refused.
@@ -398,7 +398,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 bound.join("\n")
             ));
             let (environment, scope_path) = match &target {
-                Target::One(r) => (r.environment.clone(), r.path.clone()),
+                Target::One(r) => (asked_env.clone().or_else(|| r.environment.clone()), r.path.clone()),
                 _ => (None, None),
             };
             let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path };
@@ -481,8 +481,23 @@ fn limit_headers(h: &mut axum::http::HeaderMap, rate: u32, remaining: u32, reset
 
 /// The decision on everything a request needs: the weakest outcome, and the action it's for
 /// (the strongest among equals).
+/// What copying another environment's values needs (a `copies_from` row whose body names one):
+/// `reveal` on the same resource in that environment, as the product classes it (resolved off the
+/// runtime, with the path's own id, as `target` resolves the path's environment). The outcome, and
+/// the environment it's about.
+pub(crate) async fn copy_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], target: &Target, body: Option<&Value>, scope: &Scope) -> Option<(Outcome, String)> {
+    let (Some(field), Target::One(r), Tgt::Param(names, _)) = (row.copies_from, target, row.target) else { return None };
+    let src = body?.get(field)?.as_str()?.to_string();
+    let id = names.iter().filter_map(|n| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone())).collect::<Vec<_>>().join("/");
+    let (a, product) = (access.clone(), row.product);
+    let env = tokio::task::spawn_blocking(move || a.resolvers.environment(product, &id, &src)).await.ok()?;
+    let mut from = r.clone();
+    from.environment = Some(env.clone());
+    Some((scope.outcome(&Target::One(from), Action::Reveal), env))
+}
+
 /// Outcomes from weakest to strongest.
-fn rank(o: Outcome) -> u8 {
+pub(crate) fn rank(o: Outcome) -> u8 {
     match o {
         Outcome::Deny => 0,
         Outcome::Ask => 1,
