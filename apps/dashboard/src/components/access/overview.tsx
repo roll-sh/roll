@@ -47,7 +47,7 @@ export function AccessOverview() {
         {me?.kind === "operator" && <PolicyPanel />}
         {me?.kind === "user" && (
           <p className="text-[12px] text-muted">
-            Your tokens and connections act as you: they reach what your account does (roll code, agents and your projects), never
+            Your tokens and connections act as you: they reach what your account does (roll code, agents, your projects and their secrets), never
             more, and their approvals come to you.
           </p>
         )}

@@ -318,6 +318,19 @@ impl Workspace {
         project.owner.is_empty() || self.owners.get().is_some_and(|o| o.trusts(&project.owner, kind, r#ref))
     }
 
+    /// The projects whose canvas holds `kind ref` and may stand for it ([`Workspace::trusts`]), by
+    /// id: what a grant's project rule reaches through a canvas. One query, no canvases loaded.
+    pub fn trusted_projects_of(&self, kind: Kind, r#ref: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String, String)> = self.db.read(|c| {
+            c.query(
+                "SELECT r.project_id, p.owner FROM resources r JOIN projects p ON p.id = r.project_id WHERE r.kind = ? AND r.ref = ? ORDER BY r.project_id",
+                [kind.as_str(), r#ref],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })?;
+        Ok(rows.into_iter().filter(|(_, owner)| owner.is_empty() || self.owners.get().is_some_and(|o| o.trusts(owner, kind, r#ref))).map(|(id, _)| id).collect())
+    }
+
     /// The ids of `owner`'s projects (a user's id), without their canvases.
     pub fn ids_of(&self, owner: &str) -> Result<Vec<String>> {
         Ok(self.db.read(|c| c.query("SELECT id FROM projects WHERE owner = ? ORDER BY id", [owner], |r| r.get(0)))?)

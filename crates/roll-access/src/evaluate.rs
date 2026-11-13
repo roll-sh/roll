@@ -317,11 +317,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let as_user = person.as_ref().is_some_and(|p| !p.admin);
     let reachable = matches!(
         req.extensions().get::<roll_auth::RouteAccess>(),
-        Some(roll_auth::RouteAccess(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_)))
+        Some(roll_auth::RouteAccess(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_) | roll_auth::Access::UserOrCredential(_)))
     );
     if as_user && !reachable {
         ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
+        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their secrets".into(), json!({}));
     }
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
@@ -341,9 +341,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // A user's token on a signed hop: the request it carries must be one their session may call too.
     if as_user && hop {
         let carried = req.extensions().get::<roll_auth::RouteRules>().map(|r| r.access(row.route));
-        if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_))) {
+        if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_) | roll_auth::Access::UserOrCredential(_))) {
             ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
+            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their secrets".into(), json!({}));
         }
     }
     // Matched by its real path (a catch-all, a nest, a signed hop): the log names the real route.

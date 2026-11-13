@@ -292,8 +292,12 @@ pub struct Resolved {
 pub struct WorkspaceResolver(pub Arc<roll_workspace::Workspace>);
 
 impl Resolver for WorkspaceResolver {
+    /// Only projects whose canvas may stand for the resource (`Workspace::trusts`): anyone may put
+    /// anything on their own canvas, so a person's project rule never reaches what isn't theirs,
+    /// whoever's grant names it.
     fn projects_of(&self, workspace_kind: &str, r#ref: &str) -> Vec<String> {
-        self.0.projects_of(workspace_kind, r#ref).unwrap_or_default()
+        let Ok(kind) = roll_workspace::Kind::parse(workspace_kind) else { return Vec::new() };
+        self.0.trusted_projects_of(kind, r#ref).unwrap_or_default()
     }
 
     fn place(&self, project: &str, workspace_kind: &str, r#ref: &str) -> Result<()> {
@@ -460,7 +464,7 @@ pub struct Access {
 
 /// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
 /// session can reach").
-pub const USER_REACH: [&str; 3] = ["code", "agents", "workspace"];
+pub const USER_REACH: [&str; 4] = ["code", "agents", "workspace", "secrets"];
 
 impl Access {
     pub fn open(target: &code_sql::Target, pg: code_sql::PgOptions, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {

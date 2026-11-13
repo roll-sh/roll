@@ -139,6 +139,7 @@ impl Daemon {
             roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") },
             roll_auth::Rule { route: "/v1/workspace", access: roll_auth::Access::User("a user's own projects") },
             roll_auth::Rule { route: "/v1/access", access: roll_auth::Access::User("a user's own tokens") },
+            roll_auth::Rule { route: "/v1/secrets", access: roll_auth::Access::UserOrCredential("a secrets token") },
             roll_auth::Rule { route: "/internal", access: roll_auth::Access::Product("signed hops") },
         ];
         let people = Arc::new(People::default());
@@ -342,7 +343,8 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
 }
 
 /// The ways around a token's rules stay shut: pulling another resource into its project, a list
-/// with an `ask` rule beside a narrower `allow`, and an approval reused with different headers.
+/// with an `ask` rule beside a narrower `allow`, and an approval reused with different headers (a
+/// person's canvas: `a_persons_canvas_doesnt_widen_a_project_rule`).
 #[tokio::test]
 async fn escalation_paths_are_shut() {
     let d = Daemon::new(50);
@@ -359,14 +361,6 @@ async fn escalation_paths_are_shut() {
         .await;
     assert_eq!(d.call(&admin, Method::PUT, &pull, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::OK);
     d.workspace.remove(roll_workspace::Scope::All, &a.id, roll_workspace::Kind::Postgres, "pb").unwrap();
-
-    // Each user places resources in their own projects: a token for one user's project reaches
-    // what's in it, even when the operator's project has it too.
-    let mine = d.workspace.create("usr_alice", "mine", "", None).unwrap();
-    d.workspace.place(roll_workspace::Scope::All, &mine.id, roll_workspace::Kind::Postgres, "pa", 0.0, 0.0).unwrap();
-    let (alice, _) = d.token(json!([{ "product": "postgres", "resources": [{ "project": mine.id }], "actions": { "read": "allow" } }]), json!({})).await;
-    let (s, list) = d.call(&alice, Method::GET, "/v1/projects", None).await;
-    assert_eq!((s, ids(&list)), (StatusCode::OK, vec!["pa"]));
 
     // A narrower allow doesn't turn an ask for every project into a free full list.
     let (mixed, _) = d
@@ -783,7 +777,8 @@ async fn a_users_token_acts_as_them() {
     d.workspace.create("usr_bob", "bobs", "", None).unwrap();
     let rules = json!([
         { "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "ask" } },
-        { "product": "postgres", "resources": "*", "actions": { "read": "allow" } }
+        { "product": "postgres", "resources": "*", "actions": { "read": "allow" } },
+        { "product": "secrets", "resources": "*", "actions": { "read": "allow" } }
     ]);
     let (s, made) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "cursor", "rules": rules }))).await;
     assert_eq!((s, made["grant"]["user"].as_str()), (StatusCode::CREATED, Some("usr_alice")), "{made}");
@@ -798,9 +793,11 @@ async fn a_users_token_acts_as_them() {
     // Never more than her account: an operator's route is refused though the rules name it.
     let (s, e) = d.call(&token, Method::GET, "/v1/projects", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("operator_only")));
+    // Secrets serves people (on their own projects, which secrets checks): her token reaches it.
+    assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/environments/development/secrets", None).await.0, StatusCode::OK);
     // And it says so when asked what it may do (MCP's roll://access/me reads this).
     let (_, me) = d.call(&token, Method::GET, "/v1/access", None).await;
-    assert_eq!((me["as_user"].as_str(), me["reach"].as_array().map(Vec::len)), (Some("alice"), Some(3)), "{me}");
+    assert_eq!((me["as_user"].as_str(), me["reach"].as_array().map(Vec::len)), (Some("alice"), Some(4)), "{me}");
 
     // She sees and manages only her own tokens; bob can't touch hers.
     let (_, op_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
@@ -1396,4 +1393,28 @@ async fn a_workload_gets_a_token_for_minutes() {
     d.people.remove("usr_alice");
     assert!(d.access.mint_workload(new(json!({ "read": "allow" })), &within, 15, Some("usr_alice")).await.is_err(), "its owner can't sign in");
     d.access.store.prune(30).unwrap();
+}
+
+/// A person's canvas stands only for what's theirs (`Workspace::trusts`): a grant whose rule names
+/// a person's project doesn't reach what they put on it from elsewhere, until their owner check
+/// says it's theirs. The operator's projects stand for their canvas.
+#[tokio::test]
+async fn a_persons_canvas_doesnt_widen_a_project_rule() {
+    struct Theirs(&'static str);
+    impl roll_workspace::Owners for Theirs {
+        fn trusts(&self, user: &str, _kind: roll_workspace::Kind, r#ref: &str) -> bool {
+            user == "usr_alice" && r#ref == self.0
+        }
+    }
+    let d = Daemon::new(50);
+    let alices = d.workspace.create("usr_alice", "alices", "", None).unwrap();
+    for r in ["pa", "pb"] {
+        d.workspace.place(roll_workspace::Scope::All, &alices.id, roll_workspace::Kind::Postgres, r, 0.0, 0.0).unwrap();
+    }
+    let (token, _) = d.token(json!([{ "product": "postgres", "resources": [{ "project": alices.id }], "actions": { "read": "allow" } }]), json!({})).await;
+    let (_, list) = d.call(&token, Method::GET, "/v1/projects", None).await;
+    assert_eq!(ids(&list), Vec::<&str>::new(), "nothing on her canvas is hers yet");
+    d.workspace.set_owners(Arc::new(Theirs("pa")));
+    let (_, list) = d.call(&token, Method::GET, "/v1/projects", None).await;
+    assert_eq!(ids(&list), vec!["pa"], "only what's hers");
 }

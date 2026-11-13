@@ -531,8 +531,14 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   would: only routes their session may call (the gate's `User`, `Product` and `Public` rules, which
   it hands the evaluator as `roll_auth::RouteAccess`), as them (`roll_auth::SignedIn`, no
   `Operator`), then narrowed again by its rules. So roll code sees their own owner (git checks the
-  repo as them before it takes the gate's word), projects are their own, and every other product
-  answers `403 operator_only`, whatever the rules say.
+  repo as them before it takes the gate's word), projects are their own, secrets answers for their
+  own projects only (the gate's `UserOrCredential`; secrets intersects the token's rules with
+  them), and every other product answers `403 operator_only`, whatever the rules say.
+- **A person's canvas stands only for what's theirs.** Anyone may put any resource on their own
+  project's canvas, so a project rule (whoever's grant it is) reaches a resource through a
+  person's project only when `roll_workspace::Workspace::trusts` says it's theirs (a repo under
+  their roll code owner; an admin's projects stand for anything); the operator's projects stand
+  for their canvas (`Workspace::trusted_projects_of`, one query).
 - They see and manage only their own tokens, connections, approvals and audit rows, and **they
   decide their own token's approvals** (a token never decides one). The operator sees everyone's.
 - A token or connection made from an admin's session is that admin's too: it acts as the operator
@@ -541,7 +547,7 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 - A person holds at most 100 live tokens and connections (`USER_MAX_GRANTS`), so nobody signed in
   can fill everyone's room (10,000 live grants in all).
 - The builder and the consent screen offer only what they reach (`GET /v1/access` answers
-  `{kind: "user", reach: ["code", "agents", "workspace"]}`).
+  `{kind: "user", reach: ["code", "agents", "workspace", "secrets"]}`).
 - **Their tokens' news is mailed to them** (GitHub mails a token's owner), as well as posted
   where approvals go: an approval one of their tokens waits on (they decide it), a token of theirs
   used from a new network, one roll revoked as leaked, and, once a day, the ones that expire
