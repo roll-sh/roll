@@ -123,10 +123,12 @@ fn e_composite_field(vm: &mut Vm, a: &mut [Value]) -> VR {
     Ok(Value::Null)
 }
 
+/// `CompositeFieldScript.EmitMap.emit`: a `null` map (a grok or dissect that didn't match)
+/// emits nothing.
 fn e_composite_map(vm: &mut Vm, a: &mut [Value]) -> VR {
     let m = a[0].clone();
     if m.is_null() {
-        return Err(npe("Cannot invoke \"java.util.Map.entrySet()\" because \"subfields\" is null"));
+        return Ok(Value::Null);
     }
     for (k, v) in crate::lib_coll::map_entries(vm, &m)? {
         composite_emit(vm, &k.to_java_string(), v)?;

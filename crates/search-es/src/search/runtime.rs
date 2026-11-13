@@ -203,6 +203,18 @@ pub fn check_mapping_scripts(scripts: &crate::scripting::ScriptService, st: &cra
     Ok(())
 }
 
+/// Parses a request's `runtime_mappings` and compiles their scripts, failing as a search on
+/// them would (`script_exception: compile error`).
+pub fn check_request_scripts(scripts: &crate::scripting::ScriptService, st: &crate::meta::ClusterState, request: &Map) -> EsResult<()> {
+    let fields = RuntimeFields::of(&Mapping::empty(), Some(request))?;
+    for f in fields.fields.values() {
+        let Some(s) = &f.script else { continue };
+        let ctx = if f.composite_key.is_some() { search_painless::Context::CompositeField } else { f.ty.context() };
+        scripts.compile(st, s, ctx)?;
+    }
+    Ok(())
+}
+
 /// `strict_date_optional_time||epoch_millis`, shared by the runtime fields without a format.
 pub(crate) fn default_format() -> Arc<crate::time::DateFormatter> {
     static DEFAULT: std::sync::OnceLock<Arc<crate::time::DateFormatter>> = std::sync::OnceLock::new();

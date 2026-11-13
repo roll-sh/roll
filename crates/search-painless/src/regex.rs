@@ -955,6 +955,10 @@ impl Parser<'_> {
                 if s.is_empty() {
                     return Err(self.joni("value_exception", "group name is empty"));
                 }
+                // A name can't start with a digit (that would read as a group number).
+                if s.starts_with(|c: char| c.is_ascii_digit()) {
+                    return Err(self.joni("value_exception", &format!("invalid group name <{s}>")));
+                }
                 return Ok(s);
             }
             if c == ')' {
@@ -1371,6 +1375,11 @@ impl Parser<'_> {
                     Node::Any,
                     Node::Repeat { node: Box::new(Node::Set(Rc::new(marks), Fold::None)), min: 0, max: UNBOUNDED, kind: RepKind::Possessive, by_number: false },
                 ])))
+            }
+            // Joni reads an escape it doesn't know as the letter and warns.
+            c if c.is_ascii_alphabetic() && self.onig() => {
+                self.warnings.push(format!("Unknown escape \\{c} is ignored"));
+                lit(c as u32)
             }
             c if c.is_ascii_alphabetic() => Err(self.err("Illegal/unsupported escape sequence", self.i - 1)),
             c => lit(c as u32),

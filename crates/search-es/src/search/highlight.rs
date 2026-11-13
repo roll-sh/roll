@@ -319,7 +319,10 @@ pub fn highlight_hit(
             {
                 loaded = Some(searcher.stored(d).map_err(crate::engine::convert::index_error)?);
             }
+            // An index-time script field's values come from its script (`FieldValues.valueFetcher`).
+            let scripted = index_time_values(qctx, &f.name, searcher, doc)?;
             let values: Vec<String> = match stored.or(loaded.as_deref()) {
+                _ if scripted.is_some() => scripted.unwrap_or_default(),
                 Some(st) if f.store && doc.is_some() => st
                     .iter()
                     .filter(|(n, _)| *n == f.number)
@@ -365,6 +368,15 @@ pub fn highlight_hit(
     }
     let _ = Arc::<()>::new(());
     Ok(out)
+}
+
+/// The values of index-time script field `name` for global doc `doc` (`None`: not one).
+fn index_time_values(qctx: &QueryCtx, name: &str, searcher: &search_index::Searcher, doc: Option<u32>) -> EsResult<Option<Vec<String>>> {
+    let scripts = super::index_time::of(&qctx.idx.mapping);
+    let (Some(f), Some((seg, local))) = (scripts.get(name), doc.and_then(|d| searcher.segment_of(d))) else { return Ok(None) };
+    let ev = super::runtime::Evaluator::new(&qctx.cluster.scripts, qctx.st, qctx.table, qctx.shard as i32, &qctx.idx.name, f.clone())?.counted();
+    let vals = super::index_time::fetch_values(&ev, seg, local)?;
+    Ok(Some(vals.into_iter().filter_map(|v| if let super::runtime::RtValue::Str(s) = v { Some(s) } else { None }).collect()))
 }
 
 /// The part of `q` that matches the doc, as Lucene's `Weight.matches` sees it in the unified

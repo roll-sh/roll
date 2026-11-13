@@ -141,6 +141,12 @@ pub fn check_top_metrics_runtime(aggs: &Map, def: &dyn Fn(&str) -> Option<Value>
     Ok(())
 }
 
+/// Aggregations whose values source takes a `format`.
+const FORMATTABLE: &[&str] = &[
+    "terms", "rare_terms", "significant_terms", "histogram", "date_histogram", "auto_date_histogram", "range", "date_range", "min", "max", "avg", "sum", "stats",
+    "extended_stats", "percentiles", "percentile_ranks", "median_absolute_deviation",
+];
+
 pub fn rewrite_runtime(aggs: &mut Map, def: &dyn Fn(&str) -> Option<Value>) {
     for (_, body) in aggs.iter_mut() {
         let Value::Obj(b) = body else { continue };
@@ -162,6 +168,15 @@ pub fn rewrite_runtime(aggs: &mut Map, def: &dyn Fn(&str) -> Option<Value>) {
                             m.insert(sk, sv);
                         }
                     }
+                }
+                // A date field's values print in its own format unless the aggregation sets
+                // one (`DateScriptFieldType.docValueFormat`).
+                if f.ty == super::runtime::RtType::Date
+                    && FORMATTABLE.contains(&k.as_str())
+                    && !m.contains_key("format")
+                    && let Some(fmt) = d.get("format").and_then(Value::as_str)
+                {
+                    m.insert("format".into(), Value::from(fmt));
                 }
             }
             // `composite` sources name fields one level down.

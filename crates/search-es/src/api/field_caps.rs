@@ -567,6 +567,11 @@ fn respond(
         .filter_map(|n| st.metadata.indices.get(n).map(|i| i.as_ref()))
         .filter(|i| index_filter.as_ref().is_none_or(|f| can_match(f, i) && shards_can_match(ctx, &st, f, i)))
         .collect();
+    // The request's runtime fields parse and compile on every target index (the shards'
+    // `SearchExecutionContext`): a bad script fails the request.
+    if !runtime_request.is_empty() && !indices.is_empty() {
+        crate::search::runtime::check_request_scripts(&ctx.cluster.scripts, &st, &runtime_request)?;
+    }
     // field -> type -> (index, cap)
     let mut merged: BTreeMap<String, BTreeMap<String, Vec<(String, Cap)>>> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();

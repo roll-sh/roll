@@ -26,10 +26,10 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (66 suites, 6,044
-  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 3,526,
-  3,487 of the 5,541 that pass on Elasticsearch 9.5.5 run like each suite's own test cluster.
+  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 3,534,
+  3,495 of the 5,541 that pass on Elasticsearch 9.5.5 run like each suite's own test cluster.
   Gaps found by the module suites besides those in the table: `geo_bounds` of `geo_point`
-  runtime fields, nested runtime field errors as cause chains, the `registered_domain`,
+  runtime fields, highlighting runtime fields, the tie order of `ip` runtime field terms, nested runtime field errors as cause chains, the `registered_domain`,
   `user_agent` and `attachment` processors, ingest node statistics and verbose simulate
   details; in `platinum`: `geo_shape` runtime fields, `geo_bounds` of shapes crossing the
   dateline, dateline-crossing `geohex` cells as multipolygons in the `geo_grid` processor,
@@ -196,7 +196,7 @@ the discovery/store plugins.
 | `reindex-management` | `modules/reindex-management` | plain | 11 | 11 | 0 | 0 | 11 |
 | `repository-url` | `modules/repository-url` | plain | 9 | 1 | 0 | 0 | 1 |
 | `rest-root` | `modules/rest-root` | plain | 4 | 4 | 4 | 4 | 0 |
-| `runtime-fields-common` | `modules/runtime-fields-common` | plain | 248 | 248 | 235 | 235 | 13 |
+| `runtime-fields-common` | `modules/runtime-fields-common` | plain | 248 | 248 | 243 | 243 | 5 |
 | `streams` | `modules/streams` | plain | 25 | 25 | 25 | 25 | 0 |
 | `transport-netty4` | `modules/transport-netty4` | plain | 1 | 1 | 0 | 0 | 1 |
 | `user-agent` | `modules/user-agent` | plain | 1 | 1 | 0 | 0 | 1 |
@@ -242,7 +242,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 3526 | 3487 | 2054 |
+| **total** | | | 6044 | 5541 | 3534 | 3495 | 2046 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -258,7 +258,7 @@ the discovery/store plugins.
 <!-- test-search: rank-eval >= 7 -->
 <!-- test-search: reindex >= 184 -->
 <!-- test-search: rest-root >= 4 -->
-<!-- test-search: runtime-fields-common >= 235 -->
+<!-- test-search: runtime-fields-common >= 243 -->
 <!-- test-search: streams >= 25 -->
 <!-- test-search: apm-data >= 1 -->
 <!-- test-search: async-search >= 1 -->
