@@ -1129,3 +1129,26 @@ async fn a_new_network_is_news_until_a_token_roams() {
     let (_, list) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}/networks"), None).await;
     assert_eq!(list.as_array().map(Vec::len), Some(6), "{list}");
 }
+
+/// The access checkup names the tokens that need attention and why, each finding with its fix:
+/// admin over everything and never expiring; used for less than its rules allow; a well-scoped,
+/// expiring token that uses what it has is left alone.
+#[tokio::test]
+async fn the_checkup_names_what_needs_attention() {
+    let d = Daemon::new(50);
+    let week = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64 + 7 * 86_400_000;
+    let (_, root) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "admin": "allow" } }]), json!({})).await;
+    let (wide, wide_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({ "expires_at": week })).await;
+    let (fit, fit_id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "expires_at": week })).await;
+    for t in [&wide, &fit] {
+        assert_eq!(d.call(t, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
+    let kinds = |id: &str| -> Vec<String> {
+        list.as_array().unwrap().iter().find(|e| e["grant"]["id"] == id).map(|e| e["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect()).unwrap_or_default()
+    };
+    assert_eq!(kinds(&root), ["everything", "never_expires"], "{list}");
+    assert_eq!(kinds(&wide_id), ["narrower"], "{list}");
+    assert!(kinds(&fit_id).is_empty(), "{list}");
+}

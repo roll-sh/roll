@@ -546,6 +546,20 @@ writes a policy from activity:
   while counts for a rule with the same product and action, which can keep an action that rule
   didn't need; it never widens one.
 
+### Checkup
+
+The access page opens with what needs attention (`GET /v1/access/checkup`, `roll_access::checkup`),
+as Google's security checkup and GitHub's security overview do: each live token with a finding,
+most serious first, and its fix.
+
+| finding | when | fix |
+| --- | --- | --- |
+| `everything` | a rule allows delete, reveal or admin on every product's resources, without asking | tighten |
+| `never_expires` | no expiry | give it one |
+| `unused` | no request in 30 days (or never, 30 days after it was made) | revoke |
+| `narrower` | its requests in the last 30 days needed less than its rules allow (its tighten proposal is narrower; checked for up to 200 recently used tokens) | tighten |
+| `roams` | used from five or more networks, with no address limit | limit its addresses |
+
 ### New networks
 
 A token used from a network it hasn't been used from before is told where approvals go (GitHub
@@ -642,6 +656,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
+| `GET /v1/access/checkup` | access read | the live tokens that need attention: `[{grant, findings: [{kind, why, fix}]}]` ("Checkup") |
 | `GET /v1/access/tokens/{id}/networks` | access read | the networks it's been used from: `[{network, first_at, last_at}]`, newest first ("New networks") |
 | `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
