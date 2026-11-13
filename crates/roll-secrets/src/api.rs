@@ -60,6 +60,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{E}/rollback"), post(rollback))
         .route(&format!("{E}/promote"), post(promote))
         .route(&format!("{E}/import"), post(import_dotenv))
+        .route(&format!("{E}/diff"), post(compare_file))
         .route(&format!("{E}/requests"), get(requests).post(open_request))
         .route(&format!("{E}/requests/{{id}}"), get(request))
         .route(&format!("{E}/requests/{{id}}/values"), get(request_values))
@@ -570,6 +571,17 @@ struct ImportBody {
 }
 
 /// A `.env` file as one change (bulk paste, `roll secrets import`).
+async fn compare_file(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let i: ImportBody = body(&b)?;
+    let entries = match (&i.dotenv, &i.json) {
+        (Some(text), None) => dotenv::parse(text).map_err(Error::BadRequest)?,
+        (None, Some(j)) => dotenv::from_json(j).map_err(Error::BadRequest)?,
+        _ => return Err(Error::BadRequest("a diff takes dotenv (a .env file's text) or json".into())),
+    };
+    let path = i.path.unwrap_or_else(|| "/".into());
+    Ok(ok(blocking(s, move |s| s.compare_file(&project, &env, &path, &entries, &c)).await?))
+}
+
 async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
     let i: ImportBody = body(&b)?;
     let entries = match (&i.dotenv, &i.json) {

@@ -157,7 +157,21 @@ pub enum Secrets {
     /// Import a `.env` or JSON file (`-` for stdin) as one change. JSON is an object of
     /// `KEY: value` or an array of `{key, value}` (Infisical's and Doppler's exports).
     Import {
-        file: String,
+        /// A .env or JSON file (`-`: stdin); or `--from` another manager.
+        #[arg(required_unless_present = "from")]
+        file: Option<String>,
+        /// Read it from another manager's API, with your own token from its usual variable:
+        /// doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`), infisical (`INFISICAL_TOKEN`).
+        #[arg(long, conflicts_with = "file", requires = "source")]
+        from: Option<String>,
+        /// What to read there: doppler `project/config`, vault `mount/path` (KV v2), infisical
+        /// `workspace-id/environment[/path]`. With `--map`, the part before the mapped name.
+        #[arg(long)]
+        source: Option<String>,
+        /// Several environments at once: `dev=development,prd=production` reads `<source>/dev`
+        /// into development, and so on (one change each).
+        #[arg(long, value_delimiter = ',', requires = "from")]
+        map: Vec<String>,
         /// Replace keys that exist (default: only add new ones).
         #[arg(long)]
         overwrite: bool,
@@ -241,10 +255,14 @@ pub enum Secrets {
     },
     /// Compare two environments' folder (values never shown).
     Diff {
-        #[arg(long)]
-        from: String,
-        #[arg(long)]
-        to: String,
+        #[arg(long, requires = "to", conflicts_with = "file")]
+        from: Option<String>,
+        #[arg(long, requires = "from")]
+        to: Option<String>,
+        /// A local copy (`.env` or JSON) against this environment: the keys it adds, changes and
+        /// lacks, by name (values compared on the server by fingerprint, never printed).
+        #[arg(long, required_unless_present = "from")]
+        file: Option<String>,
     },
     /// Copy keys (default: every key that differs) from one environment to another.
     Promote {
@@ -895,13 +913,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, overwrite, request } => {
-            let text = if file == "-" {
-                let mut t = String::new();
-                std::io::stdin().read_to_string(&mut t)?;
-                t
-            } else {
-                std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
+        Secrets::Import { file, from, source, map, overwrite, request } => {
+            if let (Some(from), false) = (&from, map.is_empty()) {
+                let base = source.as_deref().unwrap_or_default().trim_end_matches('/');
+                for pair in &map {
+                    let (src, dst) = pair.split_once('=').with_context(|| format!("{pair}: --map is source=environment"))?;
+                    let values = import_from(from, &format!("{base}/{src}")).await.with_context(|| format!("reading {base}/{src}"))?;
+                    let body = import_body(&serde_json::to_string(&values)?, &c.at.path, overwrite, request)?;
+                    let v = c.call(Method::POST, &format!("{}/import", c.env(dst)), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {dst}"))?;
+                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
+                    match v.get("request").filter(|r| r.is_object()) {
+                        Some(r) => println!("{src} → {dst}: change request {} ({} values)", s(&r["id"]), values.len()),
+                        None => println!("{src} → {dst}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
+                    }
+                }
+                return Ok(());
+            }
+            let text = match (file.as_deref(), from) {
+                (_, Some(from)) => serde_json::to_string(&import_from(&from, source.as_deref().unwrap_or_default()).await?)?,
+                (Some("-"), None) => {
+                    let mut t = String::new();
+                    std::io::stdin().read_to_string(&mut t)?;
+                    t
+                }
+                (Some(f), None) => std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?,
+                (None, None) => bail!("a file, or --from another manager"),
             };
             let v = c
                 .call(Method::POST, &format!("{env}/import"), Some(import_body(&text, &c.at.path, overwrite, request)?))
@@ -1056,7 +1092,27 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             summary(&v);
         }
-        Secrets::Diff { from, to } => {
+        Secrets::Diff { file: Some(file), .. } => {
+            let text = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
+            let v = c.call(Method::POST, &format!("{env}/diff"), Some(import_body(&text, &c.at.path, false, false)?)).await?;
+            if json_out {
+                return print(&v);
+            }
+            let list = |k: &str| v[k].as_array().into_iter().flatten().map(s).collect::<Vec<_>>();
+            for (k, mark, what) in [("added", "+", "only in the file"), ("changed", "~", "different here"), ("missing", "-", "not in the file"), ("references", "?", "has references: not compared"), ("linked", "?", "linked: not compared")] {
+                for name in list(k) {
+                    println!("{mark} {name:<32} {what}");
+                }
+            }
+            let differs = list("added").len() + list("changed").len() + list("missing").len();
+            if differs == 0 {
+                eprintln!("{file} matches {}:{} ({} same)", c.at.env, c.at.path, list("same").len());
+            } else {
+                bail!("{file} differs from {}:{} in {differs} key(s)", c.at.env, c.at.path);
+            }
+        }
+        Secrets::Diff { from, to, .. } => {
+            let (from, to) = (from.unwrap_or_default(), to.unwrap_or_default());
             let v = c.call(Method::GET, &format!("{}/compare?from={}&to={}&{}", c.base(), enc(&from), enc(&to), c.q()), None).await?;
             if json_out {
                 return print(&v);
@@ -1591,6 +1647,69 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
 
 /// An import's body: a JSON file (an object of `KEY: value` or an array of `{key, value}`, as
 /// other managers export) when it parses as one, else a `.env` file.
+/// An environment's values from another manager's API, as `{KEY: value}`: read here, with the
+/// user's own token, and never through roll's server.
+async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map<String, Value>> {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let need = |k: &str| env(k).with_context(|| format!("set {k}"));
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+    let get = |req: reqwest::RequestBuilder, what: String| async move {
+        let res = req.send().await.with_context(|| what.clone())?;
+        let status = res.status();
+        // Never the answer in an error: it holds values.
+        anyhow::ensure!(status.is_success(), "{what}: {status}");
+        res.json::<Value>().await.with_context(|| format!("{what}: not JSON"))
+    };
+    let mut out = serde_json::Map::new();
+    let mut put = |k: &str, v: &Value| {
+        let text = match v {
+            Value::String(s) => s.clone(),
+            Value::Null => return,
+            other => other.to_string(),
+        };
+        out.insert(k.to_string(), Value::String(text));
+    };
+    match from {
+        "doppler" => {
+            let (project, config) = source.split_once('/').context("--source is project/config")?;
+            let host = env("DOPPLER_API_HOST").unwrap_or_else(|| "https://api.doppler.com".into());
+            let url = format!("{host}/v3/configs/config/secrets/download?project={}&config={}&format=json", enc(project), enc(config));
+            let v = get(http.get(url).bearer_auth(need("DOPPLER_TOKEN")?), format!("doppler {source}")).await?;
+            for (k, val) in v.as_object().into_iter().flatten() {
+                // Doppler's own, describing the config.
+                if !k.starts_with("DOPPLER_") {
+                    put(k, val);
+                }
+            }
+        }
+        "vault" => {
+            let (mount, path) = source.split_once('/').context("--source is mount/path (KV v2)")?;
+            let addr = need("VAULT_ADDR")?;
+            let url = format!("{}/v1/{mount}/data/{path}", addr.trim_end_matches('/'));
+            let v = get(http.get(url).header("x-vault-token", need("VAULT_TOKEN")?), format!("vault {source}")).await?;
+            for (k, val) in v["data"]["data"].as_object().into_iter().flatten() {
+                put(k, val);
+            }
+        }
+        "infisical" => {
+            let mut parts = source.splitn(3, '/');
+            let (ws, environment) = (parts.next().unwrap_or_default(), parts.next().context("--source is workspace-id/environment[/path]")?);
+            let path = format!("/{}", parts.next().unwrap_or_default());
+            let api = env("INFISICAL_API_URL").unwrap_or_else(|| "https://app.infisical.com".into());
+            let url = format!("{}/api/v3/secrets/raw?workspaceId={}&environment={}&secretPath={}", api.trim_end_matches('/'), enc(ws), enc(environment), enc(&path));
+            let v = get(http.get(url).bearer_auth(need("INFISICAL_TOKEN")?), format!("infisical {source}")).await?;
+            for x in v["secrets"].as_array().into_iter().flatten() {
+                if let Some(k) = x["secretKey"].as_str() {
+                    put(k, &x["secretValue"]);
+                }
+            }
+        }
+        other => bail!("{other}: --from is doppler, vault or infisical"),
+    }
+    anyhow::ensure!(!out.is_empty(), "{from} {source} has no values to import");
+    Ok(out)
+}
+
 fn import_body(text: &str, path: &str, overwrite: bool, request: bool) -> anyhow::Result<Value> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {

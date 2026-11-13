@@ -126,6 +126,27 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     assert_ne!(refused.code, Some(0));
     assert!(refused.stderr.contains("BROKEN: NOPE doesn't exist"), "{}", refused.stderr);
 
+    // Straight from another manager: a Vault KV v2 secret, read with the user's own token.
+    let vault = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let vault_addr = format!("http://{}", vault.local_addr().unwrap());
+    let kv = axum::Router::new().route(
+        "/v1/secret/data/shop",
+        axum::routing::get(|h: axum::http::HeaderMap| async move {
+            if h.get("x-vault-token").and_then(|t| t.to_str().ok()) != Some("hvs.test") {
+                return (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "errors": ["permission denied"] })));
+            }
+            (axum::http::StatusCode::OK, axum::Json(serde_json::json!({ "data": { "data": { "FROM_VAULT": "v-1", "RETRIES": 3 } } })))
+        }),
+    ).route("/v1/secret/data/shop/stg", axum::routing::get(|| async { axum::Json(serde_json::json!({ "data": { "data": { "STAGED": "s-1" } } })) }));
+    tokio::spawn(async move { axum::serve(vault, kv).await.unwrap() });
+    let env = [("VAULT_ADDR", vault_addr.as_str()), ("VAULT_TOKEN", "hvs.test")];
+    ok(&api, &env, &[&at[..], &["import", "--from", "vault", "--source", "secret/shop"]].concat(), None).await;
+    let got = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $FROM_VAULT $RETRIES"], None).await;
+    assert_eq!(got.trim(), "v-1 3");
+    // Several environments at once: each source path into its environment.
+    let mapped = ok(&api, &env, &["secrets", "-p", "shop", "import", "--from", "vault", "--source", "secret/shop", "--map", "stg=staging"], None).await;
+    assert!(mapped.contains("stg → staging: 1 value"), "{mapped}");
+
     // A backup sealed to a key only this machine holds restores into another project.
     let keys = tempfile::tempdir().unwrap();
     let (key, file) = (keys.path().join("backup.key"), keys.path().join("shop.backup"));

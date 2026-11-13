@@ -568,7 +568,7 @@ roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KE
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
-roll secrets diff    --from development --to staging
+roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
 roll secrets audit   [--key KEY] [--format csv|jsonl]
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
@@ -739,11 +739,35 @@ exec roll secrets scan --staged
 A scan only names values its caller may reveal, and among personal values only the caller's own:
 otherwise it would confirm guesses at values the caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
 
+### A local copy against the environment
+
+`roll secrets diff --file .env` (`POST …/environments/{env}/diff`) compares a local `.env` or JSON
+copy with the folder: the keys the file adds, the ones whose value differs, the same ones, and the
+ones it lacks, by fingerprint on the server, never printing a value; it fails when they differ, so
+a stale copy shows before it misleads. Values with references and links' values can't be compared
+with a copy and are listed apart. Comparing is a way to test a guess, so it needs `reveal` and is
+audited (`secrets.compare`).
+
 ### Moving from another manager
 
 `roll secrets import` takes a `.env` file or JSON: an object of `KEY: value` (numbers and booleans
 as their text) or an array of `{key, value, comment?}`. Export from the old manager, then import
 into each environment:
+
+Or straight from its API, with your own token in its usual variable, read on your machine (never
+through roll's server) and imported as one change:
+
+```
+DOPPLER_TOKEN=dp.st…  roll secrets import --from doppler --source shop/prd -e production
+VAULT_ADDR=https://vault.example VAULT_TOKEN=hvs…  roll secrets import --from vault --source secret/shop -e production
+INFISICAL_TOKEN=…  roll secrets import --from infisical --source <workspace id>/prod/api -e production
+```
+
+`--map dev=development,stg=staging,prd=production` does a whole project: each `<source>/<name>` (a
+Doppler config, a Vault path, an Infisical environment) into its roll environment, one change
+each, reported per environment. The dashboard's import dialog shows these commands, since a browser
+can't call the other manager's API. Doppler's own `DOPPLER_*` keys are left out; numbers and booleans come in as their text. Hosts
+come from the managers' own settings (`DOPPLER_API_HOST`, `VAULT_ADDR`, `INFISICAL_API_URL`).
 
 ```
 infisical export --env=prod --format=json > prod.json   &&  roll secrets import prod.json -e production
@@ -1288,6 +1312,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
+| `POST /environments/{env}/diff` | `{dotenv} \| {json}, path?` | `{added, changed, same, missing, references, linked}`: a local copy against the folder by fingerprint, names only (`reveal`, audited) |
 | `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
 | `GET /environments/{env}/changes/{seq}?state=` | | `ChangeDetail` |
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
@@ -1507,9 +1532,9 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Import straight from another manager**: `roll secrets import --from doppler|vault|infisical`
-   reads an environment through that product's API with the user's own token (on their machine,
-   never through roll's server), then imports it as one change, as `import` does with a file.
+1. **The audit log into a roll bucket**: an audit sink that writes signed JSONL objects to a roll
+   storage bucket on the canvas (a compliance archive with the bucket's own retention and Object
+   Lock), not only an HTTPS endpoint.
 
 Waiting on other pull requests:
 

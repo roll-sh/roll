@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, Finding, ProjectFindings, SyncPreview } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
@@ -138,6 +138,8 @@ export function secretsApi(project: string) {
     changes: (env: string, before?: number, limit?: number) => req<Change[]>("GET", `${E(env)}/changes${qs({ before, limit })}`),
     batch: (env: string, b: Batch) => req<Applied>("POST", `${E(env)}/changes`, b),
     importDotenv: (env: string, body: { dotenv: string; path?: string; overwrite?: boolean; message?: string }) => req<Imported>("POST", `${E(env)}/import`, body),
+    /** A local copy against the folder, by fingerprint (needs reveal; audited). */
+    diffFile: (env: string, body: { dotenv: string; path?: string }) => req<FileDiff>("POST", `${E(env)}/diff`, body),
     /** The same import as a change request (a protected environment). */
     importAsRequest: (env: string, body: { dotenv: string; path?: string; overwrite?: boolean; message?: string }) =>
       req<ImportedAsRequest>("POST", `${E(env)}/import`, { ...body, request: true }),

@@ -205,6 +205,8 @@ export type AuditFormat = "csv" | "jsonl";
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
 export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 export type Imported = Applied & { skipped: string[] };
+/** A local copy against a folder (`POST …/environments/{env}/diff`): names only. */
+export type FileDiff = { added: string[]; changed: string[]; same: string[]; missing: string[]; references: string[]; linked: string[] };
 export type ImportedAsRequest = { request: ChangeRequest; skipped: string[] };
 /** `docker`: Docker's `--env-file`; `kubernetes`: a Secret manifest (`name`, `namespace`). */
 export type ExportFormat = "dotenv" | "json" | "shell" | "yaml" | "docker" | "kubernetes";

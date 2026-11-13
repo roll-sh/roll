@@ -90,4 +90,45 @@ impl Secrets {
         }
         Ok(missing.into_iter().collect())
     }
+
+    /// A local copy (a `.env` file's entries) against a folder, by fingerprint: which keys it adds,
+    /// changes or keeps the same, and which it lacks. Names only; it needs `reveal` (comparing is
+    /// a way to test a guess) and is audited. A value with references, or a link's, can't be
+    /// compared with a copy: those are listed apart.
+    pub fn compare_file(&self, project: &str, slug: &str, path: &str, entries: &[crate::dotenv::Entry], caller: &Caller) -> Result<FileDiff> {
+        let path = names::path(path)?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        let dek = self.project(project)?;
+        let have: std::collections::BTreeMap<String, crate::read::Entry> = self.view(project, slug, &path, caller, false, Action::Reveal)?.into_iter().filter(|e| e.row.owner.is_empty()).map(|e| (e.row.key.clone(), e)).collect();
+        let mut d = FileDiff::default();
+        let local: std::collections::BTreeMap<&str, &crate::dotenv::Entry> = entries.iter().map(|e| (e.key.as_str(), e)).collect();
+        for (key, e) in &local {
+            match have.get(*key) {
+                None => d.added.push(key.to_string()),
+                Some(x) if x.row.link.is_some() => d.linked.push(key.to_string()),
+                Some(x) if x.row.refs.as_ref().is_some_and(|r| !r.is_empty()) => d.references.push(key.to_string()),
+                Some(x) if dek.fingerprint(e.value.expose()) == x.row.fp => d.same.push(key.to_string()),
+                Some(_) => d.changed.push(key.to_string()),
+            }
+        }
+        d.missing = have.keys().filter(|k| !local.contains_key(k.as_str())).cloned().collect();
+        let keys: Vec<String> = local.keys().map(|k| k.to_string()).collect();
+        self.audit_now(project, caller, "secrets.compare", Some(slug), Some(&path), &keys, &format!("compared a local copy of {} keys", keys.len()));
+        Ok(d)
+    }
+}
+
+/// A local copy against a folder (`POST …/environments/{env}/diff`): names only.
+#[derive(Debug, Default, Serialize)]
+pub struct FileDiff {
+    /// In the file, not in the folder.
+    pub added: Vec<String>,
+    /// In both, with a different value.
+    pub changed: Vec<String>,
+    pub same: Vec<String>,
+    /// In the folder, not in the file.
+    pub missing: Vec<String>,
+    /// Values with references and links' values, which a copy can't be compared with.
+    pub references: Vec<String>,
+    pub linked: Vec<String>,
 }
