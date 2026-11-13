@@ -78,6 +78,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
+        .route(&format!("{P}/leaks"), post(scan_leaks))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
         .route(&format!("{P}/required"), get(required).put(set_required))
@@ -780,6 +781,17 @@ async fn create_sink(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
 async fn delete_sink(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_sink(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Scan {
+    candidates: Vec<String>,
+}
+
+async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let Scan { candidates } = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.scan(&project, &candidates, &c)).await?))
 }
 
 async fn rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

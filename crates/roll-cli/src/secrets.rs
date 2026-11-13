@@ -180,6 +180,13 @@ pub enum Secrets {
         #[arg(long, requires = "watch", value_name = "COMMAND")]
         exec: Option<String>,
     },
+    /// Look for this project's values in files (a directory is walked; `--staged`: what `git
+    /// commit` would record, for a pre-commit hook). Says where, never the value; fails if found.
+    Scan {
+        paths: Vec<String>,
+        #[arg(long, conflicts_with = "paths")]
+        staged: bool,
+    },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
@@ -878,6 +885,42 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             if watch {
                 render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
             }
+        }
+        Secrets::Scan { paths, staged } => {
+            let files = if staged { staged_files()? } else { walk(if paths.is_empty() { vec![".".into()] } else { paths })? };
+            let mut by: std::collections::BTreeMap<String, Vec<(String, usize)>> = Default::default();
+            for (name, text) in &files {
+                for (n, line) in text.lines().enumerate() {
+                    let mut found = std::collections::HashSet::new();
+                    line_candidates(line, &mut found);
+                    for c in found {
+                        by.entry(c).or_default().push((name.clone(), n + 1));
+                    }
+                }
+            }
+            let all: Vec<String> = by.keys().cloned().collect();
+            let mut hits: Vec<(String, usize, String, String, String)> = vec![];
+            for chunk in all.chunks(20_000) {
+                let v = c.call(Method::POST, &format!("{}/leaks", c.base()), Some(json!({ "candidates": chunk }))).await?;
+                for f in v.as_array().into_iter().flatten() {
+                    let Some(cand) = f["index"].as_u64().and_then(|i| chunk.get(i as usize)) else { continue };
+                    for (file, line) in &by[cand] {
+                        hits.push((file.clone(), *line, s(&f["key"]), s(&f["environment"]), s(&f["path"])));
+                    }
+                }
+            }
+            hits.sort();
+            hits.dedup();
+            if json_out {
+                return print(&json!(hits.iter().map(|h| json!({ "file": h.0, "line": h.1, "key": h.2, "environment": h.3, "path": h.4 })).collect::<Vec<_>>()));
+            }
+            for (file, line, key, env, path) in &hits {
+                println!("{file}:{line}  {key} ({env}{})", if path == "/" { String::new() } else { format!(" {path}") });
+            }
+            if !hits.is_empty() {
+                bail!("{} in {} file(s): move it out of the code (roll run puts it in the environment)", if hits.len() == 1 { "a value of this project".to_string() } else { format!("{} values of this project", hits.len()) }, hits.iter().map(|h| &h.0).collect::<std::collections::BTreeSet<_>>().len());
+            }
+            eprintln!("No values of this project in {} file(s)", files.len());
         }
         Secrets::Export { format, name, namespace } => {
             let mut url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
@@ -1851,6 +1894,70 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
             }
         }
     }
+}
+
+/// A line's candidates, as roll code's scan takes them: runs of `[A-Za-z0-9_\-+/=.:@~]`, the whole
+/// trimmed line, and the right-hand side of `KEY=VALUE` or `key: value` (unquoted). The server
+/// never matches anything under 8 characters.
+fn line_candidates(line: &str, out: &mut std::collections::HashSet<String>) {
+    let mut add = |s: &str| {
+        if (8..=4096).contains(&s.chars().count()) {
+            out.insert(s.to_string());
+        }
+    };
+    for run in line.split(|ch: char| !(ch.is_ascii_alphanumeric() || "_-+/=.:@~".contains(ch))) {
+        add(run);
+    }
+    let trimmed = line.trim();
+    add(trimmed);
+    if let Some(i) = trimmed.find(['=', ':']) {
+        let rhs = trimmed[i + 1..].trim().trim_end_matches([',', ';']).trim();
+        add(['"', '\'', '`'].iter().find_map(|q| rhs.strip_prefix(*q).and_then(|s| s.strip_suffix(*q))).unwrap_or(rhs));
+    }
+}
+
+/// Text files under `paths` (skipping `.git`, `node_modules`, `target`, binaries and files over 1 MiB).
+fn walk(paths: Vec<String>) -> anyhow::Result<Vec<(String, String)>> {
+    let mut out = vec![];
+    let mut todo: Vec<std::path::PathBuf> = paths.into_iter().map(Into::into).collect();
+    while let Some(p) = todo.pop() {
+        let meta = std::fs::symlink_metadata(&p).with_context(|| format!("reading {}", p.display()))?;
+        if meta.is_dir() {
+            if p.file_name().is_some_and(|n| [".git", "node_modules", "target"].contains(&n.to_string_lossy().as_ref())) {
+                continue;
+            }
+            for e in std::fs::read_dir(&p)? {
+                todo.push(e?.path());
+            }
+        } else if meta.is_file() && meta.len() <= 1 << 20 {
+            let bytes = std::fs::read(&p)?;
+            if !bytes.contains(&0) {
+                out.push((p.display().to_string().trim_start_matches("./").to_string(), String::from_utf8_lossy(&bytes).into_owned()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// What `git commit` would record: each staged file's staged content.
+fn staged_files() -> anyhow::Result<Vec<(String, String)>> {
+    let git = |args: &[&str]| -> anyhow::Result<Vec<u8>> {
+        let o = std::process::Command::new("git").args(args).output().context("running git")?;
+        if !o.status.success() {
+            bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim());
+        }
+        Ok(o.stdout)
+    };
+    let names = git(&["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"])?;
+    let mut out = vec![];
+    for name in names.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+        let name = String::from_utf8_lossy(name).into_owned();
+        let bytes = git(&["show", &format!(":{name}")])?;
+        if bytes.len() <= 1 << 20 && !bytes.contains(&0) {
+            out.push((name, String::from_utf8_lossy(&bytes).into_owned()));
+        }
+    }
+    Ok(out)
 }
 
 /// `${KEY}` → its value; `\${` is a literal `${`. Anything else (`$KEY`, `${a:-b}`) stays as

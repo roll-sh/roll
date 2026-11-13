@@ -2,7 +2,8 @@
 //! values appear among some text's candidate tokens, found by fingerprint, so nothing is
 //! decrypted and no value leaves this module.
 
-use crate::{Result, Secrets};
+use crate::access::{Action, Caller, Scope};
+use crate::{Error, Result, Secrets};
 use code_sql::OptionalExtension;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
@@ -20,7 +21,38 @@ pub struct Leak {
     pub path: String,
 }
 
+/// The most candidates one scan takes (`POST …/leaks`).
+pub const SCAN_MAX: usize = 20_000;
+
+/// A candidate of a scan that is a stored value: its index, and where the value is.
+#[derive(Clone, Debug, Serialize)]
+pub struct Found {
+    pub index: usize,
+    #[serde(flatten)]
+    pub leak: Leak,
+}
+
 impl Secrets {
+    /// A caller's scan of text of its own (`roll secrets scan`, a pre-commit hook): which of
+    /// `candidates` are values of this project's it may reveal. Only those: anything else would
+    /// make the scan an oracle for guessing values it can't read.
+    pub fn scan(&self, project: &str, candidates: &[String], caller: &Caller) -> Result<Vec<Found>> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        if candidates.len() > SCAN_MAX {
+            return Err(Error::BadRequest(format!("at most {SCAN_MAX} candidates a scan")));
+        }
+        self.project(project)?;
+        let found: Vec<Found> = self
+            .leak_matches(project, candidates)?
+            .into_iter()
+            .filter(|(_, l)| !l.environment.contains('/') && caller.allows(Action::Reveal, &Scope::at(project, &l.environment, &l.path)))
+            .map(|(index, leak)| Found { index, leak })
+            .collect();
+        let keys: Vec<String> = found.iter().map(|f| f.leak.key.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+        self.audit_now(project, caller, "secrets.scan", None, None, &keys, &format!("scanned {} candidates: {} matched", candidates.len(), found.len()));
+        Ok(found)
+    }
+
     /// The secrets of `project`, in any environment, whose value equals one of `candidates`.
     /// Only rows that hold a value count (plain values and managed links): live and dynamic links
     /// store none. A project that never had secrets has none to leak (and isn't set up by asking).

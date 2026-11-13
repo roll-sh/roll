@@ -99,6 +99,12 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--", "sh", "-c", "echo $HOST"], None).await;
     assert_eq!(here.trim(), "db.internal");
 
+    // A pre-commit scan finds a stored value in a file, and says where (never the value).
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("config.yml"), "name: shop\ndb:\n  host: db.internal\n").unwrap();
+    let scanned = roll(&api, &[], &["secrets", "-p", "shop", "scan", repo.path().to_str().unwrap()], None).await;
+    assert!(scanned.code != Some(0) && scanned.stdout.contains("config.yml:3  HOST (production)"), "{}{}", scanned.stdout, scanned.stderr);
+
     // A config file filled from the environment: `\${…}` and shell syntax stay as written.
     let tpl = "url: http://${HOST}:${PORT}\nliteral: \\${HOST} ${HOME:-x} $PORT\n";
     let filled = ok(&api, &[], &[&at[..], &["render", "-"]].concat(), Some(tpl)).await;

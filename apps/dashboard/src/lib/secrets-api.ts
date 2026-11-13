@@ -189,6 +189,8 @@ export function secretsApi(project: string) {
     /** The `whsec_…` signing secret comes back once. */
     createSink: (url: string, fromStart = false) => req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart }),
     deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),
+    /** Which candidates (tokens of some text) are this project's values the caller may reveal; never the values. */
+    scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
     rotators: () => req<Rotator[]>("GET", `${P}/rotators`),
     /** The answer holds its signing secret, once. */
     addRotator: (r: { name: string; url: string }) => req<Rotator & { secret: string }>("POST", `${P}/rotators`, r),

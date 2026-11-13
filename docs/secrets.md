@@ -489,6 +489,7 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
+roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
@@ -625,6 +626,24 @@ the change`. The blocker names keys and environments, never the value or the lin
 - **Way around.** Rotate the secret and remove the value from the change. For a false positive, an
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
+
+#### Before a commit: `roll secrets scan`
+
+The same check runs on a laptop, before anything is pushed: `roll secrets scan [PATH…]` walks
+files (skipping `.git`, `node_modules`, `target`, binaries and files over 1 MiB) and `--staged`
+reads exactly what `git commit` would record. The CLI takes each line's candidates (runs of token
+characters, the trimmed line, the right-hand side of `KEY=VALUE`), and `POST …/leaks
+{candidates}` (at most 20,000 a call) answers which are the project's values, by fingerprint: the
+key, environment and folder, never the value. It prints `file:line KEY (environment)` and exits
+non-zero when it found one, so it works as a hook:
+
+```
+# .git/hooks/pre-commit
+exec roll secrets scan --staged
+```
+
+A scan only names values its caller may reveal: otherwise it would confirm guesses at values the
+caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
 
 ### Moving from another manager
 
@@ -1136,6 +1155,7 @@ isn't in the workspace is 404.
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
+| `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -1275,7 +1295,8 @@ Done and in PR #20:
   rotators for values outside roll;
 - `roll secrets`, `roll secrets setup` and `roll run [--watch]`;
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
-- leaked secrets don't land, plus scans of a repo's default branch and history;
+- leaked secrets don't land, plus scans of a repo's default branch and history, and `roll secrets
+  scan [--staged]` before a commit;
 - required and typed keys; insights, rotation reminders and expiry dates for values that expire
   outside roll; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
