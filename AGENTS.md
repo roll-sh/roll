@@ -288,8 +288,11 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     redacts itself, and containers get env values by name (`code-preview/src/docker.rs`).
   - Only the `reveal` routes return values. Every read of values and every write is audited.
     Anything that touches a second environment (a reference, an import, a base, a promote's
-    source) checks the caller through `Caller::allows`; checks and sandboxes resolve as a consumer
-    that may not touch a protected environment.
+    source) checks the caller through `Caller::allows`; checks, sandboxes and previews resolve
+    untrusted (`Secrets::untrusted`, `"untrusted": true`): never a protected environment.
+  - Workload identities (`identities.rs`) log CI in with its own OIDC token: an issuer is a URL a
+    tenant chose, fetched only through rolld's guarded client (`Deliver::get`), and a shared issuer
+    (GitHub, GitLab) needs a subject that names one repo.
   - roll-secrets knows no product: a resource is linkable through a `LinkProvider` that rolld
     registers, calling the product's own routes in process. A product's credential is never its
     shared password when it can issue keys of its own. Issuing and revoking happen outside the

@@ -269,6 +269,26 @@ impl roll_secrets::Deliver for AuditDeliver {
         let u = self.0.url(url)?;
         self.0.post_signed(&u, ("x-roll-sink", id), secret, body)
     }
+
+    /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
+    fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
+        let u = self.0.url(url)?;
+        let host = u.host_str().unwrap_or_default().to_string();
+        block_on(async {
+            let mut resp = self.0.client.get(u).header("accept", "application/json").send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            if !resp.status().is_success() {
+                return Err(Error::Link(format!("{host} answered {}", resp.status())));
+            }
+            let mut out = Vec::new();
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok(out)
+        })
+    }
 }
 
 struct Webhook(Hooks);

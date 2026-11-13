@@ -66,6 +66,9 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/leases/{{id}}/renew"), post(renew_lease))
         .route(&format!("{P}/tokens"), get(tokens).post(create_token))
         .route(&format!("{P}/tokens/{{id}}"), axum::routing::delete(revoke_token))
+        .route(&format!("{P}/identities"), get(identities).post(create_identity))
+        .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity))
+        .route("/v1/secrets/login", post(login))
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
@@ -616,6 +619,35 @@ async fn create_token(State(s): S, Who(c): Who, Path(project): Path<String>, b: 
 async fn revoke_token(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.revoke_token(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn identities(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.identities(&project, &c)).await?))
+}
+
+async fn create_identity(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewIdentity = body(&b)?;
+    Ok(created(blocking(s, move |s| s.create_identity(&project, n, &c)).await?))
+}
+
+async fn delete_identity(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_identity(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginBody {
+    identity: String,
+    /// The workload's OIDC token (a JWT).
+    token: String,
+}
+
+/// A workload's OIDC token for a short-lived scoped token (public: the token is the credential).
+async fn login(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
+    let l: LoginBody = body(&b)?;
+    let ip = s.client_ip(&parts);
+    Ok(secret_response(ok(blocking(s, move |s| s.login(&l.identity, &l.token, ip)).await?)))
 }
 
 async fn required(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

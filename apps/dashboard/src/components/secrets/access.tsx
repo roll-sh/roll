@@ -1,6 +1,7 @@
 import { Check, Copy, KeyRound, Plus, Send } from "lucide-react";
 import { useState } from "react";
 import { ACTIONS, type Action, type NewToken } from "@/lib/secrets-api";
+import { Identities } from "./identities";
 import { ShareDialog, type ShareSource } from "./share-dialog";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, ghost, label, LinkChip, primary, Section, Teach, until, useLoad } from "./ui";
@@ -13,11 +14,12 @@ const ACTION_HELP: Record<Action, string> = {
   admin: "rename, reorder, protection, review requests",
 };
 
-/** Scoped tokens (`rlst_…`, for CI and services: `ROLL_TOKEN=… roll run …`), the leases of dynamic credentials, and one-time shares. */
+/** Scoped tokens (`rlst_…`, for CI and services: `ROLL_TOKEN=… roll run …`), workload identities (OIDC logins), the leases of dynamic credentials, and one-time shares. */
 export function AccessView() {
   return (
     <div className="mx-auto max-w-4xl space-y-8 px-4 py-5">
       <Tokens />
+      <Identities />
       <Leases />
       <Shares />
     </div>

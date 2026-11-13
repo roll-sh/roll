@@ -190,6 +190,10 @@ pub enum Secrets {
     /// Scoped tokens for CI and services: list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
+    /// Workload identities: CI jobs and clusters log in with their own OIDC token
+    /// (`ROLL_IDENTITY`), no stored token: list, add, rm.
+    #[command(subcommand)]
+    Identities(Identities),
     /// Hand a value to someone outside roll: a link that opens once (or `--views`) and expires.
     /// The value is encrypted here; the key is only in the link.
     Share {
@@ -385,6 +389,47 @@ pub enum Tokens {
         ttl_days: Option<i64>,
     },
     Revoke { id: String },
+}
+
+// Parsed once per run.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+pub enum Identities {
+    #[command(alias = "list")]
+    Ls,
+    /// Let workloads whose OIDC tokens match log in. For GitHub Actions:
+    /// `add deploy --github acme/web --claim ref=refs/heads/main --for-env production`.
+    Add {
+        name: String,
+        /// A GitHub repo (`owner/name`): GitHub Actions' issuer, and every workflow of the repo
+        /// (narrow with `--claim`).
+        #[arg(long, conflicts_with_all = ["issuer", "subject"])]
+        github: Option<String>,
+        /// The token's issuer (`iss`), for any other OIDC provider.
+        #[arg(long, requires = "subject")]
+        issuer: Option<String>,
+        /// The token's `sub`, or a pattern of it with `*`.
+        #[arg(long)]
+        subject: Option<String>,
+        /// The token's audience (`aud`).
+        #[arg(long, default_value = "roll")]
+        audience: String,
+        /// Another claim that must match, `name=value` (`*` for any run of characters).
+        #[arg(long = "claim")]
+        claims: Vec<String>,
+        #[arg(long = "for-env")]
+        envs: Vec<String>,
+        #[arg(long = "for-path")]
+        paths: Vec<String>,
+        /// read, reveal, write, delete, admin (default: read and reveal).
+        #[arg(long = "action")]
+        actions: Vec<String>,
+        /// How long a login's token lasts, 5–60 minutes (default 15).
+        #[arg(long)]
+        ttl_minutes: Option<i64>,
+    },
+    /// Delete an identity; the tokens it gave out stop working.
+    Rm { id: String },
 }
 
 /// `roll run`: a command with an environment's secrets in its environment.
@@ -750,6 +795,51 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             Tokens::Revoke { id } => {
                 c.call(Method::DELETE, &format!("{}/tokens/{}", c.base(), enc(&id)), None).await?;
                 println!("Revoked {id}");
+            }
+        },
+        Secrets::Identities(i) => match i {
+            Identities::Ls => {
+                let v = c.call(Method::GET, &format!("{}/identities", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for i in v.as_array().into_iter().flatten() {
+                    let list = |x: &Value| x.as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "all".into());
+                    let used = i["last_used_at"].as_i64().map(|at| format!("{} by {}", ago(at), s(&i["last_subject"]))).unwrap_or_else(|| "never".into());
+                    println!("{}  {:<16} {}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
+                }
+            }
+            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes } => {
+                let (issuer, subject) = match (github, issuer, subject) {
+                    (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
+                    (None, Some(i), Some(s)) => (i, s),
+                    _ => bail!("give --github owner/repo, or --issuer and --subject"),
+                };
+                let claims: serde_json::Map<String, Value> = claims
+                    .iter()
+                    .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
+                    .collect::<anyhow::Result<_>>()?;
+                let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
+                let mut body = json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions });
+                if !envs.is_empty() {
+                    body["environments"] = json!(envs);
+                }
+                if !paths.is_empty() {
+                    body["paths"] = json!(paths);
+                }
+                if let Some(m) = ttl_minutes {
+                    body["ttl_minutes"] = json!(m);
+                }
+                let v = c.call(Method::POST, &format!("{}/identities", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{}", s(&v["id"]));
+                eprintln!("Created {}. In the workload: ROLL_IDENTITY={} (and ROLL_API_URL), then `roll run …` logs in by itself.", s(&v["name"]), s(&v["id"]));
+            }
+            Identities::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/identities/{}", c.base(), enc(&id)), None).await?;
+                println!("Deleted {id}");
             }
         },
         Secrets::Share { key, views, ttl, note } => {
@@ -1118,6 +1208,31 @@ fn random_value(n: usize) -> anyhow::Result<String> {
         }
     }
     Ok(out)
+}
+
+/// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from
+/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token) or GitHub Actions
+/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default `roll`), for a
+/// short-lived secrets token.
+pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<String> {
+    let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
+    let oidc = if let Some(t) = env("ROLL_OIDC_TOKEN") {
+        t
+    } else if let Some(f) = env("ROLL_OIDC_TOKEN_FILE") {
+        std::fs::read_to_string(&f).with_context(|| format!("reading ROLL_OIDC_TOKEN_FILE {f}"))?
+    } else if let (Some(url), Some(bearer)) = (env("ACTIONS_ID_TOKEN_REQUEST_URL"), env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")) {
+        let audience = env("ROLL_OIDC_AUDIENCE").unwrap_or_else(|| "roll".into());
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let r = reqwest::Client::new().get(format!("{url}{sep}audience={}", enc(&audience))).bearer_auth(bearer).send().await.context("asking GitHub Actions for its OIDC token")?;
+        anyhow::ensure!(r.status().is_success(), "GitHub Actions answered {} for its OIDC token (does the job have `permissions: id-token: write`?)", r.status());
+        let v: Value = r.json().await?;
+        v["value"].as_str().context("GitHub Actions' OIDC answer has no value")?.to_string()
+    } else {
+        anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
+    };
+    let anon = Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone() };
+    let v = anon.post("/v1/secrets/login", json!({ "identity": identity, "token": oidc.trim() })).await.context("logging in with the workload identity")?;
+    v["token"].as_str().map(str::to_string).context("the login answered no token")
 }
 
 /// `roll secrets edit`: the folder's own keys as a `.env` in `$EDITOR` (a 0600 file under

@@ -16,10 +16,12 @@ mod audit;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
+pub mod identities;
 pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
+mod oidc;
 mod read;
 pub mod refs;
 mod notices;
@@ -42,6 +44,7 @@ pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
 pub use read::{Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
+pub use identities::{Identity, Login, NewIdentity};
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
 pub use sweep::{Lease, Swept};
@@ -295,6 +298,8 @@ pub struct Secrets {
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
+    /// OIDC issuers' public keys (identities.rs).
+    oidc: oidc::Keys,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -329,8 +334,11 @@ impl Secrets {
         db.add_column("environments", "notify_host", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
         db.add_column("leases", "path", "TEXT")?;
+        // Workload identities (identities.rs) and the tokens their logins made.
+        db.ensure_schema(identities::SCHEMA)?;
+        db.add_column("tokens", "identity", "TEXT")?;
         db.ensure_schema(notices::SCHEMA)?;
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
