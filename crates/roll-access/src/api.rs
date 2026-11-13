@@ -253,6 +253,8 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
 struct ListFilter {
     product: Option<String>,
     resource: Option<String>,
+    /// `workload`: the workload tokens instead (the latest 500).
+    kind: Option<String>,
 }
 
 /// Whether a rule of `g`'s is about `product` (by name, not `*`) and, with `resource`, names it
@@ -279,7 +281,12 @@ async fn list(State(a): S, ext: Extensions, Query(f): Query<ListFilter>) -> crat
         return Err(Error::BadRequest("resource needs product".into()));
     }
     let who = who(&a, &ext)?;
-    let (grants, activity) = blocking(a, |a| Ok((a.store.list()?, a.store.activity()?))).await?;
+    let workloads = match f.kind.as_deref() {
+        None => false,
+        Some("workload") => true,
+        Some(k) => return Err(Error::BadRequest(format!("kind {k:?}: only workload"))),
+    };
+    let (grants, activity) = blocking(a, move |a| Ok((if workloads { a.store.workloads(500)? } else { a.store.list()? }, a.store.activity()?))).await?;
     let out: Vec<Value> = grants
         .into_iter()
         .filter(|g| visible(&who, g))

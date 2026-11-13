@@ -568,6 +568,13 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   with `Access::create_grant` and the caller's request: the function `POST /v1/access/tokens` is,
   with the same owner, coverage, policy and caps, never a second way in. Its page lists them with
   `GET /v1/access/tokens?product=&resource=`.
+- A workload that proved who it is (roll secrets' identity logins: a CI job's OIDC token) gets a
+  token for 5 to 60 minutes from `Access::mint_workload`: rules within the identity's scope, owned
+  by whoever set the identity up (none while they can't sign in), its `ip_allow` the identity's.
+  The login is the authentication, so no caller is gated. Workload tokens (`kind: "workload"`)
+  stay out of the token list (`?kind=workload` lists the latest 500), the checkup, the expiry
+  digest, new-network notices and the tokens' caps (10,000 live of their own), and go a day after
+  they end. Their requests are audited as any token's, and each mint is a row.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
 ### Tighten to what it used
@@ -699,7 +706,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
-| `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens |
+| `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |

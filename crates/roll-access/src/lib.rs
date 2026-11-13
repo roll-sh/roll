@@ -568,6 +568,55 @@ impl Access {
         Ok(true)
     }
 
+    /// A short-lived token for a workload that proved who it is (roll secrets' identity logins: a
+    /// CI job's OIDC token): `rules` within `within` (the identity's scope), for `minutes`
+    /// ([`store::WORKLOAD_MINUTES`]), owned by whoever set the identity up (`user`, or the
+    /// operator). The login is the authentication, so there's no caller to gate; a person who
+    /// can't sign in any more gets none. Left out of the token list and the checkup, outside the
+    /// tokens' caps, and pruned a day after it ends; what it does is audited as any token's, and
+    /// each mint is a row.
+    pub async fn mint_workload(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>) -> Result<(store::Grant, String)> {
+        if !within.covers(&new.rules) {
+            return Err(Error::Forbidden("a workload's rules must be within its identity's".into()));
+        }
+        if let Some(u) = user {
+            let people = self.people.get().cloned().ok_or_else(|| Error::Forbidden("no accounts here".into()))?;
+            if people.person(u).await.map_err(Error::Internal)?.is_none() {
+                return Err(Error::Forbidden("the identity's owner can't sign in".into()));
+            }
+        }
+        let a = self.clone();
+        let by = user.unwrap_or("operator").to_string();
+        let user = user.map(str::to_string);
+        let (g, secret) = tokio::task::spawn_blocking(move || {
+            let made = a.store.create_workload(&new, minutes, &by, user.as_deref())?;
+            a.store.audit(&store::AuditEvent {
+                id: new_id("aud"),
+                at: code_sql::now_ms(),
+                grant_id: Some(made.0.id.clone()),
+                grant_name: Some(made.0.name.clone()),
+                source: "workload".into(),
+                tool: None,
+                method: "-".into(),
+                route: "minted".into(),
+                product: Some("access".into()),
+                action: Some("write".into()),
+                resource: None,
+                decision: "allow".into(),
+                approval: None,
+                status: 201,
+                args: None,
+                ip: None,
+                duration_ms: 0,
+                client: None,
+            });
+            Ok::<_, Error>(made)
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+        Ok((g, secret))
+    }
+
     fn web_url(&self) -> &str {
         self.config.web_url.trim_end_matches('/')
     }

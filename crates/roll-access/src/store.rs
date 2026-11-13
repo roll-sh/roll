@@ -116,6 +116,10 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
 
 /// A grant's secret prefixes: scoped tokens, OAuth access and refresh tokens.
 pub const TOKEN_PREFIX: &str = "rlt_";
+/// Live workload grants at most (an identity's logins: a CI job each), apart from tokens' caps.
+pub const MAX_WORKLOADS: usize = 10_000;
+/// How long a workload grant lives, in minutes.
+pub const WORKLOAD_MINUTES: std::ops::RangeInclusive<u32> = 5..=60;
 pub const ACCESS_PREFIX: &str = "rlo_";
 pub const REFRESH_PREFIX: &str = "rlf_";
 
@@ -487,7 +491,11 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
     Ok(Grant {
         id: r.get(0)?,
         name: r.get(1)?,
-        kind: if r.get::<_, String>(2)? == "oauth" { "oauth" } else { "token" },
+        kind: match r.get::<_, String>(2)?.as_str() {
+            "oauth" => "oauth",
+            "workload" => "workload",
+            _ => "token",
+        },
         rules: serde_json::from_str(&rules).unwrap_or_default(),
         expires_at: r.get(4)?,
         ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
@@ -708,13 +716,13 @@ impl Store {
         let kind_s = if kind == GrantKind::Oauth { "oauth" } else { "token" };
         self.db.write(|c| {
             // Live ones: a revoked token doesn't keep a place.
-            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL", (), |r| r.get(0))?;
+            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL AND kind <> 'workload'", (), |r| r.get(0))?;
             if count as usize >= MAX_GRANTS {
                 return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
             }
             // One person never fills everyone's room.
             if let Some(u) = user {
-                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL", [u], |r| r.get(0))?;
+                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL AND kind <> 'workload'", [u], |r| r.get(0))?;
                 if theirs as usize >= USER_MAX_GRANTS {
                     return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
                 }
@@ -738,9 +746,44 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("no token {id}")))
     }
 
-    /// Every grant, newest first (revoked ones too: the list shows them).
+    /// Every token and connection, newest first (revoked ones too: the list shows them), not
+    /// workloads ([`Store::workloads`]): they come and go by the minute.
     pub fn list(&self) -> Result<Vec<Grant>> {
-        Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} ORDER BY g.created_at DESC, g.id"), (), grant_row))?)
+        Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind <> 'workload' ORDER BY g.created_at DESC, g.id"), (), grant_row))?)
+    }
+
+    /// Workload grants, newest first, at most `limit`.
+    pub fn workloads(&self, limit: usize) -> Result<Vec<Grant>> {
+        Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind = 'workload' ORDER BY g.created_at DESC, g.id LIMIT ?"), [limit as i64], grant_row))?)
+    }
+
+    /// A workload grant (`Access::mint_workload`): a token for `minutes`, whose secret dies with it.
+    pub fn create_workload(&self, new: &NewGrant, minutes: u32, created_by: &str, user: Option<&str>) -> Result<(Grant, String)> {
+        check_name(&new.name)?;
+        check_rules(&new.rules)?;
+        parse_ip_allow(&new.ip_allow)?;
+        if !WORKLOAD_MINUTES.contains(&minutes) {
+            return Err(Error::BadRequest(format!("a workload lives {} to {} minutes", WORKLOAD_MINUTES.start(), WORKLOAD_MINUTES.end())));
+        }
+        let now = code_sql::now_ms();
+        let until = now + i64::from(minutes) * 60_000;
+        let id = new_id("tok");
+        let token = new_secret(TOKEN_PREFIX);
+        let rules = serde_json::to_string(&new.rules).map_err(|e| Error::Internal(e.to_string()))?;
+        let ip = serde_json::to_string(&new.ip_allow).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE kind = 'workload' AND revoked_at IS NULL AND expires_at > ?", [now], |r| r.get(0))?;
+            if live as usize >= MAX_WORKLOADS {
+                return Err(Error::Conflict(format!("at most {MAX_WORKLOADS} live workload tokens")));
+            }
+            c.execute(
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise) VALUES (?, ?, 'workload', ?, ?, ?, ?, ?, NULL, ?, ?, 0)",
+                params![id, new.name.trim(), rules, until, ip, created_by, now, new.rate_per_minute.map(i64::from), user],
+            )?;
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'token', ?, ?)", params![hash(&token), id, until, now])?;
+            Ok(())
+        })?;
+        Ok((self.get(&id)?, token))
     }
 
     /// The grant a presented secret belongs to, when both are live. Looked up every time.
@@ -1248,6 +1291,12 @@ impl Store {
             c.execute("DELETE FROM grant_networks WHERE last_at < ?", [before])?;
             c.execute("DELETE FROM oauth_codes WHERE expires_at < ?", [now])?;
             c.execute("DELETE FROM grant_secrets WHERE expires_at IS NOT NULL AND expires_at < ?", [now])?;
+            let ended = "SELECT id FROM grants WHERE kind = 'workload' AND COALESCE(revoked_at, expires_at) < ?";
+            let day = now - 24 * 3600 * 1000;
+            for table in ["grant_secrets", "grant_networks", "approvals"] {
+                c.execute(&format!("DELETE FROM {table} WHERE grant_id IN ({ended})"), [day])?;
+            }
+            c.execute(&format!("DELETE FROM grants WHERE id IN ({ended})"), [day])?;
             Ok::<_, Error>(())
         })
     }
@@ -1318,12 +1367,12 @@ impl Store {
         let ip = serde_json::to_string(&new.ip_allow).unwrap_or_default();
         self.db.write(|c| {
             // The same room a token takes: everyone's, and its person's.
-            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL", (), |r| r.get(0))?;
+            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL AND kind <> 'workload'", (), |r| r.get(0))?;
             if count as usize >= MAX_GRANTS {
                 return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
             }
             if let Some(u) = user {
-                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL", [u], |r| r.get(0))?;
+                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL AND kind <> 'workload'", [u], |r| r.get(0))?;
                 if theirs as usize >= USER_MAX_GRANTS {
                     return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
                 }

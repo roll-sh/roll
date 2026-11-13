@@ -1355,3 +1355,31 @@ async fn tokens_are_listed_by_what_they_were_made_for() {
     assert_eq!(ids(&list), vec![ci.as_str()]);
     assert_eq!(d.call(OPERATOR, Method::GET, "/v1/access/tokens?resource=prj_a", None).await.0, StatusCode::BAD_REQUEST);
 }
+
+/// A workload that proved who it is (roll secrets' identity logins) gets a token for minutes,
+/// within its identity's scope and owned by whoever set it up: not while that person can't sign
+/// in, kept out of the token list, and working like any token until it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workload_gets_a_token_for_minutes() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let scope = |actions: Value| serde_json::from_value::<roll_auth::scope::Scope>(json!([{ "product": "workspace", "resources": "*", "actions": actions }])).unwrap();
+    let new = |actions: Value| serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "ci: acme/site main", "rules": [{ "product": "workspace", "resources": "*", "actions": actions }] })).unwrap();
+    let within = scope(json!({ "read": "allow" }));
+
+    assert!(d.access.mint_workload(new(json!({ "write": "allow" })), &within, 15, Some("usr_alice")).await.is_err(), "beyond the identity's scope");
+    assert!(d.access.mint_workload(new(json!({ "read": "allow" })), &within, 240, Some("usr_alice")).await.is_err(), "for hours");
+    let (g, secret) = d.access.mint_workload(new(json!({ "read": "allow" })), &within, 15, Some("usr_alice")).await.unwrap();
+    assert_eq!((g.kind, g.user.as_deref()), ("workload", Some("usr_alice")));
+    assert!(g.expires_at.unwrap() <= code_sql::now_ms() + 15 * 60_000);
+    assert_eq!(d.call(&secret, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK);
+
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/tokens", None).await;
+    assert!(!ids(&list).contains(&g.id.as_str()), "not in the token list");
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/tokens?kind=workload", None).await;
+    assert_eq!(ids(&list), vec![g.id.as_str()]);
+
+    d.people.remove("usr_alice");
+    assert!(d.access.mint_workload(new(json!({ "read": "allow" })), &within, 15, Some("usr_alice")).await.is_err(), "its owner can't sign in");
+    d.access.store.prune(30).unwrap();
+}
