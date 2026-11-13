@@ -1085,6 +1085,25 @@ impl Apps {
         }
     }
 
+    /// `run.rollback_on_crash`: the live deployment, crash-looping within ten minutes of going
+    /// live and not itself a rollback, is replaced by the one before it.
+    async fn rollback_on_crash(self: &Arc<Self>, l: &crate::live::EnvLive) {
+        let Some(tpl) = l.template().filter(|t| t.run.rollback_on_crash) else { return };
+        let id = tpl.deployment.clone();
+        let Ok(d) = self.db(move |s| s.deployment(&id)).await else { return };
+        let recent = d.finished_at.is_some_and(|t| code_sql::now_ms() - t <= 10 * 60_000);
+        if !recent || d.rollback_of.is_some() {
+            return;
+        }
+        l.log.stream(Stream::System).line(format!("{} is crash-looping within ten minutes of going live: rolling back to the deployment before it", d.id));
+        let (this, sid, e) = (self.clone(), l.service.clone(), l.env.clone());
+        tokio::spawn(async move {
+            if let Err(err) = this.rollback_previous(&sid, &e, Some("crash loop".into()), false).await {
+                this.logs.sink(format!("env:{sid}/{e}"), Stream::System).line(format!("couldn't roll back: {err}"));
+            }
+        });
+    }
+
     /// An environment that went into a crash loop gets one event for it (until it leaves it).
     async fn note_crash_loop(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let key = format!("{}/{}", l.service, l.env);
@@ -1094,6 +1113,7 @@ impl Apps {
                     let (sid, e, dep) = (l.service.clone(), l.env.clone(), l.template().map(|t| t.deployment.clone()));
                     let data = serde_json::json!({ "crashes": c.crashes, "last_error": c.last_error });
                     let _ = self.db(move |s| s.add_event("crash_loop", &sid, &e, dep.as_deref(), &data)).await;
+                    self.rollback_on_crash(l).await;
                 }
             }
             None => {

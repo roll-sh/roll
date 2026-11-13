@@ -2437,3 +2437,36 @@ async fn a_log_alert_is_an_event_once() {
     assert_eq!(fired.len(), 1, "once while it lasts: {fired:?}");
     assert_eq!((fired[0]["data"]["count"].as_u64(), fired[0]["data"]["pattern"].as_str()), (Some(2), Some("panic")));
 }
+
+
+/// `run.rollback_on_crash`: a deployment that crash-loops soon after going live is replaced by
+/// the one before it (its image, no build), and the rollback isn't rolled back in turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deployment_that_crash_loops_is_rolled_back() {
+    let w = world_with(|c| c.live.restart_backoff = Duration::from_millis(5)).await;
+    let (svc, d1) = image_service(&w, "jobs", json!({"type": "worker", "rollback_on_crash": true})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    let d2 = settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    assert_eq!(d2["status"], "active", "{d2}");
+    let live = w.apps.live(&id, "production");
+    let running = |w: &World| w.fake.instances(&id).into_iter().filter(|(_, dep, st)| *st == FakeState::Running && *dep == d2["id"].as_str().unwrap()).map(|(n, _, _)| n).collect::<Vec<_>>();
+    for _ in 0..3 {
+        let mut up = running(&w);
+        for _ in 0..200 {
+            if !up.is_empty() {
+                break;
+            }
+            live.tick().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            up = running(&w);
+        }
+        w.fake.crash(&up[0]);
+        live.tick().await;
+    }
+    // The reaper notices the loop and rolls back.
+    let env = get_until(&w.api, &base, |e| e["active"]["id"] != d2["id"] && e["active"]["id"].is_string()).await;
+    let (_, now) = call(&w.api, "GET", &format!("{base}/deploys/{}", env["active"]["id"].as_str().unwrap()), None).await;
+    assert_eq!((now["rollback_of"].as_str(), now["actor"].as_str()), (d1["id"].as_str(), Some("crash loop")), "{now}");
+}

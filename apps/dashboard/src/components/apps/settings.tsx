@@ -57,6 +57,7 @@ interface Form {
   restartTries: string;
   affinity: boolean;
   tcp: boolean;
+  rollbackOnCrash: boolean;
   scaleStream: string;
   scaleGroup: string;
   scalePer: string;
@@ -111,6 +112,7 @@ export function formOf(s: Service): Form {
     restartTries: str(s.run.restart_tries),
     affinity: !!s.run.affinity,
     tcp: !!s.run.tcp,
+    rollbackOnCrash: !!s.run.rollback_on_crash,
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
     scalePer: str(s.run.scale?.per_instance),
@@ -177,6 +179,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
+  if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
     run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
@@ -435,6 +438,12 @@ export function SettingsTab({
           )}
           <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
             {t("alertMemory", "90")}
+          </Field>
+          <Field label="A crash loop after a deploy" hint="within ten minutes of going live">
+            <select value={form.rollbackOnCrash ? "back" : "stay"} onChange={(e) => set("rollbackOnCrash", e.target.value === "back")} className={`${input} w-full`}>
+              <option value="stay">Stays (an alert)</option>
+              <option value="back">Rolls back to the one before</option>
+            </select>
           </Field>
           <Field label="Alert: its log says" hint="text in its output (any case); empty: off">
             {t("alertLog", "panic")}

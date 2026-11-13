@@ -84,6 +84,8 @@ export interface Run {
   affinity?: boolean;
   /** Its port speaks TCP, not HTTP: each environment answers on a port of its own. */
   tcp?: boolean;
+  /** A deployment that crash-loops within ten minutes of going live is replaced by the one before it. */
+  rollback_on_crash?: boolean;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
 }

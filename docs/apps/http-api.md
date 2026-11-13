@@ -215,6 +215,10 @@ type Run = {
    *  connection, its allow list and maintenance applied; its HTTP names are 404s. A web
    *  service; no health_path, h2c, affinity or gradual rollout (its health is its port). */
   tcp?: boolean;
+  /** A deployment that enters a crash loop within ten minutes of going live is replaced by the
+   *  one before it (a rollback: its image, no build, actor "crash loop"); a rollback's own
+   *  deployment never is, so there are no two in a row. */
+  rollback_on_crash?: boolean;
 };
 
 type Service = {

@@ -416,6 +416,11 @@ pub struct Run {
     /// woken and spliced per connection; its HTTP names don't serve it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tcp: bool,
+    /// A deployment that falls into a crash loop within ten minutes of going live is replaced
+    /// by the one before it (its image, no build): a gradual rollout's error rollback for an
+    /// at-once deploy. Never a rollback's own: no two in a row.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rollback_on_crash: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +559,7 @@ impl Default for Run {
             restart_tries: None,
             affinity: false,
             tcp: false,
+            rollback_on_crash: false,
         }
     }
 }
