@@ -588,7 +588,7 @@ pub fn is_conversion(f: F) -> bool {
     use F::*;
     matches!(
         f,
-        ToBoolean | ToDatetime | ToDateNanos | ToDouble | ToInteger | ToIp | ToLong | ToString | ToText | ToUnsignedLong | ToVersion | ToGeoPoint | ToCartesianPoint | ToGeoShape | ToCartesianShape
+        ToBoolean | ToDatetime | ToDateNanos | ToDouble | ToInteger | ToIp | ToLong | ToString | ToText | ToUnsignedLong | ToVersion | ToGeoPoint | ToCartesianPoint | ToGeoShape | ToCartesianShape | ToAggregateMetricDouble
     )
 }
 
@@ -610,6 +610,7 @@ pub fn conversion_accepts(f: F, t: &str) -> bool {
         ToCartesianPoint => string || t == "point",
         ToGeoShape => string || matches!(t, "geo_point" | "geo_shape"),
         ToCartesianShape => string || matches!(t, "point" | "shape"),
+        ToAggregateMetricDouble => numeric || t == "aggregate_metric_double",
         _ => false,
     }
 }

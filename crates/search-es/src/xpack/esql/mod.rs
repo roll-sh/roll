@@ -376,20 +376,19 @@ fn union_types(columns: &mut Value, original: &[(String, Vec<String>)]) {
             continue;
         }
         let Some((_, types)) = original.iter().find(|(n, _)| Some(n.as_str()) == m.get("name").and_then(Value::as_str)) else { continue };
-        m.insert("original_types".into(), Value::Arr(types.iter().map(|t| Value::from(t.as_str())).collect()));
+        let mut names: Vec<&str> = types.iter().map(|t| exec::es_type_name(t)).collect();
+        names.sort();
+        m.insert("original_types".into(), Value::Arr(names.iter().map(|t| Value::from(*t)).collect()));
         if types.len() > 1 {
             let numeric = |t: &str| matches!(t, "long" | "integer" | "short" | "byte" | "double" | "float" | "half_float" | "scaled_float" | "unsigned_long");
-            let dates = types.iter().all(|t| matches!(t.as_str(), "date" | "date_nanos"));
             let cast = if types.iter().any(|t| t == "aggregate_metric_double") && types.iter().all(|t| t == "aggregate_metric_double" || numeric(t)) {
-                Some("aggregate_metric_double")
-            } else if dates {
-                None
+                "aggregate_metric_double"
+            } else if types.iter().all(|t| matches!(t.as_str(), "date" | "date_nanos")) {
+                "date_nanos"
             } else {
-                Some("keyword")
+                "keyword"
             };
-            if let Some(cast) = cast {
-                m.insert("suggested_cast".into(), cast.into());
-            }
+            m.insert("suggested_cast".into(), cast.into());
         }
     }
 }
@@ -507,9 +506,12 @@ pub fn list_queries(_ctx: &Ctx) -> EsResult<Reply> {
 
 pub fn get_query(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
-    // Running-query ids are `<node>:<task>`; anything else doesn't decode.
-    if id.split_once(':').is_none_or(|(_, t)| t.parse::<u64>().is_err()) {
-        return Err(EsError::illegal_argument(format!("invalid id: [{id}]")));
+    // Ids are `AsyncExecutionId`s; the task they name runs on its node.
+    let task = async_results::task_of(id)?;
+    if let Some((node, _)) = task.split_once(':')
+        && node != ctx.cluster.node.id
+    {
+        return Err(EsError::new(500, "exception", format!("task [{task}] belongs to the node [{node}] which isn't part of the cluster and there is no record of the task")));
     }
     Err(EsError::resource_not_found(format!("query [{id}] not found")))
 }

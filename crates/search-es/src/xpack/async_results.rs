@@ -128,12 +128,19 @@ fn write_vint(out: &mut Vec<u8>, mut v: u32) {
 /// Checks that an id decodes as an `AsyncExecutionId`, failing like Elasticsearch
 /// (`invalid id: [<id>]` caused by the stream error) when it doesn't.
 pub fn check_id(id: &str) -> Result<(), crate::error::EsError> {
+    task_of(id).map(|_| ())
+}
+
+/// The task id (`<node id>:<task number>`) an `AsyncExecutionId` holds, failing like
+/// [`check_id`].
+pub fn task_of(id: &str) -> Result<String, crate::error::EsError> {
     use base64::Engine;
     let invalid = |cause: crate::error::EsError| crate::error::EsError::illegal_argument(format!("invalid id: [{id}]")).caused_by(cause);
     let cfg = base64::engine::GeneralPurposeConfig::new().with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent).with_decode_allow_trailing_bits(true);
     let lenient = base64::engine::GeneralPurpose::new(&base64::alphabet::URL_SAFE, cfg);
     let raw = lenient.decode(id.trim_end_matches('=')).map_err(|e| invalid(crate::error::EsError::illegal_argument(e.to_string())))?;
     let mut pos = 0usize;
+    let mut task = String::new();
     for _ in 0..2 {
         let mut len = 0u32;
         let mut shift = 0;
@@ -152,13 +159,14 @@ pub fn check_id(id: &str) -> Result<(), crate::error::EsError> {
         if (len as usize) > rest {
             return Err(invalid(crate::error::EsError::new(400, "e_o_f_exception", format!("tried to read: {len} bytes but only {rest} remaining"))));
         }
+        task = String::from_utf8_lossy(&raw[pos..pos + len as usize]).into_owned();
         pos += len as usize;
     }
     if pos != raw.len() {
         return Err(crate::error::EsError::illegal_argument(format!("invalid id: [{id}]"))
             .caused_by(crate::error::EsError::illegal_argument(format!("invalid id: [{id}]"))));
     }
-    Ok(())
+    Ok(task)
 }
 
 impl Results {

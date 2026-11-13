@@ -419,7 +419,8 @@ pub fn fetch_fields(table: &FieldTable, source: Option<&Value>, specs: &[FieldAn
             if include_unmapped {
                 let mut raw = Vec::new();
                 crate::engine::source::extract_values(src, &name, &mut raw);
-                let vals: Vec<Value> = raw.into_iter().filter(|v| !v.is_null()).cloned().collect();
+                // Only leaf values: an object at the path (or in its array) isn't a value.
+                let vals: Vec<Value> = raw.into_iter().filter(|v| !v.is_null() && !matches!(v, Value::Obj(_))).cloned().collect();
                 if !vals.is_empty() {
                     fields.insert(name, Value::Arr(vals));
                 }

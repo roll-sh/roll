@@ -260,6 +260,13 @@ pub fn parse_error(src: &str, at: usize, msg: &str) -> EsError {
     }
 }
 
+/// The type names (and aliases) a `::` cast may name: Elasticsearch's `DataType` names; the
+/// ones without a conversion are refused as unsupported.
+const CAST_TYPES: &[&str] = &[
+    "boolean", "bool", "byte", "short", "integer", "int", "long", "unsigned_long", "float", "half_float", "scaled_float", "double", "keyword", "string", "text", "datetime", "date", "date_nanos", "ip", "version", "object", "date_period", "time_duration", "geo_point",
+    "cartesian_point", "geo_shape", "cartesian_shape", "geohash", "geotile", "geohex", "counter_long", "counter_integer", "counter_double", "aggregate_metric_double", "dense_vector", "histogram", "exponential_histogram", "tdigest", "partial_agg", "flattened",
+];
+
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum BinOp {
     Add,
@@ -1186,11 +1193,15 @@ impl<'a> P<'a> {
         }
         let mut e = self.primary()?;
         while self.eat_op("::") {
-            let (ty, _) = self.ident()?;
+            let (ty, ty_at) = self.ident()?;
             let end = self.toks[self.i - 1].end;
             let ty = ty.to_ascii_lowercase();
-            if ty == "text" {
-                return Err(parse_error(self.src, start, "Unsupported conversion to type [TEXT]"));
+            if !CAST_TYPES.contains(&ty.as_str()) {
+                return Err(parse_error(self.src, ty_at, &format!("Unknown data type named [{ty}]")));
+            }
+            // A type without a conversion function.
+            if ty == "text" || super::exec::cast_function(&ty).is_none() && super::value::DataType::parse_name(&ty).is_none() && !matches!(ty.as_str(), "date_period" | "time_duration") {
+                return Err(parse_error(self.src, start, &format!("Unsupported conversion to type [{}]", ty.to_ascii_uppercase())));
             }
             // A string cast to a temporal amount is that span (`"3 days"::date_period`).
             if let (ExprKind::Lit(V::Str(text)), "date_period" | "time_duration") = (&e.kind, ty.as_str())

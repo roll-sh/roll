@@ -48,6 +48,9 @@ pub struct Stats {
     pub original_types: Vec<(String, Vec<String>)>,
     /// Column `_meta` (`SET column_metadata=true`), by column name.
     pub col_meta: Vec<(String, Value)>,
+    /// Columns of conflicting types from a union source (a subquery or view) that nothing read
+    /// yet: the error each is if a command above reads it.
+    pub conflicts: Vec<(String, EsError)>,
 }
 
 /// The default and maximum number of rows a query returns.
@@ -82,6 +85,8 @@ pub struct Resources {
     unsupported: std::sync::OnceLock<HashMap<String, String>>,
     /// By policy: its table and the types of its enrich fields.
     enrich: HashMap<String, (std::sync::Arc<crate::xpack::enrich::Table>, Vec<Col>)>,
+    /// By `range` policy: the mapping type of its match field (`integer_range`, ...).
+    enrich_ranges: HashMap<String, String>,
     /// By index: its columns and every row.
     lookup: HashMap<String, Table>,
     /// The source fields Elasticsearch would resolve (`needed_columns`) and every source field:
@@ -210,9 +215,24 @@ fn merge_problems(mut errs: Vec<EsError>) -> EsError {
 }
 
 /// `Cannot use field [f] due to ambiguities ...` at `at`, `written` as the query writes it.
+/// A leg with no indices is the keyword `SET unmapped_fields="load"` reads from the `_source` of
+/// the indices that don't map the field.
 fn ambiguous_at(src: &str, at: usize, written: &str, types: &[(String, Vec<String>)]) -> EsError {
-    let list: Vec<String> = types.iter().map(|(t, idx)| format!("[{t}] in [{}]", idx.join(", "))).collect();
+    let list: Vec<String> = types
+        .iter()
+        .map(|(t, idx)| match idx.is_empty() {
+            true => format!("[{t}] due to loading from _source"),
+            // At most three indices by name, then how many others.
+            false if idx.len() > 3 => format!("[{}] in [{}] and [{}] other {}", es_type_name(t), idx[..3].join(", "), idx.len() - 3, if idx.len() == 4 { "index" } else { "indices" }),
+            false => format!("[{}] in [{}]", es_type_name(t), idx.join(", ")),
+        })
+        .collect();
     verification(src, at, &format!("Cannot use field [{written}] due to ambiguities being mapped as [{}] incompatible types: {}", types.len(), list.join(", ")))
+}
+
+/// A mapping type as Elasticsearch's messages name it (`date` is `datetime`).
+pub(crate) fn es_type_name(t: &str) -> &str {
+    if t == "date" { "datetime" } else { t }
 }
 
 fn verification(src: &str, at: usize, msg: &str) -> EsError {
@@ -255,6 +275,19 @@ enum CE {
     ToLocal(Box<CE>, crate::time::Zone),
     /// The inverse: a wall-clock date of the zone back to the instant.
     FromLocal(Box<CE>, crate::time::Zone),
+}
+
+/// The conversion function a `::type` cast to a type outside [`DataType::parse_name`] calls
+/// (`x::geo_point` is `TO_GEOPOINT(x)`, with its type checks), and the type it gives.
+pub(crate) fn cast_function(ty: &str) -> Option<(&'static str, DataType)> {
+    Some(match ty {
+        "aggregate_metric_double" => ("to_aggregate_metric_double", DataType::AggregateMetricDouble),
+        "geo_point" => ("to_geopoint", DataType::GeoPoint),
+        "geo_shape" => ("to_geoshape", DataType::GeoShape),
+        "cartesian_point" => ("to_cartesianpoint", DataType::CartesianPoint),
+        "cartesian_shape" => ("to_cartesianshape", DataType::CartesianShape),
+        _ => return None,
+    })
 }
 
 /// Elasticsearch's runtime match filter: a text value matches when it shares a term with the
@@ -689,6 +722,17 @@ impl Compiler<'_> {
                     l.push(self.compile(i)?.0);
                 }
                 (CE::In(Box::new(c), l, *neg, at_of(self.src, e)), DataType::Boolean)
+            }
+            ExprKind::Cast(x, ty) if cast_function(ty).is_some() => {
+                let (name, t) = cast_function(ty).expect("matched");
+                let f = functions::resolve(name).expect("a conversion function");
+                if let Some((i, u)) = self.union_of(x) {
+                    if !u.iter().all(|(ut, _)| functions::conversion_accepts(f, ut)) {
+                        return Err(self.ambiguous(x, u));
+                    }
+                    return Ok((CE::Cast(Box::new(CE::Col(i)), t), t));
+                }
+                return self.compile(&Expr { kind: ExprKind::Call(name.into(), vec![(**x).clone()]), start: e.start, end: e.end });
             }
             ExprKind::Cast(x, ty) => {
                 // ES|QL has no conversion to text (`TO_STRING` gives keywords); SQL casts to
@@ -1426,6 +1470,22 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
                     &format!("Unsupported type [{}] for enrich matching field [{on_name}]; only [{listed}] allowed for type [{}]", functions::type_name_static(key_ty), table.kind),
                 ));
             }
+            // A range matches inputs of its own kind only (keywords parse as anything).
+            if let Some(range) = src.res.enrich_ranges.get(name)
+                && !matches!(key_ty, DataType::Null | DataType::Keyword | DataType::Text)
+            {
+                let ok = match range.as_str() {
+                    "integer_range" | "long_range" => matches!(key_ty, DataType::Integer | DataType::Long),
+                    "float_range" | "double_range" => matches!(key_ty, DataType::Integer | DataType::Long | DataType::Double),
+                    "date_range" => key_ty == DataType::Date,
+                    "ip_range" => key_ty == DataType::Ip,
+                    _ => true,
+                };
+                if !ok {
+                    let r = range.trim_end_matches("_range").to_ascii_uppercase();
+                    return Err(EsError::new(500, "esql_illegal_argument_exception", format!("ENRICH range and input types are incompatible: range[{r}], input[{}]", functions::type_name_static(key_ty).to_ascii_uppercase())));
+                }
+            }
             let mut adds: Vec<(String, String, DataType)> = Vec::new();
             match with {
                 Some(list) => {
@@ -1453,8 +1513,9 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
                 let Some(i) = cols.iter().rposition(|c| c.name == *f) else { return Err(verification(src, *at, &format!("Unknown column [{f}] in left side of join"))) };
                 let Some(j) = lt.cols.iter().position(|c| c.name == *f) else { return Err(verification(src, *at, &format!("Unknown column [{f}] in right side of join"))) };
                 for (side, ty) in [("right", lt.cols[j].ty), ("left", cols[i].ty)] {
-                    if ty == DataType::Flattened {
-                        return Err(verification(src, *at, &format!("JOIN with {side} field [{f}] of type [FLATTENED] is not supported")));
+                    // The lookup side is matched with term queries: never on analyzed text.
+                    if ty == DataType::Flattened || (side == "right" && ty == DataType::Text) {
+                        return Err(verification(src, *at, &format!("JOIN with {side} field [{f}] of type [{}] is not supported", ty.name().to_ascii_uppercase())));
                     }
                 }
                 on_idx.push(i);
@@ -2343,7 +2404,7 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
             }
             if ty == DataType::Unsupported {
                 let mut ts: Vec<String> = types.iter().map(|t| t.to_string()).collect();
-                ts.sort();
+                ts.sort_by(|a, b| es_type_name(a).cmp(es_type_name(b)));
                 let indices_of = |t: &str| -> Vec<String> {
                     let mut idx: Vec<String> = fields[name].get(t).and_then(|c| c.get("indices")).and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
                     idx.sort();
@@ -3120,6 +3181,7 @@ fn merge_stats(into: &mut Stats, from: Stats) {
         }
     }
     into.col_meta.extend(from.col_meta);
+    into.conflicts.extend(from.conflicts);
     for (n, t) in from.original_types {
         if !into.original_types.iter().any(|(x, _)| *x == n) {
             into.original_types.push((n, t));
@@ -3411,7 +3473,19 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
             let mut parts = Vec::with_capacity(branches.len());
             for b in &branches {
                 let bq = Query { src: b.src.to_string(), cmds: b.cmds.clone(), sql: q.sql, locale: q.locale.clone(), settings: q.settings.clone() };
-                let (t, s) = run_query(cluster, bq, filter.clone(), w, false, &carry).await?;
+                let (t, mut s) = run_query(cluster, bq, filter.clone(), w, false, &carry).await?;
+                // A view's own conflicts are located in the view.
+                if let Some(v) = &b.view {
+                    for (_, e) in &mut s.conflicts {
+                        let r = e.reason();
+                        if let Some((head, rest)) = r.split_once("\nline ")
+                            && let Some((loc, msg)) = rest.split_once(": ")
+                            && !loc.contains("(in view")
+                        {
+                            *e = EsError::new(400, "verification_exception", format!("{head}\nline {loc} (in view [{v}]): {msg}"));
+                        }
+                    }
+                }
                 merge_stats(&mut stats, s);
                 parts.push(t);
             }
@@ -3441,9 +3515,13 @@ fn run_query<'a>(cluster: &'a Cluster, mut q: Query, filter: Option<Value>, w: &
             for c in rest.iter().filter(|c| !matches!(c, Cmd::Keep(_) | Cmd::Drop(_))) {
                 cmd_refs(c, &mut used);
             }
-            if let Some((_, e)) = deferred.into_inner().into_iter().find(|(n, _)| used.contains(n)) {
-                return Err(e);
+            // A branch's own union (a view of subqueries) defers its conflicts to here too.
+            let mut conflicts = std::mem::take(&mut stats.conflicts);
+            conflicts.extend(deferred.into_inner());
+            if let Some((_, e)) = conflicts.iter().find(|(n, _)| used.contains(n)) {
+                return Err(e.clone());
             }
+            stats.conflicts = conflicts;
             (vec![t], rest)
         };
         let t = parts.into_iter().next().unwrap_or_default();
@@ -3527,18 +3605,46 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
                     }
                 }
                 // A keyword some target indices leave unmapped loads from their `_source`.
+                // A field of several types that some indices leave unmapped has one more: the
+                // keyword those load. Dates and nanosecond dates no longer widen then.
                 if load && source.indices.len() > 1 {
                     let mut used = std::collections::HashSet::new();
                     ref_cmds.iter().for_each(|c| cmd_refs(c, &mut used));
-                    let candidates: Vec<String> = source.fields.iter().zip(&source.cols).filter(|(f, c)| c.ty == DataType::Keyword && used.contains(*f) && !source.load.contains(f)).map(|(f, _)| f.clone()).collect();
-                    if !candidates.is_empty() {
-                        let path = format!("/{}/_field_caps?fields={}&include_unmapped=true&ignore_unavailable=true&expand_wildcards=open", encode(&source.index), encode(&candidates.join(",")));
+                    let keywords: Vec<String> = source.fields.iter().zip(&source.cols).filter(|(f, c)| c.ty == DataType::Keyword && used.contains(*f) && !source.load.contains(f)).map(|(f, _)| f.clone()).collect();
+                    let several: Vec<String> = source.fields.iter().zip(&source.cols).filter(|(f, c)| source.unions.contains_key(*f) || c.ty == DataType::DateNanos).map(|(f, _)| f.clone()).collect();
+                    if !keywords.is_empty() || !several.is_empty() {
+                        let all: Vec<String> = keywords.iter().chain(&several).cloned().collect();
+                        let path = format!("/{}/_field_caps?fields={}&include_unmapped=true&ignore_unavailable=true&expand_wildcards=open", encode(&source.index), encode(&all.join(",")));
                         let caps = internal::call(cluster, "GET", &path, None).await.unwrap_or(Value::Null);
-                        for f in candidates {
-                            if caps.get("fields").and_then(|m| m.get(&f)).and_then(|m| m.get("unmapped")).is_some() {
+                        let caps_of = |f: &str| caps.get("fields").and_then(|m| m.get(f)).and_then(Value::as_object).cloned().unwrap_or_default();
+                        for f in keywords {
+                            if caps_of(&f).contains_key("unmapped") {
                                 source.source_order.insert(f.clone());
                                 source.load.push(f);
                             }
+                        }
+                        for f in several {
+                            let m = caps_of(&f);
+                            if !m.contains_key("unmapped") {
+                                continue;
+                            }
+                            let indices_of = |t: &str| -> Vec<String> {
+                                let mut idx: Vec<String> = m.get(t).and_then(|c| c.get("indices")).and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
+                                idx.sort();
+                                idx
+                            };
+                            let legs = match source.unions.remove(&f) {
+                                Some(u) => u,
+                                None if m.contains_key("date") && m.contains_key("date_nanos") => {
+                                    if let Some(i) = source.cols.iter().position(|c| c.name == f) {
+                                        source.cols[i].ty = DataType::Unsupported;
+                                    }
+                                    source.original_types.push((f.clone(), vec!["date".into(), "date_nanos".into()]));
+                                    vec![("date_nanos".into(), indices_of("date_nanos")), ("date".into(), indices_of("date"))]
+                                }
+                                None => continue,
+                            };
+                            source.unions.insert(f, std::iter::once(("keyword".to_string(), Vec::new())).chain(legs).collect());
                         }
                     }
                 }
@@ -3664,6 +3770,11 @@ async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd]) -> EsResult
                 let table = cluster.xpack.enrich.tables.read().get(&name).cloned();
                 let Some(table) = table else { continue };
                 let caps = internal::call(cluster, "GET", &format!("/{}/_field_caps?fields=*", encode(&table.index)), None).await.unwrap_or(Value::Null);
+                if table.kind == "range"
+                    && let Some(t) = caps.get("fields").and_then(|m| m.get(&table.match_field)).and_then(Value::as_object).and_then(|m| m.keys().next())
+                {
+                    res.enrich_ranges.insert(name.clone(), t.clone());
+                }
                 let mut cols = Vec::new();
                 for f in fields_in_order {
                     let ty = caps.get("fields").and_then(|m| m.get(&f)).and_then(Value::as_object).and_then(|m| m.keys().next()).map(|t| DataType::of_mapping(t)).unwrap_or(DataType::Keyword);
