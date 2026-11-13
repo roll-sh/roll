@@ -1194,6 +1194,10 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/repos/{owner}/{repo}", "code", ADMIN, one(REPO, "repo")),
     row("DELETE", "/v1/code/repos/{owner}/{repo}", "code", D, one(REPO, "repo")),
     row("*", "/v1/code/repos/{owner}/{repo}/", "code", M, one(REPO, "repo")),
+    // Where a repo's committed secrets are (key, environment, path, line; never the value): it
+    // tells a reader which line holds production's key, so it's the repo's managers' (roll code
+    // checks manage too): admin.
+    row("*", "/v1/code/repos/{owner}/{repo}/leaks", "code", ADMIN, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/land", "code", DEPLOY, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/pause", "code", ADMIN, one(REPO, "repo")),
     row("POST", "/v1/code/repos/{owner}/{repo}/queue/resume", "code", ADMIN, one(REPO, "repo")),
