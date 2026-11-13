@@ -971,12 +971,13 @@ impl Store {
         Ok(self.db.read(|c| c.query(&sql, args.as_slice(), audit_row))?)
     }
 
-    /// What a grant's allowed requests since `since` were about, by product, action and resource
-    /// (most used first; at most 5,000 kinds).
+    /// What a grant's requests that ran since `since` were about, by product, action and resource
+    /// (most used first; at most 5,000 kinds): allowed ones, and ones that ran on an approval (a
+    /// pending one is the gate's 403).
     pub fn used(&self, grant: &str, since: i64) -> Result<Vec<crate::tighten::Used>> {
         let rows = self.db.read(|c| {
             c.query(
-                "SELECT product, action, resource, COUNT(*), MAX(at) FROM audit WHERE grant_id = ? AND at >= ? AND decision = 'allow' AND product IS NOT NULL AND action IS NOT NULL GROUP BY product, action, resource ORDER BY COUNT(*) DESC LIMIT 5000",
+                "SELECT product, action, resource, COUNT(*), MAX(at) FROM audit WHERE grant_id = ? AND at >= ? AND (decision = 'allow' OR (decision = 'ask' AND approval IS NOT NULL AND status <> 403)) AND product IS NOT NULL AND action IS NOT NULL GROUP BY product, action, resource ORDER BY COUNT(*) DESC LIMIT 5000",
                 params![grant, since],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?)),
             )

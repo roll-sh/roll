@@ -408,22 +408,33 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         (outcome, action) = (copied, Action::Reveal);
         (asked_env, asked_path) = (Some(from), from_path);
     }
+    // Handing another resource's credentials to this one (apps' links) is revealing them: when
+    // that decides, the request (and its approval) is about the linked resource.
+    let mut lent: Option<(&'static str, String)> = None;
+    if let Some((o, product, id)) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope).await
+        && rank(o) < rank(outcome)
+    {
+        (outcome, action) = (o, Action::Reveal);
+        (asked_env, asked_path) = (None, None);
+        lent = Some((product, id));
+    }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
     // were refused before any rule; a move between projects stays refused.
     if outcome == Outcome::Deny && ctx.grant.ask_otherwise && catalog::placement(row, &params).is_none() {
         outcome = Outcome::Ask;
     }
-    let resource = describe(&target);
+    let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
+    let about = lent.as_ref().map_or(row.product, |(p, _)| p);
     let mut approval_used: Option<String> = None;
     match outcome {
         Outcome::Deny => {
             ctx.audit(Some(row), Some(action), resource.clone(), "deny", None, StatusCode::FORBIDDEN);
-            let what = resource.as_deref().map_or_else(|| row.product.to_string(), |r| format!("{} {r}", row.product));
+            let what = resource.as_deref().map_or_else(|| about.to_string(), |r| format!("{about} {r}"));
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 format!("this token can't {action} {what}"),
-                json!({ "needs": { "product": row.product, "action": action, "resource": resource } }),
+                json!({ "needs": { "product": about, "action": action, "resource": resource } }),
             );
         }
         Outcome::Ask if decided_before => {}
@@ -456,10 +467,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             let (environment, scope_path, scope_index) = match &target {
                 // When a copy's source decided, the approval is about that folder: remembering it
                 // allows exactly that.
+                _ if lent.is_some() => (None, None, None),
                 Target::One(r) => (asked_env.clone().or_else(|| r.environment.clone()), asked_path.clone().or_else(|| r.path.clone()), r.index.clone()),
                 _ => (None, None, None),
             };
-            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index };
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index, product: about };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(id) => approval_used = Some(id),
                 Err(resp) => return *resp,
@@ -586,6 +598,42 @@ pub(crate) async fn copy_outcome(
     weakest
 }
 
+/// What handing other resources' credentials to this one needs ([`catalog::Lend`]): `reveal` on
+/// each, as a rule places it. The weakest decides; a kind roll doesn't know is refused.
+pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope) -> Option<(Outcome, &'static str, String)> {
+    let param = |n: &str| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
+    let links: Vec<(String, String)> = match row.lends? {
+        // A route that names them otherwise than its row is refused, never let through.
+        catalog::Lend::Path(k, r) => match (param(k), param(r)) {
+            (Some(k), Some(r)) => vec![(k, r)],
+            _ => return Some((Outcome::Deny, row.product, "a link this route doesn't name".into())),
+        },
+        catalog::Lend::Body(field) => body?
+            .get(field)?
+            .as_array()?
+            .iter()
+            .map(|l| (l["kind"].as_str().unwrap_or("").to_string(), l["ref"].as_str().unwrap_or("").to_string()))
+            .collect(),
+    };
+    let mut weakest: Option<(Outcome, &'static str, String)> = None;
+    for (kind, r) in links {
+        let found = match catalog::link_target(&kind) {
+            None => (Outcome::Deny, row.product, format!("{kind}/{r}")),
+            Some((product, rkind)) => {
+                let (a, r2) = (access.clone(), r.clone());
+                match tokio::task::spawn_blocking(move || a.resource(product, rkind, &r2)).await {
+                    Ok(res) => (scope.outcome(&Target::One(res), Action::Reveal), product, r),
+                    Err(_) => (Outcome::Deny, product, r),
+                }
+            }
+        };
+        if weakest.as_ref().is_none_or(|(w, ..)| rank(found.0) < rank(*w)) {
+            weakest = Some(found);
+        }
+    }
+    weakest
+}
+
 /// Outcomes from weakest to strongest.
 pub(crate) fn rank(o: Outcome) -> u8 {
     match o {
@@ -653,11 +701,13 @@ struct Asked<'a> {
     environment: Option<String>,
     scope_path: Option<String>,
     scope_index: Option<String>,
+    /// The product it's about (a link's: the linked resource's).
+    product: &'static str,
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
-    let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index } = req;
+    let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about } = req;
     let access = &ctx.access;
     let mut existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     // The same request again (a client retrying after the person opened the approval, an agent
@@ -682,7 +732,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
             let a = access.clone();
             let grant = ctx.grant.clone();
             let (product, method, route, path, tool) =
-                (row.product.to_string(), ctx.method.clone(), ctx.route.clone(), path.to_string(), ctx.mcp.as_ref().map(|m| m.tool.to_string()));
+                (about.to_string(), ctx.method.clone(), ctx.route.clone(), path.to_string(), ctx.mcp.as_ref().map(|m| m.tool.to_string()));
             let res = resource.clone();
             blocking(move || {
                 a.store.ask(Ask {
