@@ -95,12 +95,19 @@ fn invalid_token(access: &Access) -> Response {
 pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap) -> Target {
     let param = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let product = row.product.to_string();
-    // Storage acts in the account a request names; bucket names repeat across accounts, so a
-    // request naming one is about the product as a whole.
-    if row.product == "storage"
-        && (headers.contains_key("x-roll-account") || query.is_some_and(|q| url::form_urlencoded::parse(q.as_bytes()).any(|(k, _)| k == "account")))
-    {
-        return Target::Product { product };
+    // Storage acts in the account a request names. Bucket names repeat across accounts, so a
+    // bucket there is `<account>/<bucket>` (a rule names it so); anything else in another account
+    // (lists, keys, roles) is about the product as a whole.
+    if let Some(account) = storage_account(row, query, headers) {
+        return match row.target {
+            Tgt::Param(names, kind) => {
+                let bucket = names.iter().filter_map(|n| param(n)).collect::<Vec<_>>().join("/");
+                Target::One(access.resource(row.product, kind, &format!("{account}/{bucket}")))
+            }
+            // Its buckets, filtered to the ones the token has there.
+            Tgt::List { .. } => Target::List { product },
+            _ => Target::Product { product },
+        };
     }
     match row.target {
         Tgt::Param(names, kind) => {
@@ -129,6 +136,15 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
         }
         Tgt::Product | Tgt::AnyGrant => Target::Product { product },
     }
+}
+
+/// The storage account a request names (`X-Roll-Account`, else `?account=`), if any.
+fn storage_account(row: &Row, query: Option<&str>, headers: &axum::http::HeaderMap) -> Option<String> {
+    if row.product != "storage" {
+        return None;
+    }
+    let from_query = || query.and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.into_owned()));
+    headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).or_else(from_query).filter(|a| !a.is_empty())
 }
 
 pub(crate) fn describe(t: &Target) -> Option<String> {
@@ -161,6 +177,8 @@ struct Ctx {
     route: String,
     /// What a request that isn't an MCP call did, for the log (a push's ref updates).
     args: Option<Value>,
+    /// A list's items are named under this (a named storage account's buckets: `<account>/<name>`).
+    list_prefix: Option<String>,
 }
 
 impl Ctx {
@@ -218,7 +236,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
         }
     }
-    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None };
+    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None };
     if !decided_before {
         let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
         tokio::task::spawn_blocking(move || a.store.touch(&id, ip.as_deref()));
@@ -294,6 +312,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             Err(e) => return Error::Internal(e.to_string()).into_response(),
         }
     };
+    ctx.list_prefix = storage_account(row, original.query(), &parts.headers);
     // The body, when the action depends on it.
     let mut buffered: Option<bytes::Bytes> = None;
     let mut body = Some(body);
@@ -659,11 +678,13 @@ async fn post_process(
         }
     }
     if filter_list && let Tgt::List { items, id_field, kind } = row.target {
-        let (a, s, product) = (ctx.access.clone(), scope.clone(), row.product);
+        let (a, s, product, prefix) = (ctx.access.clone(), scope.clone(), row.product, ctx.list_prefix.clone());
         let kind = kind.unwrap_or(product);
         v = tokio::task::spawn_blocking(move || {
             let keep = |item: &Value| {
                 let Some(id) = item.get(id_field).and_then(Value::as_str) else { return false };
+                let named = prefix.as_ref().map(|p| format!("{p}/{id}"));
+                let id = named.as_deref().unwrap_or(id);
                 let r = if product == "workspace" { Resource { project: Some(id.into()), ..Resource::new("workspace", id) } } else { a.resource(product, kind, id) };
                 s.outcome(&Target::One(r), action) == Outcome::Allow
             };

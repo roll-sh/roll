@@ -91,6 +91,8 @@ fn postgres() -> Router {
         .route("/v1/open", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/internal/tasks", axum::routing::any(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/git/{owner}/{repo}/git-receive-pack", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        .route("/v1/storage/buckets/{name}", get(|| async { axum::Json(json!({ "name": "logs" })) }))
+        .route("/v1/storage/buckets", get(|| async { axum::Json(json!([{ "name": "logs" }, { "name": "media" }])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
 }
@@ -243,6 +245,15 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(ids(&list), Vec::<&str>::new());
 
     // An address outside the allowlist (an in-process request has none) is refused.
+    // A bucket in another storage account is `<account>/<bucket>`: a rule for one doesn't reach
+    // the same name in the default account or in a third.
+    let (bucket, _) = d.token(json!([{ "product": "storage", "resources": [{ "id": "acme/logs" }], "actions": { "read": "allow" } }]), json!({})).await;
+    assert_eq!(d.send(&bucket, Method::GET, "/v1/storage/buckets/logs", None, &[("x-roll-account", "acme")]).await.0, StatusCode::OK);
+    assert_eq!(d.send(&bucket, Method::GET, "/v1/storage/buckets/logs", None, &[("x-roll-account", "other")]).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&bucket, Method::GET, "/v1/storage/buckets/logs", None).await.0, StatusCode::FORBIDDEN);
+    let (s, list) = d.send(&bucket, Method::GET, "/v1/storage/buckets", None, &[("x-roll-account", "acme")]).await;
+    assert_eq!((s, list), (StatusCode::OK, json!([{ "name": "logs" }])), "the account's list, filtered to its bucket");
+
     let (fenced, _) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ip_allow": ["10.0.0.0/8"] })).await;
     assert_eq!(d.call(&fenced, Method::GET, "/v1/projects", None).await.1["code"], "ip_not_allowed");
 
