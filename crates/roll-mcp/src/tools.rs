@@ -494,6 +494,13 @@ static TOOLS: &[Tool] = &[
     ),
     t("apps_list_environments", "List environments", "A service's environments.", "apps", "GET", "/v1/apps/services/{service}/environments", &[SERVICE]),
     t("apps_get_service", "Get a service", "A service with its environments and deploys.", "apps", "GET", "/v1/apps/services/{service}", &[SERVICE]),
+    t("apps_update_service", "Update a service", "Change a service's name, source, build or run settings (fields given are changed; run takes alerts {memory_pct, error_pct, p95_ms} for metric alerts).", "apps", "PATCH", "/v1/apps/services/{service}", &[
+        SERVICE,
+        b("name", Ty::Str, "New name"),
+        b("source", Ty::Obj, "Where it's built from (repo or image), as apps_get_service shows it"),
+        b("build", Ty::Obj, "Build settings to change"),
+        b("run", Ty::Obj, "Run settings to change (instances, memory, start command, alerts {memory_pct, error_pct, p95_ms}, …)"),
+    ]),
     t(
         "apps_deploy",
         "Deploy",
@@ -530,7 +537,7 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, breq("command", Ty::Str, "The command line"), b("timeout_s", Ty::Int, "Seconds before it's stopped")],
     ),
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
-    t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
+    t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
     t(
         "apps_set_variables",
