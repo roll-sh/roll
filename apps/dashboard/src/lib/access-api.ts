@@ -326,6 +326,14 @@ export function statusOf(g: Pick<Grant, "revoked_at" | "expires_at">, now = Date
   return "active";
 }
 
+/** Live tokens that expire within `days`, soonest first (GitHub mails a week before). */
+export function expiringSoon<G extends Pick<Grant, "revoked_at" | "expires_at">>(grants: G[], now = Date.now(), days = 7): G[] {
+  const until = now + days * 86_400_000;
+  return grants
+    .filter((g) => statusOf(g, now) === "active" && g.expires_at !== null && g.expires_at <= until)
+    .sort((a, b) => (a.expires_at ?? 0) - (b.expires_at ?? 0));
+}
+
 /** Expiry choices in the builder, in ms from now (null: never). */
 export const EXPIRIES: { label: string; ms: number | null }[] = [
   { label: "7 days", ms: 7 * 86_400_000 },

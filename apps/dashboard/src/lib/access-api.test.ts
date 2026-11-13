@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { catalogFor, denyRedirect, draftOf, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, type Preset } from "./access-api";
+import { catalogFor, denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -27,6 +27,16 @@ describe("access", () => {
     expect(presetRules(presets[2])[0].resources).toBe("*");
     expect(denyRedirect("http://127.0.0.1:5000/cb?x=1", "s")).toBe("http://127.0.0.1:5000/cb?x=1&error=access_denied&error_description=The+user+denied+the+request&state=s");
     expect(statusOf({ revoked_at: null, expires_at: 1 }, 2)).toBe("expired");
+  });
+});
+
+describe("tokens", () => {
+  it("names the live tokens that expire within a week, soonest first", () => {
+    const day = 86_400_000;
+    const g = (name: string, expires_at: number | null, revoked_at: number | null = null) => ({ name, expires_at, revoked_at });
+    const now = 100 * day;
+    const list = [g("later", now + 30 * day), g("soon", now + 3 * day), g("sooner", now + day), g("gone", now - day), g("never", null), g("revoked", now + day, now)];
+    expect(expiringSoon(list, now).map((x) => x.name)).toEqual(["sooner", "soon"]);
   });
 });
 

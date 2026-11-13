@@ -216,6 +216,8 @@ const fn qreq(name: &'static str, desc: &'static str) -> P {
     P { name, ty: Ty::Str, at: At::Query, required: true, desc }
 }
 /// The workspace project a new resource goes in (`X-Roll-Project`): needed by project-scoped tokens.
+/// A key a retried call sends again, so a route that honours it (apps' deploys) runs it once.
+const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header("idempotency-key"), required: false, desc: "Any unique string: a call retried with the same key runs once" };
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
@@ -440,7 +442,7 @@ static TOOLS: &[Tool] = &[
         "apps",
         "POST",
         "/v1/apps/services/{service}/environments/{env}/deploys",
-        &[SERVICE, ENV, b("revision", Ty::Str, "Git commit or branch of the service's repo"), b("image", Ty::Str, "Or an image"), b("message", Ty::Str, "Why")],
+        &[SERVICE, ENV, b("revision", Ty::Str, "Git commit or branch of the service's repo"), b("image", Ty::Str, "Or an image"), b("message", Ty::Str, "Why"), IDEMPOTENCY],
     ),
     t("apps_list_deploys", "List deploys", "An environment's deploys, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys", &[SERVICE, ENV]),
     t("apps_deploy_logs", "Deploy logs", "A deploy's build and release log.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs", &[SERVICE, ENV, req("deploy", "Deploy id"), q("tail", Ty::Int, "Last lines")]),
@@ -456,7 +458,7 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, breq("command", Ty::Str, "The command line"), b("timeout_s", Ty::Int, "Seconds before it's stopped")],
     ),
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
-    t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Str, "Cursor from the last answer's next"), q("limit", Ty::Int, "At most this many")]),
+    t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
     t(
         "apps_set_variables",

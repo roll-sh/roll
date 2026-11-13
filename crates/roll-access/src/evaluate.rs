@@ -114,7 +114,8 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             let id = names.iter().filter_map(|n| param(n)).collect::<Vec<_>>().join("/");
             let mut r = access.resource(row.product, kind, &id);
             match row.env {
-                EnvFrom::Param(p) => r.environment = param(p).or(r.environment),
+                // The product says what the environment is (a preview's own is "preview").
+                EnvFrom::Param(p) => r.environment = param(p).map(|e| access.resolvers.environment(row.product, &id, &e)).or(r.environment),
                 EnvFrom::Fixed(e) => r.environment = Some(e.into()),
                 EnvFrom::None => {}
             }

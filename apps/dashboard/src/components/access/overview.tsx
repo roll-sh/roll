@@ -6,6 +6,7 @@ import {
   CLIENT_WHERE,
   CLIENTS,
   describeRule,
+  expiringSoon,
   mcpConfig,
   mcpUrl,
   reach,
@@ -125,8 +126,21 @@ function Grants({ grants, refresh }: { grants: Grant[]; refresh: () => Promise<v
       </EmptyPanel>
     );
   }
+  const soon = expiringSoon(live);
   return (
     <Panel title="Tokens and connections" aside={<span className="font-mono text-[12px] text-subtle">{live.length} active</span>}>
+      {soon.length > 0 && (
+        <p className="border-b border-line px-5 py-2.5 text-[12px] text-muted">
+          {soon.length === 1 ? "One expires" : `${soon.length} expire`} within a week:{" "}
+          {soon.map((g, i) => (
+            <span key={g.id}>
+              {i > 0 && ", "}
+              <b className="font-medium text-fg">{g.name}</b> {relative(g.expires_at)}
+            </span>
+          ))}
+          . Edit one to give it longer, or let it go.
+        </p>
+      )}
       <ul className="divide-y divide-line">
         {live.map((g) => (
           <GrantRow key={g.id} g={g} refresh={refresh} />

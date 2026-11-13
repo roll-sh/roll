@@ -232,6 +232,13 @@ pub trait Resolver: Send + Sync + 'static {
         let _ = (kind, id);
         None
     }
+    /// What an environment named in a path is, for rules (`environments`): `env` of the resource
+    /// `id` as the product classes it, `"preview"` for a preview's own environment (`pv-12`), else
+    /// `None` to keep the name.
+    fn environment(&self, id: &str, env: &str) -> Option<String> {
+        let _ = (id, env);
+        None
+    }
     /// The workspace projects a resource of this workspace kind is in.
     fn projects_of(&self, workspace_kind: &str, r#ref: &str) -> Vec<String> {
         let _ = (workspace_kind, r#ref);
@@ -271,6 +278,8 @@ impl Resolver for WorkspaceResolver {
 pub struct Resolvers {
     pub by_kind: HashMap<&'static str, Arc<dyn Resolver>>,
     pub workspace: Option<Arc<dyn Resolver>>,
+    /// Per product: what an environment named in a path is (`Resolver::environment`).
+    pub environments: HashMap<&'static str, Arc<dyn Resolver>>,
 }
 
 impl Resolvers {
@@ -280,6 +289,11 @@ impl Resolvers {
 
     pub fn projects_of(&self, workspace_kind: &str, r#ref: &str) -> Vec<String> {
         self.workspace.as_ref().map(|w| w.projects_of(workspace_kind, r#ref)).unwrap_or_default()
+    }
+
+    /// `env` (named in a path) of `product`'s resource `id`, as rules see it.
+    pub fn environment(&self, product: &str, id: &str, env: &str) -> String {
+        self.environments.get(product).and_then(|r| r.environment(id, env)).unwrap_or_else(|| env.to_string())
     }
 }
 
