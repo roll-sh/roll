@@ -332,7 +332,7 @@ done
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
 VISUAL=""
 for _ in $(seq 1 120); do
-  VISUAL=$(api GET "/v1/previews/$PV" | jq_ "('%s since %s' % (d['visual_change']['percent'], d['visual_change']['since'][:10])) if d.get('visual_change') else ''")
+  VISUAL=$(api GET "/v1/previews/$PV" | jq_ "('%s%% since %s' % (d['visual_change']['percent'], d['visual_change']['since'][:10])) if d.get('visual_change') else ''")
   [ -n "$VISUAL" ] && break
   sleep 0.5
 done
@@ -391,7 +391,7 @@ cat <<EOF
 | A preview's own variable (\`roll preview env\`) in the running service / \`DATABASE_URL\` as one | FEATURE_FLAG=$VAR_SEEN / refused |
 | ignore_paths: docs/ | $KEPT |
 | \`[skip preview]\` in the title, then without it | removed, then a new preview |
-| The page's change since the push before (screenshots) | $VISUAL% |
+| The page's change since the push before (screenshots) | $VISUAL |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 3 / $BRANCHES_LEFT |
 EOF
