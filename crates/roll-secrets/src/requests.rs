@@ -256,6 +256,7 @@ impl Secrets {
 
     /// Open a request for `items` (a batch's, or a promotion's into a protected environment).
     pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, caller: &Caller) -> Result<Request> {
+        self.check_types(project, &items)?;
         let path = path.to_string();
         for i in &items {
             caller.need(if matches!(i.action, ItemAction::Delete) { Action::Delete } else { Action::Write }, &Scope::at(project, slug, &i.path))?;

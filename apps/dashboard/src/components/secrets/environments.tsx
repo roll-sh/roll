@@ -1,11 +1,11 @@
 import { ArrowDown, ArrowUp, Bell, GripVertical, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { ENV_SLUG, LABEL_PART, type Environment } from "@/lib/secrets-api";
+import { ENV_SLUG, KEY_TYPES, LABEL_PART, SECRET_KEY, type Environment, type KeyType, type Required } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
 import { Dialog } from "../agents/ui/dialog";
 import { Switch } from "../agents/ui/switch";
 import { useSecrets } from "./secrets-page";
-import { ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, iconButton, label, primary, Section, until } from "./ui";
+import { ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, iconButton, label, primary, Section, until, useLoad } from "./ui";
 
 /**
  * The project's environments: add, rename (references to the slug are rewritten), reorder (the
@@ -86,6 +86,8 @@ export function EnvironmentsView() {
       </Section>
 
       <Previews previews={previews} onError={setError} onChanged={reloadEnvs} />
+
+      <RequiredKeys onError={setError} />
 
       <Retention onError={setError} />
 
@@ -240,6 +242,81 @@ function Notify({ env, onError }: { env: Environment; onError: (e: string) => vo
 }
 
 /** How long old values stay readable: the sweeper destroys older versions' values after that (never a current one). */
+const TYPE_LABEL: Record<KeyType, string> = { url: "URL", int: "integer", port: "port", bool: "boolean", json: "JSON", email: "email" };
+
+/** Keys every standard environment must set, each with what its value must be (typed keys). */
+function RequiredKeys({ onError }: { onError: (e: string) => void }) {
+  const { api, reloadEnvs } = useSecrets();
+  const list = useLoad(() => api.required(), [api]);
+  const [adding, setAdding] = useState<Required>({ key: "", path: "/", comment: "" });
+  const [busy, setBusy] = useState(false);
+  const save = async (next: Required[]) => {
+    setBusy(true);
+    try {
+      await api.setRequired(next);
+      list.reload();
+      reloadEnvs();
+      return true;
+    } catch (e) {
+      onError(errorText(e));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const rows = list.data ?? [];
+  const keyOk = SECRET_KEY.test(adding.key) && adding.path.startsWith("/");
+  return (
+    <Section title="Required keys" aside={<span className="text-[11.5px] text-subtle">Every standard environment must set these; typed ones must fit.</span>}>
+      {rows.length > 0 && (
+        <div className={`${card} mb-2 divide-y divide-line`}>
+          {rows.map((r) => (
+            <div key={`${r.path}:${r.key}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[12.5px]">
+              <span className="font-mono">{r.key}</span>
+              {r.path !== "/" && <span className="font-mono text-[11px] text-subtle">{r.path}</span>}
+              {r.type && <span className="rounded border border-line-2 px-1 text-[10.5px] text-muted">{TYPE_LABEL[r.type]}</span>}
+              {r.pattern && <code className="truncate rounded border border-line-2 px-1 font-mono text-[10.5px] text-muted" title="The whole value must match">/{r.pattern}/</code>}
+              {r.comment && <span className="truncate text-[11.5px] text-subtle">{r.comment}</span>}
+              <button className={`${ghost} ml-auto`} disabled={busy} onClick={() => save(rows.filter((x) => x !== r))}>
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={async (ev) => {
+          ev.preventDefault();
+          if (!keyOk) return;
+          const next = { ...adding, key: adding.key.trim(), ...(adding.pattern?.trim() ? { pattern: adding.pattern.trim() } : { pattern: undefined }) };
+          if (await save([...rows.filter((x) => !(x.key === next.key && x.path === next.path)), next])) setAdding({ key: "", path: adding.path, comment: "" });
+        }}
+      >
+        <label className="w-48">
+          <span className={label}>Key</span>
+          <input value={adding.key} onChange={(e) => setAdding({ ...adding, key: e.target.value.toUpperCase() })} placeholder="PORT" spellCheck={false} className={`${field} h-7 font-mono text-[12px]`} />
+        </label>
+        <label className="w-28">
+          <span className={label}>Folder</span>
+          <input value={adding.path} onChange={(e) => setAdding({ ...adding, path: e.target.value })} spellCheck={false} className={`${field} h-7 font-mono text-[12px]`} />
+        </label>
+        <div>
+          <span className={label}>Type</span>
+          <Select label="Type" value={adding.type ?? ""} onChange={(v) => setAdding({ ...adding, type: (v || undefined) as KeyType | undefined })} options={[{ value: "", label: "any" }, ...KEY_TYPES.map((t) => ({ value: t, label: TYPE_LABEL[t] }))]} className="h-7 w-28" />
+        </div>
+        <label className="min-w-40 flex-1">
+          <span className={label}>Pattern (optional)</span>
+          <input value={adding.pattern ?? ""} onChange={(e) => setAdding({ ...adding, pattern: e.target.value })} placeholder="[a-z]{2}-[a-z]+-[0-9]" spellCheck={false} className={`${field} h-7 font-mono text-[12px]`} />
+        </label>
+        <button type="submit" className={button} disabled={!keyOk || busy}>
+          <Plus className="size-3.5" /> Require
+        </button>
+      </form>
+    </Section>
+  );
+}
+
 function Retention({ onError }: { onError: (e: string) => void }) {
   const { api, historyDays, reloadEnvs } = useSecrets();
   const [days, setDays] = useState(historyDays?.toString() ?? "");

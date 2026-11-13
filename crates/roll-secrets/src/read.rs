@@ -320,6 +320,10 @@ impl Secrets {
         for m in self.missing_required(project, &path, &have)? {
             problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
         }
+        if resolve {
+            let typed: Vec<Problem> = self.type_problems(project, &path, &values)?.into_iter().filter(|t| !problems.iter().any(|p| p.key == t.key)).collect();
+            problems.extend(typed);
+        }
         let action = if consumer.is_some() { "secrets.resolve" } else { "secrets.export" };
         let keys: Vec<String> = values.keys().cloned().collect();
         let summary = match consumer {

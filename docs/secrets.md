@@ -257,6 +257,15 @@ required key it lacks as a problem (`required, but staging doesn't set it`), so 
 and resolves refuse to start without it, as they do for an unresolved reference. An ephemeral
 environment counts what its base defines.
 
+**Typed keys.** A required key can also say what its value must be: a `type` (`url`, `int`,
+`port`, `bool`, `json`, `email`) and a `pattern` (a regular expression the whole value matches;
+at most 500 characters, checked when it's set). A write, an import, a promotion, a change request
+or a new ephemeral environment's overrides with a value that doesn't fit is refused with 400
+naming the key and the rule (`PORT must be a port (1–65535)`), never the value. A value with a
+reference is checked once resolved: reading the environment's values reports `PORT must be a port`
+as a problem, so `roll run` won't start with it. A rollback restores what was there, typed or not.
+Edit them in Environments → Required keys, or `roll secrets required add PORT --type port`.
+
 ### Insights
 
 `GET …/environments/{env}/insights?path=` shows, for each key of a folder, when it last changed
@@ -911,7 +920,7 @@ type Version = { version: number; seq: number; op: "set" | "delete"; what: strin
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
-type Required = { key: string; path: string; comment: string };
+type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean };
@@ -1010,9 +1019,7 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **Typed keys**: a required key gets a type (`url`, `int`, `port`, `bool`, `json`, `email`) and an
-   optional pattern, checked on every write, import, promote and request (a value that doesn't
-   fit is refused, by key, never echoing the value), shown in the grid and the CLI's `ls`, so a
-   malformed value never reaches an app. In progress.
+4. **Typed keys in the grid**: a typed key's cell shows when a value doesn't fit (from the
+   resolved check, without revealing it), and the add-secret form validates as you type.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

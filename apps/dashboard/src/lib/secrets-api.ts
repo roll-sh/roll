@@ -7,13 +7,14 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Identity, NewIdentity, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI } from "@roll/secrets/types";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
 export type * from "@roll/secrets/types";
 
 export const ACTIONS: readonly Action[] = ["read", "reveal", "write", "delete", "admin"];
+export const KEY_TYPES: readonly KeyType[] = ["url", "int", "port", "bool", "json", "email"];
 
 /** An answer that isn't 2xx: the API's `error`, its `code` (`approval_required`, `stale`, `conflict`…) and the status. */
 export class SecretsError extends Error {
@@ -157,6 +158,8 @@ export function secretsApi(project: string) {
     tokens: () => req<Token[]>("GET", `${P}/tokens`),
     createToken: (t: NewToken) => req<Token & { token: string }>("POST", `${P}/tokens`, t),
     revokeToken: (id: string) => req<null>("DELETE", `${P}/tokens/${enc(id)}`),
+    required: () => req<Required[]>("GET", `${P}/required`),
+    setRequired: (list: Required[]) => req<Required[]>("PUT", `${P}/required`, list),
     identities: () => req<Identity[]>("GET", `${P}/identities`),
     createIdentity: (i: NewIdentity) => req<Identity>("POST", `${P}/identities`, i),
     deleteIdentity: (id: string) => req<null>("DELETE", `${P}/identities/${enc(id)}`),
