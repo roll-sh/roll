@@ -834,15 +834,20 @@ static ROWS: &[Row] = &[
     // What hands out more than the request itself: secrets' own tokens, syncs (they push values
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
     row("*", "/v1/secrets/projects/{project}/tokens", "secrets", ADMIN, one(&["project"], "project")),
-    row("GET", "/v1/secrets/projects/{project}/tokens", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/tokens/", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")),
-    row("GET", "/v1/secrets/projects/{project}/audit/sinks", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),
+    // Identities mint tokens, as `tokens` does: seeing or changing them is the project admin's.
+    row("*", "/v1/secrets/projects/{project}/identities", "secrets", ADMIN, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/identities/", "secrets", ADMIN, one(&["project"], "project")),
+    // Renewing a lease extends a credential whoever could read it holds.
+    row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
+    // Exporting an environment's folder shares it with another project.
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("POST", "/v1/secrets/projects/{project}/shares", "secrets", REVEAL, one(&["project"], "project")),
     // Purging a secret's history can't be undone.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -1118,6 +1123,9 @@ mod tests {
         assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
+        // Secrets' identities mint tokens; renewing a lease extends a credential.
+        assert_eq!(action("GET", "/v1/secrets/projects/{p}/identities", "x"), Some(Action::Admin));
+        assert_eq!(action("POST", "/v1/secrets/projects/{p}/leases/{l}/renew", "x"), Some(Action::Reveal));
         let f = find("POST", "/git/{*path}", "/git/acme/site.git/git-receive-pack").unwrap();
         assert_eq!(f.row.route, "/git/{owner}/{repo}/git-receive-pack");
         let mut routes: Vec<_> = ROWS.iter().map(|r| (r.method, r.route)).collect();
