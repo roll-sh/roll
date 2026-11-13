@@ -86,10 +86,18 @@ Still waiting, the result is not an error:
 { "status": "approval_pending", "approval": "apr_…", "url": "https://roll.sh/dashboard/access/approvals?id=apr_…" }
 ```
 
-The agent tells the user, then calls the same tool again with the same arguments plus
-`"approval": "apr_…"`. That waits again and runs the call once it's approved. An approval runs
-exactly the request it was asked for (same method, path and body), once. `access_wait_approval`
-waits for a decision without running anything. A denied call fails with the user's reason.
+The agent tells the user, then calls the same tool again with the same arguments (`"approval":
+"apr_…"` too, though the same call finds its approval without it). That waits again and runs the
+call once it's approved. An approval runs exactly the request it was asked for (same method, path
+and body), once, and asking the same thing again waits on the same approval rather than making
+another. `access_wait_approval` waits for a decision without running anything. A denied call
+fails with the user's reason.
+
+A client that opens URLs for elicitation (it declares `capabilities.elicitation.url` in
+`initialize`, MCP 2025-11-25) gets the approval as one instead: the call answers the JSON-RPC error
+`-32042` with `data.elicitations[0]` = `{mode: "url", elicitationId: "apr_…", url, message}` (and
+`data.approval`). The client shows the person the approval page, and sends the call again once
+they've decided; the gate finds its approval.
 
 ## Authorization
 
@@ -127,8 +135,10 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 
 - Streamable HTTP, JSON-RPC 2.0, protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26` and
   `2024-11-05`.
-- **Stateless:** no `Mcp-Session-Id`. Every node of a cluster answers every request, and nothing is
-  lost on a restart. `GET` and `DELETE` answer 405.
+- **Stateless:** every node of a cluster answers every request, and nothing is lost on a restart.
+  `initialize` answers an `Mcp-Session-Id` that holds no state: it only says whether the client
+  declared URL elicitation (`roll-url-1` or `roll-1`), so later calls know how to ask for approvals.
+  A request without one works as before. `GET` and `DELETE` answer 405.
 - Responses are JSON, or server-sent events when `Accept` has `text/event-stream` without
   `application/json`. Keep-alive comments come every 15 seconds while a call waits, for example on
   an approval.
@@ -291,7 +301,7 @@ previews are listed once those products are on.
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_rollback` | Roll an environment back to an earlier deploy. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
-| `apps_logs` | Recent logs of a service's environment. | `GET /v1/apps/services/{service}/environments/{env}/logs` |
+| `apps_logs` | Recent logs of a service's environment, or with `http` its requests (filter by `status`, `min_ms`). | `GET /v1/apps/services/{service}/environments/{env}/logs` |
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_remove_domain` | Remove a domain. | `DELETE /v1/apps/services/{service}/environments/{env}/domains/{host}` |

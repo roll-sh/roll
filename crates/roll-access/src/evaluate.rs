@@ -596,7 +596,13 @@ struct Asked<'a> {
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
     let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index } = req;
     let access = &ctx.access;
-    let existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
+    let mut existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
+    // The same request again (a client retrying after the person opened the approval, an agent
+    // that dropped the id) waits on or runs with the approval it already has: one per request.
+    if existing.is_none() {
+        let (a, g, h) = (access.clone(), ctx.grant.id.clone(), request_hash.clone());
+        existing = blocking(move || a.store.open_approval(&g, &h)).await.map_err(|e| Box::new(e.into_response()))?.map(|a| a.id);
+    }
     let approval = match existing {
         Some(id) => {
             let a = access.clone();
