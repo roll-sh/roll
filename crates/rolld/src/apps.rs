@@ -331,7 +331,7 @@ pub async fn start(
     let db = match &target {
         code_sql::Target::Sqlite(p) => code_sql::Db::open_sqlite(p, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
         code_sql::Target::Postgres { url, schema } => {
-            let pg = code_sql::PgOptions { max_connections: args.db_budget()?.workspace, ca: args.code.code_db_ca.clone(), ..Default::default() };
+            let pg = code_sql::PgOptions { max_connections: args.db_budget()?.apps, ca: args.code.code_db_ca.clone(), ..Default::default() };
             tokio::task::block_in_place(|| code_sql::Db::connect(url, schema, pg))?
         }
     };

@@ -718,8 +718,12 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 - **roll-secrets**: see "Secrets and environments". Theirs: `roll_net` instead of
   `code_control::review::apps::PublicOnly` (mcp makes it `pub(crate)`), and docs/secrets.md's
   `Secrets::resolve`/`Consumer::App`.
-- **Every product sharing the system database** (apps, previews, mcp) reserves its own share of
-  `ROLL_SYSTEM_DB_CONNECTIONS`, as secrets and search do, instead of borrowing the workspace's.
+- **Every product sharing the system database** reserves its own share of
+  `ROLL_SYSTEM_DB_CONNECTIONS`, as secrets and search do: apps has `DbBudget::apps` (weight 1,
+  4 by default); previews and mcp still borrow the workspace's.
+- `scripts/test-apps.sh` runs its own `cargo test -p` calls, not `scripts/lib/gate.sh`'s shared
+  package set: adding the apps crates there would slow roll code's and agents' gates, so it's
+  for those gates' owners to decide (AGENTS.md asks new suites to use it).
 - **rolld/src/main.rs on merge**: open the workspace once, open secrets before `apps::start`
   (which takes the `SecretSource` instead of `NoSecrets`), merge every product's router, and only
   then take the copies secrets (`products_api`) and mcp (`auth.layer`, last) keep.

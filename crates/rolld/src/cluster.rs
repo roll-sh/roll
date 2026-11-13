@@ -75,27 +75,29 @@ pub struct DbBudget {
     pub streams: usize,
     /// Workspace projects (always on; docs/workspace.md).
     pub workspace: usize,
+    /// roll apps' store (its deploy queue, meters and event log).
+    pub apps: usize,
 }
 
 impl DbBudget {
     /// Each product's own default when no budget is set.
-    pub const DEFAULT: DbBudget = DbBudget { code: 16, nosql: 16, redis: 8, streams: 8, workspace: 2 };
+    pub const DEFAULT: DbBudget = DbBudget { code: 16, nosql: 16, redis: 8, streams: 8, workspace: 2, apps: 4 };
 
     /// Split `total` between the pools of the products that are on. Queues keeps one
     /// connection of its own, roll code one for `LISTEN` and workspace projects (always on) one:
     /// they come off the top. The rest is
-    /// shared by weight (roll code's two pools 3 each, nosql 2, redis and streams 1), at least
-    /// one connection per pool.
+    /// shared by weight (roll code's two pools 3 each, nosql 2, redis, streams and apps 1), at
+    /// least one connection per pool.
     pub fn split(total: Option<usize>, on: crate::products::Products) -> DbBudget {
         use crate::products::Product;
         let Some(total) = total else { return DbBudget::DEFAULT };
         let weight = |p: Product, w: usize| if on.on(p) { w } else { 0 };
         let reserved = weight(Product::Queues, 1) + weight(Product::Code, 1) + 1;
-        let weights = [weight(Product::Code, 3), weight(Product::Code, 3), weight(Product::Nosql, 2), weight(Product::Redis, 1), weight(Product::Streams, 1)];
+        let weights = [weight(Product::Code, 3), weight(Product::Code, 3), weight(Product::Nosql, 2), weight(Product::Redis, 1), weight(Product::Streams, 1), weight(Product::Apps, 1)];
         let sum: usize = weights.iter().sum::<usize>().max(1);
         let left = total.saturating_sub(reserved);
         let share = |w: usize| (left * w / sum).max(1);
-        DbBudget { code: share(3), nosql: share(2), redis: share(1), streams: share(1), workspace: 1 }
+        DbBudget { code: share(3), nosql: share(2), redis: share(1), streams: share(1), workspace: 1, apps: share(1) }
     }
 }
 
@@ -211,9 +213,9 @@ mod db_budget_tests {
         assert_eq!(DbBudget::split(None, Products::all()), DbBudget::DEFAULT);
         let all = DbBudget::split(Some(12), Products::all());
         // 12 less queues', code's LISTEN and workspace's connections, over code 3+3, nosql 2,
-        // redis 1, streams 1.
-        assert_eq!(all, DbBudget { code: 2, nosql: 1, redis: 1, streams: 1, workspace: 1 });
-        assert!(2 * all.code + all.nosql + all.redis + all.streams + all.workspace + 2 <= 12);
+        // redis 1, streams 1, apps 1.
+        assert_eq!(all, DbBudget { code: 2, nosql: 1, redis: 1, streams: 1, workspace: 1, apps: 1 });
+        assert!(2 * all.code + all.nosql + all.redis + all.streams + all.workspace + all.apps + 2 <= 12);
         let code_only = DbBudget::split(Some(12), Products::from_iter([Product::Code]));
         assert_eq!(code_only.code, 5, "code's two pools share what's left after LISTEN");
         assert_eq!(DbBudget::split(Some(1), Products::all()).redis, 1, "every pool gets at least one");
