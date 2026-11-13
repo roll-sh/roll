@@ -110,6 +110,25 @@ impl Engine {
         self.store.view(r)
     }
 
+    /// Keep the preview past its TTL for `hours` from now (at most [`KEEP_MAX_HOURS`]); `0` lets
+    /// its rules decide again. A landed or closed change, or a deleted project, still ends it.
+    pub fn keep(&self, id: &str, hours: u32) -> Result<Preview> {
+        if hours > KEEP_MAX_HOURS {
+            return Err(Error::BadRequest(format!("hours: 0 to {KEEP_MAX_HOURS}")));
+        }
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let until = (hours > 0).then(|| self.store.now_ms().map(|now| now + hours as i64 * 3_600_000)).transpose()?;
+        self.store.set_kept_until(id, until)?;
+        self.store.log(id, &match hours {
+            0 => "no longer kept: its rules decide when it goes".to_string(),
+            h => format!("kept for {h} hours past its TTL"),
+        })?;
+        self.store.view(self.store.row(id)?)
+    }
+
     /// Re-branch `which` (`"<kind>:<parent>"`, or every resource when empty) from the parents.
     pub fn reset(&self, id: &str, which: Vec<String>) -> Result<Preview> {
         let resources = self.store.resources(id)?;
@@ -218,6 +237,9 @@ impl Engine {
         Ok((name, rx))
     }
 }
+
+/// The longest a preview can be kept past its TTL in one go (30 days).
+pub const KEEP_MAX_HOURS: u32 = 720;
 
 /// How many lines each later read of a polled log asks for.
 pub const FOLLOW_WINDOW: usize = 2000;

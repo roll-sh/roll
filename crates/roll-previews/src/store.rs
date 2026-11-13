@@ -328,6 +328,9 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
+        if !db.has_column("previews", "kept_until")? {
+            db.add_column("previews", "kept_until", "INTEGER")?;
+        }
         for col in ["released", "schema_head", "schema_changes"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
@@ -747,6 +750,19 @@ impl Store {
     }
 
     /// Whether the preview's branches were told it's idle (and nothing used it since).
+    /// Until when the preview is kept past its TTL (`None`: its rules decide).
+    pub fn kept_until(&self, id: &str) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT kept_until FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_kept_until(&self, id: &str, until: Option<i64>) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET kept_until = ? WHERE id = ?", params![until, id])?))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no preview {id}")));
+        }
+        Ok(())
+    }
+
     pub fn idled(&self, id: &str) -> Result<bool> {
         Ok(self.db.read(|c| c.query_row("SELECT idled FROM previews WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional())?.unwrap_or(0) != 0)
     }
@@ -907,6 +923,7 @@ impl Store {
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
         let schema_changes = self.schema_changes(&r.id)?;
+        let kept_until = self.kept_until(&r.id)?;
         Ok(Preview {
             id: r.id,
             project: r.project_id,
@@ -937,6 +954,7 @@ impl Store {
                 .collect(),
             cost: cost.rounded(),
             schema_changes,
+            kept_until,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,

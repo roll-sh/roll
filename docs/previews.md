@@ -497,6 +497,7 @@ Bodies are JSON. Every error is `{"error": string}`.
 | `POST /v1/previews/{id}/sleep` | | `Preview`: stop its services now |
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
+| `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
@@ -524,7 +525,8 @@ type Preview = {
   share_url: string | null;           // url with its access token (link access): the one to hand out
   services: Service[]; resources: Resource[];
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
-  schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
+  schema_changes: string[] | null;
+  kept_until: number | null;          // kept past its TTL until then (POST …/keep)    // "+ …"/"- …" against the parents, once read at `head`; null: not known
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
   created_by: string; created_at: number; updated_at: number;
 };
@@ -615,28 +617,24 @@ Ranked by what a person notices first. Done so far:
 - the bypass on roll apps' gate too (`bypass_sha256`, feature/roll-apps 31ddb210d).
 - a budget alert to the project's repos (its own `budget` event: webhooks, the event stream,
   automations) at 80% and 100% of `max_usd_month`, once a month per budget;
+- Postgres column masking per preview (measured: the branch reads `user-…@example.invalid`, the
+  parent the real address);
+- keeping a preview past its TTL (`POST …/keep`, the sheet, `roll preview keep`);
 - a third adversarial review and its fixes (no bypass for forks, rotation restarts nothing the
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Postgres column masking per preview** (Neon's anonymized branches, Tonic): `masking`
-   rules for `postgres:<ref>` (`schema.table.column` → `null`, `redact`, `hash`, `email`,
-   `fixed:<value>`) rewrite those columns in the branch, in one transaction, before anything
-   serves it (then `VACUUM FULL` of the masked tables, so old row versions leave the branch's
-   files). Today only NoSQL masks; Postgres needs a hand-written seed.
-2. **Keep or extend a preview**: `POST /v1/previews/{id}/extend {hours}` and a pin past the
-   TTL (Render and Railway let a preview outlive its rules), on the sheet and `roll preview`.
-3. **The integration branch again**: `wip/previews-on-secrets-mcp` refreshed on the threads'
+1. **The integration branch again**: `wip/previews-on-secrets-mcp` refreshed on the threads'
    latest heads, with apps and search merged too, and the cross-thread run (a service on roll
    apps reading a secret and a branch, a "Previews only" token) repeated. Needs the disk for one
    more full build.
-4. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+2. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page through the bypass, and the comment shows it (Vercel does). Store it in
    roll storage and drop it with the preview. Needs a host whose containers reach rolld (not
    ai-server's firewall) to verify.
-5. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

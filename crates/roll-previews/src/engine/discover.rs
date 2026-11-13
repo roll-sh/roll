@@ -173,7 +173,8 @@ impl Engine {
                     Some(_) => {}
                 }
             }
-            if r.expires_at.is_some_and(|t| t <= now) || r.last_active_at + ttl_ms <= now {
+            let kept = self.store.kept_until(&r.id)?.is_some_and(|t| t > now);
+            if !kept && (r.expires_at.is_some_and(|t| t <= now) || r.last_active_at + ttl_ms <= now) {
                 // An open change gets a preview again on its next push, not before.
                 if let Some(change) = &r.change_id {
                     self.store.dismiss(change, &r.head)?;

@@ -41,6 +41,15 @@ pub enum Preview {
     Wake { preview: String },
     /// Redeploy whatever isn't at the revision it should run.
     Refresh { preview: String },
+    /// Keep it past its TTL for a while (7 days unless --hours; at most 720); --release lets its
+    /// rules decide again. A landed or closed change still ends it.
+    Keep {
+        preview: String,
+        #[arg(long, default_value_t = 168, conflicts_with = "release")]
+        hours: u32,
+        #[arg(long)]
+        release: bool,
+    },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
         preview: String,
@@ -219,6 +228,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Sleep { preview } => api.post(&format!("/v1/previews/{preview}/sleep"), json!({})).await?,
         Preview::Wake { preview } => api.post(&format!("/v1/previews/{preview}/wake"), json!({})).await?,
         Preview::Refresh { preview } => api.post(&format!("/v1/previews/{preview}/refresh"), json!({})).await?,
+        Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
         Preview::Logs { preview, service, lines, follow } => {
             let path_base = match &service {

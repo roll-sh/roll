@@ -1,4 +1,4 @@
-import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
+import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
 import { followLogs, openUrl, previewsApi, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
@@ -210,7 +210,14 @@ export function PreviewSheet({
                 ["slug", p.slug],
                 ["last visit", since(p.last_active_at)],
                 ...(p.last_reset_at ? ([["last reset", since(p.last_reset_at)]] as [string, string][]) : []),
-                ["expires", p.expires_at ? new Date(p.expires_at).toLocaleDateString() : "with its change"],
+                [
+                  "expires",
+                  p.kept_until && p.kept_until > Date.now()
+                    ? `kept until ${new Date(p.kept_until).toLocaleDateString()}`
+                    : p.expires_at
+                      ? new Date(p.expires_at).toLocaleDateString()
+                      : "with its change",
+                ],
                 ["created by", p.created_by],
               ]}
             />
@@ -256,6 +263,15 @@ export function PreviewSheet({
             {p.resources.length > 0 && (
               <button className={small} disabled={busy !== null} onClick={() => run("reset", () => previewsApi.reset(p.id))} title="Branch every resource again from its parent">
                 <RotateCcw className="size-3.5" /> Reset data
+              </button>
+            )}
+            {p.kept_until && p.kept_until > Date.now() ? (
+              <button className={small} disabled={busy !== null} onClick={() => run("keep", () => previewsApi.keep(p.id, 0))} title="Let the project's rules decide when it goes again">
+                <Pin className="size-3.5" /> Release
+              </button>
+            ) : (
+              <button className={small} disabled={busy !== null} onClick={() => run("keep", () => previewsApi.keep(p.id, 168))} title="Keep it for 7 days past its TTL (a landed or closed change still ends it)">
+                <Pin className="size-3.5" /> Keep 7 days
               </button>
             )}
             <button

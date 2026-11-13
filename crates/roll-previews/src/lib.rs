@@ -194,6 +194,8 @@ pub struct Preview {
     /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
     /// not known (no Postgres branch, or not read yet).
     pub schema_changes: Option<Vec<String>>,
+    /// Kept past its TTL until then (`POST …/keep`); a landed or closed change still ends it.
+    pub kept_until: Option<i64>,
     pub last_reset_at: Option<i64>,
     pub last_active_at: i64,
     pub expires_at: Option<i64>,

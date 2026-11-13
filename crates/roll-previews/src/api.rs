@@ -22,6 +22,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews", get(list).post(create))
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
+        .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/reset", post(reset))
         // These act on running services, which live on the preview's holder in a cluster.
         .merge(
@@ -137,6 +138,18 @@ async fn delete(AxState(e): S, Path(id): Path<String>) -> crate::Result<Response
 async fn refresh(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Preview>> {
     check_id(&id)?;
     blocking(e, move |e| e.refresh(&id)).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeepBody {
+    hours: u32,
+}
+
+async fn keep(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let k: KeepBody = body(&b)?;
+    blocking(e, move |e| e.keep(&id, k.hours)).await.map(Json)
 }
 
 async fn sleep(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Preview>> {

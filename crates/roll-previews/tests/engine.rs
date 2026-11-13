@@ -114,6 +114,16 @@ async fn previews_beyond_the_limit_wait_and_start_as_others_go() {
     e.code.heads.lock().insert("acme/web@feat/x".into(), "cs_x".into());
     let err = e.engine.create(&e.project, "acme/web", Some("feat/x"), None, "me").await.unwrap_err();
     assert!(err.to_string().contains("max_previews"), "{err}");
+    // Unused past its TTL it goes, unless it's kept; released, its rules decide again.
+    let b = e.engine.store.row_by_change("chg_b").unwrap().unwrap();
+    e.engine.store.update(&b.id, |r| r.last_active_at = 0).unwrap();
+    e.engine.keep(&b.id, 24).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&b.id).unwrap().desired, Desired::Active, "kept past its TTL");
+    assert!(e.engine.keep(&b.id, 721).is_err(), "30 days at most");
+    e.engine.keep(&b.id, 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row(&b.id).map_or(true, |r| r.desired == Desired::Deleted), "unused past its TTL, it goes");
 }
 
 #[tokio::test]

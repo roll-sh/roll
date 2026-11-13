@@ -71,6 +71,8 @@ export interface Preview {
   cost: PreviewCost;
   /** What the change did to the Postgres schema (`+ …`, `- …`), once read at `head`. */
   schema_changes?: string[] | null;
+  /** Kept past its TTL until then (epoch ms). */
+  kept_until?: number | null;
   last_reset_at: number | null;
   last_active_at: number;
   expires_at: number | null;
@@ -173,6 +175,8 @@ export const previewsApi = {
   /** Marks it for deletion (`desired: "deleted"`); the reconciler removes it. */
   remove: (id: string) => call<Preview>("DELETE", one(id)),
   refresh: (id: string) => call<Preview>("POST", `${one(id)}/refresh`),
+  /** Keep it past its TTL for `hours` (at most 720); 0 lets its rules decide again. */
+  keep: (id: string, hours: number) => call<Preview>("POST", `${one(id)}/keep`, { hours }),
   sleep: (id: string) => call<Preview>("POST", `${one(id)}/sleep`),
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
