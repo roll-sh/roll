@@ -459,6 +459,12 @@ type AuditEvent = {
 - The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
 
+Each node writes its audit rows through one writer, which takes what's queued and writes it in one
+transaction (`Store::queue_audit`): a write per request, serialized, held a token's requests to
+~9k a second on one node; batched, ~110k (`gate_latency`, release, 32 callers), every row kept. A
+full queue (16,384 rows) has the request write its own row: nothing is dropped. As before, these
+writes aren't synced: a crash can lose the last moment's rows.
+
 ### Audit sinks
 
 The operator can stream the log to a SIEM (Datadog, Splunk, a Lambda): the audit page's "Stream to
