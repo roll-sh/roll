@@ -33,6 +33,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
 | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` | write |
 | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 | write |
+| `GET /v1/apps/events?after=&limit=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
 | `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
@@ -264,6 +265,9 @@ type Usage = {
   total_usd: number;
 };
 
+"/** In the event log, each written in the same transaction as the change it records; a reader
+ *  sees events a second old or more (a sequence number is taken before its commit). Kept 7 days. */
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop"; service: string; environment: string; deployment: string | null; data: object };
 type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";
 type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
 /** A one-off command in a fresh container of the active deployment: its variables and project

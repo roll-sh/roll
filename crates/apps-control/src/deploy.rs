@@ -296,7 +296,7 @@ impl Apps {
                 self.step(&d.id, "failed").await;
                 let msg = e.to_string();
                 log.stream(Stream::System).line(format!("failed: {msg}"));
-                let _ = self.db(move |s| s.set_status(&id, &[DeployStatus::Queued, DeployStatus::Building, DeployStatus::Deploying], DeployStatus::Failed, Some(&msg))).await;
+                let _ = self.db(move |s| s.fail_deployment(&id, &msg)).await;
                 warn!(service = %d.service, env = %d.environment, deployment = %d.id, error = %e, "apps: a deploy failed");
             }
         }
@@ -717,6 +717,23 @@ impl Apps {
         }
     }
 
+    /// An environment that went into a crash loop gets one event for it (until it leaves it).
+    async fn note_crash_loop(self: &Arc<Self>, l: &crate::live::EnvLive) {
+        let key = format!("{}/{}", l.service, l.env);
+        match l.crash_loop() {
+            Some(c) => {
+                if self.looping.lock().insert(key) {
+                    let (sid, e, dep) = (l.service.clone(), l.env.clone(), l.template().map(|t| t.deployment.clone()));
+                    let data = serde_json::json!({ "crashes": c.crashes, "last_error": c.last_error });
+                    let _ = self.db(move |s| s.add_event("crash_loop", &sid, &e, dep.as_deref(), &data)).await;
+                }
+            }
+            None => {
+                self.looping.lock().remove(&key);
+            }
+        }
+    }
+
     /// The reaper: every second, each owned environment's tick; every minute, the meters.
     async fn reaper(self: Arc<Self>) {
         let mut every = tokio::time::interval(Duration::from_secs(1));
@@ -734,6 +751,7 @@ impl Apps {
             // Each environment's tick on its own task: one waiting for a cold start to finish
             // doesn't hold up the others.
             for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+                self.note_crash_loop(&l).await;
                 if l.ticking.swap(true, Ordering::SeqCst) {
                     continue;
                 }
@@ -754,6 +772,8 @@ impl Apps {
                 let _ = self.db(move |s| s.prune_metrics(before)).await;
                 let day_ago = code_sql::now_ms() - 24 * 3_600_000;
                 let _ = self.db(move |s| s.prune_deploy_keys(day_ago)).await;
+                let week_ago = code_sql::now_ms() - 7 * 24 * 3_600_000;
+                let _ = self.db(move |s| s.prune_events(week_ago)).await;
             }
         }
     }

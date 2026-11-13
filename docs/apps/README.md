@@ -336,6 +336,11 @@ every deployment is immutable with instant rollback.
   `apps.localhost` on the apps listener (`ROLL_APPS_LISTEN`, `127.0.0.1:7080`), and each service
   can also get a port of its own (`ROLL_APPS_PORTS=58100-58199`) so it opens on a machine without
   wildcard DNS (a Tailscale name).
+- **The event log** (`GET /v1/apps/events?after=`): `deploy.active` (written in the switch's
+  transaction), `deploy.failed` (in the failure's), `crash_loop` (once per loop, by the reaper),
+  in order, kept 7 days, for anything that must not miss one (roll code's webhooks, chat ops, an
+  MCP client) to read after its cursor. A reader sees events a second old or more: a sequence
+  number is taken before its transaction commits, so a newer one can appear first.
 - **Crash loops**: every crash (an exit, a start that fails or never answers, a port that stops
   answering) is counted per environment; three in ten minutes is a crash loop, said once in the
   environment's log and on `Environment.crash_loop` (the count, when, and why), which the
@@ -577,7 +582,7 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 A review on 2026-11-12 against feature/roll-secrets (#20), feature/roll-mcp (#19),
 feature/roll-previews and feature/roll-search found these. Ours are in `## Next`; theirs:
 
-- **roll-mcp**: `POST …/jobs`, `…/jobs/{job}/cancel` and `GET …/shell` run code with the
+- **roll-mcp**: `GET /v1/apps/events` is a read. `POST …/jobs`, `…/jobs/{job}/cancel` and `GET …/shell` run code with the
   environment's variables, so they're `deploy` (production) like deploys (the shell is a `GET`:
   classify it by path, not method); the other `…/jobs` routes are reads.
   The catalogue misses `GET /v1/apps`, `POST /v1/apps/plan` and
@@ -624,7 +629,8 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    metering for Fargate.
 3. **Notifications.** A failed deploy and a crash loop reach people: for a repo service as
    deployment events through roll code's one delivery queue (webhooks, review apps), and to chat
-   through chat ops; designed with the other branches, not a second webhook system. (Done:
+   through chat ops, reading the event log (`GET /v1/apps/events`) after a durable cursor;
+   designed with the other branches, not a second webhook system. (Done: the event log;
    crash loops on the environment and the service page; search over the stored 7 days of logs,
    `?q=`, `roll logs --grep … --since 2h`, the Logs tab's Search 7 days.)
 4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL: as roll secrets links per

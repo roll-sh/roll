@@ -99,6 +99,20 @@ pub(crate) fn private_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Something that happened to a service, in the event log (`GET /v1/apps/events`): written with
+/// the change it records, read after a cursor.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Event {
+    pub seq: i64,
+    pub at: i64,
+    /// `deploy.active`, `deploy.failed`, `crash_loop`.
+    pub kind: String,
+    pub service: String,
+    pub environment: String,
+    pub deployment: Option<String>,
+    pub data: serde_json::Value,
+}
+
 /// A private environment's gate: the visitors' token and an automation bypass (CI), as SHA-256
 /// hex digests; neither secret is kept.
 #[derive(Clone, Debug, PartialEq)]

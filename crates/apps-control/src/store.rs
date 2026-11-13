@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS env_access (
     token_hash TEXT NOT NULL,
     PRIMARY KEY (service, env)
 ) WITHOUT ROWID;
+-- What happened to services, in order, each written in the change's own transaction: the feed
+-- consumers that must not miss one read (GET /v1/apps/events). Kept 7 days.
+CREATE TABLE IF NOT EXISTS events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    deployment TEXT,
+    data TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
@@ -578,8 +589,60 @@ impl Store {
             if let Some(h) = vars_hash {
                 c.execute("UPDATE deployments SET vars_hash = ? WHERE id = ?", params![h, to])?;
             }
+            let revision: Option<String> = c.query_row("SELECT revision FROM deployments WHERE id = ?", [to], |r| r.get(0)).optional()?.flatten();
+            c.execute(
+                "INSERT INTO events (at, kind, service, env, deployment, data) VALUES (?, 'deploy.active', ?, ?, ?, ?)",
+                params![now, service, env, to, serde_json::json!({ "revision": revision, "replaced": from }).to_string()],
+            )?;
             Ok(true)
         })
+    }
+
+    /// A deploy failed: its status, and the event, in one transaction.
+    pub fn fail_deployment(&self, id: &str, error: &str) -> Result<bool> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            let n = c.execute(
+                "UPDATE deployments SET status = 'failed', error = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status IN ('queued', 'building', 'deploying')",
+                params![error, now, id],
+            )?;
+            if n == 0 {
+                return Ok(false);
+            }
+            let (service, env, revision): (String, String, Option<String>) = c.query_row("SELECT service, env, revision FROM deployments WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            c.execute(
+                "INSERT INTO events (at, kind, service, env, deployment, data) VALUES (?, 'deploy.failed', ?, ?, ?, ?)",
+                params![now, service, env, id, serde_json::json!({ "revision": revision, "error": error }).to_string()],
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// An event no state change carries (a crash loop the reaper noticed).
+    pub fn add_event(&self, kind: &str, service: &str, env: &str, deployment: Option<&str>, data: &serde_json::Value) -> Result<()> {
+        let now = self.now()?;
+        self.db.execute("INSERT INTO events (at, kind, service, env, deployment, data) VALUES (?, ?, ?, ?, ?, ?)", params![now, kind, service, env, deployment, data.to_string()])?;
+        Ok(())
+    }
+
+    /// Events after `after`, at most `limit`, only those a second old or more: a sequence number
+    /// is taken before its transaction commits, so a newer one can show up first; a second lets
+    /// the older ones land before a reader moves past them.
+    pub fn events(&self, after: i64, limit: usize) -> Result<Vec<Event>> {
+        let settled = self.now()? - 1000;
+        Ok(self.db.query(
+            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE seq > ? AND at <= ? ORDER BY seq LIMIT ?",
+            params![after, settled, limit.clamp(1, 1000) as i64],
+            |r| {
+                let data: String = r.get(6)?;
+                Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })
+            },
+        )?)
+    }
+
+    pub fn prune_events(&self, before_ms: i64) -> Result<()> {
+        self.db.execute("DELETE FROM events WHERE at < ?", [before_ms])?;
+        Ok(())
     }
 
     // ── deployments ──

@@ -315,6 +315,15 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     assert_eq!((st, body["deployment"].clone()), (StatusCode::OK, d1["id"].clone()));
     // Only the old deployment's instance is left.
     assert!(w.fake.instances(id).iter().all(|(_, dep, _)| *dep == d1["id"]));
+    // Both are in the event log, in order, for whoever must not miss them (after a second's
+    // settling).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (_, log) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let mine: Vec<(&str, &str)> = log["events"].as_array().unwrap().iter().filter(|e| e["service"] == id).map(|e| (e["kind"].as_str().unwrap(), e["deployment"].as_str().unwrap_or(""))).collect();
+    assert_eq!(mine, [("deploy.active", d1["id"].as_str().unwrap()), ("deploy.failed", d2["id"].as_str().unwrap())], "{log}");
+    assert!(log["events"].as_array().unwrap().iter().any(|e| e["kind"] == "deploy.failed" && e["data"]["error"].as_str().unwrap_or("").contains("health check")));
+    let next = log["next"].as_i64().unwrap();
+    assert!(call(&w.api, "GET", &format!("/v1/apps/events?after={next}"), None).await.1["events"].as_array().unwrap().is_empty());
     // A pre-deploy command (a migration) that fails stops the deploy before anything starts.
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"unset": ["FAKE_UNHEALTHY"]}))).await;
     let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"pre_deploy": "exit 3"}}))).await;

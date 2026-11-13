@@ -58,6 +58,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}", get(get_service).patch(patch_service).delete(delete_service))
         .route("/v1/apps/services/{id}/links", get(links))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
+        .route("/v1/apps/events", get(events))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/environments", get(environments))
         .route(env, get(get_env).put(put_env).delete(delete_env))
@@ -221,6 +222,22 @@ async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, Str
 async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>) -> R {
     apps.delete_link(&id, &kind, &r).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+
+/// `GET /v1/apps/events?after=&limit=`: what happened to services, in order, after a cursor;
+/// `next` is the cursor for the following call.
+async fn events(State(apps): S, Query(q): Query<EventsQuery>) -> R {
+    let after = q.after.unwrap_or(0);
+    let limit = q.limit.unwrap_or(100);
+    let events = apps.db(move |s| s.events(after, limit)).await?;
+    let next = events.last().map_or(after, |e| e.seq);
+    ok(json!({ "events": events, "next": next }))
 }
 
 async fn put_registry(State(apps): S, Path(id): Path<String>, b: Bytes) -> R {

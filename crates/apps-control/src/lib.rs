@@ -143,6 +143,8 @@ pub struct Apps {
     cancels: Mutex<HashMap<String, CancellationToken>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
+    /// Environments in a crash loop whose event is written (one per loop).
+    looping: Mutex<std::collections::HashSet<String>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     pub(crate) client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -200,6 +202,7 @@ impl Apps {
             cancels: Mutex::new(HashMap::new()),
             access: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             stop: CancellationToken::new(),
         })
