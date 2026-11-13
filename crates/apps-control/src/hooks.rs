@@ -29,6 +29,15 @@ impl Apps {
         .await
     }
 
+    /// A hook token found where it shouldn't be (roll-access's leak scanning, `Access::on_leaked`):
+    /// the hook stops working at once. Says which hook it was, or `None` when no live hook has it.
+    pub fn revoke_leaked_hook(&self, token: &str) -> Option<String> {
+        let row = self.store.environment_by_hook(&crate::public::token_hash(token)).ok()??;
+        self.store.set_hook(&row.service, &row.name, None).ok()?;
+        tracing::warn!(service = %row.service, env = %row.name, "apps: a leaked deploy hook was revoked");
+        Some(format!("{}'s {} deploy hook", row.service, row.name))
+    }
+
     /// `POST /v1/apps/hooks/{service}/{env}/{token}[?image=]`: deploy, as the hook. Anything
     /// that isn't a live hook is the same 404, so the URL tells a guesser nothing.
     pub async fn run_hook(self: &Arc<Self>, service: &str, env: &str, token: &str, image: Option<String>) -> Result<Deployment> {

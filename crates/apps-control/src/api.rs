@@ -617,7 +617,15 @@ async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query
 /// Who made a request, for the deployments it makes: what rolld's gate put in its extensions
 /// (the operator's token today; on roll-mcp a scoped token's or connection's name,
 /// `roll_auth::Grant`). Nothing a client sends is believed.
+/// Who acted, for the activity log: a scoped token by its name, a signed-in admin by their user
+/// id, else the operator.
 fn actor(ext: &Extensions) -> Option<String> {
+    if let Some(g) = roll_auth::Grant::on(ext) {
+        return Some(format!("token:{}", g.name));
+    }
+    if let Some(u) = ext.get::<roll_auth::SignedIn>() {
+        return Some(u.user.clone());
+    }
     roll_auth::Operator::on(ext).then(|| "operator".to_string())
 }
 

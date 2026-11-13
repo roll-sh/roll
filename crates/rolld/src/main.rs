@@ -484,10 +484,16 @@ async fn run() -> anyhow::Result<()> {
             nosql: nosql.as_ref().map(|n| n.control.clone()),
             streams: streams.as_ref().map(|s| s.broker.clone()),
             code: code.as_ref().map(|c| &c.code),
+            apps: apps.as_ref().map(|a| a.apps.clone()),
         },
         workspace,
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // apps' deploy hooks found leaked (`rlk_`) stop working, like tokens.
+    if let Some(a) = &apps {
+        let apps = a.apps.clone();
+        access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
+    }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);
     // Approvals can be posted to a Slack channel through roll code's chat ops.
