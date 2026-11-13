@@ -1,12 +1,34 @@
-import { KeyRound } from "lucide-react";
+import { Cloud, Database, KeyRound, Link2, RotateCw, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { SECRET_KEY, type Batch, type Environment, type LinkField, type LinkMode, type LinkTarget, type Op } from "@/lib/secrets-api";
 import type { ResourceKind } from "@/lib/workspace-api";
 import { Dialog } from "../agents/ui/dialog";
 import { Segmented } from "../agents/ui/toggle-group";
-import { KindTile } from "../workspace/kind";
+import { KIND_ICON } from "../workspace/kind";
 import { useSecrets } from "./secrets-page";
 import { ErrorNote, field, sized, ghost, primary, useLoad } from "./ui";
+
+/** Link kinds that aren't canvas resources: roll secrets' own registries. */
+const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
+  rotator: { icon: RotateCw, label: "Rotator" },
+  aws: { icon: Cloud, label: "AWS role" },
+  aws_iam_user: { icon: KeyRound, label: "IAM user" },
+  outside_database: { icon: Database, label: "Database outside roll" },
+};
+
+/** A link target's kind: a canvas resource's icon, roll secrets' own, or a plain link for one this dashboard doesn't know yet. */
+function kindOf(kind: string): { icon: LucideIcon; label: string } {
+  return OWN_KINDS[kind] ?? { icon: KIND_ICON[kind as ResourceKind] ?? Link2, label: kind };
+}
+
+function LinkKindTile({ kind }: { kind: string }) {
+  const Icon = kindOf(kind).icon;
+  return (
+    <span className="grid size-[22px] shrink-0 place-items-center rounded-md border border-line-2 bg-raised text-fg inset-shadow-highlight">
+      <Icon className="size-3.5" />
+    </span>
+  );
+}
 
 const MODE_LABEL: Record<LinkMode, string> = { live: "Live", managed: "Managed", dynamic: "Dynamic" };
 const MODE_HELP: Record<LinkMode, string> = {
@@ -95,10 +117,10 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
               onClick={() => setAt(id)}
               className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${target === t ? "bg-fg/[0.07]" : "hover:bg-fg/[0.04]"}`}
             >
-              <KindTile kind={t.kind as ResourceKind} size={22} />
+              <LinkKindTile kind={t.kind} />
               <span className="min-w-0 flex-1 leading-tight">
                 <span className="block truncate text-[12.5px] font-medium">{t.name}</span>
-                <span className="block truncate text-[10.5px] text-subtle">{t.kind}</span>
+                <span className="block truncate text-[10.5px] text-subtle">{kindOf(t.kind).label}</span>
               </span>
               {n > 0 && <span className="font-mono text-[10.5px] text-accent">{n}</span>}
             </button>
