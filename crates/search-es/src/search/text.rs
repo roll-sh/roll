@@ -87,7 +87,7 @@ fn zero_terms_query(z: ZeroTerms) -> QueryRef {
 }
 
 /// The analyzer named in a query (`[match] analyzer [x] not found`).
-fn named_analyzer(ctx: &QueryCtx, name: &str, query: &str) -> EsResult<Analyzer> {
+pub(crate) fn named_analyzer(ctx: &QueryCtx, name: &str, query: &str) -> EsResult<Analyzer> {
     if name == "default" {
         return Ok(ctx.table.analysis.default_analyzer());
     }
@@ -105,7 +105,7 @@ fn has_text_search(f: &FieldInfo) -> bool {
 pub fn field_query(ctx: &QueryCtx, field: &str, value: &Value, ty: MatchType, o: &MatchOpts, query_name: &str) -> EsResult<Option<QueryRef>> {
     // Runtime fields (which shadow mapped ones) have no analysis: the text is one term.
     if let Some(rf) = ctx.runtime_target(field, query_name)? {
-        return ctx.runtime_match(rf, value, ty, o.lenient).map(Some);
+        return ctx.runtime_match(rf, value, ty, o, query_name).map(Some);
     }
     // The `match*` builders check a named analyzer before looking the field up.
     if let Some(n) = o.analyzer
@@ -677,6 +677,13 @@ pub fn resolve_fields(ctx: &QueryCtx, fields: &[(String, f32)]) -> Vec<(String, 
                     Some(e) => e.1 *= boost,
                     None => out.push((name, *boost)),
                 }
+            }
+            // Runtime fields match patterns too (they always may exist in the index).
+            for name in ctx.runtime_matching(pat) {
+                if out.iter().any(|(n, _)| *n == name) {
+                    continue;
+                }
+                out.push((name, *boost));
             }
         } else {
             match out.iter_mut().find(|(n, _)| n == pat) {

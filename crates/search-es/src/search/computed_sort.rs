@@ -148,3 +148,69 @@ impl SegmentComputedSort for GeoLeaf {
         }
     }
 }
+
+/// A runtime field's sort key: keywords and ips as their text (ips by their bytes, as doc
+/// values hold them), the rest as numbers; the smallest value ascending, the largest
+/// descending.
+#[derive(Debug)]
+pub struct RuntimeKey {
+    pub ev: Arc<super::runtime::Evaluator>,
+    pub reverse: bool,
+}
+
+impl ComputedSort for RuntimeKey {
+    fn kind(&self) -> &str {
+        match self.ev.field.ty {
+            super::runtime::RtType::Keyword | super::runtime::RtType::Ip => "string",
+            _ => "number",
+        }
+    }
+
+    fn segment(&self, seg: &SegmentContext) -> search_aggs::Result<Box<dyn SegmentComputedSort>> {
+        let leaf = self.ev.leaf(seg).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))?;
+        Ok(Box::new(RuntimeLeaf { leaf, reverse: self.reverse }))
+    }
+
+    fn render_bytes(&self, b: &[u8]) -> Json {
+        match <[u8; 16]>::try_from(b) {
+            Ok(ip) if self.ev.field.ty == super::runtime::RtType::Ip => Json::Str(search_index::query::range::inet_to_string(&ip)),
+            _ => Json::Str(String::from_utf8_lossy(b).into_owned()),
+        }
+    }
+}
+
+struct RuntimeLeaf {
+    leaf: super::runtime::EvalLeaf,
+    reverse: bool,
+}
+
+impl SegmentComputedSort for RuntimeLeaf {
+    fn value(&mut self, doc: u32, _score: f32) -> SortVal {
+        use super::runtime::RtValue as V;
+        let vals = match self.leaf.values(doc) {
+            Ok(v) => v,
+            Err(e) => {
+                defer(e);
+                return SortVal::Null;
+            }
+        };
+        let mut bytes: Vec<Vec<u8>> = Vec::new();
+        let mut nums: Vec<f64> = Vec::new();
+        for v in vals {
+            match v {
+                V::Str(s) => bytes.push(s.into_bytes()),
+                V::Ip(b) => bytes.push(b.to_vec()),
+                V::Long(l) | V::Date(l) => nums.push(l as f64),
+                V::Double(d) => nums.push(d),
+                V::Bool(b) => nums.push(b as i64 as f64),
+                V::Geo(..) => {}
+            }
+        }
+        if !bytes.is_empty() {
+            let b = if self.reverse { bytes.into_iter().max() } else { bytes.into_iter().min() };
+            return b.map_or(SortVal::Null, SortVal::Bytes);
+        }
+        let n = if self.reverse { nums.into_iter().reduce(f64::max) } else { nums.into_iter().reduce(f64::min) };
+        n.map_or(SortVal::Null, SortVal::Double)
+    }
+}

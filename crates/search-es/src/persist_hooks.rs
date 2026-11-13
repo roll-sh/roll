@@ -148,7 +148,7 @@ impl Engine {
 
     /// Applies one logged operation to shard `shard` of `idx` again (recovery). The index must
     /// be open ([`Engine::open_seeded`]). Stale and duplicate operations are no-ops.
-    pub fn replay(&self, idx: &IndexMeta, shard: u32, op: &LoggedOp<'_>) -> EsResult<()> {
+    pub fn replay(&self, scripts: &crate::scripting::ScriptService, st: &crate::meta::ClusterState, idx: &IndexMeta, shard: u32, op: &LoggedOp<'_>) -> EsResult<()> {
         let Some(ie) = self.loaded(&idx.uuid) else {
             return Err(EsError::illegal_state(format!("replaying into index [{}] that isn't open", idx.name)));
         };
@@ -163,7 +163,7 @@ impl Engine {
                 let value = crate::fetch::parse_source(&src)?;
                 let mut ctx = idx.mapping_ctx();
                 ctx.join_routing = Some(routing.is_some());
-                let parsed = crate::document::parse_document(&idx.mapping, &ctx, &value, Some(&src), Some(id))?;
+                let mut parsed = crate::document::parse_document(&idx.mapping, &ctx, &value, Some(&src), Some(id))?;
                 if parsed.dynamic_update.is_some() {
                     // The mapping update an operation needed is durable before the operation is
                     // applied, so this is a lost mapping: refuse rather than drop fields.
@@ -172,6 +172,7 @@ impl Engine {
                         idx.name
                     )));
                 }
+                crate::search::index_time::apply(scripts, st, &idx.mapping, &value, &mut parsed)?;
                 let stored = crate::write::stored_source(idx, &table, &src, &value);
                 let doc = if crate::engine::tsdb::is_time_series(idx) {
                     let (gen_id, tsid, _) = crate::write::time_series_id(idx, &parsed, id, routing)?;

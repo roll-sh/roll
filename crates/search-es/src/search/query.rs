@@ -178,6 +178,20 @@ impl<'a> QueryCtx<'a> {
         super::runtime::RuntimeFields::of_index(&self.idx.mapping, self.runtime_mappings.as_ref()).ok()?.get(name).cloned()
     }
 
+    /// Runtime fields matching a field pattern, but `geo_point` ones (no text search), sorted.
+    pub fn runtime_matching(&self, pattern: &str) -> Vec<String> {
+        if self.idx.mapping.runtime.is_empty() && self.runtime_mappings.as_ref().is_none_or(|r| r.is_empty()) {
+            return Vec::new();
+        }
+        let keep = |rt: &super::runtime::RuntimeFields| rt.matching(pattern).into_iter().filter(|n| rt.get(n).is_some_and(|f| f.ty != super::runtime::RtType::GeoPoint)).collect();
+        if let Some(scope) = super::runtime::RuntimeScope::ambient()
+            && scope.index_name() == self.idx.name
+        {
+            return keep(scope.fields());
+        }
+        super::runtime::RuntimeFields::of_index(&self.idx.mapping, self.runtime_mappings.as_ref()).map(|rt| keep(&rt)).unwrap_or_default()
+    }
+
     /// A query over runtime field values (`AbstractScriptFieldQuery`, constant scoring).
     pub(crate) fn runtime_query(&self, f: Arc<super::runtime::RtField>, pred: super::runtime::Predicate) -> EsResult<QueryRef> {
         if !self.allow_expensive {

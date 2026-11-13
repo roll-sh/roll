@@ -867,6 +867,7 @@ impl ClusterData {
             let r = {
                 let (failed, records) = (&mut failed, &mut records);
                 let engine = &cluster.engine;
+                let state = cluster.state();
                 let id = &st.id;
                 self.store
                     .replay(&mut rec, &mut |r| {
@@ -875,7 +876,7 @@ impl ClusterData {
                         // Uncommitted, so in the translog again (`translog` stats), as after
                         // an Elasticsearch translog recovery.
                         se.logged(&op);
-                        if let Err(e) = engine.replay(idx, n, &op) {
+                        if let Err(e) = engine.replay(&cluster.scripts, &state, idx, n, &op) {
                             // The operation was accepted once; refusing it now means the shard
                             // changed under it. Keep the rest of the history.
                             tracing::error!(shard = %id, seq_no = op.seq_no(), error = %e.reason(), "replaying an operation failed");

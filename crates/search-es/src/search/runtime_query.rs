@@ -328,7 +328,10 @@ impl QueryCtx<'_> {
                 let m = MultiTermQuery::fuzzy(u32::MAX, &term, edits, z.prefix_length.max(0) as usize, z.max_expansions.max(1) as usize, z.transpositions);
                 Some(Predicate::Automaton(Arc::new(m), format!("{term}~{edits}")))
             }
-            Q::Match(m) => return self.runtime_match(f, &m.query, super::text::MatchType::Boolean, false).map(Some),
+            Q::Match(m) => {
+                let o = super::text::MatchOpts { operator: m.operator, analyzer: m.analyzer.as_deref(), ..Default::default() };
+                return self.runtime_match(f, &m.query, super::text::MatchType::Boolean, &o, "match").map(Some);
+            }
             _ => return Ok(None),
         };
         self.predicate_query(f, pred).map(Some)
@@ -353,17 +356,42 @@ impl QueryCtx<'_> {
     }
 
     /// A `match`-family query on a runtime field: the field has no analysis, so the text is
-    /// one term (a phrase of one token is that term); phrase prefixes need text fields.
-    pub(crate) fn runtime_match(&self, f: Arc<RtField>, value: &Value, ty: super::text::MatchType, lenient: bool) -> EsResult<QueryRef> {
+    /// one term (a phrase of one token is that term); phrase prefixes need text fields. A
+    /// query's own `analyzer` splits a keyword field's text into terms (`MatchQueryParser`
+    /// analyzes with it, then asks the field for a term query per token).
+    pub(crate) fn runtime_match(&self, f: Arc<RtField>, value: &Value, ty: super::text::MatchType, o: &super::text::MatchOpts, query_name: &str) -> EsResult<QueryRef> {
         use super::text::MatchType;
-        let r = match ty {
-            MatchType::PhrasePrefix => Err(unsupported(&f, "phrase prefix", "text")),
-            MatchType::BooleanPrefix => self.runtime_prefix(f.clone(), &value_text(value), false),
-            MatchType::Boolean | MatchType::Phrase => terms_predicate(self, &f, std::slice::from_ref(value), false).and_then(|p| self.predicate_query(f.clone(), p)),
+        let r = match (ty, o.analyzer) {
+            (MatchType::PhrasePrefix, _) => Err(unsupported(&f, "phrase prefix", "text")),
+            (MatchType::BooleanPrefix, _) => self.runtime_prefix(f.clone(), &value_text(value), false),
+            (MatchType::Boolean, Some(name)) if f.ty == RtType::Keyword => self.runtime_analyzed(f.clone(), &value_text(value), name, o, query_name),
+            (MatchType::Boolean | MatchType::Phrase, _) => terms_predicate(self, &f, std::slice::from_ref(value), false).and_then(|p| self.predicate_query(f.clone(), p)),
         };
         match r {
-            Err(e) if lenient => Ok(super::text::lenient_none(&f.name, &e)),
+            Err(e) if o.lenient => Ok(super::text::lenient_none(&f.name, &e)),
             r => r,
+        }
+    }
+}
+
+impl QueryCtx<'_> {
+    /// A boolean `match` on keyword runtime field `f` with the query's `analyzer`: a term per
+    /// token, any (`or`) or all (`and`) of them; no tokens match nothing.
+    fn runtime_analyzed(&self, f: Arc<RtField>, text: &str, analyzer: &str, o: &super::text::MatchOpts, query_name: &str) -> EsResult<QueryRef> {
+        let a = super::text::named_analyzer(self, analyzer, query_name)?;
+        let mut terms: Vec<RtValue> = super::text::analyze(&a, text).into_iter().map(|t| RtValue::Str(t.term)).collect();
+        terms.dedup();
+        match terms.len() {
+            0 => Ok(match_none("no tokens")),
+            1 => self.runtime_query(f, Predicate::Terms(terms)),
+            _ if o.operator == crate::query::full_text::Operator::And => {
+                let mut b = search_index::query::BooleanQuery::new();
+                for t in terms {
+                    b = b.add(search_index::query::Occur::Must, self.runtime_query(f.clone(), Predicate::Terms(vec![t]))?);
+                }
+                Ok(super::query::arc(b))
+            }
+            _ => self.runtime_query(f, Predicate::Terms(terms)),
         }
     }
 }

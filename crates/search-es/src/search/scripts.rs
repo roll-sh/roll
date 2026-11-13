@@ -837,6 +837,35 @@ impl Host for DocHost {
         (self.seg.base + self.doc) as i32
     }
 
+    /// `params._fields[field]` (`LeafStoredFieldsLookup`): the document's stored values of a
+    /// mapped field (none when it isn't stored).
+    fn stored_field(&mut self, field: &str) -> Result<Option<Vec<search_painless::Value>>, HostError> {
+        use search_codec::stored::OwnedStoredValue as S;
+        use search_painless::Value as P;
+        let Some(f) = self.table.get(field) else { return Ok(None) };
+        if !f.store {
+            return Ok(Some(Vec::new()));
+        }
+        self.seg.ensure_stored().map_err(|e| HostError::illegal_argument(e.to_string()))?;
+        let stored = self.seg.reader.stored().document(self.doc).map_err(|e| HostError::illegal_argument(e.to_string()))?;
+        let vals = stored
+            .iter()
+            .filter(|(n, _)| *n == f.number)
+            .map(|(_, v)| match (f.kind, v) {
+                (Kind::Boolean, S::Str(s)) => P::Bool(s == "T"),
+                (Kind::Date, S::Long(ms)) => search_painless::value::zoned_date_time_millis(*ms),
+                (Kind::Ip, S::Bytes(b)) if b.len() == 16 => P::str(&search_index::query::range::inet_to_string(b)),
+                (_, S::Str(s)) => P::str(s),
+                (_, S::Int(i)) => P::Int(*i),
+                (_, S::Long(l)) => P::Long(*l),
+                (_, S::Float(x)) => P::Float(*x),
+                (_, S::Double(x)) => P::Double(*x),
+                (_, S::Bytes(b)) => P::str(&String::from_utf8_lossy(b)),
+            })
+            .collect();
+        Ok(Some(vals))
+    }
+
     fn shard(&mut self) -> (i32, String) {
         (self.shard, self.index.clone())
     }

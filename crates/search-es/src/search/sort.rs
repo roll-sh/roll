@@ -1049,6 +1049,15 @@ pub fn geo_distance(ctx: &QueryCtx, m: &crate::json::Map) -> EsResult<(SortKey, 
         }
     }
     let Some((name, points)) = field else { return Err(EsError::illegal_argument("_geo_distance sort requires a field")) };
+    if let Some(rf) = ctx.runtime_field(&name).filter(|f| f.ty == super::runtime::RtType::GeoPoint) {
+        let mode = match mode.as_deref() {
+            None => None,
+            Some("sum") => return Err(EsError::illegal_argument("sort_mode [sum] isn't supported for sorting by geo distance")),
+            Some(m) => Some(mode_of(Some(m), reverse, true)?),
+        };
+        let ev = super::runtime::Evaluator::new(&ctx.cluster.scripts, ctx.st, ctx.table, ctx.shard as i32, &ctx.idx.name, rf)?.counted();
+        return Ok((super::runtime_geo::sort_key(Arc::new(ev), points, dtype, unit, reverse, mode), name));
+    }
     let f = match ctx.field(&name) {
         Some(f) => f,
         None if ignore_unmapped => {

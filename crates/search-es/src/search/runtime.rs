@@ -51,7 +51,7 @@ impl RtType {
         })
     }
 
-    fn context(self) -> search_painless::Context {
+    pub(crate) fn context(self) -> search_painless::Context {
         use search_painless::Context as C;
         match self {
             RtType::Keyword => C::KeywordField,
@@ -204,7 +204,7 @@ pub fn check_mapping_scripts(scripts: &crate::scripting::ScriptService, st: &cra
 }
 
 /// `strict_date_optional_time||epoch_millis`, shared by the runtime fields without a format.
-fn default_format() -> Arc<crate::time::DateFormatter> {
+pub(crate) fn default_format() -> Arc<crate::time::DateFormatter> {
     static DEFAULT: std::sync::OnceLock<Arc<crate::time::DateFormatter>> = std::sync::OnceLock::new();
     DEFAULT.get_or_init(|| Arc::new(crate::time::DateFormatter::new(crate::time::DateFormatter::DEFAULT).expect("the default date format parses"))).clone()
 }
@@ -284,10 +284,15 @@ impl RtValue {
             _ => None,
         }
     }
+
+    /// [`RtValue::cmp`], values of different types as equal (for sorting one field's values).
+    pub(crate) fn partial_cmp_same(&self, other: &RtValue) -> std::cmp::Ordering {
+        self.cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+    }
 }
 
 /// A painless value as a runtime field value of `ty`.
-fn from_painless(ty: RtType, v: &search_painless::Value, out: &mut Vec<RtValue>) {
+pub(crate) fn from_painless(ty: RtType, v: &search_painless::Value, out: &mut Vec<RtValue>) {
     let j = v.to_json();
     from_json_value(ty, &crate::scripting::from_serde(&j), out);
 }
@@ -295,7 +300,11 @@ fn from_painless(ty: RtType, v: &search_painless::Value, out: &mut Vec<RtValue>)
 /// A (script or `_source`) value parsed as the field type parses it; unparsable values are
 /// skipped (`on_script_error` aside, that is what runtime fields reading `_source` do).
 fn from_json_value(ty: RtType, v: &Value, out: &mut Vec<RtValue>) {
-    if let Value::Arr(a) = v {
+    // A geo point may be a `[lon, lat]` array (`GeoPointFieldScript`'s source parsing).
+    let point_array = ty == RtType::GeoPoint && matches!(v, Value::Arr(a) if a.first().is_some_and(|x| matches!(x, Value::Num(_))));
+    if let Value::Arr(a) = v
+        && !point_array
+    {
         for x in a {
             from_json_value(ty, x, out);
         }
@@ -344,6 +353,12 @@ pub struct Evaluator {
     /// Whether the script runs as a search runs it (no loop statement limit, polling the
     /// search's deadline); off for the `_execute` API.
     pub cancellable: bool,
+}
+
+impl std::fmt::Debug for Evaluator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Evaluator({})", self.field.name)
+    }
 }
 
 impl Evaluator {
@@ -670,7 +685,11 @@ impl EvalLeaf {
                     let src = crate::fetch::parse_source(b)?;
                     if let Value::Obj(m) = &src {
                         let mut raw = Vec::new();
-                        crate::engine::source::extract_values(m, &f.name, &mut raw);
+                        if f.ty == RtType::GeoPoint {
+                            crate::engine::source::extract_values_keeping_coordinates(m, &f.name, &mut raw);
+                        } else {
+                            crate::engine::source::extract_values(m, &f.name, &mut raw);
+                        }
                         for v in raw {
                             from_json_value(f.ty, v, &mut out);
                         }
@@ -739,6 +758,8 @@ pub enum Predicate {
     Ips(Vec<([u8; 16], [u8; 16])>),
     /// Boolean values: which of `true` / `false` match (`BooleanScriptFieldTermQuery`).
     Bool(bool),
+    /// Geo points related to geometries (`GeoPointScriptFieldGeoShapeQuery`).
+    Geo(super::runtime_geo::GeoPredicate),
 }
 
 impl Predicate {
@@ -760,6 +781,7 @@ impl Predicate {
             Predicate::PrefixIgnoreCase(p) => format!("{}:{p}*", f.name),
             Predicate::Automaton(_, d) => format!("{}:{d}", f.name),
             Predicate::Bool(b) => format!("{}:{b}", f.name),
+            Predicate::Geo(g) => g.describe(&f.name),
             Predicate::Ips(rs) => {
                 let ip = search_index::query::range::inet_to_string;
                 let one = |(lo, hi): &([u8; 16], [u8; 16])| if lo == hi { ip(lo) } else { format!("[{} TO {}]", ip(lo), ip(hi)) };
@@ -813,6 +835,7 @@ impl Predicate {
             Predicate::Automaton(q, _) => values.iter().any(|v| matches!(v, RtValue::Str(s) if q.matches_term(s.as_bytes()))),
             Predicate::Ips(rs) => values.iter().any(|v| matches!(v, RtValue::Ip(b) if rs.iter().any(|(lo, hi)| b >= lo && b <= hi))),
             Predicate::Bool(want) => values.iter().any(|v| matches!(v, RtValue::Bool(b) if b == want)),
+            Predicate::Geo(g) => g.matches(values),
             Predicate::Range { lo, hi, include_lower, include_upper } => values.iter().any(|v| {
                 let lo_ok = lo.as_ref().is_none_or(|l| match v.cmp(l) {
                     Some(Ordering::Greater) => true,

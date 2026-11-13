@@ -502,11 +502,12 @@ pub async fn prepare(cluster: &Cluster, idx: Arc<IndexMeta>, id: &str, routing: 
         let mut ctx = idx.mapping_ctx();
         ctx.requested_templates = requested.clone();
         ctx.join_routing = Some(routing.is_some());
-        let parsed = crate::document::parse_document(&idx.mapping, &ctx, value, Some(source), Some(id))?;
+        let mut parsed = crate::document::parse_document(&idx.mapping, &ctx, value, Some(source), Some(id))?;
         if let Some(update) = parsed.dynamic_update {
             idx = apply_dynamic_update(cluster, &idx, update).await?;
             continue;
         }
+        crate::search::index_time::apply(&cluster.scripts, &st, &idx.mapping, value, &mut parsed)?;
         // `dense_vector` fields without `dims` take them from their first vector.
         let mut dims: Vec<(String, i64)> = Vec::new();
         for f in parsed.fields.iter().chain(parsed.nested.iter().flat_map(|n| n.fields.iter())) {
@@ -1011,7 +1012,8 @@ pub fn copy_docs(cluster: &Cluster, searchers: &[search_index::Searcher], dst: &
             let routing = crate::fetch::routing(&stored);
             let source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice).unwrap_or_else(|| Bytes::from_static(b"{}"));
             let value = crate::fetch::parse_source(&source)?;
-            let parsed = crate::document::parse_document(&dst.mapping, &ctx, &value, Some(&source), Some(&id))?;
+            let mut parsed = crate::document::parse_document(&dst.mapping, &ctx, &value, Some(&source), Some(&id))?;
+            crate::search::index_time::apply(&cluster.scripts, &cluster.state(), &dst.mapping, &value, &mut parsed)?;
             // Time series documents keep their `_tsid` and the routing hash their `_id` starts
             // with (`_ts_routing_hash`).
             let ts = crate::engine::tsdb::is_time_series(dst).then(|| {

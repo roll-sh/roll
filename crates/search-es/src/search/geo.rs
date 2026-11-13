@@ -171,6 +171,15 @@ fn indexed_shape(ctx: &QueryCtx, id: &str, index: Option<&str>, path: Option<&st
 
 /// `geo_shape`.
 pub fn geo_shape_query(ctx: &QueryCtx, g: &crate::query::geo::GeoShape) -> EsResult<QueryRef> {
+    if let Some(rf) = ctx.runtime_field(&g.field).filter(|f| f.ty == super::runtime::RtType::GeoPoint) {
+        let geom = match &g.shape {
+            crate::query::geo::ShapeSource::Inline(geo) => geo.clone(),
+            crate::query::geo::ShapeSource::Indexed { id, index, path, routing } => indexed_shape(ctx, id, index.as_deref(), path.as_deref(), routing.as_deref())?,
+        };
+        let mut shapes = Vec::new();
+        point_shapes(&geom, &mut shapes)?;
+        return super::runtime_geo::shape_query(ctx, rf, rel(g.relation), &shapes);
+    }
     let Some(f) = ctx.field(&g.field) else {
         if g.ignore_unmapped {
             return Ok(match_none("unmapped"));

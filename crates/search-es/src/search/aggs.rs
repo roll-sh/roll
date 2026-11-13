@@ -556,6 +556,16 @@ impl Lookup<'_> {
     /// A sort's `nested` object (`NestedSortBuilder`): the innermost level's path docs
     /// (with its `filter`) as children, its parent level's docs as parents.
     /// A `_script` or `_geo_distance` key of a `top_hits` / `top_metrics` sort.
+    /// A hit sort on a runtime field (it shadows a mapped field of the name).
+    fn runtime_sort(&self, field: &str, reverse: bool) -> search_aggs::Result<Option<search_aggs::HitSort>> {
+        let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        let rf = super::runtime::RuntimeScope::ambient().filter(|s| s.index_name() == self.idx.name).and_then(|s| s.field(field).cloned()).or_else(|| ctx.runtime_field(field));
+        let Some(rf) = rf.filter(|f| f.ty != super::runtime::RtType::GeoPoint) else { return Ok(None) };
+        let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, &self.table, self.shard.0 as i32, &self.idx.name, rf).map_err(err)?.counted();
+        Ok(Some(search_aggs::HitSort::Computed { sort: Arc::new(super::computed_sort::RuntimeKey { ev: Arc::new(ev), reverse }), reverse }))
+    }
+
     fn computed_sort(&self, item: &Json) -> search_aggs::Result<search_aggs::HitSort> {
         let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
         let sorts = crate::search_source::parse_sorts_value(&from_json(item)).map_err(err)?;
@@ -859,6 +869,10 @@ impl FieldLookup for Lookup<'_> {
                 "_doc" => out.push(HitSort::Doc { reverse }),
                 "_script" | "_geo_distance" | "_geoDistance" => out.push(self.computed_sort(&it)?),
                 field => {
+                    if let Some(key) = self.runtime_sort(field, reverse)? {
+                        out.push(key);
+                        continue;
+                    }
                     let Some(f) = self.field(field)? else {
                         return Err(search_aggs::AggError::new(400, "query_shard_exception", format!("No mapping found for [{field}] in order to sort on")));
                     };

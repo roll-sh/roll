@@ -188,7 +188,8 @@ fn plain_index(st: &crate::meta::ClusterState, idx: &IndexMeta, request_pipeline
 fn prepare_one(t: &Target, ctx: &mut crate::mapping::MappingCtx, id: &str, routing: Option<&str>, source: &bytes::Bytes) -> Option<Prepared> {
     let (engine, idx) = (&t.engine, &t.idx);
     let table = engine.table();
-    if table.key.0 < idx.mapping_version {
+    // Index-time scripts run in the sequential path.
+    if table.key.0 < idx.mapping_version || crate::search::index_time::has_scripts(&idx.mapping) {
         return None;
     }
     // Plain documents of a plain mapping go from bytes to fields directly (`document::fast`);

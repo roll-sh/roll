@@ -24,6 +24,7 @@ pub mod geo;
 pub mod highlight;
 pub mod hits;
 pub mod id_fielddata;
+pub mod index_time;
 pub mod ids;
 pub mod inner;
 pub mod fusion;
@@ -32,6 +33,7 @@ pub mod knn;
 pub mod kql;
 pub mod retriever;
 pub mod runtime;
+pub mod runtime_geo;
 pub mod runtime_query;
 pub mod misc;
 pub mod painless_execute;
@@ -3048,7 +3050,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     }
     let score = if h.sort.is_empty() || src.track_scores || src.sort.iter().any(|s| matches!(s, Sort::Score { .. })) { Some(h.score) } else { None };
     hits::render_doc_stored(&table, Some(&t.idx), &r.searcher, h.doc, &stored, opts, &mut m, score, req.now_ms)?;
-    if (!src.fields.is_empty() || !src.docvalue_fields.is_empty()) && (src.runtime_mappings.is_some() || !t.idx.mapping.runtime.is_empty()) {
+    if (!src.fields.is_empty() || !src.docvalue_fields.is_empty()) && (src.runtime_mappings.is_some() || !t.idx.mapping.runtime.is_empty() || (!src.fields.is_empty() && index_time::has_scripts(&t.idx.mapping))) {
         runtime_fields_of_hit(cluster, st, src, t, &table, &r.searcher, h.doc, &mut m)?;
     }
     if !src.script_fields.is_empty() {
@@ -3303,7 +3305,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
     let table = t.engine.table();
     let src = &req.source;
     let nested = m.contains_key("_nested");
-    if !nested && mk.get("parent_fields").is_some() && !src.fields.is_empty() && (src.runtime_mappings.is_some() || !t.idx.mapping.runtime.is_empty()) {
+    if !nested && mk.get("parent_fields").is_some() && !src.fields.is_empty() && (src.runtime_mappings.is_some() || !t.idx.mapping.runtime.is_empty() || index_time::has_scripts(&t.idx.mapping)) {
         runtime_fields_of_hit(cluster, st, src, t, &table, &r.searcher, doc, m)?;
     }
     if let Some(Value::Obj(spec)) = mk.get("script_fields") {
@@ -3380,8 +3382,8 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
         Some(s) => Some(s),
         None => runtime::RuntimeScope::build(&cluster.scripts, cluster.state(), &t.idx, table, shard, src.runtime_mappings.as_ref())?,
     };
-    let _ = st;
-    if scope.is_none() && !has_lookup {
+    let index_scripts = index_time::of(&t.idx.mapping);
+    if scope.is_none() && !has_lookup && index_scripts.fields.is_empty() {
         return Ok(());
     }
     let Some((seg, local)) = searcher.segment_of(doc) else { return Ok(()) };
@@ -3408,6 +3410,21 @@ fn runtime_fields_of_hit(cluster: &Cluster, st: &ClusterState, src: &SearchSourc
                     continue;
                 }
                 out.insert(name, Value::Arr(runtime::render(&ev.field, &vals, spec.format.as_deref())?));
+            }
+        }
+    }
+    // Index-time script fields: `fields` runs the script again (`FieldValues.valueFetcher`),
+    // values in emission order.
+    for spec in &src.fields {
+        for f in &index_scripts.fields {
+            let hit = if spec.field.contains('*') { crate::xcontent::filter::glob_match(&spec.field, &f.name) } else { spec.field == f.name };
+            if !hit || out.contains_key(&f.name) || scope.as_ref().is_some_and(|s| s.shadows(&f.name)) {
+                continue;
+            }
+            let ev = runtime::Evaluator::new(&cluster.scripts, st, table, shard, &t.idx.name, f.clone())?.counted();
+            let vals = index_time::fetch_values(&ev, seg, local)?;
+            if !vals.is_empty() {
+                out.insert(f.name.clone(), Value::Arr(runtime::render(f, &vals, spec.format.as_deref())?));
             }
         }
     }

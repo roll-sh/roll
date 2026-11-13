@@ -315,6 +315,11 @@ fn decay(ctx: &QueryCtx, kind: &str, field: &str, body: &Value, mode: &str) -> E
 }
 
 fn distance_feature(ctx: &QueryCtx, d: &crate::query::specialized::DistanceFeature) -> EsResult<QueryRef> {
+    if let Some(rf) = geo_runtime_field(ctx, &d.field) {
+        let p = super::sort::parse_points(&d.origin)?.first().copied().ok_or_else(|| EsError::parse("illegal origin"))?;
+        let pivot = crate::query::geo::parse_distance(&d.pivot, 1.0)?;
+        return super::runtime_geo::distance_feature(ctx, rf, p.lat, p.lon, pivot);
+    }
     let Some(f) = ctx.field(&d.field) else { return Ok(match_none(&format!("unmapped field [{}]", d.field))) };
     let boost = 1.0;
     match f.kind {
@@ -623,7 +628,16 @@ fn geo_point_field(ctx: &QueryCtx, field: &str, ignore_unmapped: bool, query: &s
     }
 }
 
+/// A `geo_point` runtime field named `field` (it shadows a mapped field of the name).
+fn geo_runtime_field(ctx: &QueryCtx, field: &str) -> Option<Arc<super::runtime::RtField>> {
+    ctx.runtime_field(field).filter(|f| f.ty == super::runtime::RtType::GeoPoint)
+}
+
 fn geo_distance(ctx: &QueryCtx, g: &crate::query::geo::GeoDistance) -> EsResult<QueryRef> {
+    if let Some(rf) = geo_runtime_field(ctx, &g.field) {
+        let shape = search_index::query::GeoShape::Circle { lat: g.center.lat, lon: g.center.lon, radius: g.distance };
+        return super::runtime_geo::shape_query(ctx, rf, search_index::query::ShapeRelation::Intersects, &[shape]);
+    }
     let Some(f) = geo_point_field(ctx, &g.field, g.ignore_unmapped, "geo_distance")? else { return Ok(match_none("unmapped")) };
     if f.kind == Kind::GeoShape {
         let geom = vec![search_index::query::shape::QueryGeometry::Circle { lat: g.center.lat, lon: g.center.lon, radius: g.distance }];
@@ -634,6 +648,10 @@ fn geo_distance(ctx: &QueryCtx, g: &crate::query::geo::GeoDistance) -> EsResult<
 }
 
 fn geo_bbox(ctx: &QueryCtx, g: &crate::query::geo::GeoBoundingBox) -> EsResult<QueryRef> {
+    if let Some(rf) = geo_runtime_field(ctx, &g.field) {
+        let shape = search_index::query::GeoShape::Rectangle(g.bottom, g.top, g.left, g.right);
+        return super::runtime_geo::shape_query(ctx, rf, search_index::query::ShapeRelation::Intersects, &[shape]);
+    }
     let Some(f) = geo_point_field(ctx, &g.field, g.ignore_unmapped, "geo_bounding_box")? else { return Ok(match_none("unmapped")) };
     // Quantized to the index encoding first, as Elasticsearch does (see `geo::point_query`).
     let mut g = g.clone();
