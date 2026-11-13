@@ -649,6 +649,37 @@ impl Access {
     /// can't sign in any more gets none. Left out of the token list and the checkup, outside the
     /// tokens' caps, and pruned a day after it ends; what it does is audited as any token's, and
     /// each mint is a row.
+    /// Stop a workload token now (its identity deleted or changed): only a workload grant, with
+    /// why, and an audit row. Whether it was live; an unknown or other grant is left alone.
+    pub fn revoke_workload(&self, id: &str, why: &str) -> Result<bool> {
+        let why: String = plain(why).chars().take(200).collect();
+        let revoked = self.store.revoke_workload(id, &why)?;
+        if revoked {
+            let g = self.store.get(id).ok();
+            self.store.audit(&store::AuditEvent {
+                id: new_id("aud"),
+                at: code_sql::now_ms(),
+                grant_id: Some(id.to_string()),
+                grant_name: g.map(|g| g.name),
+                source: "workload".into(),
+                tool: None,
+                method: "-".into(),
+                route: "revoked".into(),
+                product: Some("access".into()),
+                action: Some("write".into()),
+                resource: Some(why),
+                decision: "revoke".into(),
+                approval: None,
+                status: 200,
+                args: None,
+                ip: None,
+                duration_ms: 0,
+                client: None,
+            });
+        }
+        Ok(revoked)
+    }
+
     pub async fn mint_workload(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>) -> Result<(store::Grant, String)> {
         if !within.covers(&new.rules) {
             return Err(Error::Forbidden("a workload's rules must be within its identity's".into()));
