@@ -1,6 +1,6 @@
 import { Hand } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { accessApi, productName, RISKY, type Approval } from "@/lib/access-api";
+import { accessApi, approvalWhere, productName, RISKY, type Approval } from "@/lib/access-api";
 import { Link } from "../link";
 import { usePending } from "./use-access";
 
@@ -93,7 +93,7 @@ function Waiting({ a, onDecided }: { a: Approval; onDecided: () => void }) {
   const risky = RISKY.includes(a.action);
   // A request that carries a body (a bulk, a push's refs, a copy) is reviewed on its page first.
   const review = a.args !== null && a.args !== undefined;
-  const where = [a.environment, a.scope_path && a.scope_path !== "/" ? a.scope_path : null].filter(Boolean).join(" · ");
+  const where = approvalWhere(a);
   return (
     <li className="space-y-1.5 px-3 py-2.5 text-[12px]">
       <p className="text-muted">
