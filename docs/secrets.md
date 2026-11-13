@@ -265,6 +265,8 @@ naming the key and the rule (`PORT must be a port (1–65535)`), never the value
 reference is checked once resolved: reading the environment's values reports `PORT must be a port`
 as a problem, so `roll run` won't start with it. A rollback restores what was there, typed or not.
 Edit them in Environments → Required keys, or `roll secrets required add PORT --type port`.
+A type added after values exist doesn't change them: the overview grid marks each stored value
+that doesn't fit (`misfit` on its cell, the rule it breaks), for a caller who may reveal it.
 
 ### Insights
 
@@ -923,7 +925,7 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
-type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean };
+type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
@@ -1019,7 +1021,7 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **Typed keys in the grid**: a typed key's cell shows when a value doesn't fit (from the
-   resolved check, without revealing it), and the add-secret form validates as you type.
+4. **Typed keys as you type**: the add and edit forms check a typed key's value before saving
+   (the same rules in TypeScript), so the 400 is never the first sign.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

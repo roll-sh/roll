@@ -134,6 +134,10 @@ pub struct Cell {
     pub source: &'static str,
     pub comment: bool,
     pub personal: bool,
+    /// The typed-key rule its stored value breaks (`PORT must be a port (1–65535)`), for a caller
+    /// who may reveal it; a value with a reference is checked when it's resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub misfit: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -479,7 +483,9 @@ impl Secrets {
         for v in &views {
             keys.extend(v.iter().map(|e| e.row.key.clone()));
         }
-        let required: BTreeSet<String> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path).map(|r| r.key).collect();
+        let all_required: Vec<crate::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path).collect();
+        let required: BTreeSet<String> = all_required.iter().map(|r| r.key.clone()).collect();
+        let typed: HashMap<&str, &crate::Required> = all_required.iter().filter(|r| r.kind.is_some() || r.pattern.is_some()).map(|r| (r.key.as_str(), r)).collect();
         // Each environment's entries by key: a row looks each environment up once, not by scanning.
         let by_key: Vec<HashMap<&str, &Entry>> = views.iter().map(|v| v.iter().map(|e| (e.row.key.as_str(), e)).collect()).collect();
         keys.extend(required.iter().cloned());
@@ -493,19 +499,30 @@ impl Secrets {
                 for (env, view) in envs.iter().zip(&by_key) {
                     let found = view.get(key.as_str()).copied();
                     fps.push(found.map(|e| e.row.fp.as_str()));
-                    let cell = found.map(|e| Cell {
-                        fp: if caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path)) { e.row.fp.clone() } else { String::new() },
-                        version: e.row.version,
-                        updated_at: e.row.updated_at,
-                        link: e.row.link.clone(),
-                        reference: !e.row.references(&dek, project).is_empty(),
-                        source: match e.source {
-                            Source::Own => "own",
-                            Source::Import { .. } => "import",
-                            Source::Base { .. } => "base",
-                        },
-                        comment: !e.row.comment.is_empty(),
-                        personal: !e.row.owner.is_empty(),
+                    let cell = found.map(|e| {
+                        let reveal = caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
+                        let refs = e.row.references(&dek, project);
+                        let misfit = match (typed.get(key.as_str()), &e.row.value) {
+                            (Some(r), Some(ct)) if reveal && e.row.link.is_none() && refs.is_empty() => {
+                                dek.open(&value_aad(project, &e.row.id, e.row.version), ct).ok().and_then(|v| r.misfit(v.expose()))
+                            }
+                            _ => None,
+                        };
+                        Cell {
+                            fp: if reveal { e.row.fp.clone() } else { String::new() },
+                            version: e.row.version,
+                            updated_at: e.row.updated_at,
+                            link: e.row.link.clone(),
+                            reference: !refs.is_empty(),
+                            source: match e.source {
+                                Source::Own => "own",
+                                Source::Import { .. } => "import",
+                                Source::Base { .. } => "base",
+                            },
+                            comment: !e.row.comment.is_empty(),
+                            personal: !e.row.owner.is_empty(),
+                            misfit,
+                        }
                     });
                     cells.insert(env.slug.clone(), cell);
                 }

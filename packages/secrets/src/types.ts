@@ -82,7 +82,8 @@ export type Problem = { key: string; problem: string };
 /** `dynamic`: the keys holding a dynamic link's short-lived credential. */
 export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[] };
 export type CellSource = "own" | "import" | "base";
-export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean };
+/** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
+export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string };
 export type RowStatus = "same" | "different" | "missing";
 export type GridRow = { key: string; cells: Record<string, Cell | null>; status: RowStatus };
 export type Grid = { path: string; environments: string[]; rows: GridRow[]; folders: string[]; previews: number };

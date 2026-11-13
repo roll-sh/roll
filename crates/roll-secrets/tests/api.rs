@@ -392,6 +392,11 @@ async fn the_grid_flags_differences_and_promote_copies_them() {
     api.set("development", "PORT", "${WRONG}").await;
     let problems = api.values("development", "/").await["problems"].clone();
     assert!(problems.as_array().unwrap().iter().any(|p| p["key"] == "PORT" && p["problem"] == "PORT must be a port (1–65535)"), "{problems}");
+    // A type added after the values: the grid says which don't fit, to whoever may reveal them.
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "SAME_OR_NOT", "type": "int" }]))).await;
+    let grid = api.ok(Method::GET, "/grid", None).await;
+    let row = grid["rows"].as_array().unwrap().iter().find(|r| r["key"] == "SAME_OR_NOT").unwrap().clone();
+    assert_eq!(row["cells"]["production"]["misfit"], "SAME_OR_NOT must be an integer");
 }
 
 #[tokio::test]
