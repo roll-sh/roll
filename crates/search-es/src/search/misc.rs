@@ -243,6 +243,9 @@ pub async fn msearch_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 Some(Value::Arr(a)) => a.iter().map(|v| v.to_es_string()).collect(),
                 _ => default_index.as_deref().map(crate::meta::resolve::split_expressions).unwrap_or_default(),
             };
+            if let Some(n) = crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts)? {
+                req.indices = n;
+            }
             let out = run(ctx, req.clone())?;
             let mut v = render(&out, &req);
             if let Value::Obj(m) = &mut v {

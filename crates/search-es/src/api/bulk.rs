@@ -240,6 +240,7 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .zip(&auto)
         .map(|(it, &a)| if a { Some(crate::meta::names::time_based_id()) } else { it.args.id.clone() })
         .collect();
+    let denied = authorize_items(ctx, &items, &ids);
     let mut ahead = super::bulk_ahead::Ahead::new(ctx.cluster, &items, &ids);
     // Index items with a document prepared ahead are applied with the other items of their
     // shard, the shards in parallel (Elasticsearch's shard-level bulk requests); every other
@@ -247,6 +248,11 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut slots: Vec<Option<Slot>> = (0..items.len()).map(|_| None).collect();
     let mut queued: Queue = Vec::new();
     for (i, it) in items.iter().enumerate() {
+        if let Some(e) = denied.get(i).cloned().flatten() {
+            let name = it.index.clone().unwrap_or_default();
+            slots[i] = Some(Slot::Done(Err(Box::new((e, crate::meta::resolve::resolve_date_math(&name, ctx.now_ms).unwrap_or(name), ids[i].clone(), None)))));
+            continue;
+        }
         if !ahead.has(i) {
             apply_queued(&mut queued, &mut slots);
         }
@@ -348,6 +354,32 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     resp.insert("items".into(), crate::json::raw::from_buffer(out_items));
     Reply::ok(Value::Obj(resp))
+}
+
+/// The security checks of every item (`security::authorize_writes`): the error of each denied
+/// one. Nothing to check (empty) for a principal that skips authorization.
+fn authorize_items(ctx: &Ctx, items: &[Item], ids: &[Option<String>]) -> Vec<Option<EsError>> {
+    use crate::xpack::security::{self, WriteItem, WriteOp};
+    if !security::checks_items(ctx) {
+        return Vec::new();
+    }
+    let st = ctx.state();
+    let writes: Vec<WriteItem> = items
+        .iter()
+        .zip(ids)
+        .map(|(it, id)| {
+            let expr = it.index.as_deref().unwrap_or_default();
+            let name = crate::meta::resolve::resolve_date_math(expr, ctx.now_ms).unwrap_or_else(|_| expr.to_string());
+            let op = match it.action {
+                Action::Index => WriteOp::Index,
+                Action::Create => WriteOp::Create,
+                Action::Update => WriteOp::Update,
+                Action::Delete => WriteOp::Delete,
+            };
+            WriteItem::new(&st, name, op, id.as_deref().unwrap_or_default(), it.args.routing.as_deref())
+        })
+        .collect();
+    security::authorize_writes(ctx, &writes)
 }
 
 fn insert_after(m: &mut Map, after: &str, key: &str, v: Value) {

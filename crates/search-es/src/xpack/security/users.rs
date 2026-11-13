@@ -151,6 +151,22 @@ pub fn authenticate_password(cluster: &Cluster, user: &str, password: &str) -> O
     check_password(cluster, user, password, hash).then(|| principal_of(u, "default_native", "native"))
 }
 
+/// The enabled user `name` of the file, reserved or native realm, without its credentials
+/// (the target of a run-as).
+pub fn lookup_user(cluster: &Cluster, name: &str) -> Option<Principal> {
+    if let Some((_, roles)) = file_user(cluster, name) {
+        let u = obj! { "username" => name, "roles" => Value::Arr(roles.into_iter().map(Value::from).collect()), "metadata" => obj! {} };
+        return Some(principal_of(&u, "default_file", "file"));
+    }
+    let st = cluster.state();
+    if let Some(r) = reserved_user(name) {
+        let enabled = st.metadata.xpack.get(RESERVED, name).and_then(|o| o.get("enabled")).and_then(Value::as_bool) != Some(false);
+        return enabled.then(|| principal_of(&r, "reserved", "reserved"));
+    }
+    let u = st.metadata.xpack.get(USERS, name)?;
+    (u.get("enabled").and_then(Value::as_bool) != Some(false)).then(|| principal_of(u, "default_native", "native"))
+}
+
 /// A user as `GET _security/user` prints it.
 fn user_view(u: &Value, profile_uid: Option<Value>) -> Value {
     let mut out = Map::new();
@@ -207,6 +223,14 @@ pub async fn put_user(ctx: &Ctx<'_>) -> EsResult<Reply> {
         match k.as_str() {
             "password" => password = Some(v.to_es_string()),
             "password_hash" => hash = Some(v.to_es_string()),
+            "username" => match v {
+                Value::Str(u) if *u == name => {}
+                Value::Str(_) => return Err(EsError::illegal_argument(format!("[username] in source does not match the username provided [{name}]"))),
+                other => {
+                    let kind = if matches!(other, Value::Num(_)) { "VALUE_NUMBER" } else { other.kind_name() };
+                    return Err(EsError::parse(format!("expected field [username] to be of type string, but found [{kind}] instead")));
+                }
+            },
             "roles" | "full_name" | "email" | "metadata" | "enabled" => {}
             other => {
                 return Err(EsError::new(400, "parse_exception", format!("failed to parse add user request. unexpected field [{other}]")));
@@ -223,8 +247,7 @@ pub async fn put_user(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let new_hash = match (password, hash) {
         (Some(p), _) => Some(super::hash_password(&p)),
-        (None, Some(h)) if h.starts_with("{PBKDF2}") => Some(h),
-        (None, Some(_)) => return Err(EsError::illegal_argument("The provided password hash is not a hash or it could not be resolved to a supported hash algorithm. The supported password hash algorithms are [pbkdf2]")),
+        (None, Some(h)) => Some(accept_hash(h)?),
         (None, None) => None,
     };
     let roles = strs(m.get("roles"));
@@ -336,6 +359,15 @@ pub async fn set_enabled(ctx: &Ctx<'_>, enabled: bool) -> EsResult<Reply> {
     Reply::ok(obj! {})
 }
 
+/// A client's `password_hash`: one of the hash formats roll verifies (`{PBKDF2}`), never
+/// anything else (a clear text password sent as a hash included).
+fn accept_hash(h: String) -> EsResult<String> {
+    if h.starts_with("{PBKDF2}") {
+        return Ok(h);
+    }
+    Err(EsError::illegal_argument("The provided password hash is not a hash or it could not be resolved to a supported hash algorithm. The supported password hash algorithms are [pbkdf2]"))
+}
+
 pub async fn change_password(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let name = match ctx.path_param("username") {
         Some(n) => n.to_string(),
@@ -348,7 +380,7 @@ pub async fn change_password(ctx: &Ctx<'_>) -> EsResult<Reply> {
             check_password_len(&p)?;
             super::hash_password(&p)
         }
-        (None, Some(h)) => h.to_es_string(),
+        (None, Some(h)) => accept_hash(h.to_es_string())?,
         (None, None) => return Err(validation(&["password must be specified"])),
     };
     let now = ctx.now_ms;
@@ -412,6 +444,7 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
     let mut remote_indices = None;
     let mut remote_cluster = None;
     let mut restriction = None;
+    let mut global = None;
     for (k, val) in m {
         match k.as_str() {
             "cluster" => cluster = strs(Some(val)),
@@ -440,10 +473,15 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
                         out.insert("field_security".into(), fs.clone());
                     }
                     if let Some(q) = em.get("query") {
-                        out.insert("query".into(), match q {
-                            Value::Str(_) => q.clone(),
-                            other => Value::from(other.to_json()),
-                        });
+                        let text = match q {
+                            Value::Str(s) => s.clone(),
+                            other => other.to_json(),
+                        };
+                        check_role_query(&text).map_err(|e| {
+                            let names = strs(em.get("names")).join(",");
+                            EsError::parse(format!("failed to parse field 'query' for indices [{names}] at index privilege [{}] of role descriptor", indices.len())).caused_by(e)
+                        })?;
+                        out.insert("query".into(), Value::from(text));
                     }
                     out.insert("allow_restricted_indices".into(), em.get("allow_restricted_indices").and_then(Value::as_bool).unwrap_or(false).into());
                     indices.push(Value::Obj(out));
@@ -472,7 +510,7 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
             "remote_indices" => remote_indices = Some(val.clone()),
             "remote_cluster" => remote_cluster = Some(val.clone()),
             "restriction" if api_key => restriction = Some(val.clone()),
-            "global" => {}
+            "global" => global = parse_global(val)?,
             other => return Err(EsError::parse(format!("failed to parse role [{name}]. unexpected field [{other}]"))),
         }
     }
@@ -486,6 +524,9 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
     }
     let mut out = Map::new();
     out.insert("cluster".into(), Value::Arr(cluster.into_iter().map(Value::from).collect()));
+    if let Some(g) = global {
+        out.insert("global".into(), g);
+    }
     out.insert("indices".into(), Value::Arr(indices));
     out.insert("applications".into(), Value::Arr(applications));
     out.insert("run_as".into(), Value::Arr(run_as.into_iter().map(Value::from).collect()));
@@ -504,6 +545,86 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
         out.insert("description".into(), d);
     }
     Ok(Value::Obj(out))
+}
+
+/// `DLSRoleQueryValidator`: a role's query parses as a query (unless it is a template, which is
+/// checked once rendered), and holds none of the queries that would read other documents than
+/// the one being filtered: terms lookups, indexed shapes, `has_child`, `has_parent` and
+/// `percolate` (in compound queries too).
+fn check_role_query(text: &str) -> EsResult<()> {
+    let Some(v) = crate::json::parse(text.as_bytes())? else { return Ok(()) };
+    if v.get("template").is_some() {
+        return Ok(());
+    }
+    crate::query::parse_query(&v, Some(text.as_bytes()), &[])?;
+    fn walk(v: &Value) -> EsResult<()> {
+        let Some((kind, body)) = v.as_object().and_then(|m| m.iter().next()) else { return Ok(()) };
+        let refuse = |what: &str| Err(EsError::illegal_argument(format!("{what} query isn't supported as part of a role query")));
+        let children = |keys: &[&str]| -> Vec<&Value> { keys.iter().filter_map(|k| body.get(k)).flat_map(|c| c.as_array().map(|a| a.iter().collect()).unwrap_or_else(|| vec![c])).collect() };
+        let nested = match kind.as_str() {
+            "terms" if body.as_object().is_some_and(|m| m.values().any(|f| f.as_object().is_some_and(|o| o.contains_key("index") || o.contains_key("id") || o.contains_key("path")))) => {
+                return Err(EsError::illegal_argument("terms query with terms lookup isn't supported as part of a role query"));
+            }
+            "geo_shape" if body.as_object().is_some_and(|m| m.values().any(|f| f.get("indexed_shape").is_some())) => {
+                return Err(EsError::illegal_argument("geoshape query referring to indexed shapes isn't supported as part of a role query"));
+            }
+            "has_child" | "has_parent" | "percolate" => return refuse(kind),
+            "bool" => children(&["must", "should", "filter", "must_not"]),
+            "dis_max" => children(&["queries"]),
+            "constant_score" => children(&["filter"]),
+            "function_score" => children(&["query"]),
+            "boosting" => children(&["positive", "negative"]),
+            _ => Vec::new(),
+        };
+        nested.into_iter().try_for_each(walk)
+    }
+    walk(&v)
+}
+
+/// A role's `global` (configurable cluster) privileges, stored as Elasticsearch prints them
+/// (every category, empty ones included); `None` when it grants nothing.
+fn parse_global(v: &Value) -> EsResult<Option<Value>> {
+    const CATEGORIES: &str = "application,profile,role,data_source";
+    let Some(m) = v.as_object() else { return Err(EsError::parse(format!("failed to parse privilege. expected [START_OBJECT] but found [{}] instead", v.kind_name()))) };
+    let mut out = obj! { "application" => Value::object(), "profile" => Value::object(), "role" => Value::object(), "data_source" => Value::Arr(Vec::new()) };
+    let mut any = false;
+    for (k, c) in m {
+        if !CATEGORIES.split(',').any(|x| x == k) {
+            return Err(EsError::parse(format!("failed to parse privilege. expected one of [{CATEGORIES}] but found [{k}] instead")));
+        }
+        // `{"manage": {"applications": [...]}}` (application), `{"write": {"applications": [...]}}`
+        // (profile): every list is an array of strings.
+        if let Value::Obj(inner) = c {
+            for p in inner.values() {
+                for list in p.as_object().into_iter().flat_map(|o| o.values()) {
+                    if !matches!(list, Value::Arr(a) if a.iter().all(|x| x.as_str().is_some())) {
+                        return Err(EsError::parse(format!("failed to parse privilege. expected [START_ARRAY] but found [{}] instead", list.kind_name())));
+                    }
+                }
+            }
+            any |= !inner.is_empty();
+        } else if let Value::Arr(a) = c {
+            any |= !a.is_empty();
+        }
+        if let Value::Obj(o) = &mut out {
+            o.insert(k.clone(), c.clone());
+        }
+    }
+    Ok(any.then_some(out))
+}
+
+/// The applications an application privileges request (get, put, delete) names; none when it
+/// names every application.
+pub fn privilege_request_applications(ctx: &Ctx) -> Vec<String> {
+    match ctx.api.name() {
+        "security.put_privileges" => ctx.body().ok().flatten().and_then(|b| b.as_object().map(|m| m.keys().cloned().collect())).unwrap_or_default(),
+        _ => ctx.path_param("application").map(|a| a.split(',').map(str::to_string).collect()).unwrap_or_default(),
+    }
+}
+
+/// The applications whose privileges a role's `global.application.manage` lets it manage.
+pub fn managed_applications(global: &Value) -> Vec<String> {
+    global.get("application").and_then(|a| a.get("manage")).and_then(|m| m.get("applications")).and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default()
 }
 
 fn check_role_name(name: &str) -> EsResult<()> {
@@ -752,7 +873,7 @@ pub async fn delete_role_mapping(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 // --- application privileges ------------------------------------------------------------------
 
-fn privilege_key(app: &str, name: &str) -> String {
+pub fn privilege_key(app: &str, name: &str) -> String {
     format!("{app}:{name}")
 }
 
@@ -875,29 +996,127 @@ pub fn get_user_privileges(ctx: &Ctx) -> EsResult<Reply> {
     let mut run_as: Vec<String> = eff.own.iter().flat_map(|r| r.run_as.iter().cloned()).collect();
     run_as.sort();
     run_as.dedup();
-    let indices: Vec<Value> = eff
-        .own
-        .iter()
-        .flat_map(|r| r.indices.iter())
-        .map(|g| obj! {
-            "names" => Value::Arr(g.names.iter().map(Value::from).collect()),
-            "privileges" => Value::Arr(g.privileges.iter().map(Value::from).collect()),
-            "allow_restricted_indices" => g.allow_restricted,
+    // The roles merged into one as `CompositeRolesStore` builds it: index entries by their
+    // set of names (and restricted access), privileges and field and document security
+    // collected; application privileges by application and privilege (resources collected),
+    // then shown by application and resources.
+    let strs_of = |v: &[String]| Value::Arr(v.iter().map(Value::from).collect());
+    #[derive(Default)]
+    struct Merged {
+        names: Vec<String>,
+        restricted: bool,
+        privileges: Vec<String>,
+        field_security: Vec<Value>,
+        queries: Vec<String>,
+    }
+    let mut groups: Vec<Merged> = Vec::new();
+    for g in eff.own.iter().flat_map(|r| r.indices.iter()) {
+        let mut names = g.names.clone();
+        names.sort();
+        names.dedup();
+        let i = match groups.iter().position(|m| m.names == names && m.restricted == g.allow_restricted) {
+            Some(i) => i,
+            None => {
+                groups.push(Merged { names, restricted: g.allow_restricted, ..Default::default() });
+                groups.len() - 1
+            }
+        };
+        let e = &mut groups[i];
+        e.privileges.extend(g.privileges.iter().cloned());
+        e.field_security.extend(g.field_security.iter().cloned());
+        if let Some(q) = &g.query {
+            let q = q.as_str().map(str::to_string).unwrap_or_else(|| q.to_json());
+            if !e.queries.contains(&q) {
+                e.queries.push(q);
+            }
+        }
+    }
+    let indices: Vec<Value> = groups
+        .into_iter()
+        .map(|mut g| {
+            g.privileges.sort();
+            g.privileges.dedup();
+            let mut m = Map::new();
+            m.insert("names".into(), strs_of(&g.names));
+            m.insert("privileges".into(), strs_of(&g.privileges));
+            if !g.field_security.is_empty() {
+                m.insert("field_security".into(), Value::Arr(g.field_security));
+            }
+            if !g.queries.is_empty() {
+                m.insert("query".into(), strs_of(&g.queries));
+            }
+            m.insert("allow_restricted_indices".into(), g.restricted.into());
+            Value::Obj(m)
         })
         .collect();
-    let applications: Vec<Value> = eff
+    let mut by_privilege: Vec<(String, String, Vec<String>)> = Vec::new();
+    for (a, privs, res) in eff.own.iter().flat_map(|r| r.applications.iter()) {
+        for pr in privs {
+            match by_privilege.iter_mut().find(|(x, y, _)| x == a && y == pr) {
+                Some((_, _, r)) => r.extend(res.iter().cloned()),
+                None => by_privilege.push((a.clone(), pr.clone(), res.clone())),
+            }
+        }
+    }
+    let mut by_resources: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+    for (a, pr, mut res) in by_privilege {
+        res.sort();
+        res.dedup();
+        match by_resources.iter_mut().find(|(x, r, _)| *x == a && *r == res) {
+            Some((_, _, p)) => p.push(pr),
+            None => by_resources.push((a, res, vec![pr])),
+        }
+    }
+    let applications: Vec<Value> = by_resources
+        .into_iter()
+        .map(|(a, res, mut privs)| {
+            privs.sort();
+            privs.dedup();
+            obj! { "application" => a, "privileges" => strs_of(&privs), "resources" => strs_of(&res) }
+        })
+        .collect();
+    // Each configurable privilege a role grants, as its own object.
+    let global: Vec<Value> = eff
         .own
         .iter()
-        .flat_map(|r| r.applications.iter())
-        .map(|(a, p, r)| obj! { "application" => a.clone(), "privileges" => Value::Arr(p.iter().map(Value::from).collect()), "resources" => Value::Arr(r.iter().map(Value::from).collect()) })
+        .filter_map(|r| r.global.as_ref())
+        .flat_map(|g| {
+            ["application", "profile", "role"].into_iter().filter_map(move |k| g.get(k).filter(|c| c.as_object().is_some_and(|m| !m.is_empty())).map(|c| obj! { k => c.clone() }))
+        })
         .collect();
-    Reply::ok(obj! {
+    let mut out = obj! {
         "cluster" => Value::Arr(cluster.into_iter().map(Value::from).collect()),
-        "global" => Value::Arr(Vec::new()),
+        "global" => Value::Arr(global),
         "indices" => Value::Arr(indices),
         "applications" => Value::Arr(applications),
         "run_as" => Value::Arr(run_as.into_iter().map(Value::from).collect()),
-    })
+    };
+    let remote_indices: Vec<Value> = eff
+        .own
+        .iter()
+        .flat_map(|r| r.remote_indices.iter())
+        .map(|e| {
+            let mut m = Map::new();
+            for k in ["names", "privileges", "field_security", "query"] {
+                if let Some(v) = e.get(k) {
+                    m.insert(k.into(), v.clone());
+                }
+            }
+            m.insert("allow_restricted_indices".into(), e.get("allow_restricted_indices").and_then(Value::as_bool).unwrap_or(false).into());
+            m.insert("clusters".into(), e.get("clusters").cloned().unwrap_or_else(|| Value::Arr(Vec::new())));
+            Value::Obj(m)
+        })
+        .collect();
+    let remote_cluster: Vec<Value> = eff.own.iter().flat_map(|r| r.remote_cluster.iter().cloned()).collect();
+    if let Value::Obj(m) = &mut out {
+        if !remote_indices.is_empty() {
+            m.insert("remote_indices".into(), Value::Arr(remote_indices));
+        }
+        if !remote_cluster.is_empty() {
+            m.insert("remote_cluster".into(), Value::Arr(remote_cluster));
+        }
+    }
+    Reply::ok(out)
 }
 
 const SUPERUSER_PRIVILEGES: &str = r#"{"cluster":["all"],"global":[],"indices":[{"names":["*"],"privileges":["all"],"allow_restricted_indices":false},{"names":["*"],"privileges":["monitor","read","read_cross_cluster","view_index_metadata"],"allow_restricted_indices":true}],"applications":[{"application":"*","privileges":["*"],"resources":["*"]}],"run_as":["*"],"remote_indices":[{"names":["*"],"privileges":["all"],"allow_restricted_indices":false,"clusters":["*"]},{"names":["*"],"privileges":["monitor","read","read_cross_cluster","view_index_metadata"],"allow_restricted_indices":true,"clusters":["*"]}],"remote_cluster":[{"privileges":["monitor_enrich","monitor_stats"],"clusters":["*"]}]}"#;
@@ -944,7 +1163,7 @@ pub fn check_privileges(file: &super::FileRoles, st: &crate::meta::ClusterState,
         for r in strs(e.get("resources")) {
             let mut rm = Map::new();
             for pr in &privs {
-                let ok = superuser || eff.has_application_privilege(&app, pr, &r);
+                let ok = superuser || eff.has_application_privilege(st, &app, pr, &r);
                 all &= ok;
                 rm.insert(pr.clone(), ok.into());
             }

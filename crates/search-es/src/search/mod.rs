@@ -4209,8 +4209,15 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // such accounting.
     let mut held = (ctx.cluster.dialect != crate::cluster::Dialect::OpenSearch)
         .then(|| crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())));
-    for req in reqs {
-        let r = run(ctx, req.clone()).map(|out| {
+    for mut req in reqs {
+        // Each search is authorized as a search request of its own.
+        let r = crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts).and_then(|narrowed| {
+            if let Some(n) = narrowed {
+                req.indices = n;
+            }
+            run(ctx, req.clone())
+        });
+        let r = r.map(|out| {
             // Elasticsearch 9.5.5's `_msearch` items don't mark the `top_hits` / `inner_hits`
             // hits of a `seq_no_primary_term` search as unassigned, as `_search` does.
             let mut rreq = req.clone();

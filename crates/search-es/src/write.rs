@@ -506,6 +506,25 @@ pub struct Prepared {
 /// `args` (a client's write) gives the request's `dynamic_templates` (field path → dynamic
 /// template name) and `dynamic_template_params`.
 pub async fn prepare(cluster: &Cluster, idx: Arc<IndexMeta>, id: &str, routing: Option<&str>, source: &Bytes, value: &Value, args: Option<&WriteArgs>) -> EsResult<Prepared> {
+    prepare_checked(cluster, idx, id, routing, source, value, args, None).await
+}
+
+/// A check a client's write makes before it updates its index's mapping (the
+/// `indices:admin/mapping/auto_put` authorization of its principal).
+pub type MappingCheck<'a> = &'a (dyn Fn(&IndexMeta) -> EsResult<()> + Send + Sync);
+
+/// [`prepare`], with `check` run before every mapping update the document makes.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_checked(
+    cluster: &Cluster,
+    idx: Arc<IndexMeta>,
+    id: &str,
+    routing: Option<&str>,
+    source: &Bytes,
+    value: &Value,
+    args: Option<&WriteArgs>,
+    check: Option<MappingCheck<'_>>,
+) -> EsResult<Prepared> {
     let mut idx = idx;
     let given = |m: Option<&Map>| m.filter(|m| !m.is_empty()).map(|m| Arc::new(m.clone()));
     let requested = given(args.and_then(|a| a.dynamic_templates.as_ref()));
@@ -518,6 +537,9 @@ pub async fn prepare(cluster: &Cluster, idx: Arc<IndexMeta>, id: &str, routing: 
         ctx.join_routing = Some(routing.is_some());
         let mut parsed = crate::document::parse_document(&idx.mapping, &ctx, value, Some(source), Some(id))?;
         if let Some(update) = parsed.dynamic_update {
+            if let Some(check) = check {
+                check(&idx)?;
+            }
             idx = apply_dynamic_update(cluster, &idx, update).await?;
             continue;
         }
@@ -548,6 +570,9 @@ pub async fn prepare(cluster: &Cluster, idx: Arc<IndexMeta>, id: &str, routing: 
                     f.set("dims", Value::from(*n));
                     f.validate_type(&ctx)?;
                 }
+            }
+            if let Some(check) = check {
+                check(&idx)?;
             }
             idx = set_vector_dims(cluster, &idx, dims).await?;
             continue;

@@ -98,7 +98,7 @@ const CLUSTER_EXTRA: &[&str] = &[
 pub const INDEX: &[Named] = &[
     Named { name: "none", patterns: &[] },
     Named { name: "auto_configure", patterns: &["indices:admin/auto_create", "indices:admin/mapping/auto_put", "indices:admin/data_stream/create"] },
-    Named { name: "create_doc", patterns: &["indices:data/write/index:op_type/create", "indices:data/write/bulk*", "indices:data/write/simulate/bulk*"] },
+    Named { name: "create_doc", patterns: &["indices:data/write/index", "indices:data/write/index[*", "indices:data/write/index:op_type/create", "indices:data/write/bulk*", "indices:data/write/simulate/bulk*"] },
     Named { name: "create", patterns: &["indices:data/write/index*", "indices:data/write/bulk*", "indices:data/write/simulate/bulk*"] },
     Named { name: "create_index", patterns: &["indices:admin/create", "indices:admin/auto_create", "indices:admin/data_stream/create"] },
     Named { name: "delete", patterns: &["indices:data/write/delete*", "indices:data/write/bulk*"] },
@@ -170,8 +170,13 @@ fn named_matches(n: &Named, action: &str) -> bool {
     ok
 }
 
-/// Whether a privilege name (or a raw action pattern) grants `action`.
+/// Whether a privilege name (or a raw action pattern) grants `action`. `manage_own_api_key`
+/// grants nothing by itself: it is conditional on the request being about the caller's own
+/// keys (`api_keys::own_keys_request`), and implies no other privilege.
 pub fn cluster_grants(privilege: &str, action: &str) -> bool {
+    if privilege == "manage_own_api_key" {
+        return false;
+    }
     if let Some(n) = CLUSTER.iter().find(|n| n.name == privilege) {
         return named_matches(n, action);
     }
@@ -369,6 +374,10 @@ pub struct IndexGrant {
     pub names: Vec<String>,
     pub privileges: Vec<String>,
     pub allow_restricted: bool,
+    /// Field level security (`{"grant": [...], "except": [...]}`), when the entry has it.
+    pub field_security: Option<Value>,
+    /// The document level security query, when the entry has one.
+    pub query: Option<Value>,
 }
 
 /// The permissions of one role descriptor.
@@ -379,6 +388,12 @@ pub struct Permission {
     /// `(application, privileges, resources)`.
     pub applications: Vec<(String, Vec<String>, Vec<String>)>,
     pub run_as: Vec<String>,
+    /// The descriptor's `global` privileges object, when it has one.
+    pub global: Option<Value>,
+    /// `remote_indices` and `remote_cluster` entries (privileges on remote clusters, which a
+    /// single cluster only reports).
+    pub remote_indices: Vec<Value>,
+    pub remote_cluster: Vec<Value>,
 }
 
 fn strs(v: Option<&Value>) -> Vec<String> {
@@ -393,12 +408,23 @@ impl Permission {
     /// Reads the `cluster` / `indices` (or `index`) / `applications` / `run_as` of a stored role
     /// descriptor.
     pub fn of_descriptor(d: &Value) -> Permission {
-        let mut p = Permission { cluster: strs(d.get("cluster")), run_as: strs(d.get("run_as")), ..Default::default() };
+        let global = d.get("global").filter(|g| g.as_object().is_some_and(|m| !m.is_empty())).cloned();
+        let entries = |k: &str| d.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut p = Permission {
+            cluster: strs(d.get("cluster")),
+            run_as: strs(d.get("run_as")),
+            global,
+            remote_indices: entries("remote_indices"),
+            remote_cluster: entries("remote_cluster"),
+            ..Default::default()
+        };
         for e in d.get("indices").or_else(|| d.get("index")).and_then(Value::as_array).into_iter().flatten() {
             p.indices.push(IndexGrant {
                 names: strs(e.get("names")),
                 privileges: strs(e.get("privileges")),
                 allow_restricted: e.get("allow_restricted_indices").and_then(Value::as_bool).unwrap_or(false),
+                field_security: e.get("field_security").filter(|v| !v.is_null()).cloned(),
+                query: e.get("query").filter(|v| !v.is_null()).cloned(),
             });
         }
         for e in d.get("applications").and_then(Value::as_array).into_iter().flatten() {
@@ -502,6 +528,17 @@ mod tests {
         let all = Permission::of_descriptor(&obj! { "cluster" => crate::arr!["manage"] });
         assert!(all.has_cluster_privilege("monitor"));
         assert!(!all.has_cluster_privilege("manage_security"));
+    }
+
+    #[test]
+    fn manage_own_api_key_is_conditional() {
+        let own = Permission::of_descriptor(&obj! { "cluster" => crate::arr!["manage_own_api_key"] });
+        assert!(!own.allows_cluster("cluster:admin/xpack/security/api_key/get"));
+        assert!(!own.allows_cluster("cluster:admin/xpack/security/api_key/grant"));
+        assert!(!own.has_cluster_privilege("manage_api_key"));
+        assert!(own.has_cluster_privilege("manage_own_api_key"));
+        let manage = Permission::of_descriptor(&obj! { "cluster" => crate::arr!["manage_api_key"] });
+        assert!(manage.allows_cluster("cluster:admin/xpack/security/api_key/get"));
     }
 
     #[test]

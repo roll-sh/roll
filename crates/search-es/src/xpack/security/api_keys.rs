@@ -40,6 +40,12 @@ pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
     if !super::verify_secret(secret, hash) {
         return Err(super::unauthorized_credentials(format!("API key: invalid credentials for API key [{id}]")));
     }
+    // A cross-cluster key only connects remote clusters, never REST clients. (Elasticsearch
+    // checks the type before the secret; checking it after tells nothing to a caller that
+    // only knows the id.)
+    if let Some(ty) = k.get("type").and_then(Value::as_str).filter(|t| *t != "rest") {
+        return Err(super::unauthorized(format!("authentication expected API key type of [rest], but API key [{id}] has type [{ty}]")));
+    }
     Ok(Principal {
         username: k.get("username").map(Value::to_es_string).unwrap_or_default(),
         roles: Vec::new(),
@@ -235,49 +241,73 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     store_key(ctx, &owner, k).await
 }
 
-/// `access` of a cross-cluster key as the role descriptor it grants.
-fn cross_cluster_descriptor(access: &Value) -> EsResult<Value> {
+/// `access` of a cross-cluster key as Elasticsearch keeps it (`CrossClusterApiKeyRoleDescriptorBuilder`):
+/// the normalized access, and the role descriptor it grants: search reads (with their document
+/// and field level security) under `cross_cluster_search` and `monitor_enrich`, replication
+/// under `cross_cluster_replication`.
+fn cross_cluster_descriptor(access: &Value) -> EsResult<(Value, Value)> {
     let Some(m) = access.as_object() else { return Err(EsError::illegal_argument("must specify non-empty access for either [search] or [replication]")) };
-    let mut cluster = Vec::new();
-    let mut indices = Vec::new();
-    if let Some(Value::Arr(s)) = m.get("search") {
-        cluster.push(Value::from("cross_cluster_search"));
+    let (mut cluster, mut indices, mut out) = (Vec::new(), Vec::new(), Map::new());
+    let entries = |k: &str| m.get(k).and_then(Value::as_array).filter(|a| !a.is_empty());
+    let (search, replication) = (entries("search"), entries("replication"));
+    if let Some(s) = search {
+        if replication.is_some() && s.iter().any(|e| e.get("query").is_some() || e.get("field_security").is_some()) {
+            return Err(EsError::new(400, "x_content_parse_exception", "Failed to build [cross_cluster_api_key_request] after last required field arrived")
+                .caused_by(EsError::illegal_argument("search does not support document or field level security if replication is assigned")));
+        }
+        cluster.extend([Value::from("cross_cluster_search"), Value::from("monitor_enrich")]);
+        let mut shown = Vec::new();
         for e in s {
-            let mut g = Map::new();
-            g.insert("names".into(), e.get("names").cloned().unwrap_or_else(|| Value::Arr(Vec::new())));
-            g.insert("privileges".into(), crate::arr!["read", "read_cross_cluster", "view_index_metadata"]);
-            g.insert("allow_restricted_indices".into(), e.get("allow_restricted_indices").and_then(Value::as_bool).unwrap_or(false).into());
+            let mut a = Map::new();
+            a.insert("names".into(), e.get("names").cloned().unwrap_or_else(|| Value::Arr(Vec::new())));
+            if let Some(fs) = e.get("field_security") {
+                a.insert("field_security".into(), fs.clone());
+            }
+            if let Some(q) = e.get("query") {
+                a.insert("query".into(), Value::from(q.as_str().map(str::to_string).unwrap_or_else(|| q.to_json())));
+            }
+            a.insert("allow_restricted_indices".into(), e.get("allow_restricted_indices").and_then(Value::as_bool).unwrap_or(false).into());
+            let mut g = a.clone();
+            g.shift_insert(1, "privileges".into(), crate::arr!["read", "read_cross_cluster", "view_index_metadata"]);
             indices.push(Value::Obj(g));
+            shown.push(Value::Obj(a));
         }
+        out.insert("search".into(), Value::Arr(shown));
     }
-    if let Some(Value::Arr(r)) = m.get("replication") {
+    if let Some(r) = replication {
         cluster.push(Value::from("cross_cluster_replication"));
+        let mut shown = Vec::new();
         for e in r {
+            let names = e.get("names").cloned().unwrap_or_else(|| Value::Arr(Vec::new()));
+            let restricted = e.get("allow_restricted_indices").and_then(Value::as_bool).unwrap_or(false);
             indices.push(obj! {
-                "names" => e.get("names").cloned().unwrap_or_else(|| Value::Arr(Vec::new())),
+                "names" => names.clone(),
                 "privileges" => crate::arr!["cross_cluster_replication", "cross_cluster_replication_internal"],
-                "allow_restricted_indices" => e.get("allow_restricted_indices").and_then(Value::as_bool).unwrap_or(false),
+                "allow_restricted_indices" => restricted,
             });
+            shown.push(obj! { "names" => names, "allow_restricted_indices" => restricted });
         }
+        out.insert("replication".into(), Value::Arr(shown));
     }
     if cluster.is_empty() {
         return Err(EsError::illegal_argument("must specify non-empty access for either [search] or [replication]"));
     }
-    Ok(obj! { "cross_cluster" => obj! {
+    let descriptor = obj! { "cross_cluster" => obj! {
         "cluster" => Value::Arr(cluster), "indices" => Value::Arr(indices), "applications" => Value::Arr(Vec::new()),
         "run_as" => Value::Arr(Vec::new()), "metadata" => obj! {}, "transient_metadata" => obj! { "enabled" => true },
-    } })
+    } };
+    Ok((Value::Obj(out), descriptor))
 }
 
 pub async fn create_cross_cluster(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let name = body.get("name").cloned().unwrap_or(Value::Null);
     check_name(&name)?;
-    let access = body.get("access").cloned().unwrap_or(Value::Null);
+    let (access, role_descriptors) = cross_cluster_descriptor(body.get("access").unwrap_or(&Value::Null))?;
     let k = NewKey {
         name,
         expiration: expiration_of(body.get("expiration"), ctx.now_ms)?,
-        role_descriptors: cross_cluster_descriptor(&access)?,
+        role_descriptors,
         metadata: body.get("metadata").cloned().unwrap_or_else(Value::object),
         cross_cluster: Some(access),
     };
@@ -287,7 +317,32 @@ pub async fn create_cross_cluster(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 pub async fn grant(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
-    let owner = super::tokens::grant_principal(ctx.cluster, &body, "cluster:admin/xpack/security/api_key/grant")?;
+    let grant_type = body.get("grant_type").and_then(Value::as_str);
+    if body.get("client_authentication").is_some() && grant_type == Some("password") {
+        return Err(EsError::action_request_validation(&["[client_authentication] is not supported for grant_type [password]".into()]));
+    }
+    let mut owner = super::tokens::grant_principal(ctx.cluster, &body, "cluster:admin/xpack/security/api_key/grant")?;
+    // Client authentication goes with JWTs, which roll doesn't issue: no access token of roll's
+    // takes it.
+    if body.get("client_authentication").is_some() {
+        return Err(EsError::security(400, "[client_authentication] not supported with the supplied access_token type"));
+    }
+    // `run_as`: the key belongs to the user the granted credentials may run as.
+    if let Some(target) = body.get("run_as").and_then(Value::as_str) {
+        let st = ctx.state();
+        let eff = super::effective(&super::file_roles(ctx.cluster), &st, &owner);
+        let allowed = eff.own.iter().any(|r| r.run_as.iter().any(|p| super::privileges::glob(p, target)));
+        match super::users::lookup_user(ctx.cluster, target).filter(|_| allowed) {
+            Some(u) => owner = u,
+            None => {
+                return Err(EsError::security(403, format!(
+                    "action [cluster:admin/xpack/security/user/authenticate] is unauthorized for {}, because user [{}] is unauthorized to run as [{target}]",
+                    super::who(&owner),
+                    owner.username
+                )));
+            }
+        }
+    }
     let key = body.get("api_key").cloned().unwrap_or_else(Value::object);
     let name = key.get("name").cloned().unwrap_or(Value::Null);
     check_name(&name)?;
@@ -301,17 +356,52 @@ pub async fn grant(ctx: &Ctx<'_>) -> EsResult<Reply> {
     store_key(ctx, &owner, k).await
 }
 
+/// Whether `manage_own_api_key` grants the request (`ManageOwnApiKeyClusterPrivilege`):
+/// creating, querying and updating keys (their handlers act on the caller's own keys only),
+/// and getting or invalidating keys the request shows to be the caller's own: `owner=true`,
+/// or the caller's username with its realm; an API key only itself, by its id. Granting keys
+/// and every other API key request need `manage_api_key`.
+pub fn own_keys_request(ctx: &Ctx, p: &Principal) -> bool {
+    let owns = |id: Option<&str>, username: Option<&str>, realm: Option<&str>, owner: bool| match &p.kind {
+        AuthKind::ApiKey(a) => id == Some(a.id.as_str()),
+        _ => owner || matches!((username, realm), (Some(u), Some(r)) if !u.is_empty() && !r.is_empty() && u == p.username && r == p.realm_name),
+    };
+    // A key sees its owner's role descriptors only with `manage_api_key`.
+    if matches!(p.kind, AuthKind::ApiKey(_)) && ctx.bool_param("with_limited_by", false).unwrap_or(true) {
+        return false;
+    }
+    match ctx.api.name() {
+        "security.create_api_key" | "security.query_api_keys" | "security.update_api_key" | "security.bulk_update_api_keys" => true,
+        "security.get_api_key" => owns(ctx.query("id"), ctx.query("username"), ctx.query("realm_name"), ctx.bool_param("owner", false).unwrap_or(false)),
+        "security.invalidate_api_key" => {
+            let Ok(body) = ctx.body() else { return false };
+            let body = body.unwrap_or_else(Value::object);
+            let text = |k: &str| body.get(k).and_then(Value::as_str).map(str::to_string);
+            let (username, realm) = (text("username"), text("realm_name"));
+            let owner = body.get("owner").and_then(Value::as_bool).unwrap_or(false);
+            let mut ids: Vec<String> = body.get("ids").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
+            ids.extend(text("id"));
+            if ids.is_empty() {
+                owns(None, username.as_deref(), realm.as_deref(), owner)
+            } else {
+                ids.iter().all(|i| owns(Some(i), username.as_deref(), realm.as_deref(), owner))
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Whether the principal may see and manage every key (`manage_api_key`), not only its own.
 fn manages_all(ctx: &Ctx) -> bool {
     let p = super::principal(ctx);
     p.is_superuser() || super::effective(&super::file_roles(ctx.cluster), &ctx.state(), p).has_cluster_privilege("manage_api_key")
 }
 
+/// Whether `k` is the principal's own: a user's keys, or an API key itself (it owns no other).
 fn owned_by(k: &Value, p: &Principal) -> bool {
-    let user = k.get("username").and_then(Value::as_str) == Some(p.username.as_str());
     match &p.kind {
-        AuthKind::ApiKey(a) => user || k.get("id").and_then(Value::as_str) == Some(a.id.as_str()),
-        _ => user && k.get("realm").and_then(Value::as_str) == Some(p.realm_name),
+        AuthKind::ApiKey(a) => k.get("id").and_then(Value::as_str) == Some(a.id.as_str()),
+        _ => k.get("username").and_then(Value::as_str) == Some(p.username.as_str()) && k.get("realm").and_then(Value::as_str) == Some(p.realm_name),
     }
 }
 
@@ -513,24 +603,36 @@ struct Update {
 }
 
 fn parse_update(body: &Value, now: i64, cross: bool) -> EsResult<Update> {
-    let access = body.get("access").cloned();
+    let (access, role_descriptors) = match (body.get("access"), cross) {
+        (Some(a), true) => {
+            let (a, d) = cross_cluster_descriptor(a)?;
+            (Some(a), Some(d))
+        }
+        (_, false) if body.get("role_descriptors").is_some() => (None, Some(parse_descriptors(body.get("role_descriptors"))?)),
+        _ => (None, None),
+    };
     Ok(Update {
-        role_descriptors: match (&access, cross) {
-            (Some(a), true) => Some(cross_cluster_descriptor(a)?),
-            (_, false) if body.get("role_descriptors").is_some() => Some(parse_descriptors(body.get("role_descriptors"))?),
-            _ => None,
-        },
+        role_descriptors,
         access,
         metadata: body.get("metadata").cloned(),
         expiration: expiration_of(body.get("expiration"), now)?,
     })
 }
 
+/// Who updates keys: a user, never an API key (`TransportBaseUpdateApiKeyAction`).
+fn updater(ctx: &Ctx) -> EsResult<Principal> {
+    let p = super::principal(ctx);
+    if matches!(p.kind, AuthKind::ApiKey(_)) {
+        return Err(EsError::illegal_argument("authentication via API key not supported: only the owner user can update an API key"));
+    }
+    Ok(p.clone())
+}
+
 pub async fn update(ctx: &Ctx<'_>, cross: bool) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let upd = parse_update(&body, ctx.now_ms, cross)?;
-    let p = super::principal(ctx).clone();
+    let p = updater(ctx)?;
     let now = ctx.now_ms;
     let file = super::file_roles(ctx.cluster);
     let updated = ctx.cluster.update(move |st| apply_update(st, &file, &id, &p, &upd, cross, now)).await?;
@@ -541,7 +643,7 @@ pub async fn bulk_update(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let ids: Vec<String> = body.get("ids").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
     let upd = parse_update(&body, ctx.now_ms, false)?;
-    let p = super::principal(ctx).clone();
+    let p = updater(ctx)?;
     let now = ctx.now_ms;
     let file = super::file_roles(ctx.cluster);
     let results = ctx
@@ -578,8 +680,8 @@ mod tests {
 
     #[test]
     fn cross_cluster_access_becomes_a_role() {
-        let d = cross_cluster_descriptor(&obj! { "search" => crate::arr![obj! { "names" => crate::arr!["logs*"] }] }).unwrap();
-        assert_eq!(d.pointer(&["cross_cluster", "cluster"]), Some(&crate::arr!["cross_cluster_search"]));
+        let (_, d) = cross_cluster_descriptor(&obj! { "search" => crate::arr![obj! { "names" => crate::arr!["logs*"] }] }).unwrap();
+        assert_eq!(d.pointer(&["cross_cluster", "cluster"]), Some(&crate::arr!["cross_cluster_search", "monitor_enrich"]));
         assert!(cross_cluster_descriptor(&obj! {}).is_err());
     }
 

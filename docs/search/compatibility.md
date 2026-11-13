@@ -230,7 +230,7 @@ the discovery/store plugins.
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 43 | 43 | 46 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 0 | 0 | 9 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 868 | 868 | 544 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 932 | 932 | 480 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 544 | 544 | 5 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
@@ -242,7 +242,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 4149 | 4149 | 1392 |
+| **total** | | | 6044 | 5541 | 4213 | 4213 | 1328 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -284,15 +284,15 @@ the discovery/store plugins.
 <!-- test-search: transform >= 108 -->
 <!-- test-search: watcher >= 43 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 868 -->
+<!-- test-search: platinum >= 932 -->
 <!-- test-search: esql >= 544 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 225/618, `analytics` 111/114,
-`spatial` 92/105, `security` 25/101, `rollup` 0/52, `exponential_histogram` 44/44, `vector-tile`
-34/34, `api_key` 17/32, `aggregate-metrics` 26/28, `inference` 1/23, `search.vectors` 22/23,
-`wildcard` 22/22, `terms_enum` 15/20, `rank_vectors` 0/15, `users` 13/15, `constant_keyword`
-12/13, `counted_keyword` 8/11, `data_streams` 9/11, `migrate` 0/11, `change_password` 3/8,
-`roles` 5/8, `text_structure` 5/8, `enrich` 6/7, `privileges` 4/7, `profiling` 0/7, `token` 4/6,
+`spatial` 92/105, `security` 73/101, `rollup` 0/52, `exponential_histogram` 44/44, `vector-tile`
+34/34, `api_key` 31/32, `aggregate-metrics` 26/28, `inference` 1/23, `search.vectors` 22/23,
+`wildcard` 22/22, `terms_enum` 15/20, `rank_vectors` 0/15, `users` 14/15, `constant_keyword`
+12/13, `counted_keyword` 8/11, `data_streams` 9/11, `migrate` 0/11, `change_password` 6/8,
+`roles` 8/8, `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 4/6,
 `versionfield` 6/6, `async_search` 4/5, `redact` 0/5, `sql` 5/5, `user_profile` 4/5,
 `authenticate` 3/4, `logsdb` 2/4, `role_mapping` 4/4, `search-business-rules` 4/4, `dlm` 0/3,
 `monitoring` 0/3, `searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2,

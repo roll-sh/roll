@@ -392,7 +392,8 @@ pub fn get(ctx: &Ctx) -> EsResult<Reply> {
     let include_defaults = ctx.bool_param("include_defaults", false)?;
     let verbose = ctx.bool_param("verbose", false)?;
     let st = ctx.state();
-    let names = resolve_data_streams(&st, &names(ctx), &opts)?;
+    let mut names = resolve_data_streams(&st, &names(ctx), &opts)?;
+    crate::xpack::security::retain_authorized(ctx, &mut names);
     let list: Vec<Value> = names.iter().filter_map(|n| st.metadata.data_streams.get(n)).map(|ds| data_stream_value(ctx, &st, ds, include_defaults, verbose)).collect();
     Reply::ok(obj! { "data_streams" => Value::Arr(list) })
 }
@@ -469,7 +470,8 @@ fn maximum_timestamp(cluster: &crate::cluster::Cluster, st: &ClusterState, ds: &
 pub fn stats(ctx: &Ctx) -> EsResult<Reply> {
     let opts = ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN)?;
     let st = ctx.state();
-    let names = resolve_data_streams(&st, &names(ctx), &opts)?;
+    let mut names = resolve_data_streams(&st, &names(ctx), &opts)?;
+    crate::xpack::security::retain_authorized(ctx, &mut names);
     let streams: Vec<&Arc<DataStream>> = names.iter().filter_map(|n| st.metadata.data_streams.get(n)).collect();
     let backing: Vec<&IndexMeta> = streams.iter().flat_map(|d| d.indices.iter()).filter_map(|i| st.metadata.indices.get(i)).map(|i| i.as_ref()).collect();
     let size = |bytes: i64, key: &str, m: &mut Map| {

@@ -358,7 +358,8 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
         let shard = crate::meta::routing::shard_for(&target.index, "", Some(&routing));
         check_active_shards(ctx, &target.index, shard).await?;
         let given = if auto_id { String::new() } else { args.id.clone().unwrap_or_default() };
-        let prepared = write::prepare(cluster, target.index.clone(), &given, Some(&routing), &source, &value, Some(&args)).await?;
+        let check = |idx: &IndexMeta| crate::xpack::security::check_mapping_update(ctx, idx);
+        let prepared = write::prepare_checked(cluster, target.index.clone(), &given, Some(&routing), &source, &value, Some(&args), Some(&check)).await?;
         let id = prepared.id.clone();
         return write::apply_index(prepared, &args, false, &id).map(|o| with_executed(o, &args, executed));
     }
@@ -369,7 +370,8 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
     // A document that fails to index after a pipeline rewrote it goes to the failure store as
     // rewritten (`IndexRequest.source()` is the ingested document by then).
     let ingested = |e: EsError| if executed.is_empty() { e } else { e.with_hidden("ingested_source", value.clone()) };
-    let prepared = write::prepare(cluster, target.index.clone(), &id, routing.as_deref(), &source, &value, Some(&args)).await.map_err(ingested)?;
+    let check = |idx: &IndexMeta| crate::xpack::security::check_mapping_update(ctx, idx);
+    let prepared = write::prepare_checked(cluster, target.index.clone(), &id, routing.as_deref(), &source, &value, Some(&args), Some(&check)).await.map_err(ingested)?;
     write::apply_index(prepared, &args, auto_id, &id).map(|o| with_executed(o, &args, executed))
 }
 
@@ -757,8 +759,25 @@ pub fn mget(ctx: &Ctx) -> EsResult<Reply> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
+    // Documents are read per shard, each shard request authorized on the names its documents
+    // were asked by; one that doesn't resolve fails on its own first.
+    let denied = if crate::xpack::security::checks_items(ctx) {
+        let resolved: Vec<Option<(String, (String, u32))>> = items
+            .iter()
+            .map(|(index, id, a)| {
+                let index = index.as_deref().unwrap_or_default();
+                let idx = single_index(ctx, index).ok()?;
+                Some((index.to_string(), (idx.name.clone(), crate::meta::routing::shard_for(&idx, id.as_deref().unwrap_or_default(), a.routing.as_deref()))))
+            })
+            .collect();
+        let docs: Vec<(String, (String, u32))> = resolved.iter().flatten().cloned().collect();
+        let mut checked = crate::xpack::security::authorize_gets(ctx, &docs).into_iter();
+        resolved.iter().map(|r| r.as_ref().and_then(|_| checked.next().flatten())).collect()
+    } else {
+        Vec::new()
+    };
     let mut docs = Vec::with_capacity(items.len());
-    for (index, id, a) in &items {
+    for (n, (index, id, a)) in items.iter().enumerate() {
         let index = index.as_deref().unwrap_or_default();
         let id = id.as_deref().unwrap_or_default().to_string();
         let id = &id;
@@ -766,6 +785,9 @@ pub fn mget(ctx: &Ctx) -> EsResult<Reply> {
         let mut shown = index.to_string();
         let r = single_index(ctx, index).and_then(|idx| {
             shown = idx.name.clone();
+            if let Some(e) = denied.get(n).cloned().flatten() {
+                return Err(e);
+            }
             let got = get_one(ctx, &idx, id, a)?;
             render_get(ctx, &idx.name, id, got.as_ref(), a)
         });
