@@ -32,7 +32,7 @@ impl Daemon {
         let ws = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let workspace = Arc::new(roll_workspace::Workspace::new(ws).unwrap());
         let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(50), ..Config::default() };
-        let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, Resolvers::default()).unwrap();
+        let access = Access::with_db(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("access.db")), "access").unwrap(), config, Resolvers::default()).unwrap();
         let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![roll_auth::Rule { route: "/v1/mcp", access: roll_auth::Access::Product("MCP: answers 401 itself") }]);
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
         let layer = || axum::middleware::from_fn_with_state(gate.clone(), roll_auth::check);
