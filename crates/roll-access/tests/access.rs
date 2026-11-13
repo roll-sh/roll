@@ -1340,3 +1340,18 @@ async fn a_person_is_told_of_their_tokens() {
     assert_eq!(d.access.revoke_leaked(&[token], "a public gist").unwrap().len(), 1);
     told(vec!["usr_alice: Your roll token \"cursor\" expires within a week", "usr_alice: roll revoked your token \"cursor\""]).await;
 }
+
+/// A product's page lists the tokens made for one of its resources (roll secrets' project tokens):
+/// those with a rule on that product naming it, not every token that reaches it.
+#[tokio::test(flavor = "multi_thread")]
+async fn tokens_are_listed_by_what_they_were_made_for() {
+    let d = Daemon::new(50);
+    let rule = |resources: Value| json!([{ "product": "secrets", "resources": resources, "environments": ["staging"], "actions": { "read": "allow" } }]);
+    let (_, ci) = d.token(rule(json!([{ "project": "prj_a" }])), json!({ "name": "ci" })).await;
+    d.token(rule(json!([{ "project": "prj_b" }])), json!({ "name": "other" })).await;
+    d.token(rule(json!("*")), json!({ "name": "everything" })).await;
+    let (s, list) = d.call(OPERATOR, Method::GET, "/v1/access/tokens?product=secrets&resource=prj_a", None).await;
+    assert_eq!(s, StatusCode::OK, "{list}");
+    assert_eq!(ids(&list), vec![ci.as_str()]);
+    assert_eq!(d.call(OPERATOR, Method::GET, "/v1/access/tokens?resource=prj_a", None).await.0, StatusCode::BAD_REQUEST);
+}
