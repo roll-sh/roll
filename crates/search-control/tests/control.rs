@@ -617,6 +617,18 @@ async fn api_keys() {
     assert_eq!(s, 404);
     // The cluster's own password still works.
     assert_eq!(e.es(&user, &pw, reqwest::Method::GET, "/notes/_count", None).await.0, 200);
+    // A data key writes documents but can't make keys or users of its own.
+    let d = e.post("/v1/search/clusters/keys/keys", json!({"name": "app", "access": "data"})).await;
+    let h = format!("ApiKey {}", d["api_key"].as_str().unwrap());
+    let send = |m: reqwest::Method, path: &str, body: Value| {
+        let r = e.http.request(m, format!("{}{path}", e.es)).header("Authorization", h.clone()).json(&body).send();
+        async move { r.await.unwrap().status().as_u16() }
+    };
+    assert_eq!(send(reqwest::Method::PUT, "/notes/_doc/2", json!({"t": "y"})).await, 201);
+    assert_eq!(send(reqwest::Method::POST, "/_security/api_key", json!({"name": "more"})).await, 403);
+    assert_eq!(send(reqwest::Method::PUT, "/_security/user/x", json!({"password": "pw-pw-pw-pw", "roles": ["superuser"]})).await, 403);
+    let (s, _) = e.call(reqwest::Method::POST, "/v1/search/clusters/keys/keys", Some(json!({"name": "x", "access": "root"}))).await;
+    assert_eq!(s, 400);
 }
 
 #[tokio::test]

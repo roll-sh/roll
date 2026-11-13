@@ -428,10 +428,11 @@ doc_route!(doc_delete, "DELETE", EsBody::None);
 struct NewKey {
     name: String,
     expires_in_s: Option<i64>,
+    access: Option<String>,
 }
 
 async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<NewKey>) -> ApiResult<Value> {
-    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s).await?))
+    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s, k.access.as_deref()).await?))
 }
 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {

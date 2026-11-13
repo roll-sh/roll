@@ -1142,12 +1142,19 @@ impl Control {
     /// mustn't share the cluster's password: `api_key` is `base64(<key id>@<cluster>:<key>)`,
     /// sent as `Authorization: ApiKey …`, and works on any host (the `@<cluster>` names the
     /// cluster). The key is in this answer only. `expires_in_s`: it stops working after that.
-    pub async fn create_key(&self, id: &str, name: &str, expires_in_s: Option<i64>) -> Result<Value> {
+    /// `access`: `admin` (the default: everything the cluster's own user may do) or `data` (a
+    /// link's role: data, templates, pipelines and lifecycle policies, no security).
+    pub async fn create_key(&self, id: &str, name: &str, expires_in_s: Option<i64>, access: Option<&str>) -> Result<Value> {
         let c = self.get(id).await?;
         if name.trim().is_empty() || name.len() > 1024 {
             return Err(ControlError::Invalid("name: 1 to 1024 characters".into()));
         }
         let mut body = json!({ "name": name });
+        match access.unwrap_or("admin") {
+            "admin" => {}
+            "data" => body["role_descriptors"] = json!({ "roll_link": link_role() }),
+            a => return Err(ControlError::Invalid(format!("access must be admin or data, not {a:?}"))),
+        }
         if let Some(s) = expires_in_s {
             if s <= 0 {
                 return Err(ControlError::Invalid("expires_in_s must be positive".into()));
