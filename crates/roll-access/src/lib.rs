@@ -420,6 +420,7 @@ impl Access {
                     args: None,
                     ip: None,
                     duration_ms: 0,
+                    client: None,
                 });
                 out.push(g);
             }

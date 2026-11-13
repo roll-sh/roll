@@ -38,6 +38,16 @@ pub struct McpCall {
     /// The client shows the person the approval page itself (MCP URL elicitation): an `ask`
     /// answers at once instead of waiting for the decision.
     pub elicits: bool,
+    /// The MCP client's name and version, as it said in `initialize`.
+    pub client: Option<Arc<str>>,
+}
+
+/// What a client calls itself, fit for a log line: one line, no control characters, at most 120
+/// characters. A hint, never a proof.
+pub fn client_name(s: &str) -> Option<String> {
+    let clean: String = s.chars().filter(|c| !c.is_control()).take(120).collect();
+    let clean = clean.trim();
+    (!clean.is_empty()).then(|| clean.to_string())
 }
 
 /// The evaluator, as rolld's gate wants it.
@@ -192,6 +202,8 @@ struct Ctx {
     list_prefix: Option<String>,
     /// The product an audit row is about when not the route's (a link's: the linked resource's).
     about: Option<&'static str>,
+    /// What made the request ([`client_name`]).
+    client: Option<String>,
 }
 
 impl Ctx {
@@ -214,6 +226,7 @@ impl Ctx {
             args: self.mcp.as_ref().map(|m| (*m.args).clone()).or_else(|| self.args.clone()),
             ip: self.ip.map(|i| i.to_string()),
             duration_ms: self.started.elapsed().as_millis() as i64,
+            client: self.client.clone(),
         };
         if let Some(e) = self.access.store.queue_audit(e) {
             let access = self.access.clone();
@@ -255,7 +268,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
         }
     }
-    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None, about: None };
+    let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None, list_prefix: None, about: None, client: None };
+    ctx.client = match ctx.mcp.as_ref().and_then(|m| m.client.clone()) {
+        Some(c) => Some(c.to_string()),
+        None => req.headers().get(axum::http::header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(client_name),
+    };
     if !ctx.grant.ip_allow.is_empty() {
         let nets = crate::store::parse_ip_allow(&ctx.grant.ip_allow).unwrap_or_default();
         if !ip.is_some_and(|ip| nets.iter().any(|n| n.contains(&ip))) {
