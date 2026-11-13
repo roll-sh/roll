@@ -650,7 +650,9 @@ panel in Settings read it, newest first; audit events are kept 90 days (the rest
 
 A crash loop's banner on the service page has the logs a click away and **Roll back** to the
 deployment that was live before (its image again, no build); `roll apps rollback` with no id
-does the same, as `heroku rollback`. A failed or timed-out cron run is a `cron.failed` event,
+does the same, as `heroku rollback`. The server picks the target (`POST …/rollback`): it follows
+the `rollback_of` chain, so after B → A the next goes before A, never forward to B. A failed or
+timed-out cron run is a `cron.failed` event,
 notified by default; a failed one-off job is `job.failed`, off by default (someone ran it and saw
 it). Both carry the exit code.
 
