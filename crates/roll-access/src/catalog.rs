@@ -508,6 +508,15 @@ fn cql_action(b: &Value) -> Action {
 /// ships (`deploy`); deleting a thread `delete`; and a shell, writing files, rolling back, raising a
 /// thread's runtime or interaction mode, answering an agent's approval (it would approve itself),
 /// endpoints, the gateway, projects and the machine's settings are `admin`. Unknown types too.
+/// A new apps notification: a webhook (the default) answers its signing secret once, so `reveal`;
+/// a Slack or Discord one answers none, so `write`.
+fn apps_notification_action(b: &Value) -> Action {
+    match b["kind"].as_str() {
+        Some("slack" | "discord") => Action::Write,
+        _ => Action::Reveal,
+    }
+}
+
 /// A new apps service: `deploy` unless its source is an upload (which deploys only with `roll up`).
 fn apps_create_action(b: &Value) -> Action {
     if b["source"]["kind"] == "upload" { Action::Write } else { Action::Deploy }
@@ -847,6 +856,13 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/services", "apps", Act::Body(apps_create_action), Tgt::Create { project: Some("project"), place: None, id_field: "id" })
         .env(EnvFrom::Fixed("production")),
     row("GET", "/v1/apps/events", "apps", R, Tgt::Product),
+    // A project's notifications: the URL is stored sealed and never answered; a webhook's signing
+    // secret comes back once, so making one is reveal (Slack and Discord ones are write).
+    row("GET", "/v1/apps/projects/{project}/notifications", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/notifications", "apps", Act::Body(apps_notification_action), one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
@@ -1060,6 +1076,8 @@ mod tests {
         }
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
+        assert_eq!(apps_notification_action(&serde_json::json!({ "url": "https://example.com/h" })), Action::Reveal);
+        assert_eq!(apps_notification_action(&serde_json::json!({ "kind": "slack", "url": "https://hooks.slack.com/x" })), Action::Write);
         let dep = find("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "x").unwrap();
         assert_eq!(dep.row.action("POST", &[("env".into(), "production".into())], None), Action::Deploy);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);

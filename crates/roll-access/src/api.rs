@@ -150,7 +150,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         (Who::Grant(_), Some(_)) => return Err(Error::Forbidden("a token checks only itself".into())),
         (Who::Operator, Some(id)) => {
             let id = id.clone();
-            blocking(a.clone(), move |a| a.store.get(&id)).await?.rules
+            blocking(a.clone(), move |a| a.store.get(&id)).await?.effective_rules(code_sql::now_ms())
         }
         (Who::Operator, None) => return Ok(Json(json!({ "decision": "allow", "why": "the operator may do everything" }))),
     };
@@ -231,11 +231,12 @@ impl<'a> Shape<'a> {
 /// more addresses than it may be used from, at no more requests a minute than it may make.
 async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, shape: &Shape<'_>) -> crate::Result<()> {
     let Shape { rules, expires_at, ip_allow, rate } = *shape;
-    if !crate::may_grant(Some(g), rules) {
-        return Err(Error::Forbidden("a token can only make tokens it covers: every rule must be within one of its own".into()));
-    }
     let id = g.id.to_string();
     let maker = blocking(a.clone(), move |a| a.store.get(&id)).await?;
+    // Its own rules, not what it's allowed for a while: a while never becomes for good.
+    if !maker.rules.covers(rules) {
+        return Err(Error::Forbidden("a token can only make tokens it covers: every rule must be within one of its own".into()));
+    }
     if let Some(end) = maker.expires_at
         && expires_at.is_none_or(|e| e > end)
     {
@@ -351,12 +352,61 @@ struct Decision {
     reason: Option<String>,
 }
 
-async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct Approve {
+    /// Also allow the same action on the same resource from now on: `1h`, `8h`, `1d` or `always`.
+    remember: Option<String>,
+}
+
+/// Approve a request, once, or also for what's asked again (docs/permissions.md, "Remembered
+/// approvals"): the same action on the same resource for a while, or for good.
+async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     operator_only(&a, &ext, "approve a request")?;
+    let ap: Approve = if body.iter().all(u8::is_ascii_whitespace) { Approve::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
+    let remembered = remembered(&a, &id, ap.remember.as_deref()).await?;
     let by = actor(&ext);
     let decided = blocking(a.clone(), move |a| a.store.decide(&id, true, &by, None)).await?;
     a.changed(&decided);
+    if let Some((grant, rule, until)) = remembered {
+        blocking(a.clone(), move |a| a.store.remember(&grant, &rule, until)).await?;
+    }
     Ok(Json(json!(decided)))
+}
+
+/// What approving `id` with `remember` would also allow: the grant, the rule (the request's action
+/// on its one resource) and until when (`None`: for good). Checked before anything is decided.
+async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate::Result<Option<(String, roll_auth::scope::Rule, Option<i64>)>> {
+    let hours = |h: i64| Some(Some(code_sql::now_ms() + h * 3_600_000));
+    let until: Option<Option<i64>> = match remember {
+        None | Some("once") => None,
+        Some("1h") => hours(1),
+        Some("8h") => hours(8),
+        Some("1d") => hours(24),
+        Some("always") => Some(None),
+        Some(other) => return Err(Error::BadRequest(format!("remember is 1h, 8h, 1d or always, not {other}"))),
+    };
+    let Some(until) = until else { return Ok(None) };
+    let id2 = id.to_string();
+    let found = blocking(a.clone(), move |a| a.store.approval(&id2)).await?;
+    let Some(resource) = found.resource.clone().filter(|r| !r.starts_with("new in ")) else {
+        return Err(Error::BadRequest("this request isn't about one resource: approve it once".into()));
+    };
+    let action: Action = serde_json::from_value(json!(found.action)).map_err(|_| Error::Internal(format!("approval {id} has action {}", found.action)))?;
+    let rule = roll_auth::scope::Rule {
+        product: found.product.clone(),
+        resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: resource }]),
+        environments: None,
+        paths: None,
+        actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+    };
+    // For good is a change to the token: it meets the policy as it is now.
+    if until.is_none() {
+        let g = found.grant_id.clone();
+        let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
+        a.check_policy(grant.expires_at)?;
+    }
+    Ok(Some((found.grant_id, rule, until)))
 }
 
 async fn deny(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {

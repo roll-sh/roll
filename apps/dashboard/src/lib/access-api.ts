@@ -61,6 +61,20 @@ export interface NewGrant {
   rate_per_minute?: number | null;
 }
 
+/** How long an approval also allows the same action on the same resource. */
+export type Remember = "once" | "1h" | "8h" | "1d" | "always";
+
+export const REMEMBER: { value: Remember; label: string }[] = [
+  { value: "once", label: "Once" },
+  { value: "1h", label: "For an hour" },
+  { value: "8h", label: "For 8 hours" },
+  { value: "1d", label: "For a day" },
+  { value: "always", label: "Always" },
+];
+
+/** Whether an approval is about one resource, so approving it can be remembered. */
+export const rememberable = (a: Pick<Approval, "resource">) => Boolean(a.resource && !a.resource.startsWith("new in "));
+
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "used";
 
 export interface Approval {
@@ -202,7 +216,8 @@ export const accessApi = {
       { method, path, ...opts },
     ),
   approvals: (state?: ApprovalState) => call<Approval[]>("GET", `/v1/access/approvals${query({ state })}`),
-  approve: (id: string) => call<Approval>("POST", `${approval(id)}/approve`),
+  /** `remember`: also allow the same action on the same resource for a while, or always. */
+  approve: (id: string, remember?: Remember) => call<Approval>("POST", `${approval(id)}/approve`, remember && remember !== "once" ? { remember } : {}),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
   /** The log as JSON lines (one event per line), for a download. */

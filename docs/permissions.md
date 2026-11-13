@@ -310,6 +310,21 @@ type Approval = {
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
   approval as a result the agent can wait on (`access_wait_approval`).
 
+### Remembered approvals
+
+Approving can also allow what's asked again, as Claude Code's and Cursor's "allow for this
+session" or "always" do (`POST …/approve {remember: "1h" | "8h" | "1d" | "always"}`, the approvals
+page's "Once ▾", `roll mcp approve --remember 1h`):
+
+- It allows the request's action on its one resource (`{product, resources: [{id}], actions:
+  {<action>: "allow"}}`); nothing broader. A request about the product as a whole or about
+  something new ("new in a project") can only be approved once.
+- For a while, the rule is the grant's `temporary`: it lapses by itself, and decisions read the
+  grant's rules plus the live temporary ones. For good, it's added to the grant's `rules`, and the
+  operator's token policy applies.
+- A while never becomes for good: a token makes tokens covered by its own rules only, never by
+  what it's allowed for now.
+
 ### Approvals in chat
 
 Approvals can also go to a Slack or Discord channel, through roll code's chat ops
@@ -468,7 +483,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | `?state=pending` |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
-| `POST /v1/access/approvals/{id}/approve` | operator | |
+| `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
 | `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |

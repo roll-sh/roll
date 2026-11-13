@@ -291,7 +291,8 @@ Ranked; the top item is in progress. A watchdog reads this list.
 4. **Finer resources:** apps' deploys by id (once #21 is on main). Storage buckets in a named
    account (`account/bucket`, their list filtered) are done.
 
-Done lately: leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
+Done lately: remembered approvals (docs/permissions.md: approve for an hour, a day or always,
+one action on one resource, a while never made permanent through a child token); leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
 secrets, roll code's landings scanned from the land log, GitHub's secret scanning partner
 endpoint); audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in
 signed batches, the same contract as roll secrets' sinks, checked live against a receiver that
