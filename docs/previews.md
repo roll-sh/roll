@@ -258,12 +258,13 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   trusted: it's made with `"trusted": true` only then (roll secrets refuses a protected base to
   an untrusted environment whoever reads it, so roll apps deploying it as `app:<service>` gets no
   more than the preview would). Turning `allow_production` on or off makes a new environment.
-- **Exactly the rules' values.** Each converge sets the overrides and branch URLs and deletes the
-  environment's own keys the rules no longer have (a removed override doesn't linger).
-- **It expires by itself.** It's made with `expires_at` 24 hours ahead, pushed out whenever less
-  than 12 hours are left (a preview converges every few minutes while it exists), so a teardown
-  that never happened leaves it for a day at most; roll secrets then deletes it and revokes its
-  leases.
+- **One idempotent call.** Each converge ensures it with `PUT …/environments/pv-…` (roll secrets'
+  ensure: made if missing, `replace: true` so its own keys are exactly the overrides and branch
+  URLs, a removed override doesn't linger; an unchanged repeat records nothing). A different base
+  or trust answers 409, and the environment is made again.
+- **It expires by itself.** `ttl_minutes` is a day, renewed by each converge (a preview converges
+  every few minutes while it exists), so a teardown that never happened leaves it for a day at
+  most; roll secrets then deletes it and revokes its leases.
 - The environment is deleted with the preview.
 
 ## Schema changes
