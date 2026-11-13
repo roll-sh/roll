@@ -959,7 +959,9 @@ impl Apps {
     pub async fn resume_service(self: &Arc<Self>, service: &str) {
         let known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
         for name in self.deps.runtime.list(Some(service)).await {
-            if !known.contains(&name) {
+            // A known instance's network sandbox (`<instance>-net`) is its own.
+            let owner = name.strip_suffix("-net").unwrap_or(&name).to_string();
+            if !known.contains(&name) && !known.contains(&owner) {
                 self.deps.runtime.remove(&name).await;
             }
         }

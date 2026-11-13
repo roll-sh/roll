@@ -63,13 +63,30 @@ pub struct Docker {
     scratch: PathBuf,
     /// The daemon's socket, when it's on this host.
     engine: Option<Engine>,
+    /// A web instance's network lives in a sandbox container made with it ([`sandbox_name`]):
+    /// a wake starts only the app, which joins the sandbox's network namespace, so Docker sets
+    /// no network up on the wake's path. `ROLL_APPS_NETNS=0` turns it off.
+    netns: bool,
+}
+
+/// The sandbox holding `instance`'s network, its aliases and its published port.
+pub fn sandbox_name(instance: &str) -> String {
+    format!("{instance}-net")
 }
 
 impl Docker {
     pub fn new(scratch: PathBuf) -> Docker {
         // Env files a stopped process left behind (they hold variables' values).
         let _ = std::fs::remove_dir_all(&scratch);
-        Docker { known: Mutex::new(Known::default()), scratch, engine: Engine::local() }
+        let netns = std::env::var("ROLL_APPS_NETNS").map_or(true, |v| v != "0");
+        Docker { known: Mutex::new(Known::default()), scratch, engine: Engine::local(), netns }
+    }
+
+    /// With or without network sandboxes, whatever `ROLL_APPS_NETNS` says (a measurement
+    /// compares the two).
+    pub fn with_netns(mut self, on: bool) -> Docker {
+        self.netns = on;
+        self
     }
 
     async fn id_and_port(&self, name: &str) -> anyhow::Result<(String, Option<u16>)> {
@@ -160,6 +177,37 @@ impl Runtime for Docker {
             None => None,
         };
         if let Some(engine) = &self.engine {
+            // A web instance on a network: its network first, in a sandbox that runs from now on.
+            if self.netns
+                && let (Some(_), Some(_)) = (spec.port, &spec.network)
+            {
+                let sandbox = sandbox_name(&spec.name);
+                let made = async {
+                    engine.create(&sandbox, &sandbox_config(spec, host_port)).await?;
+                    engine.start(&sandbox).await
+                }
+                .await;
+                match made {
+                    Ok(()) => match engine.create(&spec.name, &joined(engine_config(spec, None)?, &sandbox)).await {
+                        Ok(id) => {
+                            self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            let _ = docker(&["rm", "-f", "-v", &sandbox]).await;
+                            if !e.to_string().contains("No such image") {
+                                return Err(e);
+                            }
+                        }
+                    },
+                    // No sandbox (its image isn't here yet, say): the instance holds its own
+                    // network, as before.
+                    Err(e) => {
+                        tracing::debug!(sandbox, error = %e, "apps: no network sandbox; the instance holds its own");
+                        let _ = docker(&["rm", "-f", "-v", &sandbox]).await;
+                    }
+                }
+            }
             match engine.create(&spec.name, &engine_config(spec, host_port)?).await {
                 Ok(id) => {
                     self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
@@ -329,6 +377,7 @@ impl Runtime for Docker {
 
     async fn remove(&self, name: &str) {
         let _ = docker(&["rm", "-f", "-v", name]).await;
+        let _ = docker(&["rm", "-f", "-v", &sandbox_name(name)]).await;
         self.known.lock().containers.remove(name);
     }
 
@@ -471,6 +520,56 @@ fn nanos(cpu: f64) -> i64 {
 pub const CAP_DROP: [&str; 4] = ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SETFCAP"];
 
 /// The Engine API's create config for an instance: the same container the CLI path makes.
+/// The sandbox's container: busybox asleep, holding the instance's network, its aliases on the
+/// project network and its published port; nothing else, and allowed nothing else.
+fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>) -> serde_json::Value {
+    use serde_json::json;
+    let mut host = json!({
+        "Memory": 16i64 << 20,
+        "MemorySwap": 16i64 << 20,
+        "NanoCpus": 50_000_000i64,
+        "PidsLimit": 8,
+        "SecurityOpt": ["no-new-privileges"],
+        "CapDrop": ["ALL"],
+        "ReadonlyRootfs": true,
+        "RestartPolicy": {"Name": "no"},
+        "Init": true,
+        "ExtraHosts": ["host.docker.internal:host-gateway"],
+        "LogConfig": {"Type": "none", "Config": {}},
+    });
+    let mut config = json!({
+        "Image": VOLUME_IMAGE,
+        "Cmd": ["sleep", "2147483647"],
+        "Labels": { LABEL: spec.service, format!("{LABEL}.env"): spec.env, format!("{LABEL}.role"): "network" },
+    });
+    if let (Some(p), Some(hp)) = (spec.port, host_port) {
+        let port = format!("{p}/tcp");
+        config["ExposedPorts"] = json!({ &port: {} });
+        host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+    }
+    if let Some(net) = &spec.network {
+        host["NetworkMode"] = json!(net);
+        config["NetworkingConfig"] = json!({"EndpointsConfig": { net: {"Aliases": spec.aliases} }});
+    }
+    config["HostConfig"] = host;
+    config
+}
+
+/// An instance's config joined to its sandbox's network: no network, port or hosts of its own
+/// (Docker refuses those with another container's network).
+fn joined(mut config: serde_json::Value, sandbox: &str) -> serde_json::Value {
+    if let Some(o) = config.as_object_mut() {
+        o.remove("ExposedPorts");
+        o.remove("NetworkingConfig");
+    }
+    if let Some(h) = config["HostConfig"].as_object_mut() {
+        h.remove("PortBindings");
+        h.remove("ExtraHosts");
+        h.insert("NetworkMode".into(), serde_json::json!(format!("container:{sandbox}")));
+    }
+    config
+}
+
 fn engine_config(spec: &InstanceSpec, host_port: Option<u16>) -> anyhow::Result<serde_json::Value> {
     use serde_json::json;
     let mut env = Vec::with_capacity(spec.vars.len());
