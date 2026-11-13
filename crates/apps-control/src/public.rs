@@ -198,13 +198,15 @@ struct SiteRequest {
     query: Option<String>,
     if_none_match: Option<String>,
     accept_encoding: Option<String>,
+    range: Option<String>,
+    if_range: Option<String>,
     request_id: Option<String>,
 }
 
 impl SiteRequest {
     fn of(req: &Request) -> SiteRequest {
         let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), request_id: h("x-request-id") }
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id") }
     }
 }
 
@@ -278,7 +280,7 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         },
         _ => (None, site.files[name], None),
     };
-    let (offset, len) = match &gz {
+    let (mut offset, mut len) = match &gz {
         Some(b) => (file.0, b.len() as u64),
         None => file,
     };
@@ -293,6 +295,22 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         r.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
         return r;
     }
+    // One byte range of the file as it is (a video's seek, a download resumed); several, or one
+    // that doesn't parse, get the whole file, as RFC 9110 allows. `If-Range` keeps it to this
+    // version of the file.
+    let ranged = status == 200 && encoding.is_none() && req.if_range.as_deref().is_none_or(|v| v.trim() == etag);
+    let mut range = None;
+    if ranged && let Some(r) = req.range.as_deref().and_then(|r| byte_range(r, len)) {
+        let Ok((start, end)) = r else {
+            done(416, 0);
+            let mut r = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            r.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{len}")).expect("ascii"));
+            return r;
+        };
+        range = Some(format!("bytes {start}-{end}/{len}"));
+        (offset, len) = (offset + start, end - start + 1);
+    }
+    let status = if range.is_some() { 206 } else { status };
     let body = if head {
         Body::empty()
     } else if let Some(b) = gz {
@@ -337,6 +355,12 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     if compress {
         h.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
     }
+    if ranged {
+        h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    }
+    if let Some(cr) = range {
+        h.insert(header::CONTENT_RANGE, HeaderValue::from_str(&cr).expect("ascii"));
+    }
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if ctype.starts_with("text/html") { "no-cache" } else { "public, max-age=300" }));
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
@@ -353,6 +377,34 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         }
     }
     r
+}
+
+/// `Range: bytes=…` against a file of `len` bytes: the first and last byte, or `Err` when it
+/// can't be met (a 416). None: not one range this answers (the whole file instead).
+fn byte_range(h: &str, len: u64) -> Option<std::result::Result<(u64, u64), ()>> {
+    let spec = h.trim().strip_prefix("bytes=")?.trim();
+    if spec.contains(',') {
+        return None;
+    }
+    let (a, b) = spec.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    let num = |s: &str| (!s.is_empty() && s.bytes().all(|c| c.is_ascii_digit())).then(|| s.parse::<u64>().ok()).flatten();
+    Some(match (a.is_empty(), b.is_empty()) {
+        // The last `b` bytes.
+        (true, false) => match num(b)? {
+            n if n == 0 || len == 0 => Err(()),
+            n => Ok((len.saturating_sub(n), len - 1)),
+        },
+        (false, _) => {
+            let start = num(a)?;
+            let end = if b.is_empty() { u64::MAX } else { num(b)? };
+            if end < start {
+                return None;
+            }
+            if start >= len { Err(()) } else { Ok((start, end.min(len - 1))) }
+        }
+        (true, true) => return None,
+    })
 }
 
 /// A visitor's gradual-rollout bucket (docs/apps/README.md, "Gradual rollouts").
@@ -759,6 +811,22 @@ impl Access {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_byte_range_is_met_and_the_rest_is_the_whole_file() {
+        use super::byte_range as r;
+        assert_eq!(r("bytes=0-99", 1000), Some(Ok((0, 99))));
+        assert_eq!(r("bytes=900-", 1000), Some(Ok((900, 999))));
+        assert_eq!(r("bytes=990-5000", 1000), Some(Ok((990, 999))));
+        assert_eq!(r("bytes=-100", 1000), Some(Ok((900, 999))));
+        assert_eq!(r("bytes=-5000", 1000), Some(Ok((0, 999))));
+        assert_eq!(r("bytes=1000-", 1000), Some(Err(())));
+        assert_eq!(r("bytes=-0", 1000), Some(Err(())));
+        assert_eq!(r("bytes=0-", 0), Some(Err(())));
+        for whole in ["bytes=0-1,5-6", "bytes=5-1", "items=0-1", "bytes=-", "bytes=a-b", "bytes=+1-2", "bytes=99999999999999999999-"] {
+            assert_eq!(r(whole, 1000), None, "{whole}");
+        }
+    }
+
     #[test]
     fn the_pages_mark_is_the_brands_export() {
         let brand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/brand/assets/horizon-dark.svg");

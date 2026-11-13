@@ -1150,6 +1150,23 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let mut plain = Vec::new();
     std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&gz[..]), &mut plain).unwrap();
     assert_eq!(plain, raw);
+    // One byte range of the file as it is (a video's seek); a stale If-Range gets it whole.
+    let ranged = |range: &str, if_range: Option<&str>| {
+        let mut b = Request::builder().uri("/assets/big.js").header("host", h.as_str()).header("range", range);
+        if let Some(v) = if_range {
+            b = b.header("if-range", v);
+        }
+        let (public, req) = (w.public.clone(), b.body(Body::empty()).unwrap());
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let (st, hd) = (r.status(), r.headers().clone());
+            (st, hd, r.into_body().collect().await.unwrap().to_bytes())
+        }
+    };
+    let (st, hr, part) = ranged("bytes=21-41", Some(hd["etag"].to_str().unwrap())).await;
+    assert_eq!((st, hr["content-range"].to_str().unwrap(), &part[..]), (StatusCode::PARTIAL_CONTENT, "bytes 21-41/4200", &raw[21..42]));
+    assert_eq!(ranged("bytes=0-1", Some("\"stale\"")).await.0, StatusCode::OK);
+    assert_eq!(ranged("bytes=5000-", None).await.0, StatusCode::RANGE_NOT_SATISFIABLE);
     let (hb, br) = get("/assets/pre.css", Some("gzip, br")).await;
     assert_eq!((hb["content-encoding"].to_str().unwrap(), &br[..]), ("br", &b"BROTLI-BYTES"[..]));
     assert!(get("/index.html", Some("gzip")).await.0.get("content-encoding").is_none(), "too small to bother");
