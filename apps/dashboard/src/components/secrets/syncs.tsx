@@ -74,7 +74,7 @@ export function SyncsView() {
 const GROUPS: [string, string[]][] = [
   ["CI", ["github", "gitlab", "circleci", "bitbucket"]],
   ["Hosting", ["vercel", "netlify", "render", "fly", "railway", "heroku", "cloudflare"]],
-  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "kubernetes"]],
+  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "kubernetes", "terraform-cloud"]],
   ["Anything else", []],
 ];
 
@@ -96,6 +96,7 @@ function targetSummary(s: Sync): string {
   if (s.kind === "aws-secrets-manager") return `${str("region")} · ${str("secret_name")}`;
   if (s.kind === "google-secret-manager") return `${str("project")}${str("prefix") ? ` · ${str("prefix")}…` : ""}`;
   if (s.kind === "azure-key-vault") return str("vault");
+  if (s.kind === "terraform-cloud") return `${str("workspace_id")} · ${str("category") || "env"}`;
   if (str("url")) {
     try {
       return new URL(str("url")).host;

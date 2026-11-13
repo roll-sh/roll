@@ -42,6 +42,8 @@ pub(super) struct Http {
     circleci: String,
     /// `https://api.bitbucket.org/2.0`.
     bitbucket: String,
+    /// `https://app.terraform.io/api/v2`.
+    terraform: String,
 }
 
 impl Http {
@@ -56,6 +58,7 @@ impl Http {
         h.azure_vault = None;
         h.circleci = "https://circleci.com/api/v2".into();
         h.bitbucket = "https://api.bitbucket.org/2.0".into();
+        h.terraform = "https://app.terraform.io/api/v2".into();
         h
     }
 
@@ -67,7 +70,7 @@ impl Http {
             .user_agent("roll-secrets-sync")
             .build()
             .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()), circleci: vercel.into(), bitbucket: format!("{vercel}/2.0") }
+        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()), circleci: vercel.into(), bitbucket: format!("{vercel}/2.0"), terraform: format!("{vercel}/api/v2") }
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -379,7 +382,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new() };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -947,6 +950,97 @@ impl SyncTarget for Bitbucket {
     }
 }
 
+// ── terraform-cloud ──
+
+/// A Terraform Cloud workspace's variables, all `sensitive`. Terraform Cloud keeps no tag on a
+/// variable: roll marks its own with a description, and never writes or deletes one without it.
+pub(super) struct TerraformCloud(pub(super) Http);
+
+const TFC_MARK: &str = "managed by roll secrets";
+
+impl TerraformCloud {
+    /// (workspace id, category, token_key)
+    fn target(&self, t: &Json) -> Result<(String, String, String)> {
+        let [ws, category, token_key] = target("terraform-cloud", t, [("workspace_id", true), ("category", false), ("token_key", true)])?;
+        let ws = ws.unwrap_or_default();
+        if !ws.starts_with("ws-") || !ident(&ws, 64, "-") {
+            return Err(bad("workspace_id is a Terraform Cloud workspace's id (ws-…)"));
+        }
+        let category = category.unwrap_or_else(|| "env".into());
+        if category != "env" && category != "terraform" {
+            return Err(bad("category is env (environment variables) or terraform (Terraform variables)"));
+        }
+        Ok((ws, category, key_field("terraform-cloud", "token_key", token_key)?))
+    }
+}
+
+impl SyncTarget for TerraformCloud {
+    fn kind(&self) -> &str {
+        "terraform-cloud"
+    }
+    fn label(&self) -> &str {
+        "Terraform Cloud workspace variables"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "workspace_id", label: "Workspace id", required: true, placeholder: "ws-AbC123" },
+            SyncField { name: "category", label: "env or terraform (default env)", required: false, placeholder: "env" },
+            SyncField { name: "token_key", label: "Key holding a team or user token", required: true, placeholder: "TFC_TOKEN" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (ws, category, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        let what = format!("terraform-cloud {ws}");
+        let base = format!("{}/workspaces/{ws}/vars", self.0.terraform);
+        let api = |r: reqwest::RequestBuilder| r.bearer_auth(token).header("content-type", "application/vnd.api+json");
+        block_on(async {
+            // The workspace's variables of this category, by key: (id, ours).
+            let (status, v) = self.0.send(api(self.0.client.get(&base)), &what).await?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("{what}: listing variables: {status}")));
+            }
+            let mut have: std::collections::BTreeMap<String, (String, bool)> = Default::default();
+            for x in v["data"].as_array().into_iter().flatten() {
+                let a = &x["attributes"];
+                if a["category"] == category.as_str()
+                    && let (Some(k), Some(id)) = (a["key"].as_str(), x["id"].as_str())
+                {
+                    have.insert(k.to_string(), (id.to_string(), a["description"] == TFC_MARK));
+                }
+            }
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                let attributes = json!({ "key": name, "value": v.expose(), "category": category, "sensitive": true, "description": TFC_MARK });
+                let req = match have.get(name.as_str()) {
+                    Some((_, false)) => return Err(Error::Link(format!("{what}: {name} exists and roll didn't create it: roll never writes to it"))),
+                    Some((id, true)) => self.0.client.patch(format!("{base}/{id}")).json(&json!({ "data": { "type": "vars", "id": id, "attributes": attributes } })),
+                    None => self.0.client.post(&base).json(&json!({ "data": { "type": "vars", "attributes": attributes } })),
+                };
+                let (status, _) = self.0.send(api(req), &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {name}: {status}")));
+                }
+            }
+            for name in p.removed {
+                let Some((id, true)) = have.get(name.as_str()) else { continue };
+                let (status, _) = self.0.send(api(self.0.client.delete(format!("{base}/{id}"))), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {name}: {status}")));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 // ── fly ──
 
 /// A Fly.io app's secrets, through Fly's GraphQL API (as flyctl's `fly-go` sends them).
@@ -1240,7 +1334,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new() };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -1555,6 +1649,13 @@ mod tests {
             // A form (Google's token request) is kept as its text.
             seen.lock().unwrap().push((method.to_string(), pq.clone(), serde_json::from_slice(&body).unwrap_or_else(|_| Json::String(String::from_utf8_lossy(&body).into()))));
             // Google: the token endpoint, then Secret Manager (OLD is roll's, NEW doesn't exist yet).
+            // Terraform Cloud: OLD is roll's, THEIRS isn't.
+            if pq == "/api/v2/workspaces/ws-abc/vars" && method == Method::GET {
+                return (StatusCode::OK, axum::Json(json!({ "data": [
+                    { "id": "var-old", "attributes": { "key": "OLD", "category": "env", "description": "managed by roll secrets" } },
+                    { "id": "var-theirs", "attributes": { "key": "THEIRS", "category": "env", "description": "" } },
+                ] })));
+            }
             // Bitbucket: OLD exists (by uuid), NEW doesn't.
             if pq.starts_with("/2.0/repositories/acme/web/pipelines_config/variables") && method == Method::GET {
                 return (StatusCode::OK, axum::Json(json!({ "values": [{ "uuid": "{old-1}", "key": "OLD", "secured": true }] })));
@@ -1730,6 +1831,16 @@ mod tests {
         let vars = "/2.0/repositories/acme/web/pipelines_config/variables";
         assert_eq!(route, [("GET", format!("{vars}?pagelen=100").as_str()), ("POST", vars), ("DELETE", format!("{vars}/%7Bold-1%7D").as_str())]);
         assert_eq!(calls[1].2, json!({ "key": "NEW", "value": "v-123", "secured": true }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terraform_cloud_writes_sensitive_variables_and_only_its_own() {
+        let (base, seen) = mock().await;
+        push(Arc::new(TerraformCloud(http(&base))), json!({ "workspace_id": "ws-abc", "token_key": "TFC" }), &[("TFC", "tfc")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        assert_eq!(route, [("GET", "/api/v2/workspaces/ws-abc/vars"), ("POST", "/api/v2/workspaces/ws-abc/vars"), ("DELETE", "/api/v2/workspaces/ws-abc/vars/var-old")]);
+        assert_eq!(calls[1].2["data"]["attributes"], json!({ "key": "NEW", "value": "v-123", "category": "env", "sensitive": true, "description": "managed by roll secrets" }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
