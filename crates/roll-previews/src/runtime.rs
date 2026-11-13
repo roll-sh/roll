@@ -384,6 +384,26 @@ impl Runtime {
         ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-store")], axum::Json(here)).into_response()
     }
 
+    /// A link's way in: its token becomes a cookie (`cookie`, for `max_age` seconds) and the
+    /// visitor is sent to the same URL without `param`.
+    fn enter(&self, req: &Request, param: &str, cookie: &str, value: &str, max_age: i64) -> Response {
+        let query = req.uri().query().unwrap_or("");
+        let prefix = format!("{param}=");
+        let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with(&prefix) && !kv.is_empty()).collect();
+        // Only a path on this host: `//evil.example/` would be another site.
+        let path = format!("/{}", req.uri().path().trim_start_matches(['/', '\\']));
+        let location = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
+        let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
+        let set = format!("{cookie}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}");
+        let mut r = (StatusCode::FOUND, "").into_response();
+        if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&set)) {
+            r.headers_mut().insert(header::LOCATION, l);
+            r.headers_mut().insert(header::SET_COOKIE, c);
+            r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        }
+        r
+    }
+
     /// Where a visitor's feedback goes (the preview in roll's dashboard), when they get the button:
     /// they came in through roll (the link access cookie), the preview is a change's, the rules
     /// have `feedback` on and roll's dashboard is known.
@@ -422,22 +442,22 @@ impl Runtime {
         if has_access_cookie(preview, &token, req) {
             return None;
         }
+        // A share link (someone outside the team, until it ends), checked again at every request
+        // so a revoked or ended one stops at once.
+        let share_cookie = format!("roll_share_{preview}");
+        if cookie_value(req, &share_cookie).is_some_and(|t| self.store.share_ends(preview, t).ok().flatten().is_some()) {
+            return None;
+        }
         let query = req.uri().query().unwrap_or("");
-        let given = query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "roll_access").map(|(_, v)| v);
-        if !token.is_empty() && given.is_some_and(|v| same(v, &token)) {
-            let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_access=") && !kv.is_empty()).collect();
-            // Only a path on this host: `//evil.example/` would be another site.
-            let path = format!("/{}", req.uri().path().trim_start_matches(['/', '\\']));
-            let location = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
-            let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
-            let set = format!("{cookie}={token}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax{secure}");
-            let mut r = (StatusCode::FOUND, "").into_response();
-            if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&set)) {
-                r.headers_mut().insert(header::LOCATION, l);
-                r.headers_mut().insert(header::SET_COOKIE, c);
-                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            }
-            return Some(r);
+        let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
+        if !token.is_empty() && given("roll_access").is_some_and(|v| same(v, &token)) {
+            return Some(self.enter(req, "roll_access", &cookie, &token, 2_592_000));
+        }
+        if let Some(t) = given("roll_share")
+            && let Ok(Some(ends)) = self.store.share_ends(preview, t)
+        {
+            let left = ((ends - self.store.now_ms().unwrap_or(ends)) / 1000).max(1);
+            return Some(self.enter(req, "roll_share", &share_cookie, t, left));
         }
         let through = match (&self.cfg.dashboard, self.store.row(preview)) {
             (Some(web), Ok(row)) => Some(format!(
@@ -632,16 +652,14 @@ fn percent_decode(v: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The value of cookie `name` on `req`.
+fn cookie_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).filter_map(|kv| kv.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v)
+}
+
 /// Whether `req` carries the preview's link access cookie.
 fn has_access_cookie(preview: &str, token: &str, req: &Request) -> bool {
-    let cookie = format!("roll_access_{preview}");
-    req.headers()
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .filter_map(|kv| kv.trim().split_once('='))
-        .any(|(k, v)| k == cookie && !token.is_empty() && same(v, token))
+    !token.is_empty() && cookie_value(req, &format!("roll_access_{preview}")).is_some_and(|v| same(v, token))
 }
 
 fn private_page(through: Option<&str>) -> Response {
@@ -1044,6 +1062,15 @@ mod tests {
         let script = raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(script.contains("text/javascript") && script.contains(&format!(r#""https://roll.test/dashboard/projects/prj_1/previews?preview={}""#, row.id)), "{script}");
         assert!(raw("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
+        // A share link: in through its token (a cookie of its own, only for its life), out once
+        // it's revoked.
+        let (share, stoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada").unwrap();
+        let entered = raw(format!("GET /hello?roll_share={stoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await;
+        assert!(entered.starts_with("HTTP/1.1 302") && entered.contains(&format!("roll_share_{}={stoken}", row.id)) && entered.contains("Max-Age=3"), "{entered}");
+        let with_share = format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={stoken}\r\nConnection: close\r\n\r\n", row.id);
+        assert!(raw(with_share.clone()).await.ends_with("service saw /hello"));
+        rt.store.revoke_share(&row.id, &share.id).unwrap();
+        assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.
         let notes = raw(format!("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(notes.contains("application/json") && notes.ends_with("[]"), "{notes}");

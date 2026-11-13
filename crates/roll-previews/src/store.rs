@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS spend (
     usd REAL NOT NULL,
     PRIMARY KEY (project_id, month)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS shares (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pinned (
     preview_id TEXT NOT NULL,
     service TEXT NOT NULL,
@@ -626,7 +635,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "activity", "screenshots", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1167,6 +1176,50 @@ impl Store {
         })
     }
 
+    /// A link that opens the preview until `expires_at` (Vercel's shareable links), on a token of
+    /// its own: only its SHA-256 is kept, so the token is in the answer once. At most
+    /// [`SHARES_MAX`] live ones.
+    pub fn create_share(&self, id: &str, expires_at: i64, by: &str) -> Result<(crate::Share, String)> {
+        let now = self.now_ms()?;
+        let token = format!("rps_{}", new_token());
+        let sid = format!("shr_{}", &new_token()[..12]);
+        let hash = bypass_hash(&token);
+        self.db.write(|c| {
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND revoked = 0 AND expires_at > ?", params![id, now], |r| r.get(0))?;
+            if live as usize >= SHARES_MAX {
+                return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
+            }
+            c.execute("INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![sid, id, hash, expires_at, by, now])?;
+            Ok::<_, Error>(())
+        })?;
+        Ok((crate::Share { id: sid, expires_at, created_by: by.to_string(), created_at: now, revoked: false }, token))
+    }
+
+    /// The preview's share links, newest first (never their tokens).
+    pub fn shares(&self, id: &str) -> Result<Vec<crate::Share>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT id, expires_at, created_by, created_at, revoked FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0 })
+            })
+        })?)
+    }
+
+    pub fn revoke_share(&self, id: &str, share: &str) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE shares SET revoked = 1 WHERE preview_id = ? AND id = ?", params![id, share])?))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no share link {share}")));
+        }
+        Ok(())
+    }
+
+    /// When the share link `token` of preview `id` ends, if it's live (not revoked, not past).
+    pub fn share_ends(&self, id: &str, token: &str) -> Result<Option<i64>> {
+        let now = self.now_ms()?;
+        Ok(self.db.read(|c| {
+            c.query_row("SELECT expires_at FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?", params![id, bypass_hash(token), now], |r| r.get(0)).optional()
+        })?)
+    }
+
     /// The earlier pushes a preview keeps reachable, newest first.
     pub fn pinned(&self, id: &str) -> Result<Vec<crate::Pinned>> {
         Ok(self.db.read(|c| {
@@ -1291,6 +1344,9 @@ fn host_taken(c: &Conn<'_>, host: &str) -> code_sql::Result<bool> {
     Ok(c.query_row("SELECT 1 FROM services WHERE host = ? UNION ALL SELECT 1 FROM pinned WHERE host = ? LIMIT 1", [host, host], |_| Ok(())).optional()?.is_some())
 }
 
+/// Live share links a preview may have at once.
+pub const SHARES_MAX: usize = 20;
+
 /// Earlier pushes kept reachable per service.
 pub const PINNED_KEEP: usize = 3;
 
@@ -1344,6 +1400,26 @@ mod tests {
         store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
         assert_eq!(store.page_speed(id).unwrap().unwrap().before, Some(speed(900)));
+    }
+
+    #[test]
+    fn a_share_link_opens_its_preview_until_it_ends_or_is_revoked() {
+        let (_dir, store) = store();
+        let (row, _) = store.create(&new("chg_share")).unwrap();
+        let id = row.id.as_str();
+        let now = store.now_ms().unwrap();
+        let (share, token) = store.create_share(id, now + 3_600_000, "ada").unwrap();
+        assert!(token.starts_with("rps_") && share.id.starts_with("shr_"));
+        assert_eq!(store.share_ends(id, &token).unwrap(), Some(now + 3_600_000));
+        assert_eq!(store.share_ends("pv_other", &token).unwrap(), None, "another preview");
+        assert_eq!(store.share_ends(id, "rps_guess").unwrap(), None);
+        let (_, ended) = store.create_share(id, now - 1, "ada").unwrap();
+        assert_eq!(store.share_ends(id, &ended).unwrap(), None, "past its end");
+        store.revoke_share(id, &share.id).unwrap();
+        assert_eq!(store.share_ends(id, &token).unwrap(), None, "revoked");
+        // Only its hash is kept: the list never has a token.
+        let listed = serde_json::to_string(&store.shares(id).unwrap()).unwrap();
+        assert!(!listed.contains(&token) && listed.contains("\"revoked\":true"));
     }
 
     #[test]

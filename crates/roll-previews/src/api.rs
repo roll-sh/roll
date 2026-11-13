@@ -25,6 +25,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
+        .route("/v1/previews/{id}/shares", get(shares).post(share))
+        .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
         .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
@@ -207,6 +209,39 @@ async fn keep(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<
     check_id(&id)?;
     let k: KeepBody = body(&b)?;
     blocking(e, move |e| e.keep(&id, k.hours)).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareBody {
+    hours: u32,
+}
+
+async fn shares(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Vec<crate::Share>>> {
+    check_id(&id)?;
+    blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.shares(&id)
+    })
+    .await
+    .map(Json)
+}
+
+/// The link is in this answer only (its token isn't kept).
+async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
+    check_id(&id)?;
+    let s: ShareBody = body(&b)?;
+    let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
+    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by)).await?;
+    let mut v = serde_json::to_value(&share).unwrap_or_default();
+    v["url"] = json!(url);
+    Ok((StatusCode::CREATED, Json(v)).into_response())
+}
+
+async fn unshare(AxState(e): S, Path((id, share)): Path<(String, String)>) -> crate::Result<Response> {
+    check_id(&id)?;
+    blocking(e, move |e| e.unshare(&id, &share)).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[derive(Deserialize)]

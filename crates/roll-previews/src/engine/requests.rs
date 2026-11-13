@@ -135,6 +135,33 @@ impl Engine {
         self.store.view(r)
     }
 
+    /// A link to the preview for someone outside the team, open for `hours` (1–720), on its own
+    /// token: the answer is the only time the link is shown. Only where the preview needs a
+    /// link (`access: link`); a public one needs none.
+    pub fn share(&self, id: &str, hours: u32, by: &str) -> Result<(crate::Share, String)> {
+        if !(1..=KEEP_MAX_HOURS).contains(&hours) {
+            return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
+        }
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        if !self.store.access(id)?.is_some_and(|a| a.required) {
+            return Err(Error::Conflict("the preview is public: anyone can open it without a link".into()));
+        }
+        let url = self.store.services(id)?.into_iter().next().map(|s| s.url).ok_or_else(|| Error::Conflict("the preview has no service to share yet".into()))?;
+        let (share, token) = self.store.create_share(id, self.store.now_ms()? + hours as i64 * 3_600_000, by)?;
+        self.store.log(id, &format!("shared for {hours} hours by {by} ({})", share.id))?;
+        Ok((share, format!("{}/?roll_share={token}", url.trim_end_matches('/'))))
+    }
+
+    /// End a share link at once.
+    pub fn unshare(&self, id: &str, share: &str) -> Result<()> {
+        self.store.revoke_share(id, share)?;
+        self.store.log(id, &format!("share link {share} revoked"))?;
+        Ok(())
+    }
+
     /// Keep the preview past its TTL for `hours` from now (at most [`KEEP_MAX_HOURS`]); `0` lets
     /// its rules decide again. A landed or closed change, or a deleted project, still ends it.
     pub fn keep(&self, id: &str, hours: u32) -> Result<Preview> {

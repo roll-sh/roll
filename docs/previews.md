@@ -475,6 +475,14 @@ logged and read again on the next converge; it never fails the preview.
   evaluator which preview and project a branched resource belongs to, so a "previews only" token
   reaches the branches and never the originals.
 
+- **Share links** (Vercel's shareable links): a link for someone outside the team
+  (`POST …/shares {hours}`, the sheet's Share, `roll preview share`) on a token of its own, open
+  until it ends (1–720 hours) or is revoked, while the preview's own link stays as it is. Only
+  the token's SHA-256 is kept, so the link is shown once. Its visitor gets a cookie for that
+  preview that lasts no longer than the link, checked against the store at every request, so a
+  revoked or ended link stops at once. A share visitor gets no feedback button (they have no
+  roll account to post with) and never the project's bypass.
+
 ## Cost
 
 A preview's cost is the sum of what its branches and services use, priced with each product's
@@ -649,6 +657,8 @@ and admins see every project.
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none) |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image |
+| `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones |
+| `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
@@ -854,6 +864,7 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- expiring share links for people outside the team (revocable, shown once);
 - page speed per push (timed with the screenshot, compared with the push before);
 - the page's feedback listed by its button (who, what, its element outlined; roll apps' proxy
   can ask `Engine::notes_for` by environment name);
@@ -887,21 +898,18 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Expiring share links** (Vercel's shareable links): a link to hand someone outside the team
-   that opens the preview until a time (`POST …/share {hours}`), on its own signed token, while
-   the preview's own link stays as it is; listed and revocable on the sheet.
-2. **A phone-width screenshot** beside the desktop one (Percy's and Chromatic's widths), with
+1. **A phone-width screenshot** beside the desktop one (Percy's and Chromatic's widths), with
    its own visual change.
-3. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

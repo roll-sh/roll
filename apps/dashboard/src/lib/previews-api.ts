@@ -108,6 +108,15 @@ export interface PreviewJob {
   memory_mb?: number;
 }
 
+/** A link that opens a preview until it ends, for someone outside the team. */
+export interface PreviewShare {
+  id: string;
+  expires_at: number;
+  created_by: string;
+  created_at: number;
+  revoked: boolean;
+}
+
 /** A page's load, as the browser that took its screenshot timed it. */
 export interface PageSpeed {
   ttfb_ms: number;
@@ -222,6 +231,11 @@ export const previewsApi = {
   refresh: (id: string) => call<Preview>("POST", `${one(id)}/refresh`),
   /** Keep it past its TTL for `hours` (at most 720); 0 lets its rules decide again. */
   keep: (id: string, hours: number) => call<Preview>("POST", `${one(id)}/keep`, { hours }),
+  /** Its share links (never their tokens). */
+  shares: (id: string) => call<PreviewShare[]>("GET", `${one(id)}/shares`),
+  /** A link for someone outside the team, open for `hours`; `url` is in this answer only. */
+  share: (id: string, hours: number) => call<PreviewShare & { url: string }>("POST", `${one(id)}/shares`, { hours }),
+  unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
   /** Set or (`null`) remove some of its own variables; its services redeploy with them. */

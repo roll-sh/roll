@@ -70,6 +70,17 @@ pub enum Preview {
         #[arg(long)]
         release: bool,
     },
+    /// A link for someone outside the team, open for --hours (24 unless said; at most 720); the
+    /// link is printed once. --list shows them, --revoke ends one.
+    Share {
+        preview: String,
+        #[arg(long, default_value_t = 24, conflicts_with_all = ["list", "revoke"])]
+        hours: u32,
+        #[arg(long)]
+        list: bool,
+        #[arg(long)]
+        revoke: Option<String>,
+    },
     /// Its own variables, over the project's `env`: list them, set `NAME=value`, or --unset NAME.
     /// Its services redeploy with them.
     Env {
@@ -145,6 +156,11 @@ async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
 fn usd(v: &Value) -> String {
     let x = v.as_f64().unwrap_or(0.0);
     if x > 0.0 && x < 0.01 { format!("${x:.4}") } else { format!("${x:.2}") }
+}
+
+/// A time to come (ms) as UTC, minute precision: "2026-11-14 09:30 UTC".
+fn until_utc(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_else(|| "?".into())
 }
 
 fn print_row(p: &Value) {
@@ -365,6 +381,35 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Wake { preview } => api.post(&format!("/v1/previews/{preview}/wake"), json!({})).await?,
         Preview::Refresh { preview } => api.post(&format!("/v1/previews/{preview}/refresh"), json!({})).await?,
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
+        Preview::Share { preview, hours, list, revoke } => {
+            let path = format!("/v1/previews/{preview}/shares");
+            let v = match (list, revoke) {
+                (_, Some(sid)) => {
+                    api.call(reqwest::Method::DELETE, &format!("{path}/{sid}"), None).await?;
+                    json!({ "revoked": sid })
+                }
+                (true, None) => api.get(&path).await?,
+                (false, None) => api.post(&path, json!({ "hours": hours })).await?,
+            };
+            if !as_json {
+                match (&v["url"], v.as_array()) {
+                    (Value::String(url), _) => {
+                        println!("{url}");
+                        eprintln!("open until {} ({}); it's shown only now. roll preview share {preview} --revoke {} ends it", until_utc(v["expires_at"].as_i64().unwrap_or(0)), s(&v["id"]), s(&v["id"]));
+                    }
+                    (_, Some(list)) if !list.is_empty() => {
+                        for x in list {
+                            let state = if x["revoked"] == true { "revoked" } else { "open" };
+                            println!("{}  {state}  until {}  by {}", s(&x["id"]), until_utc(x["expires_at"].as_i64().unwrap_or(0)), s(&x["created_by"]));
+                        }
+                    }
+                    (_, Some(_)) => println!("no share links"),
+                    _ => println!("revoked {}", s(&v["revoked"])),
+                }
+                return Ok(());
+            }
+            v
+        }
         Preview::Env { preview, set, unset } => {
             let path = format!("/v1/previews/{preview}/env");
             let v = if set.is_empty() && unset.is_empty() {

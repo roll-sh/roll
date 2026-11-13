@@ -1,7 +1,7 @@
 import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
+import { duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -249,6 +249,7 @@ export function PreviewSheet({
             </div>
 
             <Vars id={p.id} />
+            <Shares id={p.id} />
 
             <Label>Details</Label>
             <Rows
@@ -338,6 +339,79 @@ export function PreviewSheet({
           </div>
         )}
       </div>
+    </>
+  );
+}
+
+/** Links for someone outside the team, each open until it ends (or is revoked). */
+function Shares({ id }: { id: string }) {
+  const [list, setList] = useState<PreviewShare[] | null>(null);
+  const [made, setMade] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.shares(id).then(
+      (l) => live && setList(l),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  const act = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await fn();
+      setList(await previewsApi.shares(id));
+      setError(null);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!list) return error ? <p className="text-[11.5px] text-danger">{error}</p> : null;
+  const open = list.filter((x) => !x.revoked && x.expires_at > Date.now());
+  return (
+    <>
+      <Label>Share</Label>
+      <p className="text-[11.5px] text-subtle">A link for someone outside the team, open until it ends. Revoke it any time.</p>
+      <div className="flex gap-1.5">
+        {[
+          [24, "For a day"],
+          [168, "For a week"],
+        ].map(([hours, label]) => (
+          <button key={hours} type="button" className={small} disabled={busy} onClick={() => void act(async () => setMade((await previewsApi.share(id, hours as number)).url))}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {made && (
+        <div className="flex items-center gap-1.5 rounded-md border border-line-2 bg-canvas px-2 py-1.5">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={made}>
+            {made}
+          </span>
+          <button type="button" className="text-[11.5px] text-accent hover:underline" onClick={() => void navigator.clipboard?.writeText(made)}>
+            Copy
+          </button>
+        </div>
+      )}
+      {made && <p className="text-[11px] text-subtle">Shown only now: roll keeps no copy of it.</p>}
+      {open.length > 0 && (
+        <ul className="space-y-1">
+          {open.map((x) => (
+            <li key={x.id} className="flex items-center gap-2 text-[11.5px]">
+              <span className="font-mono text-subtle">{x.id}</span>
+              <span className="min-w-0 flex-1 truncate text-muted">until {new Date(x.expires_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+              <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unshare(id, x.id))}>
+                Revoke
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="text-[11.5px] text-danger">{error}</p>}
     </>
   );
 }

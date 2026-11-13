@@ -281,6 +281,17 @@ impl PageSpeed {
     }
 }
 
+/// A link that opens a preview until it expires, for someone outside the team.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Share {
+    /// `shr_…`
+    pub id: String,
+    pub expires_at: i64,
+    pub created_by: String,
+    pub created_at: i64,
+    pub revoked: bool,
+}
+
 /// How much a preview's page changed between the screenshots of two heads.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VisualChange {

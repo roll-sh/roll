@@ -199,6 +199,16 @@ NOTE_BODY='**Feedback on the preview** · [`/`](http://x/) · `body > h1`\n\nThe
 api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"$NOTE_BODY\"}" >/dev/null
 NOTES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F")
 echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes should list the feedback: $NOTES"; exit 1; }
+# A share link for someone outside the team: in through its own token (no preview cookie), out
+# once it's revoked.
+SHARE=$(api POST "/v1/previews/$PV/shares" '{"hours":1}')
+SHARE_ID=$(echo "$SHARE" | jq_ "d['id']")
+SHARE_Q=$(echo "$SHARE" | jq_ "d['url'].split('/?')[1]")
+SJAR="$HOME_DIR/cookies-share"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -c "$SJAR" -H "Host: $HOST" "http://$API/?$SHARE_Q")" = 302 ] || { echo "a share link should let its visitor in"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$SJAR" -H "Host: $HOST" "http://$API/")" = 200 ] || { echo "a share link's cookie should open the preview"; exit 1; }
+api DELETE "/v1/previews/$PV/shares/$SHARE_ID" >/dev/null
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$SJAR" -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a revoked share link should stop at once"; exit 1; }
 CONTAINER="roll-previews-$(echo "$HOST" | cut -d. -f1)"
 STATS=$(docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$CONTAINER")
 RSS1=$(ps -o rss= -p "$PID")
@@ -399,6 +409,7 @@ cat <<EOF
 | A preview's own variable (\`roll preview env\`) in the running service / \`DATABASE_URL\` as one | FEATURE_FLAG=$VAR_SEEN / refused |
 | ignore_paths: docs/ | $KEPT |
 | \`[skip preview]\` in the title, then without it | removed, then a new preview |
+| A share link (1 hour): in through it / revoked | 200 / 401 |
 | The page's change since the push before (screenshots) | $VISUAL |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |

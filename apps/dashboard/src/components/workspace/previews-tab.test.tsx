@@ -70,6 +70,7 @@ beforeEach(() => {
   api.usage.mockResolvedValue({ previews: 1, sleeping_usd_month: 0.02, active_usd_hour: 0.01, month_to_date_usd: 0.4, bytes: 1 << 20 });
   api.activity.mockResolvedValue([]);
   api.vars.mockResolvedValue({ vars: {} });
+  api.shares.mockResolvedValue([]);
 });
 
 const view = () =>
