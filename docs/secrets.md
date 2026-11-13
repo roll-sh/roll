@@ -1582,10 +1582,16 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **One permission system.** `rlst_` tokens, and the tokens workload identities mint, become
-   roll-access grants (secrets × project × environments × paths, `allowed_ips` as the grant's IP
-   allowlist, the same expiry), with existing tokens migrated to the same reach; the built-in
-   authority goes, `GrantGrants` stays. The routes and `roll secrets tokens` stay the same.
+1. **One permission system** (agreed with roll MCP, 2026-11-13). New tokens are roll-access grants
+   made through `POST /v1/access/tokens` with one rule (`secrets × {project} × environments ×
+   paths × actions`, `ip_allow`, expiry): `roll secrets tokens create` and the dashboard call it,
+   so caps, policy, audit and `check_within` stay in one place (`Access::create_grant`, on #24).
+   A project's tokens are `GET /v1/access/tokens?product=secrets&resource=<project>`, revoked and
+   edited on the access page. Workload identities keep their trust configuration and OIDC
+   verification here and mint short-lived `workload` grants (`Access::mint_workload`, 5–60
+   minutes, the identity's scope, owned by its creator). Existing `rlst_` tokens work until they
+   expire or are revoked, revoked when leaked (`Access::on_leaked("rlst_", …)`), and the built-in
+   token check goes when none is left. A person's grant already acts as them (`Within`).
 2. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
    protected environment, and an approver grants it for minutes (the approval names the
    environment and folder).
