@@ -140,3 +140,9 @@
 /v1/queues/vhosts/{vhost}/queues/{queue}/messages
 /v1/queues/vhosts/{vhost}/queues/{queue}/rates
 /v1/queues/vhosts/{vhost}/queues/{queue}/replay
+/v1/search/clusters/{id}/indices
+/v1/search/clusters/{id}/indices/{index}/docs
+/v1/search/clusters/{id}/indices/{index}/docs/{doc}
+/v1/search/clusters/{id}/indices/{index}/mapping
+/v1/search/clusters/{id}/unload
+/v1/search/clusters/{id}/usage
