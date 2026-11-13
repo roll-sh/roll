@@ -262,10 +262,11 @@ async fn look(api: &Api, preview: Option<&str>, change: Option<&str>) -> anyhow:
         (None, None) => bail!("say which preview, or --change"),
     };
     let Some(chg) = p["change"].as_str() else { return Ok(Some((p, true))) };
-    let head = api.get(&format!("/v1/code/changes/{chg}")).await.ok().and_then(|c| c["head"].as_str().map(str::to_string));
-    let ours = p["head"].as_str().unwrap_or_default();
-    // Unknown (no roll code here): trust the preview's own state.
-    let at_head = head.is_none_or(|h| !h.is_empty() && (ours == h || ours.starts_with(&h) || h.starts_with(ours)));
+    // The change's head (`cs_<hex>`) and the preview's (`<hex>`) name the same changeset. Unknown
+    // (no roll code here): trust the preview's own state.
+    let bare = |h: &str| h.strip_prefix("cs_").unwrap_or(h).to_string();
+    let head = api.get(&format!("/v1/code/changes/{chg}")).await.ok().and_then(|c| c["head"].as_str().map(bare));
+    let at_head = head.is_none_or(|h| p["head"].as_str().map(bare) == Some(h));
     Ok(Some((p, at_head)))
 }
 

@@ -251,7 +251,7 @@ async fn a_changed_rule_reaches_existing_previews() {
 }
 
 #[tokio::test]
-async fn masked_postgres_is_masked_before_it_serves_structure_only_for_forks_and_new_rules_reach_it() {
+async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
     e.code.open(change("chg_m", 4));
     e.engine.pass().await.unwrap();
@@ -268,13 +268,6 @@ async fn masked_postgres_is_masked_before_it_serves_structure_only_for_forks_and
     e.engine.pass().await.unwrap();
     assert_eq!(e.pg.masks.lock().len(), 2, "the changed rules were applied");
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
-    // A fork's code could read what masking replaced (it connects as the project's role): its
-    // masked Postgres is structure-only.
-    e.code.open(ChangeInfo { trusted: false, approved: true, ..change("chg_f", 5) });
-    e.engine.pass().await.unwrap();
-    let f = e.engine.store.row_by_change("chg_f").unwrap().unwrap();
-    let pg = e.engine.store.resources(&f.id).unwrap().into_iter().find(|r| r.kind == Kind::Postgres).unwrap();
-    assert_eq!(pg.mode, roll_previews::Mode::Schema);
 }
 
 #[tokio::test]

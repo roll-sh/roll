@@ -83,13 +83,6 @@ impl Engine {
             .iter()
             .filter_map(|res| Kind::of_workspace(res.kind).map(|k| (k, res.r#ref.clone())))
             .filter_map(|(k, parent)| s.mode_of(k, &parent).map(|m| (k, parent, m)))
-            // A fork's code connects to Postgres with the project's role, which can read a branch's
-            // WAL and so the values masking replaced: a masked Postgres resource is structure-only
-            // for it (no rows at all).
-            .map(|(k, parent, m)| {
-                let masked = k == Kind::Postgres && s.masking.get(&format!("postgres:{parent}")).is_some_and(|c| !c.is_empty());
-                (k, parent.clone(), if masked && !r.trusted { Mode::Schema } else { m })
-            })
             .collect();
         // A resource whose rule changed (branch ↔ schema) is branched again in its new mode: a
         // project that moves to structure-only stops keeping full copies at once.
