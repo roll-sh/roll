@@ -272,8 +272,16 @@ pub trait Secrets: Send + Sync {
     /// Every variable of `env`, inherited ones included.
     /// `untrusted`: nothing of a protected environment resolves (directly, by reference, by
     /// import or through the base): what the preview's code reads is its own overrides and links.
-    async fn resolve(&self, project: &str, env: &str, untrusted: bool) -> anyhow::Result<Vec<(String, String)>>;
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool) -> anyhow::Result<Resolved>;
     async fn delete(&self, project: &str, env: &str) -> anyhow::Result<()>;
+}
+
+/// An environment's values, and the keys that didn't resolve (`KEY: why`: a reference to
+/// nothing, a protected value an untrusted preview may not read).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Resolved {
+    pub values: Vec<(String, String)>,
+    pub problems: Vec<String>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the
@@ -286,8 +294,8 @@ impl Secrets for NoSecrets {
         Ok(())
     }
 
-    async fn resolve(&self, _: &str, _: &str, _: bool) -> anyhow::Result<Vec<(String, String)>> {
-        Ok(Vec::new())
+    async fn resolve(&self, _: &str, _: &str, _: bool) -> anyhow::Result<Resolved> {
+        Ok(Resolved::default())
     }
 
     async fn delete(&self, _: &str, _: &str) -> anyhow::Result<()> {
