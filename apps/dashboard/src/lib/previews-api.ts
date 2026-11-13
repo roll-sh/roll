@@ -134,6 +134,8 @@ export interface PreviewSettings {
   access: "link" | "public";
   /** A feedback button on its pages for people who came in through roll (link access). */
   feedback: boolean;
+  /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
+  env_for: Record<string, Record<string, string>>;
   /** Wake the change's services as soon as a new head is deployed (a warm first visit). */
   warm: boolean;
   /** Run once on fresh data (after branching or a reset) before the services deploy. */

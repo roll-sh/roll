@@ -70,7 +70,7 @@ impl EnvSource for Engine {
         for (k, v) in self.resolve_secrets(&r, untrusted).await? {
             set(&mut env, &k, v);
         }
-        for (k, v) in s.env.iter().map(|(k, v)| (k.clone(), v.clone())).chain(self.store.vars(preview)?) {
+        for (k, v) in project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?) {
             set(&mut env, &k, v);
         }
         for (k, v) in self.resource_env(preview).await? {

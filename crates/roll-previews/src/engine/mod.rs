@@ -472,6 +472,21 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
 /// The paths a head changes (`None`: not known).
 type HeadPaths = Option<Arc<Vec<String>>>;
 
+/// The project's variables for a preview of `branch`: `env`, then every `env_for` glob that
+/// matches the branch (a preview with none counts as `*`), in the globs' order.
+pub(super) fn project_env(s: &Settings, branch: Option<&str>) -> Vec<(String, String)> {
+    let branch = branch.unwrap_or("*");
+    let mut env: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (glob, vars) in &s.env_for {
+        if crate::glob::matches(glob, branch) {
+            for (k, v) in vars {
+                set(&mut env, k, v.clone());
+            }
+        }
+    }
+    env
+}
+
 /// Heads whose paths [`Engine::wanted`] keeps.
 const PATHS_KEPT: usize = 4096;
 

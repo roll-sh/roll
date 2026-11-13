@@ -259,7 +259,7 @@ impl Engine {
             Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
             _ => (None, None),
         };
-        let mut vars: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut vars: Vec<(String, String)> = project_env(&s, r.branch.as_deref());
         for (k, v) in self.store.vars(&r.id)? {
             set(&mut vars, &k, v);
         }

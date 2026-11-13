@@ -539,3 +539,22 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     assert_eq!(call(None, format!("/v1/previews/{}", p.id)).await.0, 200);
     assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);
 }
+
+#[tokio::test]
+async fn a_family_of_branches_gets_its_own_variables() {
+    let e = env(json!({ "enabled": true, "env": { "FEATURE": "off" }, "env_for": { "feat/*": { "FEATURE": "branch" } } }));
+    e.code.open(change("chg_f1", 3));
+    e.code.open(ChangeInfo { branch: Some("fix/3".into()), ..change("chg_f2", 4) });
+    e.engine.pass().await.unwrap();
+    let var = |change: &str| {
+        let id = e.engine.store.row_by_change(change).unwrap().unwrap().id;
+        e.apps.vars.lock().get(&(id, "web".to_string())).and_then(|v| v.iter().find(|(n, _)| n == "FEATURE").map(|(_, v)| v.clone()))
+    };
+    assert_eq!(var("chg_f1").as_deref(), Some("branch"), "feat/3 matches feat/*");
+    assert_eq!(var("chg_f2").as_deref(), Some("off"), "fix/3 keeps the project's");
+    // A preview's own variable still wins.
+    let id = e.engine.store.row_by_change("chg_f1").unwrap().unwrap().id;
+    e.engine.set_vars(&id, std::collections::BTreeMap::from([("FEATURE".to_string(), Some("mine".to_string()))])).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(var("chg_f1").as_deref(), Some("mine"));
+}

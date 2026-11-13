@@ -261,6 +261,8 @@ behind the `Apps` trait:
   1. its `roll.toml` `[preview] env`;
   2. the resolved secrets environment (`pv-<preview id>`, inheriting its base);
   3. the project's preview `env` overrides;
+  3a. the project's per-branch variables (`env_for`: a branch glob → variables, every glob that
+     matches the preview's branch, in the globs' order; Vercel's per-branch preview variables);
   3b. the preview's own variables (`PUT /v1/previews/{id}/env`, the sheet, `roll preview env`):
      Vercel's branch-scoped variables. Setting them redeploys its services; names roll or the
      preview's branches set (`ROLL_*`, `PORT`, `DATABASE_URL`, …) are refused, so they can't
@@ -702,6 +704,7 @@ type Settings = {
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
+  env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
   masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}
@@ -829,6 +832,7 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- per-branch project variables (`env_for`);
 - removed variables unset from roll apps' `pv-` environments (the names roll set kept in
   `ROLL_PREVIEW_SET` there; a person's own never touched);
 - main merged in (roll MCP and accounts), and the previews API scoped to a signed-in person's own
@@ -856,19 +860,16 @@ Ranked by what a person notices first. Done so far:
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables; and `catalog()` should read `[app.previews.run]` and
    per-environment `run` overrides, not only the service's `memory_mb`.
-2. **Branch-scoped project variables** (Vercel's preview variables per branch): `env_for:
-   {"feat/payments-*": {"STRIPE_KEY": "…"}}` in the rules, between the project's `env` and a
-   preview's own, so a family of branches gets its settings without each preview's.
-3. **A visual change per push**: the screenshot at each head compared with the previous head's,
+2. **A visual change per push**: the screenshot at each head compared with the previous head's,
    and the share of pixels that changed in the pull request comment ("the page changed 12%",
    with both images), as Percy and Chromatic do for visual review, from screenshots roll already
    takes.
-4. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
+3. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
    feedback for that page. That needs a read path the preview's origin can use without a
    credential (a signed, expiring list per page), which is why it waits.
-5. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+4. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

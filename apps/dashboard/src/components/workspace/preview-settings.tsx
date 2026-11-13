@@ -81,11 +81,13 @@ function Form({
   const [paths, setPaths] = useState(saved.paths.join(", "));
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
+  // `env_for` as rows of (branch glob, name, value).
+  const [perBranch, setPerBranch] = useState<[string, string, string][]>(Object.entries(saved.env_for ?? {}).flatMap(([g, vars]) => Object.entries(vars).map(([k, v]) => [g, k, v] as [string, string, string])));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, env]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
@@ -93,6 +95,9 @@ function Form({
     paths: words(paths),
     ignore_paths: words(ignorePaths),
     env: Object.fromEntries(env.filter(([k]) => k.trim()).map(([k, v]) => [k.trim(), v])),
+    env_for: perBranch
+      .filter(([g, k]) => g.trim() && k.trim())
+      .reduce<Record<string, Record<string, string>>>((m, [g, k, v]) => ({ ...m, [g.trim()]: { ...(m[g.trim()] ?? {}), [k.trim()]: v } }), {}),
   };
   const patch = settingsPatch(saved, next);
   const changed = Object.keys(patch).length > 0;
@@ -282,6 +287,44 @@ function Form({
             ))}
             <button type="button" onClick={() => setEnv([...env, ["", ""]])} className="flex h-7 items-center gap-1 rounded-md px-1.5 text-[12px] text-muted hover:bg-white/[0.05] hover:text-fg">
               <Plus className="size-3.5" /> Add a variable
+            </button>
+          </div>
+        </Field>
+        <Field group label="Per branch" note="For previews of branches a glob matches (feat/payments-*), over the variables above.">
+          <div className="space-y-1.5">
+            {perBranch.map(([g, k, v], i) => (
+              <div key={i} className="flex gap-1.5">
+                <input
+                  aria-label="Branches"
+                  placeholder="feat/*"
+                  value={g}
+                  onChange={(e) => setPerBranch(perBranch.map((x, j) => (j === i ? [e.target.value, x[1], x[2]] : x)))}
+                  className={`${field} h-8 w-1/4 min-w-0 font-mono text-[12px]`}
+                  spellCheck={false}
+                />
+                <input
+                  aria-label="Name"
+                  placeholder="NAME"
+                  value={k}
+                  onChange={(e) => setPerBranch(perBranch.map((x, j) => (j === i ? [x[0], e.target.value.toUpperCase(), x[2]] : x)))}
+                  className={`${field} h-8 w-1/4 min-w-0 font-mono text-[12px]`}
+                  spellCheck={false}
+                />
+                <input
+                  aria-label="Value"
+                  placeholder="value"
+                  value={v}
+                  onChange={(e) => setPerBranch(perBranch.map((x, j) => (j === i ? [x[0], x[1], e.target.value] : x)))}
+                  className={`${field} h-8 min-w-0 flex-1 font-mono text-[12px]`}
+                  spellCheck={false}
+                />
+                <button type="button" aria-label="Remove" onClick={() => setPerBranch(perBranch.filter((_, j) => j !== i))} className="grid size-8 shrink-0 place-items-center rounded-md text-muted hover:bg-white/[0.05] hover:text-fg">
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ))}
+            <button type="button" onClick={() => setPerBranch([...perBranch, ["", "", ""]])} className="flex h-7 items-center gap-1 rounded-md px-1.5 text-[12px] text-muted hover:bg-white/[0.05] hover:text-fg">
+              <Plus className="size-3.5" /> Add one for a branch
             </button>
           </div>
         </Field>
