@@ -347,7 +347,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // A user's token on a signed hop: the request it carries must be one their session may call too.
     if as_user && hop.is_some() {
         let carried = req.extensions().get::<roll_auth::RouteRules>().map(|r| r.access(row.route));
-        if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_) | roll_auth::Access::UserOrCredential(_))) {
+        if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_))) {
             ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
             return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their secrets".into(), json!({}));
         }
