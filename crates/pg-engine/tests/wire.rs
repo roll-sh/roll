@@ -4483,3 +4483,51 @@ fn protocol_cases() {
     s.engine.shutdown();
     assert!(differ.is_empty(), "{} of {} cases differ:\n{}", differ.len(), cases.len(), differ.join("\n"));
 }
+
+/// statement_timestamp(), now() and the backend's own pg_stat_activity row across simple
+/// queries, a transaction block and the extended protocol's messages sent apart: the
+/// statement timestamp is the latest Query / Parse / Bind / Execute's arrival and is
+/// query_start; now() and xact_start are the transaction's first message's. (PostgreSQL
+/// 18.6's answers, recorded with the messages 20 ms apart.)
+#[test]
+fn statement_timestamps_follow_the_messages() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    let q = "select statement_timestamp() = query_start, now() = query_start, now() = xact_start, \
+             now() < statement_timestamp(), statement_timestamp() < clock_timestamp(), \
+             query_start <= state_change from pg_stat_activity where pid = pg_backend_pid()";
+    let pause = || std::thread::sleep(Duration::from_millis(20));
+    // One statement, and the second of a Query of two: the Query's time.
+    assert_eq!(c.query(q)[1..], ["D t|t|t|f|t|t", "C SELECT 1"]);
+    let two = c.query(&format!("select pg_sleep(0.01); {q}"));
+    assert_eq!(two[two.len() - 2], "D t|t|t|f|t|t");
+    // In a block: now() is BEGIN's.
+    c.query("begin");
+    pause();
+    assert_eq!(c.query(q)[1], "D t|f|t|t|t|t");
+    c.query("commit");
+    // Parse, Bind, Execute apart, then Sync: one transaction, begun at the Parse.
+    c.parse("", q);
+    c.send(b'H', b"");
+    pause();
+    c.bind("", "");
+    c.send(b'H', b"");
+    pause();
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D t|f|t|t|t|t", "C SELECT 1"]);
+    // A prepared statement's Bind and Execute apart: begun at the Bind; in a block, at BEGIN.
+    c.parse("ps", q);
+    c.sync();
+    for block in [false, true] {
+        if block {
+            c.query("begin");
+        }
+        pause();
+        c.bind("", "ps");
+        c.send(b'H', b"");
+        pause();
+        c.execute("", 0);
+        assert_eq!(c.sync(), ["D t|f|t|t|t|t", "C SELECT 1"], "in a block: {block}");
+    }
+    c.query("commit");
+}
