@@ -201,6 +201,23 @@ impl Gate {
     }
 }
 
+/// roll-access's grants as #25 answers them: a person's own token is no grant once they can't
+/// sign in.
+struct Granted {
+    gate: Arc<Gate>,
+    people: Arc<People>,
+}
+
+impl roll_auth::Grants for Granted {
+    fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
+        let g = self.gate.tokens.lock().unwrap().values().find(|g| &*g.id == id).cloned()?;
+        match &g.user {
+            Some(user) if roll_secrets::People::person(&*self.people, user).ok().flatten().is_none() => None,
+            _ => Some(g),
+        }
+    }
+}
+
 impl roll_secrets::Workloads for Gate {
     fn mint(&self, name: &str, rule: roll_auth::scope::Rule, _: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
         let (secret, id) = self.grant(name, rule, owner);
@@ -251,7 +268,8 @@ impl Api {
         let people = Arc::new(People::default());
         ws.set_owners(people.clone());
         let gate = Arc::new(Gate::default());
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: None, people: Some(people.clone()), workloads: Some(gate.clone()) };
+        let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
         let mut api = Api { sent, gate, people, router, secrets, db, fake, sync, project: String::new(), _dir: dir };
@@ -605,6 +623,12 @@ async fn a_token_reaches_only_its_environments_folders_and_actions() {
     }
     let (_, who) = api.req(Method::GET, "/v1/secrets/whoami", None, Some(&token)).await;
     assert_eq!(who["project"].as_str(), Some(api.project.as_str()));
+    // A project-wide read answers per environment; one about the project as a whole (other
+    // environments' key names, shares, required keys) needs a rule over all of it.
+    assert_eq!(api.req(Method::GET, "/environments", None, Some(&token)).await.0, StatusCode::OK);
+    for path in ["/suggestions", "/shares", "/required"] {
+        assert_eq!(api.req(Method::GET, path, None, Some(&token)).await.0, StatusCode::FORBIDDEN, "{path}");
+    }
 }
 
 #[tokio::test]
@@ -1138,6 +1162,9 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
         req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_ada".into() });
         assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), want, "{project}");
     }
+    // An admin's own token reaches what its rules say, as the admin's session does.
+    let (root, _) = api.gate.grant("root's", roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Read]), Some("usr_root"));
+    assert_eq!(api.req(Method::GET, &at(&api.project, "/environments"), None, Some(&root)).await.0, StatusCode::OK);
     // An admin's project is a whole canvas, though made through a session.
     let (_, theirs) = api.signed_in("root", true, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "root-shop" }))).await;
     let theirs = theirs["id"].as_str().unwrap().to_string();
@@ -1155,6 +1182,18 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
     api.as_ada(Method::PUT, &at(&mine, "/environments/staging/secrets/A"), Some(json!({ "value": "2" }))).await;
     api.secrets.sweep().unwrap();
     assert_eq!(api.sync.pushes.lock().unwrap().len(), 1, "nothing pushed once she can't sign in");
+    // A sync made with her own token stops the same way (roll-access has no grant for it any more).
+    *api.people.disabled.lock().unwrap() = false;
+    let token = api.gate.issue("ada's", roll_secrets::access::rule(&mine, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal, roll_secrets::Action::Admin]), Some("usr_ada"));
+    let (s, e) = api.req(Method::POST, &at(&mine, "/syncs"), Some(json!({ "environment": "development", "kind": "fake", "target": { "name": "y", "token_key": "PLATFORM_TOKEN" } })), Some(&token)).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
+    api.as_ada(Method::PUT, &at(&mine, "/environments/development/secrets/PLATFORM_TOKEN"), Some(json!({ "value": "tok_2" }))).await;
+    api.secrets.sweep().unwrap();
+    let pushed = api.sync.pushes.lock().unwrap().len();
+    *api.people.disabled.lock().unwrap() = true;
+    api.as_ada(Method::PUT, &at(&mine, "/environments/development/secrets/B"), Some(json!({ "value": "2" }))).await;
+    api.secrets.sweep().unwrap();
+    assert_eq!(api.sync.pushes.lock().unwrap().len(), pushed, "a token-made sync stops too once she can't sign in");
 }
 
 #[tokio::test]

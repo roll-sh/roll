@@ -89,12 +89,13 @@ impl Secrets {
     }
 
     /// What a roll-access grant may do here: its rules, and a person's own token only on their own
-    /// projects, whatever its rules name (it acts as them).
+    /// projects, whatever its rules name (it acts as them). An admin's reaches what its rules say,
+    /// as the admin's session does.
     pub(crate) fn grant_grants(&self, g: &roll_auth::Grant) -> Result<Arc<dyn crate::access::Grants>> {
         let grant = crate::access::GrantGrants(g.clone());
         Ok(match &g.user {
-            Some(user) => Arc::new(crate::access::Within(grant, self.own_projects(user)?)),
-            None => Arc::new(grant),
+            Some(user) if !self.person(user)?.is_some_and(|p| p.admin) => Arc::new(crate::access::Within(grant, self.own_projects(user)?)),
+            _ => Arc::new(grant),
         })
     }
 

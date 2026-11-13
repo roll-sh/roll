@@ -37,7 +37,7 @@ fn prefix(name: &str) -> String {
 
 impl Secrets {
     pub fn suggestions(&self, project: &str, caller: &Caller) -> Result<Vec<Suggestion>> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        caller.need(Action::Read, &Scope::whole(project))?;
         self.project(project)?;
         let members = self.members(project)?;
         type Seen = (Vec<String>, BTreeSet<(String, String, String)>, BTreeMap<String, BTreeSet<String>>);
