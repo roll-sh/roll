@@ -470,3 +470,35 @@ async fn a_new_head_s_services_are_woken_so_the_first_visit_is_warm() {
     e.engine.pass().await.unwrap();
     assert_eq!(woken().await.len(), 1);
 }
+
+#[tokio::test]
+async fn earlier_pushes_stay_reachable_at_their_own_urls() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_p", 8));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_p").unwrap().unwrap();
+    for head in ["cs_8b", "cs_8c", "cs_8d", "cs_8e"] {
+        e.code.edit("chg_p", |c| c.head = head.into());
+        e.engine.pass().await.unwrap();
+        e.engine.pass().await.unwrap();
+    }
+    // The three latest earlier heads, newest first, each at a URL of its own.
+    let view = e.engine.store.preview(&p.id).unwrap();
+    let earlier: Vec<&str> = view.earlier.iter().map(|x| x.revision.as_str()).collect();
+    assert_eq!(earlier, ["cs_8d", "cs_8c", "cs_8b"]);
+    assert!(view.earlier.iter().all(|x| x.service == "web" && x.url != view.url.clone().unwrap()));
+    assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8a".into())), "the oldest's container goes");
+    // An earlier push runs its own head on its own host.
+    let (t, _) = e.engine.env(&p.id, "web@cs_8c").await.unwrap();
+    assert_eq!(t.revision, "cs_8c");
+    assert!(view.earlier.iter().any(|x| x.url.contains(&t.host)));
+    // A fork's earlier heads lost their approval with the push: they don't run.
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert!(e.engine.env(&p.id, "web@cs_8c").await.is_err());
+    // Deleted, they all go.
+    e.code.edit("chg_p", |c| c.open = false);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8d".into())));
+}

@@ -345,6 +345,17 @@ impl Engine {
             // runtime's gate reads it on each request, so a rotation restarts nothing there.
             let fingerprint = config_fingerprint(&vars, access_token.is_some(), bypass.as_deref().filter(|_| on_apps), trusted);
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
+            // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
+            // change's own services on the runtime, a trusted change's.
+            if !on_apps
+                && repo == r.repo
+                && r.trusted
+                && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
+            {
+                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url(h))? {
+                    self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
+                }
+            }
             if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved {
                 let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
                 let t = Target {
@@ -625,6 +636,10 @@ impl Engine {
         if r.state != State::Deleting {
             let row = self.store.update(&r.id, |row| row.state = State::Deleting)?;
             self.report(row).await;
+        }
+        for p in self.store.pinned(&r.id)? {
+            let name = format!("{}@{}", p.service, p.revision);
+            self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;
         }
         for svc in self.store.services(&r.id)? {
             self.apps.remove(&r.id, &svc.name).await.map_err(|e| anyhow::anyhow!("removing {}: {e:#}", svc.name))?;

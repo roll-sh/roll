@@ -150,6 +150,23 @@ export function PreviewSheet({
             ) : (
               <p className="text-[11.5px] text-subtle">No services: a repo in this project runs here once its roll.toml has a [preview] section.</p>
             )}
+            {!!p.earlier?.length && (
+              <>
+                <Label>Earlier pushes</Label>
+                <ul className="space-y-1">
+                  {p.earlier.map((x) => (
+                    <li key={`${x.service}@${x.revision}`} className="flex items-center gap-2 text-[12px]">
+                      <span className="text-soft">{x.service}</span>
+                      <span className="font-mono text-[10.5px] text-subtle">{x.revision.replace(/^cs_/, "").slice(0, 10)}</span>
+                      <a href={openUrl(x)} target="_blank" rel="noreferrer" className="ml-auto flex items-center gap-1 font-mono text-[11px] text-accent hover:underline" title="On the same data, asleep until opened">
+                        <span className="truncate">{host(x.url)}</span>
+                        <ExternalLink className="size-3 shrink-0" />
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
 
             <Label>
               <span>Data branches</span>

@@ -115,6 +115,7 @@ impl CodeSource {
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
                 expires_at: p.goes_at,
+                earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone() }).collect(),
                 // Only a public preview's: the comment is readable by whoever reads the pull request.
                 screenshot_url: (s.access == crate::settings::Access::Public)
                     .then(|| p.screenshot_link.clone())

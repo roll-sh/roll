@@ -77,6 +77,8 @@ export interface Preview {
   kept_until?: number | null;
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
   goes_at?: number | null;
+  /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
+  earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
   screenshot_at?: number | null;
   last_reset_at: number | null;

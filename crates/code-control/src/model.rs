@@ -299,6 +299,16 @@ pub struct PreviewEnvironment {
     /// When the preview goes (ms: its TTL, or a keep, running out), once that's close (a day ahead).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// Earlier pushes still reachable (newest first): the service, the changeset it runs, its URL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<PreviewEarlier>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewEarlier {
+    pub service: String,
+    pub head: String,
+    pub url: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

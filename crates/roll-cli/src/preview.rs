@@ -174,6 +174,10 @@ fn print_preview(p: &Value) {
     if let Some(runs) = p["runs"].as_str() {
         println!("runs {} (later pushes touched only ignored paths)", &runs[..runs.len().min(12)]);
     }
+    for x in p["earlier"].as_array().into_iter().flatten() {
+        let rev = s(&x["revision"]);
+        println!("earlier  {} at {}  {}", s(&x["service"]), rev.trim_start_matches("cs_").chars().take(10).collect::<String>(), s(&x["share_url"]));
+    }
     for svc in p["services"].as_array().into_iter().flatten() {
         // The link with the access token when the preview is private: the one that opens it.
         let url = svc["share_url"].as_str().or(svc["url"].as_str()).unwrap_or("-");

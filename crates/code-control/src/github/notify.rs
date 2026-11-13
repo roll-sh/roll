@@ -288,6 +288,20 @@ fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static
     }
 }
 
+/// The comment's links to earlier pushes (before and after, on the same data).
+fn earlier_line(earlier: &[crate::model::PreviewEarlier]) -> Option<String> {
+    let links: Vec<String> = earlier
+        .iter()
+        .filter(|x| (x.url.starts_with("https://") || x.url.starts_with("http://")) && !x.url.contains([')', ' ', '\n']))
+        .take(3)
+        .map(|x| {
+            let head: String = x.head.strip_prefix("cs_").unwrap_or(&x.head).chars().filter(|c| c.is_ascii_alphanumeric()).take(10).collect();
+            format!("[{} at `{head}`]({})", x.service.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>(), x.url)
+        })
+        .collect();
+    (!links.is_empty()).then(|| format!("\nEarlier pushes, on the same data: {}.\n", links.join(", ")))
+}
+
 /// The comment's warning that the preview is about to go (its TTL, or a keep, running out).
 fn expiry_line(ms: i64) -> Option<String> {
     let at = chrono::DateTime::from_timestamp_millis(ms)?;
@@ -339,6 +353,9 @@ fn preview_comment(c: &Change) -> String {
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
             ));
+            if let Some(line) = earlier_line(&e.earlier) {
+                out.push_str(&line);
+            }
             if let Some(line) = e.expires_at.and_then(expiry_line) {
                 out.push_str(&line);
             }
@@ -392,6 +409,7 @@ mod preview_tests {
             schema_changes: None,
             screenshot_url: None,
             expires_at: None,
+            earlier: Vec::new(),
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -405,5 +423,8 @@ mod preview_tests {
         assert!(block.contains("<summary>Schema changes (2)</summary>") && block.contains("+ column public.users.nick text"), "{block}");
         assert_eq!(block.matches("```").count(), 2, "a name can't close the fence: {block}");
         assert!(expiry_line(1_794_600_000_000).is_some_and(|l| l.contains("goes at 2026-11-13 20:00 UTC")));
+        let earlier = |url: &str| crate::model::PreviewEarlier { service: "web".into(), head: "cs_1a2b3c4d5e6f".into(), url: url.into() };
+        assert_eq!(earlier_line(&[earlier("https://web-1a2b3c4d5e-pr7-shop.preview.roll.site")]).as_deref(), Some("\nEarlier pushes, on the same data: [web at `1a2b3c4d5e`](https://web-1a2b3c4d5e-pr7-shop.preview.roll.site).\n"));
+        assert_eq!(earlier_line(&[earlier("javascript:alert(1)"), earlier("https://x/a)b")]), None, "only plain links");
     }
 }

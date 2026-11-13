@@ -202,6 +202,9 @@ pub struct Preview {
     /// When it goes unless it's used or kept, said once that's close (a day, or a quarter of a
     /// shorter TTL): the change, its pull request and the sheet warn.
     pub goes_at: Option<i64>,
+    /// Earlier pushes of the change's services, still reachable (newest first; the last
+    /// [`store::PINNED_KEEP`] per service).
+    pub earlier: Vec<Pinned>,
     /// When its screenshot was taken (`GET …/screenshot`), if it has one.
     pub screenshot_at: Option<i64>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
@@ -239,6 +242,20 @@ pub struct Service {
     pub memory_mb: i64,
     /// `url` with the access token, when one is needed.
     pub share_url: Option<String>,
+}
+
+/// An earlier push of a change's service, still reachable at a URL of its own (on the preview's
+/// data, asleep until opened).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Pinned {
+    pub service: String,
+    /// The changeset it runs.
+    pub revision: String,
+    pub url: String,
+    /// `url` with the access token, when one is needed.
+    pub share_url: Option<String>,
+    /// When it stopped being the latest.
+    pub at: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

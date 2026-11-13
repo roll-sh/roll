@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS spend (
     usd REAL NOT NULL,
     PRIMARY KEY (project_id, month)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pinned (
+    preview_id TEXT NOT NULL,
+    service TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    host TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, service, revision)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS dismissed (
     change_id TEXT PRIMARY KEY,
     head TEXT NOT NULL,
@@ -615,7 +624,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "activity", "screenshots", "previews"] {
+            for t in ["resources", "services", "pinned", "activity", "screenshots", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1069,8 +1078,63 @@ impl Store {
     }
 
     /// The preview and service a host label serves.
+    /// The preview and service a host label is; an earlier push's host is `<service>@<revision>`.
     pub fn service_for_host(&self, host: &str) -> Result<Option<(String, String)>> {
-        Ok(self.db.read(|c| c.query_row("SELECT preview_id, name FROM services WHERE host = ?", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional())?)
+        Ok(self.db.read(|c| {
+            if let Some(found) = c.query_row("SELECT preview_id, name FROM services WHERE host = ?", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional()? {
+                return Ok(Some(found));
+            }
+            c.query_row("SELECT preview_id, service, revision FROM pinned WHERE host = ?", [host], |r| {
+                Ok((r.get::<_, String>(0)?, format!("{}@{}", r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            })
+            .optional()
+        })?)
+    }
+
+    /// The host a service (or an earlier push's, `<service>@<revision>`) answers on.
+    pub fn service_host(&self, id: &str, name: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| match name.split_once('@') {
+            Some((svc, rev)) => c.query_row("SELECT host FROM pinned WHERE preview_id = ? AND service = ? AND revision = ?", [id, svc, rev], |r| r.get(0)).optional(),
+            None => c.query_row("SELECT host FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get(0)).optional(),
+        })?)
+    }
+
+    /// Keep `revision` of `service` reachable at a host of its own (an earlier push), and the
+    /// [`PINNED_KEEP`] latest per service. Returns the ones that no longer fit, by
+    /// `<service>@<revision>`, whose containers go.
+    pub fn pin(&self, id: &str, service: &str, revision: &str, url: &dyn Fn(&str) -> String) -> Result<Vec<String>> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let slug: String = c.query_row("SELECT slug FROM previews WHERE id = ?", [id], |r| r.get(0))?;
+            let short: String = revision.strip_prefix("cs_").unwrap_or(revision).chars().take(10).collect();
+            let mut host = crate::label_part(&format!("{service}-{short}-{slug}"), 63);
+            if host_taken(c, &host)? {
+                host = format!("{}-{}", crate::label_part(&host, 58), &id[id.len() - 4..]);
+            }
+            c.execute(
+                "INSERT INTO pinned (preview_id, service, revision, host, url, at) VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
+                params![id, service, revision, host, url(&host), now],
+            )?;
+            let old: Vec<String> = c.query(
+                "SELECT revision FROM pinned WHERE preview_id = ? AND service = ? ORDER BY at DESC LIMIT 1000 OFFSET ?",
+                params![id, service, PINNED_KEEP as i64],
+                |r| r.get(0),
+            )?;
+            for rev in &old {
+                c.execute("DELETE FROM pinned WHERE preview_id = ? AND service = ? AND revision = ?", params![id, service, rev])?;
+            }
+            Ok::<_, Error>(old.into_iter().map(|rev| format!("{service}@{rev}")).collect())
+        })
+    }
+
+    /// The earlier pushes a preview keeps reachable, newest first.
+    pub fn pinned(&self, id: &str) -> Result<Vec<crate::Pinned>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT service, revision, url, at FROM pinned WHERE preview_id = ? ORDER BY at DESC", [id], |r| {
+                Ok(crate::Pinned { service: r.get(0)?, revision: r.get(1)?, url: r.get(2)?, share_url: None, at: r.get(3)? })
+            })
+        })?)
     }
 
     // ── views ──
@@ -1117,6 +1181,11 @@ impl Store {
         let goes_at = self.goes_at(&r.id)?;
         let screenshot_at = self.screenshot_at(&r.id)?;
         let screenshot_link = self.screenshot_link(&r.id)?;
+        let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
+            p.share_url = Some(share(&p.url));
+            p
+        });
+        let earlier = earlier.collect();
         Ok(Preview {
             id: r.id,
             project: r.project_id,
@@ -1150,6 +1219,7 @@ impl Store {
             schema_changes,
             kept_until,
             goes_at,
+            earlier,
             screenshot_at,
             screenshot_link,
             last_reset_at: r.last_reset_at,
@@ -1175,8 +1245,11 @@ fn slug_taken(c: &Conn<'_>, slug: &str) -> code_sql::Result<bool> {
 }
 
 fn host_taken(c: &Conn<'_>, host: &str) -> code_sql::Result<bool> {
-    Ok(c.query_row("SELECT 1 FROM services WHERE host = ?", [host], |_| Ok(())).optional()?.is_some())
+    Ok(c.query_row("SELECT 1 FROM services WHERE host = ? UNION ALL SELECT 1 FROM pinned WHERE host = ? LIMIT 1", [host, host], |_| Ok(())).optional()?.is_some())
 }
+
+/// Earlier pushes kept reachable per service.
+pub const PINNED_KEEP: usize = 3;
 
 fn append(c: &Conn<'_>, id: &str, at: i64, message: &str) -> code_sql::Result<()> {
     let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM activity WHERE preview_id = ?", [id], |r| r.get(0))?;

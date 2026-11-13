@@ -96,6 +96,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     preview stands for the new head (its status, comment and `roll preview wait`) and says which
     one it `runs`. `paths` alone never skips a deploy: another service of the repo may run what
     it leaves out. The next push that touches anything else, measured from what runs, redeploys.
+- **Earlier pushes** (Vercel's per-push URLs): when a change's own service is redeployed at a new
+  head, the head it ran stays reachable at `<service>-<head>-<slug>`, on the preview's same data,
+  behind the same link, asleep until opened; the last 3 per service (an older one's container
+  goes). For comparing before and after. A trusted change's only (an approval is for one head),
+  `roll.toml` services only (roll apps runs its own), and old code on migrated data can break.
+  They're on the sheet, `roll preview show`, the change and the pull request comment.
 - **Warm after a push**: once a new head is deployed, the change's own services are woken (after
   the pass, a few at a time), so the first visit, usually the pull request comment's link,
   doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
@@ -650,6 +656,7 @@ type Preview = {
   change: string | null; number: number | null; github_pr: number | null; branch: string | null;
   title: string; head: string; trusted: boolean;
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
+  earlier: {service: string; revision: string; url: string; share_url: string | null; at: number}[]; // earlier pushes, still reachable
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
   desired: "active" | "deleted";
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
@@ -798,6 +805,7 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- earlier pushes reachable at URLs of their own (the last 3 per service, on the same data);
 - services warmed as soon as a push is deployed (`warm`);
 - a health check before "ready" (`roll.toml` `health`), and the start/stop race it found live
   (a sleep removing the container a start was making; a request stopping a fresh start);
@@ -837,12 +845,19 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A URL per push** (Vercel's deployment URLs): the change's earlier heads stay reachable at
-   `<head>-<service>-<slug>`, asleep and costing nothing until opened, for comparing before and
-   after on the same data.
-2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+1. **Branch-scoped project variables** (Vercel's preview variables per branch): `env_for:
+   {"feat/payments-*": {"STRIPE_KEY": "…"}}` in the rules, between the project's `env` and a
+   preview's own, so a family of branches gets its settings without each preview's.
+2. **A visual change per push**: the screenshot at each head compared with the previous head's,
+   and the share of pixels that changed in the pull request comment ("the page changed 12%",
+   with both images), as Percy and Chromatic do for visual review, from screenshots roll already
+   takes.
+3. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
+   feedback for that page. That needs a read path the preview's origin can use without a
+   credential (a signed, expiring list per page), which is why it waits.
+4. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

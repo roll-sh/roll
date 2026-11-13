@@ -711,7 +711,7 @@ impl Apps for Runtime {
         if let Some(live) = live {
             self.stop(preview, service, &live, None).await;
         }
-        if let Ok(Some(host)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service).map(|s| s.host)) {
+        if let Ok(Some(host)) = self.store.service_host(preview, service) {
             // Whichever node started it.
             self.iso.remove(&container_name(&host)).await;
         }

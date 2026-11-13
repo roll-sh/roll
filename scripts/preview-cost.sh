@@ -312,6 +312,19 @@ done
 PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
 [ "$PAGE" = "preview of change 1, third" ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
 KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"
+# The push before stays reachable at a URL of its own, on the same data (Vercel's per-push URLs).
+EARLIER_URL=$(api GET "/v1/previews/$PV" | jq_ "((d.get('earlier') or [{}])[0]).get('share_url') or ''")
+[ -n "$EARLIER_URL" ] || { echo "the previous push should stay reachable"; api GET "/v1/previews/$PV" | jq_ "d.get('earlier')"; exit 1; }
+EARLIER_HOST=$(echo "$EARLIER_URL" | sed -E 's#^https?://([^:/]+).*#\1#')
+EJAR="$HOME_DIR/cookies-earlier"
+curl -sS -o /dev/null -c "$EJAR" -H "Host: $EARLIER_HOST" "http://$API/?${EARLIER_URL#*\?}"
+EARLIER_PAGE=""
+for _ in $(seq 1 120); do
+  EARLIER_PAGE=$(curl -sS -b "$EJAR" -H "Host: $EARLIER_HOST" "http://$API/")
+  [ "$EARLIER_PAGE" = "preview of change 1, again" ] && break
+  sleep 0.5
+done
+[ "$EARLIER_PAGE" = "preview of change 1, again" ] || { echo "the earlier push should serve its own page: $EARLIER_PAGE"; exit 1; }
 
 say "[skip preview] in the title removes the preview; without it, a new one comes"
 api PATCH "/v1/code/changes/$CHG" '{"title":"New page [skip preview]"}' >/dev/null
@@ -365,5 +378,6 @@ cat <<EOF
 | A preview's own variable (\`roll preview env\`) in the running service / \`DATABASE_URL\` as one | FEATURE_FLAG=$VAR_SEEN / refused |
 | ignore_paths: docs/ | $KEPT |
 | \`[skip preview]\` in the title, then without it | removed, then a new preview |
+| The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 3 / $BRANCHES_LEFT |
 EOF

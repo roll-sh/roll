@@ -348,6 +348,8 @@ export interface PreviewEnvironment {
   screenshot_url?: string;
   /** When it goes (ms: its TTL, or a keep, running out), once that's a day away. */
   expires_at?: number;
+  /** Earlier pushes still reachable (newest first). */
+  earlier?: { service: string; head: string; url: string }[];
 }
 
 export interface Change {

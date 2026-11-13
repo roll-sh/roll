@@ -20,12 +20,31 @@ impl EnvSource for Engine {
         }
         let s = self.store.settings(&r.project_id)?;
         let services = self.store.services(preview)?;
-        let svc = services.iter().find(|x| x.name == service).ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
-        let rev = svc.revision.clone().ok_or_else(|| anyhow::anyhow!("{service} isn't deployed yet"))?;
-        // The change's own repo runs only the head that was checked (and approved, for a fork).
-        if svc.repo == r.repo && rev != r.build() {
-            anyhow::bail!("{service} is being redeployed at the change's new head");
-        }
+        // `web@<revision>`: an earlier push of `web`, at a host of its own.
+        let (name, earlier) = match service.split_once('@') {
+            Some((name, rev)) => (name, Some(rev)),
+            None => (service, None),
+        };
+        let svc = services.iter().find(|x| x.name == name).ok_or_else(|| anyhow::anyhow!("no service {name}"))?;
+        let (rev, host, url) = match earlier {
+            Some(rev) => {
+                // An approval is for one head: a fork's earlier heads don't run again.
+                if !r.trusted {
+                    anyhow::bail!("earlier pushes of a pull request from a fork don't run");
+                }
+                let p = self.store.pinned(preview)?.into_iter().find(|p| p.service == name && p.revision == rev).ok_or_else(|| anyhow::anyhow!("no earlier push {rev} of {name}"))?;
+                let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no earlier push {rev} of {name}"))?;
+                (p.revision, host, p.url)
+            }
+            None => {
+                let rev = svc.revision.clone().ok_or_else(|| anyhow::anyhow!("{service} isn't deployed yet"))?;
+                // The change's own repo runs only the head that was checked (and approved, for a fork).
+                if svc.repo == r.repo && rev != r.build() {
+                    anyhow::bail!("{service} is being redeployed at the change's new head");
+                }
+                (rev, svc.host.clone(), svc.url.clone())
+            }
+        };
         // Data being replaced, seeded or masked isn't served yet.
         let resources = self.store.resources(preview)?;
         if resources.iter().any(|x| matches!(x.state, crate::ResourceState::Pending | crate::ResourceState::Resetting)) || (s.seed.is_some() && self.store.seed_needed(preview)?) {
@@ -40,8 +59,8 @@ impl EnvSource for Engine {
             .services(&svc.repo, &rev)
             .await?
             .into_iter()
-            .find(|x| x.name == service)
-            .ok_or_else(|| anyhow::anyhow!("{} no longer has a service {service} at {}", svc.repo, short(&rev)))?;
+            .find(|x| x.name == name)
+            .ok_or_else(|| anyhow::anyhow!("{} no longer has a service {name} at {}", svc.repo, short(&rev)))?;
         // Later entries win: roll.toml, the secrets environment, the project's overrides, the
         // preview's own, the branches, then roll's own.
         let mut env = spec.env.clone();
@@ -58,7 +77,7 @@ impl EnvSource for Engine {
             set(&mut env, &k, v);
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
-        set(&mut env, "ROLL_PREVIEW_URL", svc.url.clone());
+        set(&mut env, "ROLL_PREVIEW_URL", url);
         for other in &services {
             set(&mut env, &format!("ROLL_PREVIEW_URL_{}", env_suffix(&other.name)), other.url.clone());
         }
@@ -72,7 +91,7 @@ impl EnvSource for Engine {
             project: r.project_id.clone(),
             preview: r.id.clone(),
             service: service.to_string(),
-            host: svc.host.clone(),
+            host,
             repo: svc.repo.clone(),
             revision: rev,
             git: None,
