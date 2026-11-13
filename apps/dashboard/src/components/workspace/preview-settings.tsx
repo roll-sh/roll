@@ -81,6 +81,8 @@ function Form({
   const [paths, setPaths] = useState(saved.paths.join(", "));
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
   const [pages, setPages] = useState((saved.github.pages ?? []).join(", "));
+  // Selectors can hold commas: one per line.
+  const [hide, setHide] = useState((saved.github.hide ?? []).join("\n"));
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
   // `env_for` as rows of (branch glob, name, value).
   const [perBranch, setPerBranch] = useState<[string, string, string][]>(Object.entries(saved.env_for ?? {}).flatMap(([g, vars]) => Object.entries(vars).map(([k, v]) => [g, k, v] as [string, string, string])));
@@ -88,14 +90,21 @@ function Form({
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, env, perBranch]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
     branches: words(branches),
     paths: words(paths),
     ignore_paths: words(ignorePaths),
-    github: { ...s.github, pages: words(pages) },
+    github: {
+      ...s.github,
+      pages: words(pages),
+      hide: hide
+        .split("\n")
+        .map((x) => x.trim())
+        .filter(Boolean),
+    },
     env: Object.fromEntries(env.filter(([k]) => k.trim()).map(([k, v]) => [k.trim(), v])),
     env_for: perBranch
       .filter(([g, k]) => g.trim() && k.trim())
@@ -381,6 +390,11 @@ function Form({
         {s.github.screenshot && (
           <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 5 paths: /pricing, /login).">
             <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="/ only" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && (
+          <Field label="Hidden in screenshots" note="CSS selectors blanked before each screenshot (a clock, an ad), one per line; animations always stop first.">
+            <textarea value={hide} onChange={(e) => setHide(e.target.value)} rows={2} placeholder=".clock" className={`${field} w-full py-1.5 font-mono text-[12px]`} spellCheck={false} />
           </Field>
         )}
         <Toggle label="Warm after each push" note="Its services start as soon as a push is deployed, so the pull request's link opens at once." checked={s.warm} onChange={(v) => set("warm", v)} />

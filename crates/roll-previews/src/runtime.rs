@@ -858,7 +858,7 @@ impl Apps for Runtime {
         Ok(Some((status, first)))
     }
 
-    async fn screenshot(&self, preview: &str, service: &str, pages: &[String]) -> anyhow::Result<Option<crate::ports::Shot>> {
+    async fn screenshot(&self, preview: &str, service: &str, opts: &crate::ports::ShotOptions) -> anyhow::Result<Option<crate::ports::Shot>> {
         use base64::Engine as _;
         if self.iso.name() != "docker" {
             return Ok(None);
@@ -891,8 +891,10 @@ impl Apps for Runtime {
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
         args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
-        let pages: Vec<&String> = pages.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_PAGES).collect();
+        let pages: Vec<&String> = opts.pages.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_PAGES).collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
+        let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
+        args.extend(["--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
         // and their PNGs a line each.

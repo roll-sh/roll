@@ -142,6 +142,17 @@ pub struct GithubRule {
     /// [`MAX_PAGES`], each compared with its own screenshot before and with the baseline's.
     #[serde(default)]
     pub pages: Vec<String>,
+    /// CSS selectors blanked before each screenshot (Percy's `percyCSS`): a clock, an ad, a
+    /// random avatar, so they don't count as a change. Their box stays.
+    #[serde(default)]
+    pub hide: Vec<String>,
+}
+
+pub const MAX_HIDE: usize = 20;
+
+/// Whether `s` may go into the screenshot's stylesheet as a selector: it can't end its rule.
+pub fn selector_ok(s: &str) -> bool {
+    !s.trim().is_empty() && s.len() <= 200 && !s.contains(['{', '}', '<', ';', '\\']) && !s.contains("/*") && s.chars().all(|c| !c.is_control())
 }
 
 pub const MAX_PAGES: usize = 5;
@@ -195,7 +206,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new() }
     }
 }
 
@@ -322,6 +333,9 @@ impl Settings {
                 return bad(format!("env: {k} is over 32 KiB"));
             }
         }
+        if self.github.hide.len() > MAX_HIDE || !self.github.hide.iter().all(|s| selector_ok(s)) {
+            return bad(format!("github.hide: at most {MAX_HIDE} CSS selectors of up to 200 characters (no braces, semicolons or comments)"));
+        }
         let pages = &self.github.pages;
         if pages.len() > MAX_PAGES || pages.iter().any(|p| !page_path_ok(p) || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {
             return bad(format!("github.pages: at most {MAX_PAGES} different paths besides /, each starting with / (up to 200 characters, no #, quotes or spaces)"));
@@ -386,6 +400,8 @@ mod tests {
         assert_eq!(r.mode_of(Kind::Bucket, "b"), Some(Mode::Branch));
         // Structure-only where a kind can't do it: refused, never a silent full copy.
         assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
+        assert!(Settings::default().patched(&json!({ "github": { "hide": ["time", ".clock, #ad"] } })).is_ok());
+        assert!(Settings::default().patched(&json!({ "github": { "hide": ["a} body {display:none"] } })).is_err());
         for pages in [json!(["//evil.example/"]), json!(["pricing"]), json!(["/a\"b"]), json!(["/a", "/a"]), json!(["/1", "/2", "/3", "/4", "/5", "/6"])] {
             assert!(Settings::default().patched(&json!({ "github": { "pages": pages } })).is_err(), "{pages}");
         }

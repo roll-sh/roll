@@ -507,8 +507,9 @@ impl Engine {
     /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
-        let pages = self.store.settings(&r.project_id).map(|s| s.github.pages).unwrap_or_default();
-        match self.apps.screenshot(&r.id, &first.name, &pages).await {
+        let opts = self.store.settings(&r.project_id).map(|s| crate::ports::ShotOptions { pages: s.github.pages, hide: s.github.hide }).unwrap_or_default();
+        let pages = opts.pages.clone();
+        match self.apps.screenshot(&r.id, &first.name, &opts).await {
             Ok(Some(shot)) => {
                 let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
                     && self.store.set_page_report(&r.id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok()

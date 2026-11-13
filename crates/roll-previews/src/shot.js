@@ -75,6 +75,27 @@ const A11Y = `JSON.stringify((() => {
   const links = [...document.querySelectorAll("a[href]")].filter((a) => !named(a) && !text(a));
   return { images: out(images), fields: out(fields), buttons: out(buttons), links: out(links), lang: !!document.documentElement.getAttribute("lang"), title: !!document.title.trim() };
 })())`;
+// Before each capture: animations, transitions and the caret stopped, videos paused, and the
+// project's $HIDE selectors blanked (their box kept), so only real changes count.
+const HIDE = (() => {
+  try {
+    return JSON.parse(process.env.HIDE || "[]").filter((s) => typeof s === "string").slice(0, 20);
+  } catch {
+    return [];
+  }
+})();
+const STILL = `(() => {
+  const s = document.createElement("style");
+  s.textContent = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}"
+    + ${JSON.stringify(HIDE)}.map((x) => x + "{visibility:hidden!important}").join("");
+  (document.head || document.documentElement).appendChild(s);
+  document.querySelectorAll("video").forEach((v) => { try { v.pause(); v.currentTime = 0; } catch {} });
+  return true;
+})()`;
+const still = async (sessionId) => {
+  await send("Runtime.evaluate", { expression: STILL }, sessionId).catch(() => null);
+  await sleep(100);
+};
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -86,6 +107,7 @@ const A11Y = `JSON.stringify((() => {
   await Promise.race([loaded, sleep(45000)]);
   await sleep(300);
   const speed = await send("Runtime.evaluate", { expression: SPEED, returnByValue: true }, sessionId).catch(() => null);
+  await still(sessionId);
   const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
   fs.writeFileSync(process.env.OUT, Buffer.from(shot.data, "base64"));
   let report = {};
@@ -107,6 +129,7 @@ const A11Y = `JSON.stringify((() => {
     await send("Page.reload", {}, sessionId);
     await Promise.race([again, sleep(30000)]);
     await sleep(300);
+    await still(sessionId);
     const phone = await send("Page.captureScreenshot", { format: "png" }, sessionId);
     fs.writeFileSync(process.env.OUT + ".phone.png", Buffer.from(phone.data, "base64"));
   } catch {}
@@ -121,6 +144,7 @@ const A11Y = `JSON.stringify((() => {
       await send("Page.navigate", { url: new URL(path, process.env.URL).href }, sessionId);
       await Promise.race([done, sleep(10000)]);
       await sleep(300);
+      await still(sessionId);
       const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
       fs.writeFileSync(`${process.env.OUT}.${n}.png`, Buffer.from(shot.data, "base64"));
       pages.push({ path, errors: errors.length + failed.length - before });

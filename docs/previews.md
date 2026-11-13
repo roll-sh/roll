@@ -722,7 +722,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[] };   // all true but screenshot; pages: []
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[] };   // all true but screenshot; pages, hide: []
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -788,6 +788,11 @@ type Settings = {
     went wrong while it loaded (`pages` on the preview, `GET …/screenshot?page=/pricing`, a page
     switcher on the sheet, "2 more pages, most changed /pricing by 40.0%" in the comment's
     checks). A path no longer listed is dropped at the next screenshot.
+    Before every capture the page is held still (Chromatic pauses animations, Percy takes
+    `percyCSS`): animations and transitions stop, the caret is hidden, videos pause at their
+    start, and the project's `github.hide` selectors (up to 20; a clock, an ad, a random avatar)
+    are blanked with their box kept, so the same page screenshots the same and only real changes
+    count. Speed is timed before that, on the page as it loaded.
     With `visual_review` (`off` by default, `check` or `required`) a change's pages are reviewed as
     Chromatic's UI Review does: once compared with the baseline, the change has `visual_review`
     (the most any page differs, at either width), and a `roll/visual` commit status that's
@@ -922,6 +927,7 @@ Ranked by what a person notices first. Done so far:
 - a visual review per push (`visual_review`: the `roll/visual` status, Accept in roll, and
   `required` keeping the change from landing in roll);
 - comparisons with main at the change's merge base (the baseline's last 10 heads kept);
+- stable screenshots: animations stopped and `github.hide` selectors blanked before each capture;
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
   public or private restarting nothing on roll's runtime;
 - what went wrong while the page loaded (exceptions, console errors, failed requests);

@@ -145,6 +145,13 @@ pub struct Shot {
     pub pages: Vec<PageShot>,
 }
 
+/// What a screenshot run takes: the project's other pages, and what it blanks first.
+#[derive(Clone, Debug, Default)]
+pub struct ShotOptions {
+    pub pages: Vec<String>,
+    pub hide: Vec<String>,
+}
+
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
 #[derive(Clone, Debug)]
 pub struct PageShot {
@@ -334,7 +341,7 @@ pub trait Apps: Send + Sync {
     async fn probe(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         Ok(None)
     }
-    async fn screenshot(&self, _preview: &str, _service: &str, _pages: &[String]) -> anyhow::Result<Option<Shot>> {
+    async fn screenshot(&self, _preview: &str, _service: &str, _opts: &ShotOptions) -> anyhow::Result<Option<Shot>> {
         Ok(None)
     }
     /// What it's doing on this node (`None`: never started here).
