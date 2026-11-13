@@ -191,7 +191,19 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     // session id it was given.
     let declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| m["params"]["capabilities"]["elicitation"].get("url").is_some());
     let url_elicitation = declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with(SESSION_URL)));
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, toolsets });
+    // Who's calling, as it named itself in `initialize` (carried in the session id after), for
+    // the audit log: a hint, never a proof.
+    let named = messages.iter().find(|m| m["method"] == "initialize").and_then(|m| {
+        let info = &m["params"]["clientInfo"];
+        let name = info["name"].as_str()?;
+        roll_access::evaluate::client_name(&format!("{name} {}", info["version"].as_str().unwrap_or("")))
+    });
+    let client: Option<Arc<str>> = named
+        .clone()
+        .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
+        .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
+        .map(Arc::from);
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, url_elicitation, toolsets, client });
     let mut resp = if wants_sse(&ctx.headers) {
         let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {
             futures::stream::iter(responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))))
@@ -201,12 +213,23 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         let mut responses = process(&ctx, messages).await;
         if batch { Json(Value::Array(responses)).into_response() } else { Json(responses.pop().unwrap_or(Value::Null)).into_response() }
     };
-    if let Some(url) = declared
-        && let Ok(v) = HeaderValue::from_str(&format!("{}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s")))
-    {
-        resp.headers_mut().insert("mcp-session-id", v);
+    if let Some(url) = declared {
+        use base64::Engine;
+        let name = named.map(|n| format!("{}.", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(n))).unwrap_or_default();
+        if let Ok(v) = HeaderValue::from_str(&format!("{}{name}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s"))) {
+            resp.headers_mut().insert("mcp-session-id", v);
+        }
     }
     resp
+}
+
+/// The client name a session id carries (`roll-url-1.<base64>.<random>`), cleaned again.
+fn session_client(id: &str) -> Option<String> {
+    use base64::Engine;
+    let rest = id.strip_prefix(SESSION_URL).or_else(|| id.strip_prefix(SESSION_PLAIN))?;
+    let (encoded, _) = rest.split_once('.')?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    roll_access::evaluate::client_name(&String::from_utf8_lossy(&bytes))
 }
 
 fn wants_sse(h: &HeaderMap) -> bool {
@@ -223,6 +246,8 @@ struct Ctx {
     url_elicitation: bool,
     /// The products whose tools are listed (`None`: every product's).
     toolsets: Option<Vec<String>>,
+    /// The client's name and version, as it said in `initialize`.
+    client: Option<Arc<str>>,
 }
 
 impl Ctx {
@@ -354,7 +379,7 @@ Read the resource roll://access/me for what this connection may do, in words, an
 async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
     let redacted = roll_access::redact::value(&args);
     let mut ext = Extensions::new();
-    ext.insert(McpCall { tool: name.into(), args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation });
+    ext.insert(McpCall { tool: name.into(), args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone() });
     let started = std::time::Instant::now();
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
     let (result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
@@ -385,6 +410,7 @@ async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
             args: Some(roll_access::redact::value(&args)),
             ip: ctx.ip.map(|i| i.to_string()),
             duration_ms: started.elapsed().as_millis() as i64,
+            client: ctx.client.as_deref().map(str::to_string),
         };
         let access = access.clone();
         if let Some(e) = access.store.queue_audit(e) {
@@ -404,7 +430,7 @@ async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
         req = req.header(k, v);
     }
     let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
-    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": resources::ME })), ip: ctx.ip, elicits: false });
+    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": resources::ME })), ip: ctx.ip, elicits: false, client: ctx.client.clone() });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},

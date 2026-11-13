@@ -22,6 +22,7 @@ function Token({ id }: { id: string }) {
   const { data: g, error, refresh } = usePoll(() => accessApi.token(id), 10_000);
   const { data: events } = usePoll(() => accessApi.audit({ grant: id, limit: 30 }), 15_000);
   const { data: approvals } = usePoll(() => accessApi.approvals(undefined, id), 15_000);
+  const { data: networks } = usePoll(() => accessApi.networks(id), 30_000);
   const ws = useWorkspace();
   const [inventory, setInventory] = useState<Record<string, { id: string; name: string }[]>>({});
   useEffect(() => {
@@ -66,6 +67,7 @@ function Token({ id }: { id: string }) {
             {statusOf(g) === "active" && <Temporary g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             {statusOf(g) === "active" && <Tighten g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             <Approvals list={approvals ?? []} />
+            <Networks list={networks ?? []} />
             <Requests id={id} events={events} />
           </>
         )}
@@ -214,6 +216,25 @@ function Temporary({
   );
 }
 
+/** Where it's been used from: a network it hasn't been used from before is told where approvals go. */
+function Networks({ list }: { list: { network: string; first_at: number; last_at: number }[] }) {
+  if (list.length === 0) return null;
+  return (
+    <Panel title="Where it's used from">
+      <ul className="divide-y divide-line">
+        {list.map((n) => (
+          <li key={n.network} className="flex items-center gap-3 px-5 py-2 text-[12px]">
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">{n.network}</span>
+            <span className="shrink-0 text-subtle">
+              first {relative(n.first_at)} · last {relative(n.last_at)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
 function Approvals({ list }: { list: Approval[] }) {
   if (list.length === 0) return null;
   return (
@@ -237,7 +258,10 @@ function Approvals({ list }: { list: Approval[] }) {
 
 function Requests({ id, events }: { id: string; events: AuditEvent[] | null }) {
   return (
-    <Panel title="Recent requests">
+    <Panel
+      title="Recent requests"
+      aside={events?.[0]?.client ? <span className="truncate text-[12px] text-subtle">Last from {events[0].client}</span> : undefined}
+    >
       {events === null ? (
         <div className="p-5">
           <Connecting />

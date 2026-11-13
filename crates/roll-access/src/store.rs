@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS approvals (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS approvals_state ON approvals (state, created_at);
 CREATE INDEX IF NOT EXISTS approvals_request ON approvals (grant_id, request_hash);
+CREATE TABLE IF NOT EXISTS grant_networks (
+    grant_id TEXT NOT NULL,
+    network TEXT NOT NULL,
+    first_at INTEGER NOT NULL,
+    last_at INTEGER NOT NULL,
+    PRIMARY KEY (grant_id, network)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS audit (
     id TEXT PRIMARY KEY,
     at INTEGER NOT NULL,
@@ -295,6 +302,10 @@ pub struct AuditEvent {
     pub args: Option<Value>,
     pub ip: Option<String>,
     pub duration_ms: i64,
+    /// What made the request: an MCP client's name and version, else its User-Agent (one line,
+    /// at most 120 characters; what the client says, so a hint, never a proof).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -314,10 +325,40 @@ pub struct AuditQuery {
 
 pub struct Store {
     pub(crate) db: Db,
-    /// When each grant's `last_used_at` was last written by this node.
+    /// When each grant's use from each network was last written by this node ([`use_key`]).
     touched: std::sync::Mutex<std::collections::HashMap<String, i64>>,
     /// The audit writer's queue ([`Store::queue_audit`]); its thread ends with the store.
     audit_tx: std::sync::mpsc::SyncSender<AuditEvent>,
+}
+
+/// A token used from this many networks roams (CI runners, phones): new ones aren't news.
+pub const ROAMING: i64 = 5;
+
+/// A token used from a network it hasn't been before ([`Store::record_use`]).
+#[derive(Clone, Debug)]
+pub struct NewNetwork {
+    pub network: String,
+    /// How many it's been used from now.
+    pub networks: i64,
+}
+
+/// The network an address is in, as a token's uses are told apart: its /24 (IPv4) or /48 (IPv6).
+pub fn network_of(ip: &str) -> Option<String> {
+    match ip.parse::<std::net::IpAddr>().ok()? {
+        std::net::IpAddr::V4(v) => {
+            let o = v.octets();
+            Some(format!("{}.{}.{}.0/24", o[0], o[1], o[2]))
+        }
+        std::net::IpAddr::V6(v) => {
+            let s = v.segments();
+            Some(format!("{:x}:{:x}:{:x}::/48", s[0], s[1], s[2]))
+        }
+    }
+}
+
+/// What a use is claimed by: the grant and the network (a new network is noticed at once).
+pub fn use_key(id: &str, ip: Option<&str>) -> String {
+    format!("{id} {}", ip.and_then(network_of).unwrap_or_default())
 }
 
 /// Audit rows deleted per transaction when pruning.
@@ -347,8 +388,8 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
         for e in events {
             let args = e.args.as_ref().and_then(|a| serde_json::to_string(a).ok());
             c.execute(
-                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms, client) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     e.id,
                     e.at,
@@ -366,7 +407,8 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
                     e.status as i64,
                     args,
                     e.ip,
-                    e.duration_ms
+                    e.duration_ms,
+                    e.client
                 ],
             )?;
         }
@@ -416,7 +458,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
     })
 }
 
-pub(crate) const AUDIT_COLUMNS: &str = "id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms";
+pub(crate) const AUDIT_COLUMNS: &str = "id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms, client";
 
 pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
     let a: Option<String> = r.get(14)?;
@@ -438,6 +480,7 @@ pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
         args: a.and_then(|a| serde_json::from_str(&a).ok()),
         ip: r.get(15)?,
         duration_ms: r.get(16)?,
+        client: r.get(17)?,
     })
 }
 
@@ -515,6 +558,9 @@ impl Store {
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
+        }
+        if !db.has_column("audit", "client")? {
+            db.add_column("audit", "client", "TEXT")?;
         }
         // What environment and path a request was about (a remembered approval keeps to them).
         for col in ["environment", "scope_path", "scope_index"] {
@@ -809,32 +855,53 @@ impl Store {
 
     /// The grant was used now, from `ip`: written at most once a minute per grant per node.
     pub fn touch(&self, id: &str, ip: Option<&str>) {
-        if self.touch_due(id) {
+        if self.touch_due(&use_key(id, ip)) {
             self.record_use(id, ip);
         }
     }
 
-    /// Whether this node should write a grant's last use now (at most once a minute per grant),
-    /// claiming it if so: in memory, so the request that isn't due costs nothing more.
-    pub fn touch_due(&self, id: &str) -> bool {
+    /// Whether this node should write a use now (at most once a minute per grant and network:
+    /// [`use_key`]), claiming it if so: in memory, so the request that isn't due costs nothing more.
+    pub fn touch_due(&self, key: &str) -> bool {
         let now = code_sql::now_ms();
         let mut t = self.touched.lock().unwrap_or_else(|e| e.into_inner());
-        if t.get(id).is_some_and(|last| now - last < TOUCH_MS) {
+        if t.get(key).is_some_and(|last| now - last < TOUCH_MS) {
             return false;
         }
         if t.len() > 4 * MAX_GRANTS {
             t.clear();
         }
-        t.insert(id.to_string(), now);
+        t.insert(key.to_string(), now);
         true
     }
 
-    /// Write a grant's last use (after [`Store::touch_due`]).
-    pub fn record_use(&self, id: &str, ip: Option<&str>) {
+    /// Write a grant's last use (after [`Store::touch_due`]) and the network it came from: a
+    /// network it hasn't been used from before, while it's used from few ([`ROAMING`]), comes back
+    /// for a person to hear of.
+    pub fn record_use(&self, id: &str, ip: Option<&str>) -> Option<NewNetwork> {
         let now = code_sql::now_ms();
-        if let Err(e) = self.db.write_unsynced(|c| c.execute("UPDATE grants SET last_used_at = ?, last_used_ip = ? WHERE id = ?", params![now, ip, id])) {
+        let network = ip.and_then(network_of);
+        let r = self.db.write_unsynced(|c| {
+            c.execute("UPDATE grants SET last_used_at = ?, last_used_ip = ? WHERE id = ?", params![now, ip, id])?;
+            let Some(net) = network.as_deref() else { return Ok::<_, code_sql::Error>(None) };
+            let known: i64 = c.query_row("SELECT COUNT(*) FROM grant_networks WHERE grant_id = ?", [id], |r| r.get(0))?;
+            let seen = c.execute("UPDATE grant_networks SET last_at = ? WHERE grant_id = ? AND network = ?", params![now, id, net])? > 0;
+            if seen {
+                return Ok(None);
+            }
+            c.execute("INSERT INTO grant_networks (grant_id, network, first_at, last_at) VALUES (?, ?, ?, ?) ON CONFLICT (grant_id, network) DO NOTHING", params![id, net, now, now])?;
+            // Its first network is where it starts; a token that has roamed isn't news any more.
+            Ok((known > 0 && known < ROAMING).then(|| NewNetwork { network: net.to_string(), networks: known + 1 }))
+        });
+        r.unwrap_or_else(|e| {
             tracing::warn!(error = %e, "recording a token's last use");
-        }
+            None
+        })
+    }
+
+    /// The networks a grant has been used from: `(network, first_at, last_at)`, newest first.
+    pub fn networks(&self, id: &str) -> Result<Vec<(String, i64, i64)>> {
+        Ok(self.db.read(|c| c.query("SELECT network, first_at, last_at FROM grant_networks WHERE grant_id = ? ORDER BY last_at DESC LIMIT 100", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
     }
 
     // ── approvals ──

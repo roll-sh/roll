@@ -668,6 +668,7 @@ async fn the_audit_log_streams_to_a_sink() {
         args: None,
         ip: None,
         duration_ms: 1,
+        client: None,
     };
     for n in 0..3 {
         d.access.store.audit(&row(n));
@@ -943,6 +944,11 @@ async fn a_rule_can_grant_some_indices() {
     assert_eq!(search(&asker, "logs-a").await, StatusCode::OK);
     let (_, again) = d.call(&asker, Method::POST, "/v1/search/clusters/cl_1/indices/logs-b/search", Some(json!({}))).await;
     assert_eq!(again["code"], "approval_pending", "logs-b still asks: {again}");
+    // A request says what made it (its User-Agent), and the log keeps it.
+    d.send(&logs, Method::POST, "/v1/search/clusters/cl_1/indices/logs-ua/search", Some(json!({})), &[("user-agent", "roll-cli/0.9\tforged")]).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (_, ua) = d.call(OPERATOR, Method::GET, "/v1/access/audit?resource=cl_1/logs-ua", None).await;
+    assert_eq!(ua[0]["client"], "roll-cli/0.9forged", "one line: {ua}");
 }
 
 /// A link hands the linked resource's credentials to a service (its variables): it needs reveal
@@ -1061,6 +1067,7 @@ async fn the_audit_log_keeps_its_days() {
         args: None,
         ip: None,
         duration_ms: 1,
+        client: None,
     };
     for n in 0..12_000 {
         d.access.store.audit(&row(n, now - 91 * day + n));
@@ -1071,4 +1078,23 @@ async fn the_audit_log_keeps_its_days() {
     d.access.store.prune(90).unwrap();
     let (_, kept) = d.call(OPERATOR, Method::GET, "/v1/access/audit?limit=1000", None).await;
     assert_eq!(kept.as_array().map(Vec::len), Some(3), "only the last 90 days");
+}
+
+/// A token used from a network it hasn't been before is news (a leaked token is used from
+/// somewhere new): its first network isn't, a known one isn't, and once it roams (five) neither is
+/// the next. Networks are /24s and /48s, so one office or runner pool is one.
+#[tokio::test]
+async fn a_new_network_is_news_until_a_token_roams() {
+    let d = Daemon::new(50);
+    let (_, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let used = |ip: &str| d.access.store.record_use(&id, Some(ip)).map(|n| (n.network, n.networks));
+    assert_eq!(used("203.0.113.5"), None, "where it starts");
+    assert_eq!(used("203.0.113.77"), None, "the same /24");
+    assert_eq!(used("198.51.100.9"), Some(("198.51.100.0/24".to_string(), 2)));
+    assert_eq!(used("2001:db8:1:2::7"), Some(("2001:db8:1::/48".to_string(), 3)));
+    assert_eq!(used("198.51.100.200"), None, "known");
+    assert!(used("192.0.2.1").is_some() && used("100.64.0.1").is_some(), "the fourth and the fifth");
+    assert_eq!(used("10.9.8.7"), None, "roaming now");
+    let (_, list) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}/networks"), None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(6), "{list}");
 }

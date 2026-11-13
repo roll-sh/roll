@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, type Preset } from "./access-api";
+import { denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, approvableTogether, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -75,5 +75,13 @@ describe("toolsets", () => {
   it("narrows the MCP URL to the products picked, and leaves it whole for none", () => {
     expect(withToolsets("https://api.roll.sh/v1/mcp", ["redis", "postgres"])).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres,redis");
     expect(withToolsets("https://api.roll.sh/v1/mcp", [])).toBe("https://api.roll.sh/v1/mcp");
+  });
+});
+
+describe("approving together", () => {
+  it("groups a token's waiting reads and writes, never what's risky or has a body to review", () => {
+    const a = (id: string, grant: string, action: string, args: unknown = null) => ({ id, grant_id: grant, grant_name: grant, action, args }) as Approval;
+    const groups = approvableTogether([a("1", "cursor", "read"), a("2", "cursor", "write"), a("3", "cursor", "delete"), a("4", "cursor", "write", { sql: "x" }), a("5", "ci", "read")]);
+    expect(groups).toEqual([{ grant_id: "cursor", grant_name: "cursor", ids: ["1", "2"] }]);
   });
 });

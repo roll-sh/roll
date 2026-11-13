@@ -163,6 +163,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   copy from each in-project source: `write` on the importing folder plus `reveal` on every folder
   imported. Importing another project's folder is `admin` on the importing folder (that project's
   admin must export it too). Secrets also needs `admin` to change a protected environment's imports.
+- An apps deploy hook (`POST`/`DELETE …/environments/{env}/hook`) is a credential that deploys
+  outside roll's tokens (its URL is the secret): making, rotating or removing one is `admin`, as an
+  API key is.
 - Sending a project's data out of roll with a signing secret shown once is `reveal`: an apps
   webhook notification target, and an apps log drain (every service's output, POSTed signed).
 - Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT
@@ -366,6 +369,9 @@ type Approval = {
   reason if they denied it (for the approval's ten minutes, rather than asking them again), or runs it
   once approved. An approval runs one request: the one whose method, path and body hash it holds.
   It can't be reused.
+- A token's waiting reads and writes (two or more, none with a body to review) can be approved
+  together from the header's waiting list, each once; delete, deploy, reveal and admin are
+  approved one by one.
 - The person decides on the dashboard (a notification in the header, and the list under
   `/dashboard/access/approvals`), with `roll mcp approvals` / `roll mcp approve <id>`, or through the
   API. Only the operator decides. A grant never approves its own request, not even with `admin` on
@@ -447,6 +453,9 @@ type AuditEvent = {
   args: Json | null;                   // MCP arguments, redacted
   ip: string | null;
   duration_ms: number;
+  client?: string;                     // what made it, as it says: an MCP client's name and version
+                                       // (from initialize, carried in the session id), else its
+                                       // User-Agent; one line, at most 120 characters
 };
 ```
 
@@ -528,6 +537,18 @@ writes a policy from activity:
   while counts for a rule with the same product and action, which can keep an action that rule
   didn't need; it never widens one.
 
+### New networks
+
+A token used from a network it hasn't been used from before is told where approvals go (GitHub
+and Google mail a sign-in from somewhere new): a leaked token is used from somewhere new.
+
+- A network is an address's /24 (IPv4) or /48 (IPv6), so one office or one pool of runners is one.
+- Its first network is where it starts, and isn't news. Once a token has been used from five
+  (`ROAMING`: CI runners, phones), it roams; the message about the fifth says that's the last.
+- Each node writes a token's use at most once a minute per network, so a new network is seen on its
+  first request. The token's page lists its networks with when each was first and last seen
+  (`GET /v1/access/tokens/{id}/networks`).
+
 ## Leaked tokens
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
@@ -601,6 +622,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
+| `GET /v1/access/tokens/{id}/networks` | access read | the networks it's been used from: `[{network, first_at, last_at}]`, newest first ("New networks") |
 | `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
