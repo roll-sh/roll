@@ -627,7 +627,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
-| `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line, as a download |
 | `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |
 | `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |

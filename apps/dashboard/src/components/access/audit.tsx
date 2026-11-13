@@ -1,6 +1,6 @@
 import { ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { accessApi, productName, type AuditEvent, type AuditFilter } from "@/lib/access-api";
+import { accessApi, ACTIONS, productName, type AuditEvent, type AuditFilter } from "@/lib/access-api";
 import { btn, Connecting, EmptyPanel, ErrorNote, input } from "../ui";
 import { AccessShell, relative } from "./shell";
 import { Sinks } from "./sinks";
@@ -57,6 +57,15 @@ export function Audit({ grant }: { grant?: string }) {
         <div className="flex flex-wrap gap-2">
           <input value={filter.grant ?? ""} onChange={set("grant")} placeholder="Token (tok_…)" className={`${input} w-44 font-mono text-[12px]`} />
           <input value={filter.product ?? ""} onChange={set("product")} placeholder="Product" className={`${input} w-32`} />
+          <input value={filter.resource ?? ""} onChange={set("resource")} placeholder="Resource (who touched it)" className={`${input} w-52 font-mono text-[12px]`} />
+          <select value={filter.action ?? ""} onChange={set("action")} className={input} aria-label="Action">
+            <option value="">Any action</option>
+            {ACTIONS.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
           <select value={filter.decision ?? ""} onChange={set("decision")} className={input}>
             <option value="">Any decision</option>
             <option value="allow">Allowed</option>
@@ -84,7 +93,7 @@ export function Audit({ grant }: { grant?: string }) {
           <div className="overflow-hidden rounded-xl border border-line bg-panel">
             <ul className="divide-y divide-line">
               {events.map((e) => (
-                <Row key={e.id} e={e} />
+                <Row key={e.id} e={e} onResource={(resource) => setFilter((f) => ({ ...f, resource, grant: undefined }))} />
               ))}
             </ul>
             {more && (
@@ -103,7 +112,7 @@ export function Audit({ grant }: { grant?: string }) {
 
 const DECISION: Record<AuditEvent["decision"], string> = { allow: "text-muted", ask: "text-accent", deny: "text-danger" };
 
-function Row({ e }: { e: AuditEvent }) {
+function Row({ e, onResource }: { e: AuditEvent; onResource: (resource: string) => void }) {
   const [open, setOpen] = useState(false);
   const what = e.tool ?? `${e.method} ${e.route}`;
   return (
@@ -124,6 +133,14 @@ function Row({ e }: { e: AuditEvent }) {
           <p className="font-mono text-[11px]">
             {e.method} {e.route} · {e.action ?? "—"} · {e.source} · {e.duration_ms} ms{e.ip ? ` · ${e.ip}` : ""}
             {e.approval ? ` · approval ${e.approval}` : ""} · {new Date(e.at).toISOString()}
+            {e.resource && (
+              <>
+                {" · "}
+                <button onClick={() => onResource(e.resource!)} className="text-accent hover:underline">
+                  who else touched {e.resource}
+                </button>
+              </>
+            )}
           </p>
           {e.args !== null && e.args !== undefined && (
             <pre className="max-h-48 overflow-auto rounded-lg border border-line bg-bg p-2.5 font-mono text-[11px]">{JSON.stringify(e.args, null, 2)}</pre>

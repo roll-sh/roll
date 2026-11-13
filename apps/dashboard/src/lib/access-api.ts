@@ -218,6 +218,9 @@ const approval = (id: string) => `/v1/access/approvals/${encodeURIComponent(id)}
 export interface AuditFilter {
   grant?: string;
   product?: string;
+  /** What it was about: this resource or anything under it (who touched it). */
+  resource?: string;
+  action?: string;
   decision?: string;
   source?: string;
   before?: number;

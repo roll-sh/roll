@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS audit (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS audit_at ON audit (at);
 CREATE INDEX IF NOT EXISTS audit_grant ON audit (grant_id, at);
+CREATE INDEX IF NOT EXISTS audit_resource ON audit (resource, at);
 CREATE TABLE IF NOT EXISTS oauth_clients (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -316,6 +317,9 @@ pub struct AuditQuery {
     pub product: Option<String>,
     pub decision: Option<String>,
     pub source: Option<String>,
+    /// What it was about: this resource, or anything under it (`cl_1` finds `cl_1/logs-a`).
+    pub resource: Option<String>,
+    pub action: Option<String>,
     pub before: Option<i64>,
     pub limit: Option<usize>,
     /// Only these grants' rows (a user's own tokens); set by the route, never from the query.
@@ -968,7 +972,7 @@ impl Store {
         let limit = q.limit.unwrap_or(100).clamp(1, 1000) as i64;
         let mut sql = format!("SELECT {AUDIT_COLUMNS} FROM audit WHERE at < ?");
         let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Int(q.before.unwrap_or(i64::MAX))];
-        for (col, v) in [("grant_id", &q.grant), ("product", &q.product), ("decision", &q.decision), ("source", &q.source)] {
+        for (col, v) in [("grant_id", &q.grant), ("product", &q.product), ("decision", &q.decision), ("source", &q.source), ("action", &q.action)] {
             if let Some(v) = v.as_deref().filter(|v| !v.is_empty()) {
                 sql.push_str(&format!(" AND {col} = ?"));
                 args.push(code_sql::Value::Text(v.to_string()));
@@ -980,6 +984,13 @@ impl Store {
             }
             sql.push_str(&format!(" AND grant_id IN ({})", vec!["?"; ids.len()].join(", ")));
             args.extend(ids.iter().map(|i| code_sql::Value::Text(i.clone())));
+        }
+        // "Who touched this?": the resource, or what's under it (its indices, its objects).
+        if let Some(r) = q.resource.as_deref().filter(|r| !r.is_empty()) {
+            let escaped: String = r.chars().flat_map(|c| if matches!(c, '%' | '_' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
+            sql.push_str(" AND (resource = ? OR resource LIKE ? ESCAPE '\\')");
+            args.push(code_sql::Value::Text(r.to_string()));
+            args.push(code_sql::Value::Text(format!("{escaped}/%")));
         }
         sql.push_str(" ORDER BY at DESC, id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
