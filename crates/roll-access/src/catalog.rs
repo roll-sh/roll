@@ -181,8 +181,8 @@ impl Row {
         self.path_query = Some(q);
         self
     }
-    // Unused until secrets reads the caller's `Grant` (its swap marks health and leaks with it).
-    #[allow(dead_code)]
+    /// A route that keeps only what the caller's `Grant` allows in each answer (secrets' health
+    /// and leaks): a rule limited to some environments or folders matches it too.
     const fn filters_itself(mut self) -> Row {
         self.filters_itself = true;
         self
@@ -934,8 +934,8 @@ static ROWS: &[Row] = &[
     // (`Grant::allows`, one check per project inside the request).
     // Across projects: until secrets filters by the caller's `Grant` (its swap makes these
     // `AnyGrant`), it would answer any token as the operator, so only a rule for all of secrets.
-    row("GET", "/v1/secrets/search", "secrets", R, Tgt::Product),
-    row("GET", "/v1/secrets/findings", "secrets", R, Tgt::Product),
+    row("GET", "/v1/secrets/search", "secrets", R, Tgt::AnyGrant),
+    row("GET", "/v1/secrets/findings", "secrets", R, Tgt::AnyGrant),
     row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.
@@ -960,10 +960,10 @@ static ROWS: &[Row] = &[
     // Not `filters_itself` yet: secrets checks each finding against the caller's `Grant` only once
     // it reads it (the swap on wip/secrets-on-mcp); until then an environment-limited token
     // would get every environment's findings. The swap marks both.
-    row("GET", "/v1/secrets/projects/{project}/health", "secrets", R, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/health", "secrets", R, one(&["project"], "project")).filters_itself(),
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
-    row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
     // Rotators: URLs roll calls to issue and revoke values that live outside roll. Listing shows
     // names and hosts; adding one answers its signing secret once; both changes are admin.
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
