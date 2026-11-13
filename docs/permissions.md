@@ -138,6 +138,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   ref updates; resend it with `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
+- Sending a project's data out of roll with a signing secret shown once is `reveal`: an apps
+  webhook notification target, and an apps log drain (every service's output, POSTed signed).
 - Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT
   …/environments/{env}` and its `variables_from`) also needs `reveal` on the same resource in the
   environment the body names, and the request gets the weaker of the two decisions. When the copy
