@@ -216,6 +216,10 @@ type EnvironmentPut = {
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
    *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it. */
   wait_for_ci?: boolean;
+  /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
+   *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
+   *  service's, null goes back to it; checked with the service's settings as one run. */
+  run?: { [field: string]: number | null };
 };
 
 type Environment = EnvironmentSummary & {
@@ -230,6 +234,7 @@ type Environment = EnvironmentSummary & {
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
   canary: { deployment: string; share: number } | null; // a gradual rollout under way: the percent of requests the new deployment takes
+  run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
   created_at: number;

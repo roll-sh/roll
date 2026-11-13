@@ -201,3 +201,8 @@ export function useLatest<T>(v: T) {
   });
   return r;
 }
+
+/** The sizes an instance comes in. */
+export const CPU = [0.25, 0.5, 1, 2, 4, 8];
+export const MEMORY = [256, 512, 1024, 2048, 4096, 8192, 16384];
+export const mb = (n: number) => (n >= 1024 ? `${n / 1024} GB` : `${n} MB`);

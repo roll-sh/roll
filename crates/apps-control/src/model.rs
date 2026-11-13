@@ -360,6 +360,10 @@ pub struct Run {
     pub rollout: Rollout,
 }
 
+/// The run settings an environment may set for itself (Railway's per-environment settings):
+/// its size and scale, never what it runs.
+pub const ENV_RUN_FIELDS: [&str; 7] = ["min_instances", "max_instances", "cpu", "memory_mb", "concurrency", "suspend_after_s", "sleep_after_s"];
+
 /// A gradual rollout (Vercel's rolling releases, Cloud Run's traffic splits): the new
 /// deployment takes each of `steps` percent of requests for `step_s` seconds, next to the old
 /// one, then all of them. A step in which the new deployment answers `error_pct` or more of its
@@ -621,6 +625,8 @@ pub struct Environment {
     pub crash_loop: Option<CrashLoop>,
     /// A gradual rollout under way: the new deployment and the percent of requests it takes.
     pub canary: Option<Canary>,
+    /// Its own run settings over the service's ([`ENV_RUN_FIELDS`]); empty: the service's.
+    pub run: serde_json::Map<String, serde_json::Value>,
     /// A push deploys only once its commit's checks pass (Railway's "Wait for CI").
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.

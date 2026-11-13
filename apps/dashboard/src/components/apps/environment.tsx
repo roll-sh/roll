@@ -1,9 +1,9 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useState } from "react";
-import { appsApi, PRODUCTION, type Environment, type Service } from "@/lib/apps-api";
+import { appsApi, PRODUCTION, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
-import type { Runner } from "./shared";
+import { CPU, MEMORY, mb, type Runner } from "./shared";
 
 /** A private environment's token: 32 of [a-z0-9], from the browser's CSPRNG. */
 export function newAccessToken(): string {
@@ -79,6 +79,8 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             </button>
           </div>
         )}
+
+        <OwnRun service={service} env={env} runner={runner} />
 
         <div className="flex flex-wrap items-end gap-3 px-5 py-4">
           <div className="min-w-56 flex-1">
@@ -169,3 +171,77 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
     </Panel>
   );
 }
+
+const OWN: { key: EnvRunField; label: string; web?: boolean }[] = [
+  { key: "min_instances", label: "Min instances" },
+  { key: "max_instances", label: "Max instances" },
+  { key: "cpu", label: "CPU" },
+  { key: "memory_mb", label: "Memory" },
+  { key: "sleep_after_s", label: "Sleep after (s)", web: true },
+];
+
+/** The environment's own size and scale (Railway's per-environment settings): each blank one is the service's. */
+function OwnRun({ service, env, runner }: { service: Service; env: Environment; runner: Runner }) {
+  const web = service.run.type === "web";
+  const fields = OWN.filter((f) => web || !f.web);
+  const saved = (k: EnvRunField) => (env.run?.[k] == null ? "" : String(env.run[k]));
+  const [own, setOwn] = useState<Record<string, string>>(() => Object.fromEntries(fields.map((f) => [f.key, saved(f.key)])));
+  const changed = fields.filter((f) => (own[f.key] ?? "") !== saved(f.key));
+  const busy = runner.busy !== null;
+  const ofService = (k: EnvRunField) => {
+    const v = service.run[k as keyof typeof service.run] as number | undefined;
+    return v == null ? "" : k === "memory_mb" ? mb(v) : k === "cpu" ? `${v} vCPU` : String(v);
+  };
+  const select = (k: EnvRunField, options: number[], show: (n: number) => string) => (
+    <select value={own[k] ?? ""} onChange={(e) => setOwn((o) => ({ ...o, [k]: e.target.value }))} className={`${input} w-full`}>
+      <option value="">service's ({ofService(k)})</option>
+      {options.map((n) => (
+        <option key={n} value={String(n)}>
+          {show(n)}
+        </option>
+      ))}
+    </select>
+  );
+  return (
+    <form
+      className="space-y-3 px-5 py-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const run = Object.fromEntries(changed.map((f) => [f.key, own[f.key]?.trim() ? Number(own[f.key]) : null]));
+        void runner.run("own-run", () => appsApi.putEnvironment(service.id, env.name, { run }));
+      }}
+    >
+      <div>
+        <p className="text-[13px] font-medium">Its own size</p>
+        <p className="mt-1 text-[12px] text-muted">Over the service's settings, for {env.name} only (staging small, production warm). Blank is the service's; it applies with the next deploy.</p>
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+        {fields.map((f) => (
+          <Field key={f.key} label={f.label}>
+            {f.key === "cpu" ? (
+              select("cpu", CPU, (n) => `${n} vCPU`)
+            ) : f.key === "memory_mb" ? (
+              select("memory_mb", MEMORY, mb)
+            ) : (
+              <input
+                value={own[f.key] ?? ""}
+                onChange={(e) => setOwn((o) => ({ ...o, [f.key]: e.target.value.replace(/\D/g, "") }))}
+                placeholder={ofService(f.key)}
+                inputMode="numeric"
+                className={`${input} w-full`}
+              />
+            )}
+          </Field>
+        ))}
+      </div>
+      {changed.length > 0 && (
+        <div className="flex justify-end">
+          <button type="submit" className={primary} disabled={busy}>
+            {runner.busy === "own-run" ? <span className="shimmer">Saving…</span> : "Save"}
+          </button>
+        </div>
+      )}
+    </form>
+  );
+}
+

@@ -81,7 +81,12 @@ every deployment is immutable with instant rollback.
   file's other sections are roll code's; code-preview allows `[app]` in it. `[app.run]` sets any
   run setting (`type`, `port`, `min_instances`, `concurrency`, `cpu`, `memory_mb`, `schedule`,
   timings) but the volume, and `[app.environments.<name>]` (with its own `.run`) goes on top in
-  that environment only, as Railway's environment overrides do. `[app.previews]` (and `.run`)
+  that environment only, as Railway's environment overrides do. Without a file, an environment
+  sets its own size and scale (`PUT …/environments/{env}` `run`: instances, CPU, memory,
+  concurrency, suspend and sleep; `roll apps env --run min_instances=1`; "Its own size" in the
+  dashboard) over the service's, checked with them as one run. The file still goes on top of
+  both, as config as code wins on Railway. Changing one marks the environment `needs_deploy`,
+  and an environment's own `min_instances` keeps the service owned, as the service's does. `[app.previews]` (and `.run`)
   goes on top in preview environments (ephemeral ones, `pv-<id>`), before a named block. A
   preview scales to zero unless that block sets `min_instances`, whatever production keeps up,
   so an open pull request costs nothing until someone opens it (Render's `previews.plan` and
@@ -856,22 +861,20 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Per-environment run settings**: an environment's own size, instances and sleep from the
-   API, the CLI and the dashboard (today only roll.toml's `[app.environments.<name>.run]`).
-2. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+1. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-3. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+2. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-4. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+3. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-5. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-6. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+5. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-7. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+6. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-8. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+7. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

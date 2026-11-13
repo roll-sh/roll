@@ -8,11 +8,8 @@ import { DrainsPanel } from "./drains";
 import { EnvironmentPanel } from "./environment";
 import { NotificationsPanel } from "./notifications";
 import { SpendPanel } from "./spend";
-import type { Runner } from "./shared";
+import { CPU, MEMORY, mb, type Runner } from "./shared";
 
-const CPU = [0.25, 0.5, 1, 2, 4, 8];
-const MEMORY = [256, 512, 1024, 2048, 4096, 8192, 16384];
-const mb = (n: number) => (n >= 1024 ? `${n / 1024} GB` : `${n} MB`);
 
 /** The form's values, as text (empty: the default). */
 interface Form {

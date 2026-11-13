@@ -612,6 +612,7 @@ impl Apps {
         let domains = self.domains(&r.service, &r.name).await?;
         let sid = r.service.clone();
         let svc = self.db(move |s| s.service(&sid)).await?;
+        let svc = svc.for_env(&r).unwrap_or(svc);
         let next_run_at = match (&svc.run.schedule, &r.active) {
             (Some(sched), Some(_)) if svc.run.kind == RunType::Cron => crate::cron::Schedule::parse(sched).ok().and_then(|s| s.next_after(code_sql::now_ms())),
             _ => None,
@@ -643,6 +644,7 @@ impl Apps {
             next_run_at,
             crash_loop,
             canary,
+            run: r.run.clone(),
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
             created_at: r.created_at,
@@ -654,7 +656,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -719,6 +721,25 @@ impl Apps {
         if let Some(vars) = copied.filter(|v| !v.is_empty()) {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.change_variables(&sid, &e, &vars, &[])).await?;
+        }
+        // Its own size and scale: each field replaces the service's, null goes back to it.
+        if let Some(patch) = o.get("run") {
+            let Value::Object(p) = patch else { return Err(Error::BadRequest("run is an object".into())) };
+            if let Some(k) = p.keys().find(|k| !crate::model::ENV_RUN_FIELDS.contains(&k.as_str())) {
+                return Err(Error::BadRequest(format!("run.{k} is the service's; an environment sets {}", crate::model::ENV_RUN_FIELDS.join(", "))));
+            }
+            let (sid, e) = (service.to_string(), env.to_string());
+            let mut row = self.db(move |s| s.environment(&sid, &e)).await?;
+            for (k, v) in p {
+                if v.is_null() {
+                    row.run.remove(k);
+                } else {
+                    row.run.insert(k.clone(), v.clone());
+                }
+            }
+            svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
+            let (sid, e, run) = (service.to_string(), env.to_string(), row.run);
+            self.db(move |s| s.set_env_run(&sid, &e, &run)).await?;
         }
         match o.get("wait_for_ci") {
             None | Some(Value::Null) => {}

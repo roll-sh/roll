@@ -796,6 +796,20 @@ async fn an_environment_is_cloned_and_a_live_image_promoted_to_it() {
     assert_eq!((p["status"].as_str(), p["trigger"].as_str(), &p["image"]), (Some("active"), Some("promote"), &d["image"]), "{p}");
     assert_eq!(Fake::count(&w.fake.counts.pulls), pulls, "nothing pulled or built");
     assert_eq!(call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "staging"}))).await.0, StatusCode::BAD_REQUEST);
+    // Staging's own scale: its next deployment keeps one up, production keeps the service's 0.
+    let (st, env) = call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"run": {"min_instances": 1, "max_instances": 1}}))).await;
+    assert_eq!((st, env["run"].clone(), env["needs_deploy"].clone()), (StatusCode::OK, json!({"min_instances": 1, "max_instances": 1}), json!(true)), "{env}");
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"run": {"start": "sh"}}))).await.0, StatusCode::BAD_REQUEST, "what runs is the service's");
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"run": {"min_instances": 9}}))).await.0, StatusCode::BAD_REQUEST, "checked against max_instances");
+    let up = |w: &World, dep: &Value| w.fake.instances(&id).iter().filter(|(_, d, st)| d == dep && *st == FakeState::Running).count();
+    let (_, s2) = call(&w.api, "POST", &format!("{base}/staging/deploys"), Some(json!({}))).await;
+    let s2 = settled(&w, &id, "staging", s2["id"].as_str().unwrap()).await;
+    let (_, p2) = call(&w.api, "POST", &format!("{base}/production/deploys"), Some(json!({}))).await;
+    let p2 = settled(&w, &id, "production", p2["id"].as_str().unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((up(&w, &s2["id"]), up(&w, &p2["id"])), (1, 0), "staging keeps one up, production sleeps");
+    let (_, env) = call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"run": {"min_instances": null, "max_instances": null}}))).await;
+    assert_eq!(env["run"], json!({}), "null goes back to the service's");
 }
 
 /// Each request through the proxy is an access line (no query string), filterable by status and

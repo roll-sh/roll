@@ -370,6 +370,11 @@ pub enum AppsCmd {
         /// Deploy a push only once its commit's checks pass (`true`), or at once (`false`).
         #[arg(long)]
         wait_for_ci: Option<bool>,
+        /// This environment's own size or scale over the service's, `field=value` (`min_instances`,
+        /// `max_instances`, `cpu`, `memory_mb`, `concurrency`, `suspend_after_s`,
+        /// `sleep_after_s`); `field=` goes back to the service's. Repeatable.
+        #[arg(long = "run", value_name = "FIELD=VALUE")]
+        run: Vec<String>,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -1396,7 +1401,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -1410,6 +1415,18 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(w) = wait_for_ci {
                 body.insert("wait_for_ci".into(), json!(w));
+            }
+            if !run.is_empty() {
+                let mut r = serde_json::Map::new();
+                for kv in &run {
+                    let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("--run is field=value, like min_instances=1"))?;
+                    let v = match v.trim() {
+                        "" => Value::Null,
+                        n => serde_json::from_str::<serde_json::Number>(n).map(Value::Number).map_err(|_| anyhow::anyhow!("--run {k}: {n} isn't a number"))?,
+                    };
+                    r.insert(k.trim().to_string(), v);
+                }
+                body.insert("run".into(), Value::Object(r));
             }
             api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(Value::Object(body))).await?
         }

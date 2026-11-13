@@ -139,7 +139,7 @@ impl Apps {
                 }
             }
         }
-        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.run.clone(), upload: upload_key, status: DeployStatus::Queued, actor: by.actor };
+        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.for_env(&row)?.run, upload: upload_key, status: DeployStatus::Queued, actor: by.actor };
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
@@ -392,6 +392,8 @@ impl Apps {
         anyhow::ensure!(!self.capped(&d.service), "the project reached its spending limit for the month");
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let (svc, env) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+        // The environment's own size and scale over the service's, before roll.toml.
+        let svc = svc.for_env(&env)?;
         let id = d.id.clone();
         self.step(&d.id, "build").await;
         let (image, run) = match &d.image {
@@ -1076,7 +1078,11 @@ impl Apps {
         loop {
             if let Ok(rows) = self.db(|s| s.services(None)).await {
                 for svc in rows {
-                    let always = svc.run.kind != RunType::Web || svc.run.min_instances > 0;
+                    let sid = svc.id.clone();
+                    // An environment's own floor counts too (production with one warm instance).
+                    let floor = svc.run.min_instances > 0
+                        || self.db(move |s| s.environments(&sid)).await.is_ok_and(|envs| envs.iter().any(|e| e.run.get("min_instances").and_then(Value::as_u64).is_some_and(|n| n > 0)));
+                    let always = svc.run.kind != RunType::Web || floor;
                     let sid = svc.id.clone();
                     let pending = self.db(move |s| s.pending_deployments(&sid)).await.map(|p| !p.is_empty()).unwrap_or(false);
                     if !(always || pending) {
@@ -1160,7 +1166,9 @@ impl Apps {
             None => None,
         };
         let (sid, e) = (svc.id.clone(), env.to_string());
-        let ephemeral = self.db(move |s| s.environment(&sid, &e)).await.is_ok_and(|r| r.ephemeral);
+        let row = self.db(move |s| s.environment(&sid, &e)).await.ok();
+        let ephemeral = row.as_ref().is_some_and(|r| r.ephemeral);
+        let svc = row.as_ref().and_then(|r| svc.for_env(r).ok()).unwrap_or_else(|| svc.clone());
         let scope = crate::config::EnvScope { name: env, ephemeral };
         let run = file.as_ref().and_then(|f| f.apply(&svc.build, &svc.run, Some(scope)).ok()).map_or_else(|| svc.run.clone(), |(_, r, _)| r);
         if ephemeral { crate::config::preview_defaults(run, file.as_ref()).0 } else { run }
