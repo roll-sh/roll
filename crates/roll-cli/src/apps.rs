@@ -328,6 +328,14 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// A Compose file as roll.toml's `[apps]` and `[databases]` (Railway's Compose import):
+    /// printed, or appended to ./roll.toml with `--write`; `roll up --all` applies it.
+    ImportCompose {
+        /// The Compose file (default: compose.yaml, compose.yml, docker-compose.yml here).
+        file: Option<PathBuf>,
+        #[arg(long)]
+        write: bool,
+    },
     /// The environment's deploy hook: a new secret URL that deploys it (printed once; the old
     /// one stops working), or `--remove`.
     Hook {
@@ -915,6 +923,11 @@ struct AppEntry {
     /// Databases below, by name: their connection variables go in.
     #[serde(default)]
     links: Vec<String>,
+    /// The port it listens on (an image's; a root's own roll.toml can say it too).
+    port: Option<u16>,
+    /// Variables it starts with (set when the service is made, never over what it has).
+    #[serde(default)]
+    variables: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -981,6 +994,103 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
         }
     }
     out
+}
+
+/// A Compose file as roll.toml text: image and build services as `[apps.<name>]`, Postgres and
+/// Redis containers as roll's own `[databases.<name>]` (linked from what depends on them), and
+/// notes on what isn't carried over (volumes, networks, commands, health checks).
+fn compose_to_toml(text: &str) -> anyhow::Result<(String, Vec<String>)> {
+    let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(text).context("the Compose file isn't YAML")?;
+    let services = v.get("services").and_then(|s| s.as_mapping()).context("the Compose file has no services")?;
+    let str_of = |v: &serde_yaml_ng::Value| -> Option<String> {
+        match v {
+            serde_yaml_ng::Value::String(s) => Some(s.clone()),
+            serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+            serde_yaml_ng::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }
+    };
+    let db_kind = |image: &str| {
+        let repo = image.split(['@']).next().unwrap_or(image).rsplit('/').next().unwrap_or(image).split(':').next().unwrap_or("");
+        if repo.starts_with("postgres") || repo.starts_with("postgis") || repo == "postgresql" {
+            Some("postgres")
+        } else if repo == "redis" || repo == "valkey" || repo.starts_with("redis-") {
+            Some("redis")
+        } else {
+            None
+        }
+    };
+    let name_of = |k: &str| -> anyhow::Result<String> {
+        let n: String = k.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').to_string();
+        anyhow::ensure!(valid_name(&n), "service {k:?} has no name roll can use (a-z, 0-9 and -, at most 32)");
+        Ok(n)
+    };
+    let mut dbs = std::collections::BTreeMap::new();
+    for (k, svc) in services {
+        let k = str_of(k).context("a service's name")?;
+        if let Some(kind) = svc.get("image").and_then(str_of).as_deref().and_then(db_kind) {
+            dbs.insert(k.clone(), (name_of(&k)?, kind));
+        }
+    }
+    let q = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let (mut out, mut notes) = (String::new(), Vec::new());
+    for (k, svc) in services {
+        let k = str_of(k).context("a service's name")?;
+        if dbs.contains_key(&k) {
+            continue;
+        }
+        let name = name_of(&k)?;
+        out.push_str(&format!("[apps.{name}]\n"));
+        match (svc.get("build"), svc.get("image").and_then(str_of)) {
+            (Some(b), _) => {
+                let ctx = str_of(b).or_else(|| b.get("context").and_then(str_of)).unwrap_or_else(|| ".".into());
+                let ctx = ctx.trim_start_matches("./").trim_end_matches('/');
+                out.push_str(&format!("root = {}\n", q(if ctx.is_empty() { "." } else { ctx })));
+            }
+            (None, Some(img)) => out.push_str(&format!("image = {}\n", q(&img))),
+            (None, None) => bail!("service {k} has neither image nor build"),
+        }
+        // The container's own port: `8080:80` → 80, `80`, or `{target: 80}`.
+        if let Some(p) = svc.get("ports").and_then(|p| p.as_sequence()).and_then(|s| s.first()) {
+            let port = match p.get("target") {
+                Some(t) => str_of(t),
+                None => str_of(p).map(|s| s.split('/').next().unwrap_or("").rsplit(':').next().unwrap_or("").to_string()),
+            };
+            if let Some(port) = port.and_then(|p| p.parse::<u16>().ok()) {
+                out.push_str(&format!("port = {port}\n"));
+            }
+        }
+        let links: Vec<String> = match svc.get("depends_on") {
+            Some(serde_yaml_ng::Value::Sequence(s)) => s.iter().filter_map(str_of).collect(),
+            Some(serde_yaml_ng::Value::Mapping(m)) => m.keys().filter_map(str_of).collect(),
+            _ => Vec::new(),
+        };
+        let links: Vec<String> = links.iter().filter_map(|l| dbs.get(l).map(|(n, _)| q(n))).collect();
+        if !links.is_empty() {
+            out.push_str(&format!("links = [{}]\n", links.join(", ")));
+        }
+        let vars: Vec<(String, String)> = match svc.get("environment") {
+            Some(serde_yaml_ng::Value::Mapping(m)) => m.iter().filter_map(|(k, v)| Some((str_of(k)?, str_of(v).unwrap_or_default()))).collect(),
+            Some(serde_yaml_ng::Value::Sequence(s)) => s.iter().filter_map(str_of).filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect(),
+            _ => Vec::new(),
+        };
+        if !vars.is_empty() {
+            out.push_str(&format!("[apps.{name}.variables]\n"));
+            for (k, v) in vars {
+                out.push_str(&format!("{} = {}\n", q(&k), q(&v)));
+            }
+        }
+        out.push('\n');
+        let dropped: Vec<&str> = ["volumes", "networks", "command", "entrypoint", "healthcheck", "env_file"].into_iter().filter(|f| svc.get(*f).is_some()).collect();
+        if !dropped.is_empty() {
+            notes.push(format!("{k}: not carried over: {} (roll.toml [app] in its root, volumes in its settings)", dropped.join(", ")));
+        }
+    }
+    for (k, (name, kind)) in &dbs {
+        out.push_str(&format!("[databases.{name}]\nkind = {}\n\n", q(kind)));
+        notes.push(format!("{k}: a roll {kind} database instead of a container; its link sets {}", if *kind == "postgres" { "DATABASE_URL" } else { "REDIS_URL" }));
+    }
+    Ok((out, notes))
 }
 
 async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result<()> {
@@ -1069,7 +1179,14 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                     None => json!({ "kind": "upload" }),
                 };
                 let made_links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
-                let svc = api.post("/v1/apps/services", json!({ "project": project, "name": n, "source": source, "links": made_links })).await?;
+                let mut body = json!({ "project": project, "name": n, "source": source, "links": made_links });
+                if let Some(p) = a.port {
+                    body["run"] = json!({ "port": p });
+                }
+                if !a.variables.is_empty() {
+                    body["variables"] = json!(a.variables);
+                }
+                let svc = api.post("/v1/apps/services", body).await?;
                 eprintln!("made service {n}");
                 svc
             }
@@ -1561,6 +1678,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
+        AppsCmd::ImportCompose { file, write } => {
+            let path = match file {
+                Some(f) => f,
+                None => ["compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"].iter().map(PathBuf::from).find(|p| p.exists()).ok_or_else(|| anyhow::anyhow!("no compose.yaml here: name the file"))?,
+            };
+            let text = std::fs::read_to_string(&path).with_context(|| format!("{}", path.display()))?;
+            let (toml_text, notes) = compose_to_toml(&text)?;
+            for n in &notes {
+                eprintln!("# {n}");
+            }
+            if write {
+                let existing = std::fs::read_to_string("roll.toml").unwrap_or_default();
+                anyhow::ensure!(parse_project(&existing).is_err() || !existing.contains("[apps."), "roll.toml declares [apps] already: merge by hand (print without --write)");
+                let joined = if existing.trim().is_empty() { toml_text.clone() } else { format!("{}\n\n{toml_text}", existing.trim_end()) };
+                std::fs::write("roll.toml", joined)?;
+                eprintln!("wrote roll.toml: `roll up --all --dry-run` shows what it would do");
+                return Ok(());
+            }
+            if !json_out {
+                print!("{toml_text}");
+                return Ok(());
+            }
+            json!({ "toml": toml_text, "notes": notes })
+        }
         AppsCmd::Hook { target, remove } => {
             let svc = service(api, &target).await?;
             let path = format!("{}/hook", env_path(&svc, &target.env));
@@ -1770,6 +1911,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_compose_file_becomes_a_projects_roll_toml() {
+        let compose = "services:\n  web:\n    build: ./apps/web\n    ports: [\"8080:3000\"]\n    environment:\n      NODE_ENV: production\n    depends_on: [db, cache]\n    volumes: [\"./data:/data\"]\n  proxy:\n    image: nginx:1.27\n    ports:\n      - target: 80\n  db:\n    image: postgres:17\n  cache:\n    image: redis:7-alpine\n";
+        let (text, notes) = compose_to_toml(compose).unwrap();
+        let f = parse_project(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        let web = &f.apps["web"];
+        assert_eq!((web.root.as_deref(), web.port, web.links.clone()), (Some("apps/web"), Some(3000), vec!["db".to_string(), "cache".to_string()]));
+        assert_eq!(web.variables["NODE_ENV"], "production");
+        assert_eq!((f.apps["proxy"].image.as_deref(), f.apps["proxy"].port), (Some("nginx:1.27"), Some(80)));
+        assert_eq!((f.databases["db"].kind.as_str(), f.databases["cache"].kind.as_str()), ("postgres", "redis"));
+        assert!(notes.iter().any(|n| n.starts_with("web: not carried over: volumes")), "{notes:?}");
+    }
+
+    #[test]
     fn a_projects_file_is_checked_and_planned() {
         let f = parse_project("[app]\nport = 3000\n[apps.web]\nroot = \"apps/web\"\nlinks = [\"db\", \"cache\"]\n[apps.proxy]\nimage = \"nginx:1.27\"\n[databases.db]\nkind = \"postgres\"\n[databases.cache]\nkind = \"redis\"\n").unwrap();
         let mut dbs = std::collections::BTreeMap::new();
@@ -1781,7 +1935,7 @@ mod tests {
             plan_lines(&f, &services, &dbs, &links),
             ["+ redis database cache", "= postgres database db", "= service proxy (image nginx:1.27)", "+ service web (from apps/web)", "~ link web to db", "~ link web to cache", "↑ deploy web"]
         );
-        for bad in ["[apps.web]\nroot = \"../x\"\n", "[apps.web]\nroot = \"a\"\nimage = \"b\"\n", "[apps.web]\nroot = \"a\"\nlinks = [\"nope\"]\n", "[apps.Web]\nroot = \"a\"\n", "[apps.web]\nroot = \"a\"\n[databases.db]\nkind = \"mysql\"\n", "[apps.web]\nroot = \"a\"\nport = 1\n"] {
+        for bad in ["[apps.web]\nroot = \"../x\"\n", "[apps.web]\nroot = \"a\"\nimage = \"b\"\n", "[apps.web]\nroot = \"a\"\nlinks = [\"nope\"]\n", "[apps.Web]\nroot = \"a\"\n", "[apps.web]\nroot = \"a\"\n[databases.db]\nkind = \"mysql\"\n", "[apps.web]\nroot = \"a\"\nreplicas = 1\n"] {
             assert!(parse_project(bad).is_err(), "{bad}");
         }
     }
