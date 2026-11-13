@@ -860,6 +860,9 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     let with_code = api.ok(Method::GET, "/health?code=1", None).await;
     let unreferenced: Vec<(&str, &str)> = with_code.as_array().unwrap().iter().filter(|f| f["issue"] == "unreferenced").map(|f| (f["environment"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
     assert_eq!(unreferenced, [("staging", "DB_PASSWORD"), ("production", "DB_PASSWORD")]);
+    // It says something about the repository's contents: never to a caller who can't read its code.
+    let (s, _) = api.req(Method::GET, "/health?code=1", None, t["token"].as_str()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
     // Across projects: this one, with its findings.
     let all = api.ok(Method::GET, "/v1/secrets/findings", None).await;
     assert_eq!((all.as_array().map(Vec::len), all[0]["project"].as_str(), all[0]["findings"].as_array().map(Vec::len)), (Some(1), Some(api.project.as_str()), Some(6)));

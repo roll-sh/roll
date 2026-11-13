@@ -411,7 +411,10 @@ default branch, looked up in roll code's search index (rolld's `CodeRefs`; roll 
 files). A mention anywhere counts, as a case-sensitive substring, so a key that might be read is
 never flagged. It's a search per key and repository (up to 500 keys), so only on request, and any
 repository that can't be searched here (the index not ready, roll code off) makes the check say
-nothing at all rather than guess. In the
+nothing at all rather than guess. Whether a name appears in a repository says something about its contents,
+so the check is only for a caller who may read every repository on the canvas (`Grants::reads_code`:
+with roll-access, the caller's Grant for `code` read on that repository; until then, the operator):
+anyone else gets a 403 naming the repository. In the
 dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
 made in the browser) and an expired or expiring key's new date, each one change, or a change
 request where the environment is protected. The Health tab and the sidebar's Secrets entry carry
