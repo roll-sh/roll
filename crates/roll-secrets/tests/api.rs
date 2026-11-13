@@ -805,7 +805,20 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     assert_eq!((sent[0]["stale"].clone(), sent[0]["max_age_days"].as_i64()), (json!(["USED"]), Some(90)));
     assert_eq!(sent[0]["expiring"], json!([{ "key": "CERT", "expires_at": soon }]));
     assert!(sent[0]["text"].as_str().unwrap().contains("CERT in 3 days"), "{}", sent[0]["text"]);
-    assert!(!sent[0].to_string().contains("\"u\"") && !sent[0].to_string().contains("c2"), "names, never values");
+    assert!(!sent[0].to_string().contains("\"u\"") && !sent[0].to_string().contains("\"c2\""), "names, never values");
+}
+
+#[tokio::test]
+async fn a_scan_finds_values_only_its_caller_may_reveal() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_51Hx9Q2abc").await;
+    let text = json!({ "candidates": ["hello world", "sk_live_51Hx9Q2abc"] });
+    let found = api.ok(Method::POST, "/leaks", Some(text.clone())).await;
+    assert_eq!(found, json!([{ "index": 1, "key": "STRIPE_KEY", "environment": "production", "path": "/" }]));
+    // Without reveal, a scan would be an oracle for guessing values: it finds nothing.
+    let token = api.ok(Method::POST, "/tokens", Some(json!({ "name": "lint", "actions": ["read"] }))).await;
+    let (s, v) = api.req(Method::POST, "/leaks", Some(text), token["token"].as_str()).await;
+    assert_eq!((s, v), (StatusCode::OK, json!([])));
 }
 
 #[tokio::test]

@@ -469,7 +469,8 @@ Each call is a POST from rolld's guarded client (HTTPS, a public address, no red
 every roll webhook is (`X-Roll-Signature-256`, `X-Roll-Timestamp`, `X-Roll-Delivery`), with
 `X-Roll-Rotator: <id>`:
 - `{"action": "issue", "rotator", "label"}`: mint a new value; answer `{"value": "…", "handle": …}`
-  (at most 96 KiB). `handle` is anything the endpoint needs to revoke that value later.
+  (at most 96 KiB). `handle` is anything the endpoint needs to revoke that value later; it's kept
+  as given (not sealed, like a product's credential handle), so it names the value, never holds it.
 - `{"action": "revoke", "rotator", "handle"}`: retire it; any 2xx.
 
 The URL (which may carry a token) and the signing secret are sealed with the project's data key;
@@ -482,12 +483,13 @@ a key still links to can't be deleted.
 
 ```
 roll secrets ls      [-p project] [-e env] [--path /]          # keys, masked
-roll secrets get     KEY [--plain]
+roll secrets get     KEY [--raw]
 roll secrets set     KEY=VALUE… | KEY (value from stdin) [--comment] [--tag]
 roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
+roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
@@ -625,6 +627,24 @@ the change`. The blocker names keys and environments, never the value or the lin
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
 
+#### Before a commit: `roll secrets scan`
+
+The same check runs on a laptop, before anything is pushed: `roll secrets scan [PATH…]` walks
+files (skipping `.git`, `node_modules`, `target`, binaries and files over 1 MiB) and `--staged`
+reads exactly what `git commit` would record. The CLI takes each line's candidates (runs of token
+characters, the trimmed line, the right-hand side of `KEY=VALUE`), and `POST …/leaks
+{candidates}` (at most 20,000 a call) answers which are the project's values, by fingerprint: the
+key, environment and folder, never the value. It prints `file:line KEY (environment)` and exits
+non-zero when it found one, so it works as a hook:
+
+```
+# .git/hooks/pre-commit
+exec roll secrets scan --staged
+```
+
+A scan only names values its caller may reveal: otherwise it would confirm guesses at values the
+caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
+
 ### Moving from another manager
 
 `roll secrets import` takes a `.env` file or JSON: an object of `KEY: value` (numbers and booleans
@@ -682,6 +702,9 @@ minutes.
 and folder that holds a key, among those the caller may read (a token, its own project's), with its
 version, when it changed and whether it's linked: never its value. `STRIPE_*` finds every key that
 starts with `STRIPE_`. For rotating an organisation-wide key: where is it, so nothing is missed.
+In the dashboard, "Set everywhere…" under an exact key's places then gives each place one new value:
+one change per environment, a change request where it's protected, and a linked place rotated by
+its provider instead; each place's outcome is listed, so a refusal in one doesn't hide the rest.
 
 ### Sharing a value once
 
@@ -1132,6 +1155,7 @@ isn't in the workspace is 404.
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
+| `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -1266,11 +1290,13 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 
 Done and in PR #20:
 - the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
-- rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search), and
+- rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search: checked
+  live against a real roll search cluster), and
   rotators for values outside roll;
 - `roll secrets`, `roll secrets setup` and `roll run [--watch]`;
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
-- leaked secrets don't land, plus scans of a repo's default branch and history;
+- leaked secrets don't land, plus scans of a repo's default branch and history, and `roll secrets
+  scan [--staged]` before a commit;
 - required and typed keys; insights, rotation reminders and expiry dates for values that expire
   outside roll; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
@@ -1296,19 +1322,35 @@ Reviewed again on 2026-11-13:
 - across the apps, previews, MCP and search branches (findings sent to each thread; this branch's
   part is done: untrusted preview environments, `linked` keys, the Access table).
 
-Ranked:
+Ranked (work that can start now):
 
-1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
-   prepared on `wip/secrets-on-mcp`. Also, on that branch:
-   - list `secrets` among MCP's products, so its tools aren't filtered out;
-   - map ephemeral environments to roll-access's `preview` environment class;
-   - get the catalogue rows reported to the MCP thread (identities, lease renew, exports, admin
-     listings) into place.
-   Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
+1. **Weak values** (1Password Watchtower): a key whose name says it's a credential (`PASSWORD`,
+   `SECRET`, `TOKEN`, `API_KEY`…) and whose value is short, of one kind of character, a common
+   password or its own key's name is flagged `weak` when it's written (computed from the plaintext
+   then, kept as a flag), shown to whoever may reveal it, in insights, the list and `roll secrets
+   insights`.
+2. **Values as they were**: `GET …/values?seq=` resolves an environment as it was after a change
+   (reveal, audited), for "what did production have before the incident"; `roll secrets export
+   --at`.
+3. **`roll secrets check .env.example`**: the keys a template names that the environment lacks (and
+   the ones it has that the template doesn't), without reading a value, for CI and onboarding.
+
+Waiting on other pull requests:
+
+- **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
+   ready on `wip/secrets-on-mcp`, which is merged with both branches and green. Every route this
+   router serves has a catalogue row there (imports decided per source, rotators, search), ephemeral
+   environments are roll-access's `preview` class (`environment_fn`), and `ask` grants are
+   honoured. Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
-   real cluster.
-3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+- **Merge with roll search** (#22), whichever merges second. Checked live on a branch with both
+   (2026-11-13): a key linked to a cluster's `api_key` gets the cluster's own API key (200 with it,
+   401 without), rotating issues a new one while the old works through the grace period and fails
+   once its retired lease is revoked, and a `dynamic` link's key dies with its lease. The merge
+   conflicts are additive: CI's matrix (`secrets` and `search` rows), roll-cli's test dependencies,
+   rolld's `main.rs` (search's router, then workspace and secrets) and `DbBudget` (both `search`
+   and `secrets`, with secrets' extra reserved connection).
+- *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+- **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

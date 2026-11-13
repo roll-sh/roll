@@ -2,6 +2,7 @@
 //! and folder that holds it, among those the caller may read. Names, versions and whether it's
 //! linked; never a value. For rotating an organisation-wide key: "where is STRIPE_KEY?".
 
+use code_sql::params;
 use crate::access::{Action, Caller, Scope};
 use crate::{Error, Result, Secrets, names};
 use serde::Serialize;
@@ -34,15 +35,20 @@ impl Secrets {
             return Err(Error::BadRequest("key is a key's name, or the start of one followed by *".into()));
         }
         type Row = (String, String, String, String, i64, i64, Option<String>);
+        // A caller bound to one project (a token) is looked for there, before the window: other
+        // projects' rows must not crowd its own out.
+        let only = caller.grants.project().map(String::from);
         let rows: Vec<Row> = self.db.read(|c| {
-            let sql = "SELECT s.project_id, e.slug, s.path, s.key, s.version, s.updated_at, s.link FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.owner = '' AND ";
-            Ok::<_, Error>(match exact {
-                Some(k) => c.query(&format!("{sql}s.key = ? ORDER BY s.project_id, e.position, s.path LIMIT 5000"), [k], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?,
+            let (matching, arg) = match exact {
+                Some(k) => ("s.key = ?", k.to_string()),
                 // Keys are [A-Za-z0-9_]: `_` is LIKE's one-character wildcard, so escape it.
-                None => c.query(&format!("{sql}s.key LIKE ? ESCAPE '\\' ORDER BY s.project_id, e.position, s.path, s.key LIMIT 5000"), [format!("{}%", probe.replace('_', "\\_"))], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
-                })?,
-            })
+                None => ("s.key LIKE ? ESCAPE '\\'", format!("{}%", probe.replace('_', "\\_"))),
+            };
+            let sql = format!(
+                "SELECT s.project_id, e.slug, s.path, s.key, s.version, s.updated_at, s.link FROM secrets s JOIN environments e ON e.id = s.env_id
+                 WHERE s.owner = '' AND {matching} AND (CAST(? AS TEXT) IS NULL OR s.project_id = ?) ORDER BY s.project_id, e.position, s.path, s.key LIMIT 5000"
+            );
+            Ok::<_, Error>(c.query(&sql, params![arg, only, only], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?)
         })?;
         let mut names_of = std::collections::HashMap::new();
         let mut out = vec![];
