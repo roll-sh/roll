@@ -360,6 +360,9 @@ Open mode: `contract.rs::open_mode_makes_everyone_admin`.
   approve or request changes only where installed: `routes.rs::every_repo_route_follows_the_auth_matrix`,
   `review.rs::app_tokens_are_scoped_even_on_an_open_daemon`,
   `review.rs::review_apps_events_scopes_requests_and_failed_deliveries`.
+- A signed-in user's session (docs/accounts.md, rolld's gate) is their own user owner, made on
+  first sign-in; an admin's is the admin: `rolld/tests/auth.rs::every_control_plane_route_needs_the_operator_token`,
+  `roll-accounts/tests/flows.rs::an_invite_becomes_a_session_by_email_code`.
 - Anonymous writes are 401 (the dashboard opens its sign-in prompt), never 403, including owner
   create, owner patch and token create: `api.rs::repos_rename_and_visibility`, `routes.rs::every_repo_route_follows_the_auth_matrix`.
 

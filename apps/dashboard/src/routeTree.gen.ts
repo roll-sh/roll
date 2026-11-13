@@ -10,9 +10,11 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as SigninRouteImport } from './routes/signin'
 import { Route as OwnerIndexRouteImport } from './routes/$owner/index'
 import { Route as OwnerRepoRouteRouteImport } from './routes/$owner/$repo/route'
 import { Route as DashboardIndexRouteImport } from './routes/dashboard/index'
+import { Route as DashboardAccountRouteImport } from './routes/dashboard/account'
 import { Route as DashboardDatabasesRouteImport } from './routes/dashboard/databases'
 import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams'
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
@@ -71,6 +73,11 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SigninRoute = SigninRouteImport.update({
+  id: '/signin',
+  path: '/signin',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const OwnerIndexRoute = OwnerIndexRouteImport.update({
   id: '/$owner/',
   path: '/$owner/',
@@ -84,6 +91,11 @@ const OwnerRepoRouteRoute = OwnerRepoRouteRouteImport.update({
 const DashboardIndexRoute = DashboardIndexRouteImport.update({
   id: '/dashboard/',
   path: '/dashboard/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardAccountRoute = DashboardAccountRouteImport.update({
+  id: '/dashboard/account',
+  path: '/dashboard/account',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardDatabasesRoute = DashboardDatabasesRouteImport.update({
@@ -361,7 +373,9 @@ const DashboardCodeOwnerRepoChangesNumberRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/signin': typeof SigninRoute
   '/$owner/$repo': typeof OwnerRepoRouteRouteWithChildren
+  '/dashboard/account': typeof DashboardAccountRoute
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
@@ -419,6 +433,8 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/signin': typeof SigninRoute
+  '/dashboard/account': typeof DashboardAccountRoute
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
@@ -477,7 +493,9 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/signin': typeof SigninRoute
   '/$owner/$repo': typeof OwnerRepoRouteRouteWithChildren
+  '/dashboard/account': typeof DashboardAccountRoute
   '/dashboard/databases': typeof DashboardDatabasesRoute
   '/dashboard/streams': typeof DashboardStreamsRoute
   '/dashboard/tasks': typeof DashboardTasksRoute
@@ -537,7 +555,9 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/signin'
     | '/$owner/$repo'
+    | '/dashboard/account'
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
@@ -595,6 +615,8 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/signin'
+    | '/dashboard/account'
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
@@ -652,7 +674,9 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/signin'
     | '/$owner/$repo'
+    | '/dashboard/account'
     | '/dashboard/databases'
     | '/dashboard/streams'
     | '/dashboard/tasks'
@@ -711,7 +735,9 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  SigninRoute: typeof SigninRoute
   OwnerRepoRouteRoute: typeof OwnerRepoRouteRouteWithChildren
+  DashboardAccountRoute: typeof DashboardAccountRoute
   DashboardDatabasesRoute: typeof DashboardDatabasesRoute
   DashboardStreamsRoute: typeof DashboardStreamsRoute
   DashboardTasksRoute: typeof DashboardTasksRoute
@@ -765,6 +791,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/signin': {
+      id: '/signin'
+      path: '/signin'
+      fullPath: '/signin'
+      preLoaderRoute: typeof SigninRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/$owner/': {
       id: '/$owner/'
       path: '/$owner'
@@ -784,6 +817,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard'
       fullPath: '/dashboard/'
       preLoaderRoute: typeof DashboardIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/account': {
+      id: '/dashboard/account'
+      path: '/dashboard/account'
+      fullPath: '/dashboard/account'
+      preLoaderRoute: typeof DashboardAccountRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard/databases': {
@@ -1189,7 +1229,9 @@ const OwnerRepoRouteRouteWithChildren = OwnerRepoRouteRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  SigninRoute: SigninRoute,
   OwnerRepoRouteRoute: OwnerRepoRouteRouteWithChildren,
+  DashboardAccountRoute: DashboardAccountRoute,
   DashboardDatabasesRoute: DashboardDatabasesRoute,
   DashboardStreamsRoute: DashboardStreamsRoute,
   DashboardTasksRoute: DashboardTasksRoute,

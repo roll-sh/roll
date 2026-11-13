@@ -1,3 +1,4 @@
+import { withSession } from "@/lib/code-token";
 import {
   ChevronRight,
   Download,
@@ -790,7 +791,7 @@ function ImagePreview({ bucket, objectKey, versionId }: { bucket: string; object
     setSrc(null);
     setFailed(null);
     (async () => {
-      const res = await fetch(storageApi.thumbnailUrl(bucket, objectKey, PREVIEW_WIDTH, versionId), { headers: storageHeaders() });
+      const res = await fetch(storageApi.thumbnailUrl(bucket, objectKey, PREVIEW_WIDTH, versionId), withSession({ headers: storageHeaders() }));
       if (!res.ok) {
         let msg = `${res.status} ${res.statusText}`.trim();
         try {

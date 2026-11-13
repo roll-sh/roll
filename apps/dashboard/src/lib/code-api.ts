@@ -6,7 +6,7 @@
  * Repos are addressed by full name, `owner/name`, everywhere.
  */
 
-import { getToken, requestSignIn } from "./code-token";
+import { getToken, requestSignIn, withSession } from "./code-token";
 import { ROLL_API } from "./roll-api";
 import { streamSse } from "./sse";
 
@@ -1160,12 +1160,15 @@ export function createCodeApi(
     await before?.();
     const headers: Record<string, string> = auth();
     if (body !== undefined) headers["content-type"] = "application/json";
-    return fetch(`${base}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store",
-    });
+    return fetch(
+      `${base}${path}`,
+      withSession({
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        cache: "no-store",
+      }),
+    );
   };
 
   const call = async <T>(method: string, path: string, body?: unknown): Promise<T> => {

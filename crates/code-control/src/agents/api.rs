@@ -290,7 +290,7 @@ async fn revoke_machine(State(code): S, caller: Caller, Path((owner, machine)): 
 }
 
 /// Revoke a live machine of an owner; false if there's none.
-async fn revoke(code: &Code, owner_id: &str, machine: &str) -> Result<bool> {
+pub(crate) async fn revoke(code: &Code, owner_id: &str, machine: &str) -> Result<bool> {
     let hub = code.agents.hub(owner_id);
     let _order = hub.order.lock().await;
     let Some(cursor) = store::revoke_machine(code.db.sql(), owner_id, machine)? else { return Ok(false) };

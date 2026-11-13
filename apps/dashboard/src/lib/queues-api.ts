@@ -1,5 +1,6 @@
 /** Client for the roll queues API (`/v1/queues`, crates/mq-control). See docs/queues/contracts.md. */
 
+import { withSession } from "./code-token";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 export { ROLL_API, formatBytes, formatUsd } from "./roll-api";
@@ -324,12 +325,15 @@ export class OfflineError extends Error {}
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${ROLL_API}${path}`, {
-      method,
-      headers: apiHeaders(body),
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store",
-    });
+    res = await fetch(
+      `${ROLL_API}${path}`,
+      withSession({
+        method,
+        headers: apiHeaders(body),
+        body: body === undefined ? undefined : JSON.stringify(body),
+        cache: "no-store",
+      }),
+    );
   } catch {
     throw new OfflineError(`Can't reach rolld at ${ROLL_API}`);
   }

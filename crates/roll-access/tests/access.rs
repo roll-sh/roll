@@ -164,8 +164,8 @@ fn ids(list: &Value) -> Vec<&str> {
 #[tokio::test]
 async fn a_scoped_token_does_only_what_its_rules_say() {
     let d = Daemon::new(50);
-    let project = d.workspace.create("billing", "", None).unwrap();
-    d.workspace.place(&project.id, roll_workspace::Kind::Postgres, "pa", 0.0, 0.0).unwrap();
+    let project = d.workspace.create("", "billing", "", None).unwrap();
+    d.workspace.place(roll_workspace::Scope::All, &project.id, roll_workspace::Kind::Postgres, "pa", 0.0, 0.0).unwrap();
     let (token, grant) = d.token(json!([{ "product": "postgres", "resources": [{ "project": project.id }], "actions": { "read": "allow" } }]), json!({})).await;
     assert!(token.starts_with("rlt_"));
 
@@ -207,7 +207,7 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(d.call(&token, Method::GET, "/v1/access/tokens", None).await.0, StatusCode::FORBIDDEN);
 
     // Moving the database out of the project takes it out of reach at once.
-    d.workspace.remove(&project.id, roll_workspace::Kind::Postgres, "pa").unwrap();
+    d.workspace.remove(roll_workspace::Scope::All, &project.id, roll_workspace::Kind::Postgres, "pa").unwrap();
     let (_, list) = d.call(&token, Method::GET, "/v1/projects", None).await;
     assert_eq!(ids(&list), Vec::<&str>::new());
 
@@ -282,8 +282,8 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
 #[tokio::test]
 async fn escalation_paths_are_shut() {
     let d = Daemon::new(50);
-    let a = d.workspace.create("a", "", None).unwrap();
-    d.workspace.place(&a.id, roll_workspace::Kind::Postgres, "pa", 0.0, 0.0).unwrap();
+    let a = d.workspace.create("", "a", "", None).unwrap();
+    d.workspace.place(roll_workspace::Scope::All, &a.id, roll_workspace::Kind::Postgres, "pa", 0.0, 0.0).unwrap();
     // "This project only": write everything in project a, including the workspace's own routes.
     let (scoped, _) = d.token(json!([{ "product": "*", "resources": [{ "project": a.id }], "actions": { "read": "allow", "write": "allow" } }]), json!({})).await;
     let pull = format!("/v1/workspace/projects/{}/resources/postgres/pb", a.id);
@@ -294,7 +294,15 @@ async fn escalation_paths_are_shut() {
         .token(json!([{ "product": "*", "resources": [{ "project": a.id }], "actions": { "write": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "admin": "allow" } }]), json!({}))
         .await;
     assert_eq!(d.call(&admin, Method::PUT, &pull, Some(json!({ "x": 0, "y": 0 }))).await.0, StatusCode::OK);
-    d.workspace.remove(&a.id, roll_workspace::Kind::Postgres, "pb").unwrap();
+    d.workspace.remove(roll_workspace::Scope::All, &a.id, roll_workspace::Kind::Postgres, "pb").unwrap();
+
+    // Each user places resources in their own projects: a token for one user's project reaches
+    // what's in it, even when the operator's project has it too.
+    let mine = d.workspace.create("usr_alice", "mine", "", None).unwrap();
+    d.workspace.place(roll_workspace::Scope::All, &mine.id, roll_workspace::Kind::Postgres, "pa", 0.0, 0.0).unwrap();
+    let (alice, _) = d.token(json!([{ "product": "postgres", "resources": [{ "project": mine.id }], "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, list) = d.call(&alice, Method::GET, "/v1/projects", None).await;
+    assert_eq!((s, ids(&list)), (StatusCode::OK, vec!["pa"]));
 
     // A narrower allow doesn't turn an ask for every project into a free full list.
     let (mixed, _) = d
@@ -445,7 +453,7 @@ async fn a_token_never_makes_a_stronger_one() {
     assert_eq!(child(json!(60)).await.0, StatusCode::CREATED);
     assert_eq!(make(read, Some(end - 1000)).await.0, StatusCode::CREATED);
 
-    let project = d.workspace.create("app", "", None).unwrap();
+    let project = d.workspace.create("", "app", "", None).unwrap();
     let (scoped, _) = d.token(json!([{ "product": "postgres", "resources": [{ "project": project.id }], "actions": { "write": "allow", "read": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&scoped, Method::POST, "/v1/projects", Some(json!({ "name": "x" }))).await.0, StatusCode::FORBIDDEN);
     let (s, made) = d.send(&scoped, Method::POST, "/v1/projects", Some(json!({ "name": "x" })), &[("x-roll-project", &project.id)]).await;
