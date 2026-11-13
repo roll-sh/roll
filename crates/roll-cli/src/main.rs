@@ -13,6 +13,7 @@ mod nosql;
 mod queues;
 mod storage;
 mod redis;
+mod seal;
 mod secrets;
 
 /// roll — serverless infrastructure.

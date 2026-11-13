@@ -40,6 +40,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{E}/imports"), get(imports).put(set_imports))
         .route(&format!("{E}/exports"), get(exports).put(set_exports))
         .route(&format!("{P}/shared"), get(shared_with))
+        .route(&format!("{P}/backup"), post(backup))
+        .route(&format!("{P}/restore"), post(restore))
         .route(&format!("{E}/secrets"), get(secrets))
         .route(K, get(secret).put(set_secret).delete(delete_secret))
         .route(&format!("{K}/value"), get(reveal))
@@ -301,6 +303,27 @@ async fn imports(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
 async fn set_imports(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
     let list: Vec<Import> = body(&b)?;
     Ok(ok(blocking(s, move |s| s.set_imports(&project, &env, &path_of(&q), list, &c)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupBody {
+    /// An X25519 public key (base64url): only its holder opens the archive.
+    recipient: String,
+}
+
+/// Every value of the project, sealed to the caller's key (admin).
+async fn backup(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let body: BackupBody = body(&b)?;
+    let context = crate::backup::context(&project);
+    let sealed = blocking(s, move |s| s.backup(&project, &body.recipient, &c)).await?;
+    Ok(secret_response(ok(json!({ "sealed": sealed, "context": context }))))
+}
+
+/// An opened archive into a project with no secrets yet (admin).
+async fn restore(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let archive: crate::backup::Archive = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.restore(&project, archive, &c)).await?))
 }
 
 async fn shared_with(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

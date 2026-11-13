@@ -190,6 +190,29 @@ pub enum Secrets {
     /// Scoped tokens for CI and services: list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
+    /// A key pair for backups: the secret key written to a file only you can read, the public key
+    /// printed (give it to `backup --to`).
+    Keygen {
+        /// Where the secret key goes (created 0600; never overwritten).
+        #[arg(long, default_value = "roll-secrets-backup.key")]
+        out: std::path::PathBuf,
+    },
+    /// Back the project up, sealed to a public key (`keygen`): every environment, folder, value,
+    /// link, import, policy and required key. Written to stdout or --out.
+    Backup {
+        /// The recipient's public key (base64url X25519).
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Load a backup into this project (which has no secrets yet), opened with the secret key.
+    Restore {
+        file: std::path::PathBuf,
+        /// The secret key file (`keygen`).
+        #[arg(long)]
+        key: std::path::PathBuf,
+    },
     /// The folders this folder imports (its own project's, or a folder another project shares
     /// with it): list, add, rm.
     #[command(subcommand)]
@@ -629,6 +652,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     if let Secrets::Open { link } = &cmd {
         return open_share(api, link).await;
     }
+    // A key pair is this machine's, not a project's.
+    if let Secrets::Keygen { out } = &cmd {
+        let (secret, public) = crate::seal::keypair();
+        write_private(out, &secret)?;
+        println!("{public}");
+        eprintln!("The secret key is in {} (0600): keep it apart from the backups. The public key above goes to backup --to.", out.display());
+        return Ok(());
+    }
     let at = args.resolve();
     let c = Client { project: project(api, at.project.as_deref()).await?, api, at };
     let env = c.env(&c.at.env);
@@ -875,6 +906,32 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
+        Secrets::Keygen { .. } => unreachable!("handled before a project is picked"),
+        Secrets::Backup { to, out } => {
+            let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
+            let text = serde_json::to_string_pretty(&v)?;
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, text)?;
+                    eprintln!("Backed up {} to {}: sealed, only the secret key opens it.", c.project, path.display());
+                }
+                None => println!("{text}"),
+            }
+        }
+        Secrets::Restore { file, key } => {
+            let secret = std::fs::read_to_string(&key).with_context(|| format!("reading {}", key.display()))?;
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?)?;
+            let plain = crate::seal::open(&secret, v["context"].as_str().unwrap_or_default(), &v["sealed"])?;
+            let archive: Value = serde_json::from_slice(&plain)?;
+            let r = c.call(Method::POST, &format!("{}/restore", c.base()), Some(archive)).await?;
+            if json_out {
+                return print(&r);
+            }
+            println!("Restored {} environments and {} keys into {}", r["environments"], r["secrets"], c.project);
+            for w in r["warnings"].as_array().into_iter().flatten() {
+                eprintln!("warning: {}", s(w));
+            }
+        }
         Secrets::Imports(cmd) => {
             let url = format!("{env}/imports?{}", c.q());
             let list = c.call(Method::GET, &url, None).await?;
@@ -1398,6 +1455,19 @@ fn random_value(n: usize) -> anyhow::Result<String> {
         }
     }
     Ok(out)
+}
+
+/// Write `text` to a new file only its owner can read (never over an existing one).
+fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    o.mode(0o600);
+    o.open(path).with_context(|| format!("creating {} (it mustn't exist yet)", path.display()))?.write_all(text.as_bytes())?;
+    Ok(())
 }
 
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from

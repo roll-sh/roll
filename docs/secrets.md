@@ -573,6 +573,25 @@ doppler secrets download --no-file --format json > prod.json  &&  roll secrets i
 vercel env pull .env.production --environment=production  &&  roll secrets import .env.production -e production
 ```
 
+### Backup and restore
+
+`roll secrets keygen` makes an X25519 key pair (the secret key in a 0600 file, the public key
+printed); `roll secrets backup --to <public key> --out shop.backup` writes the whole project:
+every environment (with its base, labels, expiry, trust, protection, approvals and age limit), its
+folders, its own keys with their values, comments, tags and links, its imports and the project's
+required keys. The archive is sealed to that key (`roll-seal-v1`, associated data
+`roll-secrets-backup:<project>`), so the file is safe at rest anywhere and only the key's holder
+opens it; `POST …/backup {recipient}` (admin, audited `project.backup`) is the call. Linked keys
+carry their link and no value: a restore issues its own credentials. Personal values, history,
+leases, tokens and identities aren't in it.
+
+`roll secrets restore shop.backup --key roll-secrets-backup.key` opens it on the CLI's machine and
+loads it into the selected project, which must have no secrets yet (`POST …/restore` with the
+opened archive; admin, audited `project.restore`), on this server or another. Values are written
+before any environment is protected, so a restore isn't a change request; what can't be restored
+(a link to a resource that project doesn't have, an import of another project's folder) comes back
+as a warning, by name. Disaster recovery, and moving a project between roll servers.
+
 ### Sharing a value once
 
 `roll secrets share STRIPE_KEY [--views 1] [--ttl 24h] [--note …]` (or a value on stdin) prints a
@@ -964,6 +983,8 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
+| `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin) |
+| `POST /restore` | `Archive` (an opened backup) | `{environments, secrets, warnings}` (admin; an empty project) |
 | `GET /shared` | | `Import[]`: the folders other projects share with this one |
 | `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
@@ -1157,7 +1178,7 @@ Done and in PR #20:
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
   Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
-  identities pinned to client addresses;
+  identities pinned to client addresses; encrypted project backup and restore;
 - the dashboard's Secrets surface;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
@@ -1179,16 +1200,11 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Encrypted project backup and restore**: `roll secrets backup` writes every environment,
-   folder, value, link and policy of a project as one archive sealed to a recipient key
-   (`roll-seal-v1`, X25519), and `roll secrets restore` loads it into an empty project, on this
-   server or another. Disaster recovery and moving between roll servers, with nothing readable at
-   rest outside the holder of the key.
-3. **The deployment key in the dashboard**: Environments shows where the key comes from (`env`,
+2. **The deployment key in the dashboard**: Environments shows where the key comes from (`env`,
    `kms`, `file`), whether a rotation's reseal is done, and a warning for a single node's generated
    key file; the identity form takes allowed addresses.
-4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-5. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+4. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

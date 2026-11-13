@@ -914,3 +914,31 @@ async fn every_route_is_in_the_http_contract() {
     assert!(routes.len() > 40, "the routes were read ({})", routes.len());
     assert!(missing.is_empty(), "routes missing from docs/secrets.md's HTTP table: {missing:?}");
 }
+
+#[tokio::test]
+async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
+    let api = Api::new().await;
+    api.set("staging", "API", "https://staging").await;
+    api.ok(Method::PUT, "/environments/production/secrets/STRIPE?path=/pay", Some(json!({ "value": "sk_live_backup", "comment": "payments" }))).await;
+    api.ok(Method::PUT, "/environments/development/imports?path=/", Some(json!([{ "environment": "staging", "path": "/" }]))).await;
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "API", "type": "url" }]))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+
+    let secret = [7u8; 32];
+    let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
+    assert!(!b.to_string().contains("sk_live_backup"), "sealed, never in the clear");
+    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
+    let plain = roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap();
+    let archive: Value = serde_json::from_slice(&plain).unwrap();
+
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
+    let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
+    let r = api.ok(Method::POST, &to("/restore"), Some(archive.clone())).await;
+    assert_eq!((r["secrets"].as_u64(), r["warnings"].clone()), (Some(2), json!([])));
+    assert_eq!(api.ok(Method::GET, &to("/environments/production/values?path=/pay"), None).await["values"]["STRIPE"], "sk_live_backup");
+    assert_eq!(api.ok(Method::GET, &to("/environments/development/values"), None).await["values"]["API"], "https://staging", "imports restored");
+    assert_eq!(api.ok(Method::GET, &to("/environments/production"), None).await["protected"], true, "protection last");
+    assert_eq!(api.ok(Method::GET, &to("/required"), None).await[0]["type"], "url");
+    let (s, _) = api.call(Method::POST, &to("/restore"), Some(archive)).await;
+    assert_eq!(s, StatusCode::CONFLICT, "only into a project with no secrets");
+}

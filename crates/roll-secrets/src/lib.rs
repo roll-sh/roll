@@ -13,6 +13,7 @@
 pub mod access;
 pub mod api;
 mod audit;
+pub mod backup;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
