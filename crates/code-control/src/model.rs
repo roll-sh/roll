@@ -367,6 +367,9 @@ pub struct PreviewBaseChange {
     /// Accessibility problems its first page has that the branch's didn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a11y_added: Option<u32>,
+    /// Errors and failed requests past the branch's while its first page loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub errors_added: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

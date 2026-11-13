@@ -803,7 +803,8 @@ type Settings = {
     comment's checks, the sheet and the change page ("300 ms slower than main"). Accessibility
     the same way (as Netlify's checks count what a deploy adds): the baseline's report there is
     kept, and the change answers for the problems it added, per kind and a language or title it
-    lost (`base_change.a11y_added`; "5 accessibility problems, 1 new against main").
+    lost (`base_change.a11y_added`; "5 accessibility problems, 1 new against main"), and errors
+    and failed requests too, past main's own (`errors_added`; "2 errors, 1 new against main").
     Where a page changed is a picture too (Percy's and Chromatic's diff view): `?diff=base` or
     `?diff=previous` (with `view` and `page` as for the screenshot) fades what's the same and marks
     what differs, the area only one of them has included; the sheet's Diff shows it against main
@@ -955,7 +956,7 @@ Ranked by what a person notices first. Done so far:
 - a speed budget per project (`github.budget`, the `roll/speed` status);
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
 - an acceptance carried over a push that changes nothing visible;
-- speed against main ("300 ms slower than main") and accessibility problems new against it;
+- speed against main ("300 ms slower than main") accessibility problems and errors new against it;
 - a look at the sheet and the change page from screenshots of a live preview (the screenshot's
   modes spaced apart, roll's baseline tagged in the list);
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
@@ -995,26 +996,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Errors new against main**: "2 errors while its first page loaded" counts main's own (a
-   third-party script that always logs). Counted against the baseline's at the compared head,
-   the comment says which are the change's ("1 new against main").
-2. **Screenshots of every service** (Percy snapshots each app): a project with a web app and an
+1. **Screenshots of every service** (Percy snapshots each app): a project with a web app and an
    admin gets only the first service's pages taken. Per-service pages (`github.pages` entries
    naming a service), each compared the same way.
-3. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

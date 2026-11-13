@@ -55,6 +55,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
         <p className="break-words text-[12px] text-danger">
           While its first page loaded: {[env.page_health.errors > 0 ? `${env.page_health.errors} ${env.page_health.errors === 1 ? "error" : "errors"}` : "", env.page_health.failed > 0 ? `${env.page_health.failed} failed ${env.page_health.failed === 1 ? "request" : "requests"}` : ""].filter(Boolean).join(", ")}
           {env.page_health.first_error ? ` (${env.page_health.first_error})` : ""}
+          {env.base_change?.errors_added != null && `; ${env.base_change.errors_added === 0 ? "none" : env.base_change.errors_added} new against ${env.base_change.branch}`}
         </p>
       )}
       {env.page_a11y && a11yWords(env.page_a11y).length > 0 && (

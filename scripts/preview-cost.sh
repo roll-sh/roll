@@ -412,6 +412,9 @@ case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry m
 # Main's page misses a language and a title too: none of that is the change's.
 A11Y_NEW=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('a11y_added')")
 [ "$A11Y_NEW" = 0 ] || { echo "the change adds no accessibility problems main doesn't have: $A11Y_NEW"; exit 1; }
+# Its page logs "boom" and main's doesn't: that one is the change's.
+ERRORS_NEW=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('errors_added')")
+case "$ERRORS_NEW" in [0-9]*) ;; *) echo "the comparison with main should count the change's own errors: $ERRORS_NEW"; exit 1;; esac
 # The other page, taken in the same session and compared with main's.
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
 case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac
@@ -489,7 +492,7 @@ cat <<EOF
 | ignore_paths: docs/ | $KEPT |
 | \`[skip preview]\` in the title, then without it | removed, then a new preview |
 | A share link (1 hour): in through it / revoked | 200 / 401 |
-| What went wrong while the page loaded (a push whose page logs an error) | $HEALTH |
+| What went wrong while the page loaded (a push whose page logs an error) | $HEALTH; new against main: $ERRORS_NEW |
 | The page's change since the push before (screenshots) | $VISUAL |
 | The phone-width screenshot | $PHONE |
 | The change's page against main's preview | $BASE (main loads in $MAIN_LOAD ms) |

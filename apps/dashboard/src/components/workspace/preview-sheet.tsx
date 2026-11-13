@@ -264,6 +264,9 @@ export function PreviewSheet({
                     {p.page_health.first_failed ? `: ${p.page_health.first_failed}` : ""}
                   </p>
                 )}
+                {p.base_change?.errors_added != null && (
+                  <p className="text-muted">{p.base_change.errors_added === 0 ? `None of them new against ${p.base_change.branch}.` : `${p.base_change.errors_added} new against ${p.base_change.branch}.`}</p>
+                )}
               </div>
             )}
             {p.page_a11y && a11yWords(p.page_a11y).length > 0 && (

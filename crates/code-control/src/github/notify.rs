@@ -426,7 +426,14 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         if h.failed > 0 {
             parts.push(plural(h.failed as u64, "failed request", "failed requests"));
         }
-        summary.push(if parts.is_empty() { "no errors".to_string() } else { parts.join(", ") });
+        let mut part = if parts.is_empty() { "no errors".to_string() } else { parts.join(", ") };
+        // Against main: what's new (a third-party script that always logs isn't the change's).
+        if !parts.is_empty()
+            && let Some((branch, added)) = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.errors_added?)))
+        {
+            part.push_str(&if added == 0 { format!(", none new against {branch}") } else { format!(", {added} new against {branch}") });
+        }
+        summary.push(part);
         details.push_str(&health_line(h));
     }
     if let Some(a) = &e.page_a11y {
@@ -700,7 +707,7 @@ mod preview_tests {
         let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
         assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
         assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, a11y_added: None };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, a11y_added: None, errors_added: None };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
@@ -725,12 +732,15 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), a11y_added: None });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), a11y_added: None, errors_added: None });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
         // Accessibility against main: what the change added.
         timed.page_a11y = Some(crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img>")], lang: true, title: true });
         timed.base_change.as_mut().unwrap().a11y_added = Some(1);
         assert!(page_checks(&timed).unwrap().contains("3 accessibility problems, 1 new against main"), "{}", page_checks(&timed).unwrap());
+        timed.page_health = Some(h(2, 0));
+        timed.base_change.as_mut().unwrap().errors_added = Some(0);
+        assert!(page_checks(&timed).unwrap().contains("Page checks: 2 errors, none new against main · "), "{}", page_checks(&timed).unwrap());
         assert_eq!(than_main(1000, 950, "main"), None, "noise");
         assert_eq!(than_main(500, 900, "main").as_deref(), Some("400 ms faster than main"));
         let comment = page_checks(&e).unwrap();

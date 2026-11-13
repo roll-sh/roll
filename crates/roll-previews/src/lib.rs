@@ -280,6 +280,12 @@ pub struct PageHealth {
 }
 
 impl PageHealth {
+    /// How many more errors and failed requests this page had than `main`'s (a script that always
+    /// logs isn't the change's to answer for).
+    pub fn added_since(&self, main: &PageHealth) -> u32 {
+        self.errors.saturating_sub(main.errors) + self.failed.saturating_sub(main.failed)
+    }
+
     /// From what the browser wrote (`errors` and `failed` lists), if it wrote them.
     pub fn parse(json: &str) -> Option<PageHealth> {
         #[derive(serde::Deserialize)]
@@ -458,6 +464,8 @@ pub struct BaseChange {
     pub load_ms: Option<u32>,
     /// How many accessibility problems the change's first page has that the branch's didn't.
     pub a11y_added: Option<u32>,
+    /// How many more errors and failed requests it had while it loaded than the branch's.
+    pub errors_added: Option<u32>,
 }
 
 /// An earlier push of a change's service, still reachable at a URL of its own (on the preview's
@@ -616,6 +624,8 @@ mod tests {
         let main = PageA11y { issues: vec![A11yIssue { kind: "images".into(), count: 2, first: None }], lang: true, title: true };
         assert_eq!((a.problems(), a.added_since(&main)), (5, 3));
         assert_eq!(main.added_since(&a), 0);
+        let health = |errors, failed| PageHealth { errors, first_error: None, failed, first_failed: None };
+        assert_eq!((health(3, 1).added_since(&health(2, 4)), health(0, 0).added_since(&health(5, 5))), (1, 0));
         assert_eq!(PageSpeed::parse(""), None);
     }
 
