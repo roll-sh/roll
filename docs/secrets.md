@@ -90,6 +90,14 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    c, err := secrets.FromEnv(ctx)
    err = c.Watch(ctx, "production", secrets.Watch{OnChange: func(v *secrets.Values) error { return reload(v.Values) }})
    ```
+
+   In Python, `sdk/python/roll_secrets` (`roll-secrets`, the standard library but for sealed
+   resolves, which need the `seal` extra):
+
+   ```python
+   c = roll_secrets.from_env()
+   c.watch("production", lambda v: reload(v.values))
+   ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
@@ -1603,13 +1611,11 @@ Ranked (work that can start now):
    from a `Secrets::caller_of(operator, user, grant)` factored out of `caller()`), and linked keys'
    addresses rewritten for a container (`Values.linked` → apps' `runtime.reach`; asked roll apps
    which side does it). The wiring itself is #31.
-2. **A Python client** with the same surface as `@roll/secrets` and the Go client (#32): values,
-   sealed resolve, digest, watch, workload identity login.
-3. **Products say who owns a resource**, so a person's project can link their own databases,
+2. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
-4. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),
+3. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),
    as Doppler's and Infisical's.
-5. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
+4. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
    a project has members besides its owner. Tokens already ask through roll-access (`ask` rules,
    approvals for a while); a project's one owner reaches all of it.
 
@@ -1618,7 +1624,7 @@ Open pull requests after this one:
 - **#30, one permission system** (after #20 and #25): a project's tokens are roll-access grants,
   identities' logins get `workload` tokens, `rlst_` is gone.
 - **#31, roll apps' deploys get their project's secrets** (after #20): rolld's `ForApps`.
-- **#32, a Go client** (after #20): `sdk/go/secrets`.
+- **#32, Go and Python clients** (after #20): `sdk/go/secrets`, `sdk/python/roll_secrets`.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the

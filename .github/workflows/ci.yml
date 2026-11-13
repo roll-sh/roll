@@ -86,22 +86,30 @@ jobs:
           filter: dashboard...
       - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/3
 
-  # The Go client for roll secrets (sdk/go/secrets): standard library only.
+  # roll secrets' Go and Python clients (sdk/): the same surface as @roll/secrets.
   sdk:
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    defaults:
-      run:
-        working-directory: sdk/go/secrets
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
           cache: false
-      - run: test -z "$(gofmt -l .)"
-      - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - name: Go
+        working-directory: sdk/go/secrets
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python
+        working-directory: sdk/python/roll_secrets
+        run: |
+          pip install -q cryptography
+          PYTHONPATH=src python -m unittest discover -s tests
 
   scripts:
     runs-on: ubuntu-latest
