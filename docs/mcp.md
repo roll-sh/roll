@@ -346,7 +346,7 @@ waits on a sibling PR reaching main is last.
    rolld, and send each thread its conflicts and their resolutions (last done for every head today).
 2. **Blocked on sibling PRs reaching main:** wire previews', search's, apps' and secrets' lookups
    (`by_fn` / `environment_fn`, one line each; their branches have them ready); secrets' `Grant`
-   swap (it marks health and leaks `filters_itself` and makes search and findings any token's); one sink module with secrets; apps' deploys by id; apps' `rlk_` revoker through `Access::on_leaked` (and `rlk_[a-z2-7]{40}` registered with GitHub's secret scanning); users' own tokens' PR (#18, #19 on main).
+   swap (it marks health and leaks `filters_itself` and makes search and findings any token's); one sink module with secrets; apps' deploys by id; apps' `rlk_` revoker through `Access::on_leaked` (on apps' branch now) and `rlk_[a-z2-7]{40}` registered with GitHub's secret scanning. (#18 and #19 are on main; users' own tokens are #25, stacked on #24.)
 3. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
