@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, type Preset } from "./access-api";
+import { denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -68,5 +68,12 @@ describe("the builder", () => {
     expect(rulesOf(d)).toEqual(rules);
     expect(draftOf([{ product: "*", resources: [{ id: "a" }], actions: {} }])).toBeNull();
     expect(draftOf([{ product: "x", resources: [{ project: "p" }, { id: "a" }], actions: {} }, { product: "y", resources: "*", actions: {} }])).toBeNull();
+  });
+});
+
+describe("toolsets", () => {
+  it("narrows the MCP URL to the products picked, and leaves it whole for none", () => {
+    expect(withToolsets("https://api.roll.sh/v1/mcp", ["redis", "postgres"])).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres,redis");
+    expect(withToolsets("https://api.roll.sh/v1/mcp", [])).toBe("https://api.roll.sh/v1/mcp");
   });
 });
