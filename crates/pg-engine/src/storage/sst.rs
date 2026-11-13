@@ -1,12 +1,28 @@
 //! Sorted string tables: immutable files of (storage key, value) in key order.
 //!
+//! Format 1 (`MAGIC`; what builds before format 2 write, and still a transaction's runs):
+//!
 //! ```text
 //! [block 0] [block 1] … [index] [bloom] [footer: index off/len, bloom off/len, entries, magic]
-//! block  = compression byte (0 raw, 1 zstd) + entries
+//! block  = codec byte (0 raw, 1 zstd + raw length) + entries + crc32
 //! entry  = shared varint | unshared varint | value_len+1 varint (0 = tombstone) | key suffix | value
 //! index  = per block: last key, offset, length
 //! bloom  = over user keys (storage key minus the 8-byte version)
 //! ```
+//!
+//! Format 2 (`MAGIC2`): a block is the block cache's form (`Block`, see there) as it is, so a
+//! block read from the file is used as it was decompressed, not decoded into another form:
+//!
+//! ```text
+//! [block 0] … [index] [bloom] [footer: index off/len, bloom off/len, entries, format, magic2]
+//! block  = codec byte (0 raw, 1 zstd, 2 lz4; the last two + raw length) + body + crc32
+//! body   = entries | values | restart words (u64 each) | restart value offsets (u32 each)
+//!          | version (8) | entry count (u32) | restarts (u32) | common (u16) | flags (u8:
+//!          bit 0 a value is derived, bits 4-7 the log of the entries between restarts)
+//! index  = per block: last key, offset, length, entry count
+//! ```
+//!
+//! A build reads both; it refuses a file (and a manifest) of a format past `FORMAT`.
 
 use super::cache::{BlockCache, CachedBlock};
 use crate::error::{Result, internal};
@@ -19,10 +35,40 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAGIC: u64 = 0x726f_6c6c_7373_7431; // "rollsst1"
+/// Format 2's magic: builds before it read any other as a bad footer and refuse the store.
+const MAGIC2: u64 = 0x726f_6c6c_7373_7432; // "rollsst2"
 pub(crate) const BLOCK_TARGET: usize = 16 * 1024;
 const FOOTER_LEN: usize = 48;
+const FOOTER2_LEN: usize = 56;
+/// The newest file format this build reads, and what it writes the store's files in (a
+/// transaction's runs are format 1: `SstWriter::create_run`).
+pub const FORMAT: u32 = 2;
+/// Format 2's block trailer after the restart arrays: version, entries, restarts, common, flags.
+const TRAILER: usize = 8 + 4 + 4 + 2 + 1;
+
+/// The zstd level of format 2's blocks. Their entries leave out what format 1's repeat (an
+/// index entry's row key, the block's version), so they compress less well byte for byte but
+/// are a third smaller (TPC-H SF1: 1,412 MB against 2,046), and level -1 writes fewer bytes
+/// than level 1 did of format 1 (593 MB against 621; the bulk script's table and indexes after
+/// its DELETE 18.7 against 19.8) in 30-37% less time; level -2 writes more than that did
+/// (HANDOFF "Storage format v2: design"). (A transaction's runs, format 1, stay at level 1.)
+const ZSTD_LEVEL: i32 = -1;
+
+/// How a file's blocks are compressed (the writer's choice; each block records its own, and
+/// one compression didn't shrink by an eighth is stored raw).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    None,
+    Zstd,
+    Lz4,
+}
 const BLOOM_BITS_PER_KEY: usize = 10;
 const BLOOM_K: u32 = 7;
+
+/// The bytes `put_varint` writes for `v`.
+fn varint_len(v: usize) -> usize {
+    (usize::BITS - (v | 1).leading_zeros()).div_ceil(7) as usize
+}
 
 pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
@@ -206,10 +252,24 @@ pub struct SstWriter {
     path: PathBuf,
     id: u64,
     out: BufWriter<super::durable::DFile>,
+    /// The block's entries (format 2: its entries alone, `vals` holds their values).
     block: Vec<u8>,
     block_entries: usize,
     prev_key: Vec<u8>,
-    index: Vec<(Vec<u8>, u64, u32)>,
+    /// Per block: last key, offset, length, entries.
+    index: Vec<(Vec<u8>, u64, u32, u32)>,
+    /// Writes format 2 (`FORMAT`): the store's files; a transaction's runs are format 1.
+    v2: bool,
+    /// Its zstd context, made at its first block (`zstd::bulk::compress` sets one up per
+    /// block).
+    zc: Option<zstd::bulk::Compressor<'static>>,
+    /// Format 2's block being made (`put2`, `body2`), with a whole key every 1 << `rlog`
+    /// entries.
+    b2: Block2,
+    rlog: u8,
+    /// The bytes the block would take in format 1 (where format 2's blocks end too: a block
+    /// holds the entries it held in format 1, and the cache holds it as it did).
+    raw1: usize,
     hashes: Vec<u64>,
     last_user_hash: Option<u64>,
     /// A key not an index entry was added: the file gets a bloom filter (one of index
@@ -220,7 +280,7 @@ pub struct SstWriter {
     first_key: Option<Vec<u8>>,
     min_ts: u64,
     max_ts: u64,
-    compress: bool,
+    codec: Codec,
     /// fsync the file when it is finished (not for a transaction's spilled writes, which
     /// a crash discards).
     sync: bool,
@@ -233,10 +293,38 @@ pub struct SstWriter {
     deletes: u64,
 }
 
+/// Format 2's block as `SstWriter` makes it: the values (after the entries when it is done),
+/// each restart's whole key, where its entry and value start, the block's version (its first
+/// key's), the bytes entry 0 stores of its key, whether a value is derived.
+#[derive(Default)]
+struct Block2 {
+    vals: Vec<u8>,
+    rkeys: Vec<u8>,
+    rends: Vec<u32>,
+    roffs: Vec<u32>,
+    rvals: Vec<u32>,
+    ts: Option<[u8; 8]>,
+    stored0: usize,
+    derived: bool,
+}
+
+impl Block2 {
+    fn clear(&mut self) {
+        self.vals.clear();
+        self.rkeys.clear();
+        self.rends.clear();
+        self.roffs.clear();
+        self.rvals.clear();
+        self.ts = None;
+        self.stored0 = 0;
+        self.derived = false;
+    }
+}
+
 impl SstWriter {
     /// A file of a transaction's spilled writes (`txn::spill`): uncompressed, not fsynced.
     pub fn create_temp(dir: &Path, id: u64) -> Result<Self> {
-        let mut w = Self::create(dir, id, false)?;
+        let mut w = Self::create_with(dir, id, Codec::None, false)?;
         w.sync = false;
         w.tagged = true;
         Ok(w)
@@ -244,12 +332,21 @@ impl SstWriter {
 
     /// A linkable run (`Store::commit_sorted`'s `linked`): compressed as the store's files
     /// are, not fsynced (linking does). One that no other source holds keys of goes to L1
-    /// as it is when its commit links it, so its entries are written once.
+    /// as it is when its commit links it, so its entries are written once. (Format 1: its
+    /// values carry the run's tags, which `Block::decode_linked` takes off as it reads it.)
     pub fn create_run(dir: &Path, id: u64, compress: bool) -> Result<Self> {
-        let mut w = Self::create(dir, id, compress)?;
+        let codec = if compress { Codec::Zstd } else { Codec::None };
+        let mut w = Self::create_with(dir, id, codec, false)?;
         w.sync = false;
         w.tagged = true;
         Ok(w)
+    }
+
+    /// A whole key every 1 << `rlog` entries of format 2's blocks (`RLOG` but in tests).
+    #[cfg(test)]
+    pub(crate) fn restart_log(&mut self, rlog: u8) {
+        assert!(self.entries == 0 && (1..=8).contains(&rlog));
+        self.rlog = rlog;
     }
 
     /// Size the bloom filter for about `n` user keys now (a big ingested commit's: 8 bytes
@@ -262,10 +359,21 @@ impl SstWriter {
         }
     }
 
+    /// A store file (format 2), its blocks zstd-compressed when `compress`.
     pub fn create(dir: &Path, id: u64, compress: bool) -> Result<Self> {
+        Self::create_with(dir, id, if compress { Codec::Zstd } else { Codec::None }, true)
+    }
+
+    /// A file of format 2 (`v2`) or 1, its blocks compressed by `codec` (format 1: zstd or
+    /// none, as builds before format 2 read).
+    pub fn create_with(dir: &Path, id: u64, codec: Codec, v2: bool) -> Result<Self> {
         let path = sst_path(dir, id);
         let tmp = path.with_extension("tmp");
         let out = BufWriter::with_capacity(256 * 1024, super::durable::DFile::create(&tmp)?);
+        let codec = match (v2, codec) {
+            (false, Codec::Lz4) => Codec::Zstd,
+            (_, c) => c,
+        };
         Ok(SstWriter {
             path,
             id,
@@ -274,6 +382,11 @@ impl SstWriter {
             block_entries: 0,
             prev_key: Vec::new(),
             index: Vec::new(),
+            v2,
+            zc: None,
+            b2: Block2::default(),
+            rlog: RLOG,
+            raw1: 0,
             hashes: Vec::new(),
             last_user_hash: None,
             rows: false,
@@ -282,7 +395,7 @@ impl SstWriter {
             first_key: None,
             min_ts: u64::MAX,
             max_ts: 0,
-            compress,
+            codec,
             sync: true,
             bloom: None,
             tagged: false,
@@ -295,7 +408,12 @@ impl SstWriter {
     }
 
     pub fn approx_size(&self) -> u64 {
-        self.offset + self.block.len() as u64
+        self.offset + (self.block.len() + self.b2.vals.len()) as u64
+    }
+
+    /// The block's bytes so far as format 1 counts them (`raw1`).
+    fn block_bytes1(&self) -> usize {
+        if self.v2 { self.raw1 } else { self.block.len() }
     }
 
     /// Keys must arrive in strictly increasing order.
@@ -303,25 +421,10 @@ impl SstWriter {
         if self.first_key.is_none() {
             self.first_key = Some(key.to_vec());
         }
-        // (A whole key at every restart: a cached block keeps the file's entries as they are.)
-        let shared = if self.block_entries.is_multiple_of(RESTART) {
-            0
+        if self.v2 {
+            self.put2(key, value);
         } else {
-            self.prev_key
-                .iter()
-                .zip(key)
-                .take_while(|(a, b)| a == b)
-                .count()
-        };
-        put_varint(&mut self.block, shared as u64);
-        put_varint(&mut self.block, (key.len() - shared) as u64);
-        put_varint(
-            &mut self.block,
-            value.map(|v| v.len() as u64 + 1).unwrap_or(0),
-        );
-        self.block.extend_from_slice(&key[shared..]);
-        if let Some(v) = value {
-            self.block.extend_from_slice(v);
+            self.put1(key, value);
         }
         self.prev_key.clear();
         self.prev_key.extend_from_slice(key);
@@ -344,41 +447,153 @@ impl SstWriter {
             }
             self.last_user_hash = Some(h);
         }
-        if self.block.len() >= BLOCK_TARGET {
+        if self.block_bytes1() >= BLOCK_TARGET {
             self.finish_block()?;
         }
         Ok(())
+    }
+
+    /// Format 1's entry: the key's bytes after those it shares with the one before (none at
+    /// a restart), then the value.
+    fn put1(&mut self, key: &[u8], value: Option<&[u8]>) {
+        // (A whole key at every restart: `Block::decode` keeps the restarts where they are.)
+        let shared = if self.block_entries.is_multiple_of(RESTART) {
+            0
+        } else {
+            self.prev_key
+                .iter()
+                .zip(key)
+                .take_while(|(a, b)| a == b)
+                .count()
+        };
+        put_varint(&mut self.block, shared as u64);
+        put_varint(&mut self.block, (key.len() - shared) as u64);
+        put_varint(
+            &mut self.block,
+            value.map(|v| v.len() as u64 + 1).unwrap_or(0),
+        );
+        self.block.extend_from_slice(&key[shared..]);
+        if let Some(v) = value {
+            self.block.extend_from_slice(v);
+        }
+    }
+
+    /// Format 2's entry, in the form `Block` reads (`Block::decode_with` makes the same of a
+    /// format 1 block): the version left out when it is the block's, a value the key's tail
+    /// derives as that length, other values after the block's entries.
+    fn put2(&mut self, key: &[u8], value: Option<&[u8]>) {
+        let b = &mut self.b2;
+        let klen = key.len();
+        let ts = *b.ts.get_or_insert_with(|| <[u8; 8]>::try_from(&key[klen.saturating_sub(8)..]).unwrap_or([0xFF; 8]));
+        let mut flags = 0;
+        let mut ukey = klen;
+        if klen >= 8 && key[klen - 8..] == ts {
+            flags |= F_TS;
+            ukey -= 8;
+        }
+        let tail = value.and_then(|v| derived_tail(key, v));
+        if tail.is_some() {
+            flags |= F_DERIVED;
+            b.derived = true;
+        }
+        let restart = self.block_entries.is_multiple_of(1 << self.rlog);
+        let common = if restart { 0 } else { self.prev_key.iter().zip(key).take_while(|(a, b)| a == b).count() };
+        let vl = value.map_or(0, |v| v.len() + 1);
+        // (Format 1's entry: its three lengths, the key's bytes past the shared ones, the value.)
+        self.raw1 += varint_len(common) + varint_len(klen - common) + varint_len(vl) + klen - common + vl.saturating_sub(1);
+        let share = if restart {
+            b.roffs.push(self.block.len() as u32);
+            b.rvals.push(b.vals.len() as u32);
+            b.rkeys.extend_from_slice(key);
+            b.rends.push(b.rkeys.len() as u32);
+            if self.block_entries == 0 {
+                b.stored0 = ukey;
+            }
+            0
+        } else {
+            common.min(ukey)
+        };
+        put_varint(&mut self.block, share as u64);
+        put_varint(&mut self.block, ((ukey - share) << 2 | flags) as u64);
+        put_varint(&mut self.block, tail.unwrap_or(vl) as u64);
+        self.block.extend_from_slice(&key[share..ukey]);
+        if let (Some(v), None) = (value, tail) {
+            b.vals.extend_from_slice(v);
+        }
+    }
+
+    /// Format 2's block body: the entries, their values, and what `Block::load` reads from
+    /// its end (the restarts as `Block::restarts` holds them).
+    fn body2(&mut self) -> Vec<u8> {
+        let b = &mut self.b2;
+        let mut raw = std::mem::take(&mut self.block);
+        let vbase = raw.len() as u32;
+        raw.extend_from_slice(&b.vals);
+        let nr = b.roffs.len();
+        let rkey_at = |i: usize| &b.rkeys[if i == 0 { 0 } else { b.rends[i - 1] as usize }..b.rends[i] as usize];
+        let common = match nr {
+            0 => 0,
+            n => {
+                let (x, y) = (rkey_at(0), rkey_at(n - 1));
+                x.iter().zip(y).take_while(|(p, q)| p == q).count().min(b.stored0)
+            }
+        };
+        raw.reserve(nr * 12 + TRAILER);
+        for (i, off) in b.roffs.iter().enumerate() {
+            let w = word(&rkey_at(i)[common..]) >> 32 << 32 | *off as u64;
+            raw.extend_from_slice(&w.to_le_bytes());
+        }
+        for v in &b.rvals {
+            raw.extend_from_slice(&(v + vbase).to_le_bytes());
+        }
+        raw.extend_from_slice(&b.ts.unwrap_or([0xFF; 8]));
+        raw.extend_from_slice(&(self.block_entries as u32).to_le_bytes());
+        raw.extend_from_slice(&(nr as u32).to_le_bytes());
+        raw.extend_from_slice(&(common as u16).to_le_bytes());
+        raw.push(b.derived as u8 | self.rlog << 4);
+        b.clear();
+        raw
     }
 
     fn finish_block(&mut self) -> Result<()> {
         if self.block_entries == 0 {
             return Ok(());
         }
-        let raw = std::mem::take(&mut self.block);
-        let mut data = Vec::with_capacity(raw.len() + 1);
-        if self.compress {
-            let c = zstd::bulk::compress(&raw, 1).map_err(|e| internal(format!("zstd: {e}")))?;
-            if c.len() < raw.len() * 7 / 8 {
-                data.push(1);
+        let raw = if self.v2 { self.body2() } else { std::mem::take(&mut self.block) };
+        let mut data = Vec::with_capacity(raw.len() + 9);
+        let zstd_err = |e: std::io::Error| internal(format!("zstd: {e}"));
+        let packed = match self.codec {
+            Codec::None => None,
+            Codec::Zstd => {
+                if self.zc.is_none() {
+                    self.zc = Some(zstd::bulk::Compressor::new(if self.v2 { ZSTD_LEVEL } else { 1 }).map_err(zstd_err)?);
+                }
+                let zc = self.zc.as_mut().expect("a zstd context");
+                Some((1, zc.compress(&raw).map_err(zstd_err)?))
+            }
+            Codec::Lz4 => Some((2, lz4_flex::block::compress(&raw))),
+        };
+        match packed {
+            Some((tag, c)) if c.len() < raw.len() * 7 / 8 => {
+                data.push(tag);
                 data.extend_from_slice(&(raw.len() as u32).to_le_bytes());
                 data.extend_from_slice(&c);
-            } else {
+            }
+            _ => {
                 data.push(0);
                 data.extend_from_slice(&raw);
             }
-        } else {
-            data.push(0);
-            data.extend_from_slice(&raw);
         }
         let crc = crc32fast::hash(&data);
         data.extend_from_slice(&crc.to_le_bytes());
         self.out.write_all(&data)?;
         self.index
-            .push((self.prev_key.clone(), self.offset, data.len() as u32));
+            .push((self.prev_key.clone(), self.offset, data.len() as u32, self.block_entries as u32));
         self.offset += data.len() as u64;
         self.block = raw;
         self.block.clear();
         self.block_entries = 0;
+        self.raw1 = 0;
         Ok(())
     }
 
@@ -386,11 +601,14 @@ impl SstWriter {
         self.finish_block()?;
         let mut index = Vec::new();
         put_varint(&mut index, self.index.len() as u64);
-        for (k, off, len) in &self.index {
+        for (k, off, len, n) in &self.index {
             put_varint(&mut index, k.len() as u64);
             index.extend_from_slice(k);
             put_varint(&mut index, *off);
             put_varint(&mut index, *len as u64);
+            if self.v2 {
+                put_varint(&mut index, *n as u64);
+            }
         }
         let index_off = self.offset;
         self.out.write_all(&index)?;
@@ -416,15 +634,9 @@ impl SstWriter {
         self.out.write_all(&bloom)?;
         self.offset += bloom.len() as u64;
 
-        let mut footer = Vec::with_capacity(FOOTER_LEN);
-        for v in [
-            index_off,
-            index.len() as u64,
-            bloom_off,
-            bloom.len() as u64,
-            self.entries,
-            MAGIC,
-        ] {
+        let mut footer = Vec::with_capacity(FOOTER2_LEN);
+        let tail: &[u64] = if self.v2 { &[FORMAT as u64, MAGIC2] } else { &[MAGIC] };
+        for v in [index_off, index.len() as u64, bloom_off, bloom.len() as u64, self.entries].iter().chain(tail) {
             footer.extend_from_slice(&v.to_le_bytes());
         }
         self.out.write_all(&footer)?;
@@ -464,6 +676,8 @@ pub struct SstReader {
     pub meta: SstMeta,
     file: File,
     path: PathBuf,
+    /// Its blocks are format 2's (`Block::load`), else format 1's (`Block::decode`).
+    v2: bool,
     index: BlockIndex,
     bloom: Vec<u8>,
     /// Remainders by the bloom filter's bit count.
@@ -475,7 +689,9 @@ pub struct SstReader {
 
 /// Entries between restarts in a cached block: every `RESTART`th entry stores its whole key
 /// (shared = 0), so a seek searches the restarts and decodes at most `RESTART - 1` entries.
-const RESTART: usize = 16;
+/// (Format 2 records its interval in each block, `Block::rlog`: this is what it writes.)
+const RLOG: u8 = 4;
+const RESTART: usize = 1 << RLOG;
 
 /// A block as the cache holds it: its entries in a compact form of the file's (values are
 /// slices of them), a whole key every `RESTART` entries, and where those entries start.
@@ -510,6 +726,9 @@ pub struct Block {
     ts: [u8; 8],
     /// Whether some entry's value is derived (`expand` then copies the values).
     derived: bool,
+    /// Entries between restarts: 1 << `rlog` (`RLOG` but in a format 2 block that says
+    /// otherwise).
+    rlog: u8,
 }
 
 const F_TS: usize = 1;
@@ -669,11 +888,11 @@ impl Block {
             pos.i = self.len;
             return;
         }
-        let r = i / RESTART;
+        let r = i >> self.rlog;
         pos.next = self.restarts[r] as u32;
         pos.vnext = self.rvals[r];
         pos.key.clear();
-        pos.i = r * RESTART;
+        pos.i = r << self.rlog;
         self.read(pos);
         while pos.i < i {
             pos.i += 1;
@@ -737,13 +956,13 @@ impl Block {
         pos.next = self.restarts[r] as u32;
         pos.vnext = self.rvals[r];
         pos.key.clear();
-        pos.i = r * RESTART;
+        pos.i = r << self.rlog;
         self.read(pos);
         if pos.key.as_slice() >= key {
             return;
         }
         let b = &self.data[..];
-        let end = ((r + 1) * RESTART).min(self.len);
+        let end = ((r + 1) << self.rlog).min(self.len);
         let (mut p, mut v) = (pos.next as usize, pos.vnext);
         for i in pos.i + 1..end {
             let at = (p, v);
@@ -785,7 +1004,7 @@ impl Block {
             if k >= key {
                 let shared = pos.shared as usize;
                 let below = pos.i == 0
-                    || (!pos.i.is_multiple_of(RESTART)
+                    || (!pos.i.is_multiple_of(1 << self.rlog)
                         && shared + 8 < k.len()
                         && key.len() > shared
                         && key[..shared + 1] == k[..shared + 1]);
@@ -867,20 +1086,58 @@ impl Block {
         }
     }
 
+    /// A format 2 block as it was decompressed (`SstWriter::body2`): its entries and values
+    /// are the compact form already, the restarts read from its end, the last key from the
+    /// file's block index.
+    fn load(raw: Bytes, last_key: &[u8]) -> Result<Block> {
+        let bad = || internal("bad sst block");
+        let n = raw.len();
+        let t = raw.get(n.checked_sub(TRAILER).ok_or_else(bad)?..).ok_or_else(bad)?;
+        let u32_at = |i: usize| u32::from_le_bytes(t[i..i + 4].try_into().unwrap()) as usize;
+        let ts: [u8; 8] = t[..8].try_into().unwrap();
+        let (len, nr) = (u32_at(8), u32_at(12));
+        let common = u16::from_le_bytes([t[16], t[17]]) as usize;
+        // (Flags: bit 0 a value is derived; bits 4-7 the restart interval's log.)
+        let derived = t[18] & 1 != 0;
+        let rlog = t[18] >> 4;
+        let data_len = n.checked_sub(TRAILER + nr * 12).ok_or_else(bad)?;
+        if !(1..=8).contains(&rlog) || nr != len.div_ceil(1 << rlog) {
+            return Err(bad());
+        }
+        let r = &raw[data_len..];
+        let restarts: Vec<u64> = r[..nr * 8].chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let rvals: Vec<u32> = r[nr * 8..nr * 12].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        if restarts.iter().any(|&x| x as u32 as usize >= data_len) || rvals.iter().any(|&v| v as usize > data_len) {
+            return Err(bad());
+        }
+        Ok(Block {
+            data: raw.slice(..data_len),
+            restarts,
+            rvals,
+            common,
+            len,
+            last_key: last_key.into(),
+            ts,
+            derived,
+            rlog,
+        })
+    }
+
     /// Check a decompressed block of the file's format and write it in the compact form,
     /// with a whole key at every `RESTART`th entry (files written before restarts were
     /// share a prefix there).
     fn decode(raw: Bytes) -> Result<Block> {
-        Block::decode_with(&raw, None)
+        Block::decode_with(&raw, None, RLOG)
     }
 
     /// `decode` of a block of a linked run (`SstMeta::commit_ts`) in the same pass as what
     /// `relink` makes of it: every key's version the commit's, the run's values plain ones.
     fn decode_linked(raw: &[u8], ts: u64) -> Result<Block> {
-        Block::decode_with(raw, Some((!ts).to_be_bytes()))
+        Block::decode_with(raw, Some((!ts).to_be_bytes()), RLOG)
     }
 
-    fn decode_with(raw: &[u8], link: Option<[u8; 8]>) -> Result<Block> {
+    /// (`rlog`: the restart interval's log, `RLOG` but in tests.)
+    fn decode_with(raw: &[u8], link: Option<[u8; 8]>, rlog: u8) -> Result<Block> {
         let bad = || internal("bad sst block");
         let mut restarts: Vec<u64> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut out = Vec::with_capacity(raw.len());
@@ -941,7 +1198,7 @@ impl Block {
                 flags |= F_DERIVED;
                 derived = true;
             }
-            let share = if n.is_multiple_of(RESTART) {
+            let share = if n.is_multiple_of(1 << rlog) {
                 restarts.push(out.len() as u64);
                 rvals.push(vals.len() as u32);
                 rkeys.extend_from_slice(&key);
@@ -993,6 +1250,7 @@ impl Block {
             last_key: key.as_slice().into(),
             ts: ts.unwrap_or([0xFF; 8]),
             derived,
+            rlog,
         })
     }
 }
@@ -1114,12 +1372,30 @@ impl SstReader {
         if len < FOOTER_LEN as u64 {
             return Err(internal(format!("sst {} is truncated", path.display())));
         }
-        let mut footer = [0u8; FOOTER_LEN];
-        file.read_exact_at(&mut footer, len - FOOTER_LEN as u64)?;
-        let f = |i: usize| u64::from_le_bytes(footer[i * 8..i * 8 + 8].try_into().unwrap());
-        if f(5) != MAGIC {
-            return Err(internal(format!("sst {} has a bad footer", path.display())));
-        }
+        let mut footer = [0u8; FOOTER2_LEN];
+        let at = len.saturating_sub(FOOTER2_LEN as u64);
+        let got = (len - at) as usize;
+        file.read_exact_at(&mut footer[FOOTER2_LEN - got..], at)?;
+        let word_at = |i: usize| u64::from_le_bytes(footer[i * 8..i * 8 + 8].try_into().unwrap());
+        // (Format 1's six words are the last six; format 2's seven end with its format and magic.)
+        let v2 = match word_at(6) {
+            MAGIC => false,
+            MAGIC2 if got == FOOTER2_LEN => {
+                let format = word_at(5);
+                if format > FORMAT as u64 {
+                    return Err(internal(format!(
+                        "sst {} is of storage format {format}, newer than this build reads ({FORMAT})",
+                        path.display()
+                    )));
+                }
+                if meta.commit_ts.is_some() {
+                    return Err(internal(format!("sst {}: a linked run of format 2", path.display())));
+                }
+                true
+            }
+            _ => return Err(internal(format!("sst {} has a bad footer", path.display()))),
+        };
+        let f = |i: usize| word_at(i + if v2 { 0 } else { 1 });
         let mut index_buf = vec![0u8; f(1) as usize];
         file.read_exact_at(&mut index_buf, f(0))?;
         let mut bloom = vec![0u8; f(3) as usize];
@@ -1145,6 +1421,10 @@ impl SstReader {
             pos += kl;
             let off = get_varint(&index_buf, &mut pos)?;
             let l = get_varint(&index_buf, &mut pos)? as u32;
+            if v2 {
+                // (The block's entry count: not used yet.)
+                get_varint(&index_buf, &mut pos)?;
+            }
             index.ends.push(index.keys.len() as u32);
             index.at.push((off, l));
         }
@@ -1155,6 +1435,7 @@ impl SstReader {
             meta,
             file,
             path,
+            v2,
             index,
             bloom_mod: FastMod::new(bloom.len() as u64 * 8),
             bloom,
@@ -1192,7 +1473,12 @@ impl SstReader {
         let Some((off, _)) = self.index.at.first() else { return Ok(false) };
         let mut b = [0u8; 1];
         self.file.read_exact_at(&mut b, *off)?;
-        Ok(b[0] == 1)
+        Ok(b[0] != 0)
+    }
+
+    /// The file's format (`FORMAT` or 1).
+    pub fn format(&self) -> u32 {
+        if self.v2 { FORMAT } else { 1 }
     }
 
     pub fn block_count(&self) -> usize {
@@ -1266,18 +1552,16 @@ impl SstReader {
                 format!("checksum mismatch in {} block {i}", self.path.display()),
             ));
         }
+        // (A compressed block's raw length; a raw block's first bytes, unused.)
+        let n = u32::from_le_bytes(buf[1..5].try_into().unwrap()) as usize;
         let raw: Bytes = match buf[0] {
             0 => Bytes::from(buf).slice(1..crc_pos),
-            1 => {
-                let n = u32::from_le_bytes(buf[1..5].try_into().unwrap()) as usize;
-                Bytes::from(
-                    zstd::bulk::decompress(&buf[5..crc_pos], n)
-                        .map_err(|e| internal(format!("zstd: {e}")))?,
-                )
-            }
+            1 => Bytes::from(zstd::bulk::decompress(&buf[5..crc_pos], n).map_err(|e| internal(format!("zstd: {e}")))?),
+            2 if self.v2 => Bytes::from(lz4_flex::block::decompress(&buf[5..crc_pos], n).map_err(|e| internal(format!("lz4: {e}")))?),
             _ => return Err(internal("unknown block compression")),
         };
         let block = Arc::new(match self.meta.commit_ts {
+            _ if self.v2 => Block::load(raw, self.index.key(i))?,
             Some(ts) => Block::decode_linked(&raw, ts)?,
             None => Block::decode(raw)?,
         });
@@ -1391,6 +1675,9 @@ impl Drop for SstReader {
         }
     }
 }
+
+#[cfg(test)]
+mod study;
 
 #[cfg(test)]
 mod tests {
@@ -1640,6 +1927,164 @@ mod tests {
             b.seek(&[0xFF], &mut pos);
             assert_eq!(pos.index(), b.len());
         }
+    }
+
+    /// Every entry of a block, by a cursor from its start.
+    fn entries_of(b: &Block) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let mut out = Vec::new();
+        let mut pos = BlockPos::default();
+        b.at(0, &mut pos);
+        while pos.index() < b.len() {
+            out.push((pos.key().to_vec(), b.value_ref(&pos).map(<[u8]>::to_vec)));
+            b.step(&mut pos);
+        }
+        out
+    }
+
+    /// The same entries written in format 1 and format 2 (each codec) read the same, block by
+    /// block: keys, values (derived index values, tombstones, versions not the block's, keys
+    /// too short for one), positions, seeks, and the blocks' cache form byte for byte.
+    #[test]
+    fn format2_reads_as_format1() {
+        let mut seed = 11u64;
+        let mut rnd = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let mut ents: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        for i in 0..20_000u32 {
+            let ts: u64 = if rnd(9) == 0 { 3 + rnd(4) } else { 40 };
+            let (k, v) = match i % 3 {
+                // A table's rows.
+                0 => {
+                    let mut k = vec![0, 0, 0x40, 0x41, 0, 0, 0, 0, 0x20];
+                    k.extend_from_slice(&(i as u64).to_be_bytes());
+                    let v: Vec<u8> = (0..rnd(60)).map(|_| rnd(7) as u8).collect();
+                    (k, Some(v))
+                }
+                // An index's entries, the row's key as the value (derived) or not.
+                1 => {
+                    let row = (i as u64 / 3).to_be_bytes();
+                    let mut k = vec![0, 0, 0x40, 0x41, 0, 0, 0x40, 0x65, 0x20, (i / 500) as u8, 0x20];
+                    k.extend_from_slice(&row);
+                    let mut v = vec![0, 0, 0x40, 0x41, 0, 0, 0, 0, 0x20];
+                    v.extend_from_slice(&row);
+                    (k, if rnd(11) == 0 { None } else if rnd(13) == 0 { Some(b"other".to_vec()) } else { Some(v) })
+                }
+                // The store's own keys, some short.
+                _ => ((0..1 + rnd(12)).map(|_| rnd(3) as u8).collect(), Some(vec![i as u8; rnd(40) as usize])),
+            };
+            let mut k = k;
+            if i % 3 != 2 || k.len() > 6 {
+                k.extend_from_slice(&(!ts).to_be_bytes());
+            }
+            ents.push((k, v));
+        }
+        ents.sort_by(|a, b| a.0.cmp(&b.0));
+        ents.dedup_by(|a, b| a.0 == b.0);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlockCache::new(64 << 20);
+        let write = |id: u64, codec: Codec, v2: bool| {
+            let mut w = SstWriter::create_with(dir.path(), id, codec, v2).unwrap();
+            for (k, v) in &ents {
+                w.add(k, v.as_deref()).unwrap();
+            }
+            SstReader::open(dir.path(), w.finish().unwrap(), cache.clone()).unwrap()
+        };
+        let one = write(1, Codec::Zstd, false);
+        assert_eq!(one.format(), 1);
+        for (id, codec) in [(2, Codec::None), (3, Codec::Zstd), (4, Codec::Lz4)] {
+            let two = write(id, codec, true);
+            assert_eq!(two.format(), FORMAT);
+            assert_eq!(two.first_block_compressed().unwrap(), codec != Codec::None);
+            let mut all = Vec::new();
+            for i in 0..two.block_count() {
+                all.extend(entries_of(&two.block_with(i, false).unwrap()));
+            }
+            assert_eq!(all, ents, "{codec:?}");
+            // (The same blocks: format 2's end where format 1's do, so the cache holds what it
+            // held, block for block.)
+            assert_eq!(two.block_count(), one.block_count());
+            for i in 0..two.block_count() {
+                let (a, b) = (one.block_with(i, false).unwrap(), two.block_with(i, false).unwrap());
+                assert_eq!((&a.data[..], &a.restarts, &a.rvals, a.mem_bytes()), (&b.data[..], &b.restarts, &b.rvals, b.mem_bytes()), "block {i}");
+            }
+            // Each block of format 2 is the cache form `Block::decode` makes of the same
+            // entries in format 1's block form.
+            let mut at = 0;
+            for i in 0..two.block_count() {
+                let b = two.block_with(i, false).unwrap();
+                let mine = &ents[at..at + b.len()];
+                at += b.len();
+                let d = Block::decode(Bytes::from(block_bytes(mine, RESTART))).unwrap();
+                assert_eq!(&b.data[..], &d.data[..], "block {i}");
+                assert_eq!((&b.restarts, &b.rvals, b.common, b.len, &b.last_key, b.ts, b.derived), (&d.restarts, &d.rvals, d.common, d.len, &d.last_key, d.ts, d.derived));
+                let mut pos = BlockPos::default();
+                for (j, (k, v)) in mine.iter().enumerate() {
+                    b.seek(k, &mut pos);
+                    assert_eq!((pos.index(), b.value_ref(&pos)), (j, v.as_deref()));
+                }
+            }
+            // (A block of another restart interval reads the same: it says which it has.)
+            let mut w = SstWriter::create_with(dir.path(), 10 + id, codec, true).unwrap();
+            w.restart_log(2);
+            for (k, v) in &ents {
+                w.add(k, v.as_deref()).unwrap();
+            }
+            let four = SstReader::open(dir.path(), w.finish().unwrap(), cache.clone()).unwrap();
+            let mut all = Vec::new();
+            for i in 0..four.block_count() {
+                let b = four.block_with(i, false).unwrap();
+                assert_eq!(b.restarts.len(), b.len().div_ceil(4));
+                let mine = entries_of(&b);
+                let mut pos = BlockPos::default();
+                for (j, (k, v)) in mine.iter().enumerate() {
+                    b.seek(k, &mut pos);
+                    assert_eq!((pos.index(), b.value_ref(&pos)), (j, v.as_deref()));
+                }
+                all.extend(mine);
+            }
+            assert_eq!(all, ents, "{codec:?}, restarts every 4");
+            // (Both files' block indexes find each key's block.)
+            for (k, v) in ents.iter().step_by(7) {
+                for f in [&one, &two] {
+                    let b = f.block_with(f.find_block(k), false).unwrap();
+                    let mut pos = BlockPos::default();
+                    b.seek(k, &mut pos);
+                    assert_eq!((pos.key(), b.value_ref(&pos)), (k.as_slice(), v.as_deref()));
+                }
+            }
+        }
+    }
+
+    /// A file of a format past this build's, and a footer of neither format, are refused
+    /// with an error naming them.
+    #[test]
+    fn newer_formats_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlockCache::new(1 << 20);
+        let mut w = SstWriter::create(dir.path(), 1, true).unwrap();
+        for i in 0..100u32 {
+            w.add(&mvcc(&i.to_be_bytes(), 5), Some(b"v")).unwrap();
+        }
+        let meta = w.finish().unwrap();
+        let path = sst_path(dir.path(), 1);
+        let mut b = std::fs::read(&path).unwrap();
+        let n = b.len();
+        b[n - 16..n - 8].copy_from_slice(&(FORMAT as u64 + 1).to_le_bytes());
+        std::fs::write(&path, &b).unwrap();
+        let e = SstReader::open(dir.path(), meta.clone(), cache.clone()).err().unwrap();
+        assert!(e.message.contains(&format!("storage format {}, newer than this build reads ({FORMAT})", FORMAT + 1)), "{}", e.message);
+        b[n - 1] ^= 1;
+        std::fs::write(&path, &b).unwrap();
+        let e = SstReader::open(dir.path(), meta, cache).err().unwrap();
+        assert!(e.message.contains("bad footer"), "{}", e.message);
+    }
+
+    fn mvcc(k: &[u8], ts: u64) -> Vec<u8> {
+        let mut v = k.to_vec();
+        v.extend_from_slice(&(!ts).to_be_bytes());
+        v
     }
 
     /// A linked run's block decoded in one pass reads as the relinked block does.
