@@ -139,6 +139,26 @@ pub fn is_person(principal: &str) -> bool {
     principal.starts_with("usr_")
 }
 
+/// A grant a person made, acting as them: what its rules allow, and only on the person's own
+/// projects (a person's token never reaches further than their session does).
+#[derive(Debug)]
+pub struct Within(pub GrantGrants, pub OwnProjects);
+
+impl Grants for Within {
+    fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
+        self.1.allows(action, at) && self.0.allows(action, at)
+    }
+    fn project(&self) -> Option<&str> {
+        self.0.project().or_else(|| self.1.project())
+    }
+    fn reads_code(&self, project: &str, repo: &str) -> bool {
+        self.1.reads_code(project, repo) && self.0.reads_code(project, repo)
+    }
+    fn sees(&self, project: &str) -> bool {
+        self.1.sees(project)
+    }
+}
+
 /// The operator: everything.
 #[derive(Debug)]
 pub struct Everything;

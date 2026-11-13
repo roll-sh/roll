@@ -150,7 +150,17 @@ impl Secrets {
         // A roll-access grant first: its requests carry the operator marker too, narrowed by the
         // gate, so the marker alone would read as everything.
         if let Some(g) = roll_auth::Grant::on(&parts.extensions) {
-            return Ok(Caller { principal: format!("token:{}", g.id), grants: std::sync::Arc::new(crate::access::GrantGrants(g.clone())), ip });
+            let grant = crate::access::GrantGrants(g.clone());
+            // A person's grant acts as them (the evaluator puts their `SignedIn` beside it): never
+            // past their own projects, whatever its rules name.
+            let grants: Arc<dyn crate::access::Grants> = match parts.extensions.get::<roll_auth::SignedIn>().filter(|u| !u.admin) {
+                Some(u) => {
+                    let code_owner = self.people.as_ref().and_then(|p| p.person(&u.user)).and_then(|p| p.code_owner);
+                    Arc::new(crate::access::Within(grant, self.own_projects(&u.user, code_owner)?))
+                }
+                None => Arc::new(grant),
+            };
+            return Ok(Caller { principal: format!("token:{}", g.id), grants, ip });
         }
         if let Some(t) = roll_auth::bearer(&parts.headers).filter(|t| t.starts_with(PREFIX)) {
             let mut caller = self.token_caller(t, ip.as_deref())?;
@@ -185,13 +195,14 @@ impl Secrets {
     /// A person as a caller: an admin is everything; anyone else, the projects they own as the
     /// workspace has them now.
     pub(crate) fn person_caller(&self, user: &str, admin: bool, code_owner: Option<String>) -> Result<Caller> {
-        let grants: Arc<dyn crate::access::Grants> = if admin {
-            Arc::new(crate::access::Everything)
-        } else {
-            let projects = self.workspace.list(roll_workspace::Scope::Owner(user)).map_err(|e| Error::Internal(e.to_string()))?.into_iter().map(|p| p.id).collect();
-            Arc::new(crate::access::OwnProjects { projects, code_owner })
-        };
+        let grants: Arc<dyn crate::access::Grants> = if admin { Arc::new(crate::access::Everything) } else { Arc::new(self.own_projects(user, code_owner)?) };
         Ok(Caller { principal: user.to_string(), grants, ip: None })
+    }
+
+    /// The projects `user` owns, as the workspace has them now.
+    fn own_projects(&self, user: &str, code_owner: Option<String>) -> Result<crate::access::OwnProjects> {
+        let projects = self.workspace.list(roll_workspace::Scope::Owner(user)).map_err(|e| Error::Internal(e.to_string()))?.into_iter().map(|p| p.id).collect();
+        Ok(crate::access::OwnProjects { projects, code_owner })
     }
 
     /// Whether `project`'s secrets may reach repository `repo` (`owner/name`) through roll code

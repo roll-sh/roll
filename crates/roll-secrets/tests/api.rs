@@ -1056,6 +1056,22 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
     api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/bucket/someone-elses"), Some(json!({ "x": 0, "y": 0 }))).await;
     let (s, e) = api.as_ada(Method::POST, &at(&mine, "/audit/sinks"), Some(json!({ "url": "bucket:someone-elses" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    // A roll-access token she made acts as her (the evaluator puts her session beside its grant):
+    // a rule naming someone else's project still doesn't reach it.
+    let everything = roll_auth::scope::Rule {
+        product: "secrets".into(),
+        resources: roll_auth::scope::Resources::All,
+        environments: None,
+        paths: None,
+        actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
+    };
+    let grant = roll_auth::Grant { ask_otherwise: false, id: "tok_ada".into(), name: "ada".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![everything])) };
+    for (project, want) in [(&mine, StatusCode::OK), (&api.project, StatusCode::NOT_FOUND)] {
+        let mut req = Request::builder().uri(at(project, "/environments")).body(Body::empty()).unwrap();
+        req.extensions_mut().insert(grant.clone());
+        req.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_ada".into() });
+        assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), want, "{project}");
+    }
     // A token she made works while her account can sign in.
     let (_, t) = api.as_ada(Method::POST, &at(&mine, "/tokens"), Some(json!({ "name": "ci", "actions": ["read"] }))).await;
     let token = t["token"].as_str().expect("a token").to_string();
