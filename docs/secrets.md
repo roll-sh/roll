@@ -1586,7 +1586,11 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Reviewed again on 2026-11-13 (later): the Link dialog crashed on a kind that isn't a canvas
+Reviewed again on 2026-11-14: an independent security review of #39–#41 found racing rotations
+could reset the login in use (now a claim never takes a busy role), a `#` in a password shown as
+the host, Postgres connections outliving their timeout, and deleted projects leaving credentials
+unrevoked (now revoked first, the rest retried by the sweeper); all fixed and tested. Earlier,
+2026-11-13 (later): the Link dialog crashed on a kind that isn't a canvas
 resource (a rotator, an AWS role): `KIND_ICON` only knows the workspace's. It names roll secrets'
 own kinds now and falls back to a plain link icon for any it doesn't know. Earlier, 2026-11-13 (late): #39's own review found two ways a rotation could reset the
 role in use (a refused `ALTER ROLE`, two environments sharing the pair); both fixed and tested.
@@ -1598,18 +1602,14 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **MongoDB outside roll** (next to #41's Redis, on #39's registry and guarded connections):
-   rotation and a user per lease for Atlas and self-run servers, as Vault's MongoDB plugin
-   (`updateUser`/`createUser` with a role over TLS; OP_MSG and SCRAM-SHA-256, bounded like #41's
-   reply reader).
-2. **Dynamic GCP and Azure credentials** (Vault's GCP and Azure engines, next to #38's AWS): a
+1. **Dynamic GCP and Azure credentials** (Vault's GCP and Azure engines, next to #38's AWS): a
    short-lived service-account token per lease through workload identity federation, and an Entra
    app's client secret per lease, with the same decoy check against confused deputies.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+4. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
@@ -1634,6 +1634,9 @@ Open pull requests after this one:
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 - **#40, AWS IAM users' access keys** (after #38): two key slots take turns, the old key deleted
   after its grace; a user with two keys already is refused, never pruned.
+- **#42, MongoDB outside roll** (after #41): rotation and a user per lease for Atlas and replica
+  sets; the primary only among the seeds, SRV targets inside their domain, SCRAM with the server's
+  signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.
 - **#39, Postgres and MySQL outside roll** (after #20): two login roles take turns (rotation), or a
