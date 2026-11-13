@@ -608,6 +608,8 @@ impl Apps {
         tokio::spawn(async move { this.landings().await });
         let this = self.clone();
         tokio::spawn(async move { this.domains_loop().await });
+        let this = self.clone();
+        tokio::spawn(async move { this.notifier().await });
     }
 
     /// Start and stop a service's work as its lease comes and goes.

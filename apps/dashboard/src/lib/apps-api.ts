@@ -267,6 +267,32 @@ export interface Usage {
   total_usd: number;
 }
 
+/** Where a project's events go: a signed webhook, a Slack or a Discord incoming webhook. */
+export interface NotifyTarget {
+  id: string;
+  project: string;
+  kind: "webhook" | "slack" | "discord";
+  /** The URL's host (the URL itself isn't returned). */
+  host: string;
+  events: NotifyEvent[];
+  created_at: number;
+  /** Only in the answer to its creation, for a webhook: what its requests are signed with. */
+  secret?: string;
+}
+
+export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active";
+
+export interface NotifyDelivery {
+  id: string;
+  event: number;
+  kind: string;
+  status: "pending" | "delivered" | "failed";
+  attempts: number;
+  code: number | null;
+  error: string | null;
+  at: number;
+}
+
 export type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";
 
 export interface CronRun {
@@ -327,6 +353,11 @@ export const appsApi = {
 
   environments: (id: string) => call<Environment[]>("GET", `${svc(id)}/environments`),
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
+  notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
+  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url: string; events?: NotifyEvent[] }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
+  removeNotifyTarget: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`),
+  testNotifyTarget: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/test`),
+  notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
   putRegistry: (id: string, body: { username: string; password: string; server?: string }) => call<Service>("PUT", `${svc(id)}/registry`, body),
   deleteRegistry: (id: string) => call<Service>("DELETE", `${svc(id)}/registry`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),

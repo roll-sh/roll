@@ -22,6 +22,8 @@ pub mod live;
 pub mod logs;
 pub mod metrics;
 pub mod model;
+pub mod net;
+pub mod notify;
 pub mod public;
 pub mod runtime;
 pub mod shell;
@@ -97,6 +99,9 @@ pub struct AppsConfig {
     pub upload_max: usize,
     /// The dashboard (roll code's `web_url`): a private preview's 401 page links into it.
     pub web_url: Option<String>,
+    /// Notification targets may be private addresses and plain HTTP (local development and
+    /// tests only: `ROLL_APPS_NOTIFY_ALLOW_PRIVATE`).
+    pub notify_allow_private: bool,
 }
 
 impl AppsConfig {
@@ -114,6 +119,7 @@ impl AppsConfig {
             prices: Prices::default(),
             upload_max: 512 << 20,
             web_url: None,
+            notify_allow_private: false,
         }
     }
 }
@@ -145,6 +151,8 @@ pub struct Apps {
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
+    /// For notification targets: public addresses only, no redirects.
+    notify_client: reqwest::Client,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     pub(crate) client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -191,6 +199,7 @@ pub struct ResolvedVars {
 
 impl Apps {
     pub fn new(cfg: AppsConfig, store: Store, deps: Deps) -> Arc<Apps> {
+        let cfg_allow = cfg.notify_allow_private;
         let logs = LogHub::new(deps.objects.clone());
         Arc::new(Apps {
             cfg,
@@ -202,6 +211,7 @@ impl Apps {
             cancels: Mutex::new(HashMap::new()),
             access: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            notify_client: net::client(cfg_allow, Duration::from_secs(10)),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),
             stop: CancellationToken::new(),

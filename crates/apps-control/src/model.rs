@@ -113,6 +113,34 @@ pub struct Event {
     pub data: serde_json::Value,
 }
 
+/// Where a project's events go (`…/projects/{project}/notifications`): a webhook (JSON, signed),
+/// a Slack or a Discord incoming webhook. The URL is sealed; only its host shows.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NotifyTarget {
+    pub id: String,
+    pub project: String,
+    /// `webhook`, `slack`, `discord`.
+    pub kind: String,
+    /// The URL's host, for recognising it (the URL itself is a secret).
+    pub host: String,
+    pub events: Vec<String>,
+    pub created_at: i64,
+}
+
+/// One try of sending one event to one target.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Delivery {
+    pub id: String,
+    pub event: i64,
+    pub kind: String,
+    /// `pending` (more tries coming), `delivered`, `failed`.
+    pub status: String,
+    pub attempts: u32,
+    pub code: Option<u16>,
+    pub error: Option<String>,
+    pub at: i64,
+}
+
 /// A private environment's gate: the visitors' token and an automation bypass (CI), as SHA-256
 /// hex digests; neither secret is kept.
 #[derive(Clone, Debug, PartialEq)]

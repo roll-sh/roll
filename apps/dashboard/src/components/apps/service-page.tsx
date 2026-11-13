@@ -368,6 +368,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : (
           <SettingsTab
             service={service}
+            projectName={project?.name ?? service.project}
             runner={runner}
             onDeleted={() => {
               workspace.forget("service", service.id);

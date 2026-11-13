@@ -336,6 +336,22 @@ every deployment is immutable with instant rollback.
   `apps.localhost` on the apps listener (`ROLL_APPS_LISTEN`, `127.0.0.1:7080`), and each service
   can also get a port of its own (`ROLL_APPS_PORTS=58100-58199`) so it opens on a machine without
   wildcard DNS (a Tailscale name).
+- **Notifications** (`…/projects/{project}/notifications`, a service's Settings tab): a project's
+  failed deploys and crash loops (and, when asked, every new live deployment) go to its targets:
+  a webhook (JSON, signed with HMAC-SHA256 over `<timestamp>.<body>`), a Slack incoming webhook
+  or a Discord webhook. One node (the singleton `apps:notify`) follows the event log after a
+  cursor in `state`; a page of events' deliveries and the cursor's move are one transaction, so
+  an event is queued once and never skipped. A delivery is tried at once, then after 30 s, 2 min,
+  10 min, 30 min and 1 h, then marked failed; each target keeps its delivery log, and Test sends
+  one now. URLs are sealed (a Slack URL is a credential), HTTPS, fetched with public addresses
+  only and no redirects (`apps_control::net`, which the Fargate runtime's registry client uses
+  too), answers read bounded; Slack must be `hooks.slack.com`, Discord `discord.com/api/webhooks`.
+  - **Why this, not roll code's webhooks or chat ops** (decided 2026-11-13; reversible): roll
+    code's delivery queue is per repository, and an upload or image service has none; chat ops
+    drives roll from chat through installed apps and bound threads, more than an alert needs,
+    and a Slack or Discord incoming webhook needs no install. Railway and Render notify the same
+    way. The event log is the seam: a platform-wide notifications product (email, roll code's
+    owner-level webhooks, chat ops) reads the same cursor, and this deliverer goes then.
 - **The event log** (`GET /v1/apps/events?after=`): `deploy.active` (written in the switch's
   transaction), `deploy.failed` (in the failure's), `crash_loop` (once per loop, by the reaper),
   in order, kept 7 days, for anything that must not miss one (roll code's webhooks, chat ops, an
@@ -582,7 +598,7 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 A review on 2026-11-12 against feature/roll-secrets (#20), feature/roll-mcp (#19),
 feature/roll-previews and feature/roll-search found these. Ours are in `## Next`; theirs:
 
-- **roll-mcp**: `GET /v1/apps/events` is a read. `POST …/jobs`, `…/jobs/{job}/cancel` and `GET …/shell` run code with the
+- **roll-mcp**: `GET /v1/apps/events` is a read; the project notifications routes are write (their GETs read). `POST …/jobs`, `…/jobs/{job}/cancel` and `GET …/shell` run code with the
   environment's variables, so they're `deploy` (production) like deploys (the shell is a `GET`:
   classify it by path, not method); the other `…/jobs` routes are reads.
   The catalogue misses `GET /v1/apps`, `POST /v1/apps/plan` and
@@ -627,22 +643,16 @@ Ranked; the top item not marked *waiting* is what's being worked on.
 2. The fleet runtime in the stack: the roles, project, security group and settings listed in
    "Not done yet", a first run against AWS with its cold starts measured, and allocation-based
    metering for Fargate.
-3. **Notifications.** A failed deploy and a crash loop reach people: for a repo service as
-   deployment events through roll code's one delivery queue (webhooks, review apps), and to chat
-   through chat ops, reading the event log (`GET /v1/apps/events`) after a durable cursor;
-   designed with the other branches, not a second webhook system. (Done: the event log;
-   crash loops on the environment and the service page; search over the stored 7 days of logs,
-   `?q=`, `roll logs --grep … --since 2h`, the Logs tab's Search 7 days.)
-4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL: as roll secrets links per
+3. *Waiting on #20.* Links for buckets, streams, queues and NoSQL: as roll secrets links per
    environment (their providers), not more apps link kinds.
-5. Custom domains' TLS on the fleet for real: the zone settings in "Not done yet" (fallback
+4. Custom domains' TLS on the fleet for real: the zone settings in "Not done yet" (fallback
    origin, SSL mode or SNI override), custom hostnames under authenticated origin pulls and their
    `CF-Connecting-IP` believed, then a first domain through Let's Encrypt and Cloudflare. (Done:
    Cloudflare for SaaS custom hostnames and ACME HTTP-01 on one node behind `ROLL_APPS_TLS`,
    `Domain.tls` in the API and the Domains tab, pending claims expiring after 7 days.)
-6. **The rest of a cold start**: with the CPU boost in, what's left is dockerd starting the
+5. **The rest of a cold start**: with the CPU boost in, what's left is dockerd starting the
    container on its network (≈250 ms here; the network, `--init` and the log driver each
    measured within noise by `scripts/bench-apps-coldstart.sh`). Snapshot restore (CRIU, or
    Firecracker on the fleet) is the next step for it.
-7. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
-8. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+6. Firecracker microVM hosts with snapshot restore for sub-second cold starts on the fleet.
+7. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

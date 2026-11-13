@@ -336,6 +336,8 @@ pub async fn start(
     let store = tokio::task::block_in_place(|| Store::new(db, sealer(home)?).map_err(|e| anyhow::anyhow!("{e}")))?;
     let mut cfg = AppsConfig::new(home.to_path_buf());
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
+    // Local development only: notification targets on this machine or a private network.
+    cfg.notify_allow_private = std::env::var("ROLL_APPS_NOTIFY_ALLOW_PRIVATE").is_ok_and(|v| v == "1" || v == "true");
     let edge = crate::edge::Public::of(args);
     cfg.domain = a.domain.clone().unwrap_or_else(|| if edge.is_some() { format!("up.{}", args.edge.site_domain) } else { "apps.localhost".into() });
     if edge.is_some() {

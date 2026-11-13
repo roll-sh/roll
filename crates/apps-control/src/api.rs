@@ -59,6 +59,10 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/links", get(links))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
         .route("/v1/apps/events", get(events))
+        .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
+        .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target))
+        .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
+        .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/environments", get(environments))
         .route(env, get(get_env).put(put_env).delete(delete_env))
@@ -222,6 +226,28 @@ async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, Str
 async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>) -> R {
     apps.delete_link(&id, &kind, &r).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn targets(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.targets(&project).await?)
+}
+
+async fn add_target(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    let t = apps.add_target(&project, body(&b)?).await?;
+    Ok((StatusCode::CREATED, Json(t)).into_response())
+}
+
+async fn delete_target(State(apps): S, Path((project, nid)): Path<(String, String)>) -> R {
+    apps.delete_target(&project, &nid).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn test_target(State(apps): S, Path((project, nid)): Path<(String, String)>) -> R {
+    ok(apps.test_target(&project, &nid).await?)
+}
+
+async fn deliveries(State(apps): S, Path((project, nid)): Path<(String, String)>) -> R {
+    ok(apps.deliveries(&project, &nid).await?)
 }
 
 #[derive(Deserialize)]

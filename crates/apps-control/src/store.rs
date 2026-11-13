@@ -80,6 +80,29 @@ CREATE TABLE IF NOT EXISTS events (
     deployment TEXT,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS notify_targets (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    host TEXT NOT NULL,
+    url_sealed TEXT NOT NULL,
+    secret_sealed TEXT,
+    events TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS notify_deliveries (
+    id TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    event INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    next_at INTEGER NOT NULL,
+    code INTEGER,
+    error TEXT,
+    at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS notify_due ON notify_deliveries (status, next_at);
 CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
@@ -618,6 +641,123 @@ impl Store {
         })
     }
 
+    // ── notifications ──
+
+    pub fn add_target(&self, project: &str, kind: &str, host: &str, url: &str, secret: Option<&str>, events: &[String]) -> Result<NotifyTarget> {
+        let id = new_id("ntf");
+        let now = self.now()?;
+        let url_sealed = self.sealer.seal(&format!("notify:{id}:url"), url);
+        let secret_sealed = secret.map(|s| self.sealer.seal(&format!("notify:{id}:secret"), s));
+        self.db.execute(
+            "INSERT INTO notify_targets (id, project, kind, host, url_sealed, secret_sealed, events, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![id, project, kind, host, url_sealed, secret_sealed, serde_json::to_string(events).expect("JSON"), now],
+        )?;
+        Ok(NotifyTarget { id, project: project.into(), kind: kind.into(), host: host.into(), events: events.to_vec(), created_at: now })
+    }
+
+    pub fn targets(&self, project: &str) -> Result<Vec<NotifyTarget>> {
+        Ok(self.db.query("SELECT id, project, kind, host, events, created_at FROM notify_targets WHERE project = ? ORDER BY created_at", [project], target_row)?)
+    }
+
+    /// A target with its URL and signing secret opened, to deliver to.
+    pub fn target_secrets(&self, id: &str) -> Result<Option<(NotifyTarget, String, Option<String>)>> {
+        let row: Option<(NotifyTarget, String, Option<String>)> = self
+            .db
+            .query_row("SELECT id, project, kind, host, events, created_at, url_sealed, secret_sealed FROM notify_targets WHERE id = ?", [id], |r| Ok((target_row(r)?, r.get(6)?, r.get(7)?)))
+            .optional()?;
+        row.map(|(t, u, s)| {
+            let url = self.sealer.open(&format!("notify:{}:url", t.id), &u)?;
+            let secret = s.map(|s| self.sealer.open(&format!("notify:{}:secret", t.id), &s)).transpose()?;
+            Ok((t, url, secret))
+        })
+        .transpose()
+    }
+
+    pub fn delete_target(&self, project: &str, id: &str) -> Result<()> {
+        self.db.write(|c| {
+            if c.execute("DELETE FROM notify_targets WHERE id = ? AND project = ?", [id, project])? == 0 {
+                return Err(Error::NotFound(format!("no notification target {id}")));
+            }
+            c.execute("DELETE FROM notify_deliveries WHERE target = ?", [id])?;
+            Ok(())
+        })
+    }
+
+    /// Queue `deliveries` (target, event seq, event kind) and move the notifier's cursor to
+    /// `cursor`, in one transaction: an event is queued once, and never skipped.
+    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], cursor: i64) -> Result<()> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            for (target, event, kind) in deliveries {
+                c.execute(
+                    "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?)",
+                    params![new_id("dlv"), target, event, kind, now, now],
+                )?;
+            }
+            c.execute("DELETE FROM state WHERE key = 'notify'", ())?;
+            c.execute("INSERT INTO state (key, value) VALUES ('notify', ?)", [cursor.to_string()])?;
+            Ok(())
+        })
+    }
+
+    /// Deliveries due now: (id, target, event seq, attempts so far).
+    pub fn due_deliveries(&self, limit: usize) -> Result<Vec<(String, String, i64, u32)>> {
+        let now = self.now()?;
+        Ok(self.db.query(
+            "SELECT id, target, event, attempts FROM notify_deliveries WHERE status = 'pending' AND next_at <= ? ORDER BY next_at LIMIT ?",
+            params![now, limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u32)),
+        )?)
+    }
+
+    /// A try's outcome: `next_at` for another try, else delivered (no error) or failed.
+    pub fn finish_delivery(&self, id: &str, code: Option<u16>, error: Option<&str>, next_at: Option<i64>) -> Result<()> {
+        let now = self.now()?;
+        let status = match (error, next_at) {
+            (None, _) => "delivered",
+            (Some(_), Some(_)) => "pending",
+            (Some(_), None) => "failed",
+        };
+        self.db.execute(
+            "UPDATE notify_deliveries SET status = ?, attempts = attempts + 1, next_at = ?, code = ?, error = ?, at = ? WHERE id = ?",
+            params![status, next_at.unwrap_or(now), code.map(i64::from), error, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn deliveries(&self, target: &str, limit: usize) -> Result<Vec<Delivery>> {
+        Ok(self.db.query(
+            "SELECT id, event, kind, status, attempts, code, error, at FROM notify_deliveries WHERE target = ? ORDER BY at DESC, id DESC LIMIT ?",
+            params![target, limit as i64],
+            |r| {
+                Ok(Delivery {
+                    id: r.get(0)?,
+                    event: r.get(1)?,
+                    kind: r.get(2)?,
+                    status: r.get(3)?,
+                    attempts: r.get::<_, i64>(4)? as u32,
+                    code: r.get::<_, Option<i64>>(5)?.map(|c| c as u16),
+                    error: r.get(6)?,
+                    at: r.get(7)?,
+                })
+            },
+        )?)
+    }
+
+    pub fn event(&self, seq: i64) -> Result<Option<Event>> {
+        Ok(self
+            .db
+            .query_row("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE seq = ?", [seq], |r| {
+                let data: String = r.get(6)?;
+                Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })
+            })
+            .optional()?)
+    }
+
+    pub fn last_event_seq(&self) -> Result<i64> {
+        Ok(self.db.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", (), |r| r.get(0))?)
+    }
+
     /// An event no state change carries (a crash loop the reaper noticed).
     pub fn add_event(&self, kind: &str, service: &str, env: &str, deployment: Option<&str>, data: &serde_json::Value) -> Result<()> {
         let now = self.now()?;
@@ -642,6 +782,7 @@ impl Store {
 
     pub fn prune_events(&self, before_ms: i64) -> Result<()> {
         self.db.execute("DELETE FROM events WHERE at < ?", [before_ms])?;
+        self.db.execute("DELETE FROM notify_deliveries WHERE at < ? AND status <> 'pending'", [before_ms])?;
         Ok(())
     }
 
@@ -1154,6 +1295,11 @@ impl Store {
             Ok(())
         })
     }
+}
+
+fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
+    let events: String = r.get(4)?;
+    Ok(NotifyTarget { id: r.get(0)?, project: r.get(1)?, kind: r.get(2)?, host: r.get(3)?, events: serde_json::from_str(&events).unwrap_or_default(), created_at: r.get(5)? })
 }
 
 const JOB_COLS: &str = "id, deployment, command, status, exit_code, started_at, finished_at";

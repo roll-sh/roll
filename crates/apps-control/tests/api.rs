@@ -133,6 +133,7 @@ async fn world() -> World {
     cfg.live.worker_grace = Duration::from_millis(20);
     cfg.live.probe_every = Duration::from_millis(2);
     cfg.live.drain = Duration::from_millis(50);
+    cfg.notify_allow_private = true;
     let deps = Deps {
         runtime: fake.clone(),
         builder: fake.clone(),
@@ -659,4 +660,69 @@ async fn sse_chunk(body: &mut Body) -> String {
             return String::from_utf8(base64::engine::general_purpose::STANDARD.decode(data.trim()).unwrap()).unwrap();
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
+    use hmac::Mac;
+    let w = world().await;
+    // A receiver that answers 200, and one that keeps failing.
+    let got: Arc<parking_lot::Mutex<Vec<(axum::http::HeaderMap, Value)>>> = Default::default();
+    let g = got.clone();
+    let ok = axum::Router::new().route("/hook", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push((h, serde_json::from_slice(&b).unwrap()));
+            StatusCode::OK
+        }
+    }));
+    let bad = axum::Router::new().fallback(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "down") });
+    let serve = |app: axum::Router| async move {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a = l.local_addr().unwrap();
+        tokio::spawn(axum::serve(l, app).into_future());
+        a
+    };
+    let (ok_at, bad_at) = (serve(ok).await, serve(bad).await);
+    let base = format!("/v1/apps/projects/{}/notifications", w.project);
+    let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{hook}");
+    let secret = hook["secret"].as_str().unwrap().to_string();
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop"]));
+    let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
+    let (_, list) = call(&w.api, "GET", &base, None).await;
+    assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/{}/test", hook["id"].as_str().unwrap()), None).await.1["ok"], true);
+    // A deploy fails its health check: both targets get a try.
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "health_path": "/healthz", "health_timeout_s": 1})).await;
+    let id = svc["id"].as_str().unwrap();
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}/environments/production/variables"), Some(json!({"set": {"FAKE_UNHEALTHY": "1"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;
+    assert_eq!(settled(&w, id, "production", d["id"].as_str().unwrap()).await["status"], "failed");
+    let mut sent = None;
+    for _ in 0..100 {
+        if let Some(x) = got.lock().iter().find(|(_, b)| b["type"] == "deploy.failed").cloned() {
+            sent = Some(x);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (h, body) = sent.expect("the webhook got deploy.failed");
+    assert_eq!((body["service"].as_str(), body["environment"].as_str()), (Some(id), Some("production")));
+    assert!(body["text"].as_str().unwrap().contains("health check"), "{body}");
+    // Signed: HMAC-SHA256 of "<timestamp>.<body>" with the target's secret.
+    let raw = serde_json::to_vec(&body).unwrap();
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(h["x-roll-timestamp"].as_bytes());
+    mac.update(b".");
+    mac.update(&raw);
+    let want: String = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(h["x-roll-signature"].to_str().unwrap(), format!("sha256={want}"));
+    // The failing one is logged and waits to try again.
+    let log = call(&w.api, "GET", &format!("{base}/{}/deliveries", down["id"].as_str().unwrap()), None).await.1;
+    let first = &log.as_array().unwrap()[0];
+    assert_eq!((first["status"].as_str(), first["attempts"].as_u64(), first["code"].as_u64()), (Some("pending"), Some(1), Some(500)), "{log}");
+    // Targets are checked: not a URL that isn't one, not Slack anywhere but Slack.
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": "ftp://x"}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"url": "https://hooks.example.com/x", "events": ["nope"]}))).await.0, StatusCode::BAD_REQUEST);
 }

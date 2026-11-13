@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { appsApi, SERVICE_NAME, type Build, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, primary } from "../ui";
+import { NotificationsPanel } from "./notifications";
 import type { Runner } from "./shared";
 
 const CPU = [0.25, 0.5, 1, 2, 4, 8];
@@ -127,7 +128,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
 const NUMERIC: (keyof Form)[] = ["port", "timeout", "min", "max", "concurrency", "healthTimeout", "suspendAfter", "sleepAfter", "volumeSize"];
 
 /** Source, build and run settings, saved together; deleting the service at the bottom. */
-export function SettingsTab({ service, runner, onDeleted }: { service: Service; runner: Runner; onDeleted: () => void }) {
+export function SettingsTab({ service, projectName, runner, onDeleted }: { service: Service; projectName: string; runner: Runner; onDeleted: () => void }) {
   const [form, setForm] = useState<Form>(() => formOf(service));
   const [deleting, setDeleting] = useState(false);
   // A save (or someone else's) brings the form back to what rolld has; polls that change nothing don't.
@@ -312,6 +313,8 @@ export function SettingsTab({ service, runner, onDeleted }: { service: Service; 
           {runner.busy === "settings" ? <span className="shimmer">Saving…</span> : "Save"}
         </button>
       </div>
+
+      <NotificationsPanel project={service.project} projectName={projectName} runner={runner} />
 
       <Panel title="Danger zone">
         <div className="p-5">

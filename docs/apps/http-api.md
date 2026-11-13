@@ -33,6 +33,11 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
 | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` | write |
 | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 | write |
+| `GET /v1/apps/projects/{project}/notifications` | | `NotifyTarget[]` (the URL never returned, only its host) | read |
+| `POST /v1/apps/projects/{project}/notifications` | `{ kind?: "webhook" \| "slack" \| "discord", url, events? }` | 201 `NotifyTarget` (+ `secret` once, for a webhook) | write |
+| `DELETE /v1/apps/projects/{project}/notifications/{nid}` | | 204 | write |
+| `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
+| `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
 | `GET /v1/apps/events?after=&limit=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
@@ -268,6 +273,11 @@ type Usage = {
 "/** In the event log, each written in the same transaction as the change it records; a reader
  *  sees events a second old or more (a sequence number is taken before its commit). Kept 7 days. */
 type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop"; service: string; environment: string; deployment: string | null; data: object };
+/** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
+ *  signed: X-Roll-Signature: sha256=hex(HMAC-SHA256(secret, X-Roll-Timestamp + "." + body)).
+ *  Slack gets { text }, Discord { content } (mentions off). */
+type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord"; host: string; events: ("deploy.failed" | "crash_loop" | "deploy.active")[]; created_at: number; secret?: string };
+type Delivery = { id: string; event: number; kind: string; status: "pending" | "delivered" | "failed"; attempts: number; code: number | null; error: string | null; at: number };
 type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";
 type CronRun = { id: string; deployment: string; status: RunStatus; exit_code: number | null; started_at: number; finished_at: number | null };
 /** A one-off command in a fresh container of the active deployment: its variables and project

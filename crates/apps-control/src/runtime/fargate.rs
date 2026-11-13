@@ -186,7 +186,7 @@ impl Fargate {
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("roll-apps");
         if cfg.registry.is_none() {
-            registry = registry.dns_resolver(Arc::new(PublicOnly));
+            registry = registry.dns_resolver(Arc::new(crate::net::PublicOnly));
         }
         let (registry, bucket) = (registry.build()?, cfg.bucket()?);
         Ok(Arc::new_cyclic(|me| Fargate {
@@ -495,23 +495,6 @@ impl ImageRef {
         let repo = if docker_hub && !repo.contains('/') { format!("library/{repo}") } else { repo };
         let registry = if docker_hub { "registry-1.docker.io".to_string() } else { registry };
         ImageRef { name: name.to_string(), registry, repo, reference: reference.to_string() }
-    }
-}
-
-/// Resolves names, refusing private addresses (a registry is the tenant's choice).
-struct PublicOnly;
-
-impl reqwest::dns::Resolve for PublicOnly {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_string();
-        Box::pin(async move {
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            let public: Vec<SocketAddr> = addrs.into_iter().filter(|a| !crate::model::private_ip(a.ip())).collect();
-            if public.is_empty() {
-                return Err(format!("{host} resolves to a private address").into());
-            }
-            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
-        })
     }
 }
 
