@@ -1433,6 +1433,12 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Heroku sync**: an app's config vars, set and removed in one `PATCH …/config-vars` with the
+   project's Heroku token.
+2. **Google Secret Manager sync**: one secret per key (or one JSON secret), a service account's key
+   held as a roll secret, signed into an OAuth token in rolld (no SDK).
+3. **Azure Key Vault sync**: one Key Vault secret per key, an app registration's client secret held
+   as a roll secret.
 
 Waiting on other pull requests:
 
