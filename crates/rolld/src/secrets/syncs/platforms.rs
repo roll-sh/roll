@@ -32,6 +32,9 @@ pub(super) struct Http {
     fly: String,
     railway: String,
     heroku: String,
+    /// `https://secretmanager.googleapis.com` and `https://oauth2.googleapis.com/token`.
+    google: String,
+    google_token: String,
 }
 
 impl Http {
@@ -40,6 +43,8 @@ impl Http {
         h.fly = "https://api.fly.io/graphql".into();
         h.railway = "https://backboard.railway.com/graphql/v2".into();
         h.heroku = "https://api.heroku.com".into();
+        h.google = "https://secretmanager.googleapis.com".into();
+        h.google_token = "https://oauth2.googleapis.com/token".into();
         h
     }
 
@@ -51,7 +56,7 @@ impl Http {
             .user_agent("roll-secrets-sync")
             .build()
             .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into() }
+        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token") }
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -363,7 +368,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new() };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -518,6 +523,136 @@ impl SyncTarget for Heroku {
             let (status, v) = self.0.send(req, &what).await?;
             if !status.is_success() {
                 return Err(Error::Link(format!("{what}: {status} {}", v["id"].as_str().unwrap_or_default())));
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── google-secret-manager ──
+
+/// One Google Secret Manager secret per key (`<prefix><KEY>`), each change a new version. Secrets
+/// roll creates carry the label `managed-by=roll-secrets`; only those are written or deleted.
+pub(super) struct GoogleSecrets(pub(super) Http);
+
+struct GsmTarget {
+    project: String,
+    prefix: String,
+    key_key: String,
+}
+
+const GSM_LABEL: (&str, &str) = ("managed-by", "roll-secrets");
+
+impl GoogleSecrets {
+    fn target(&self, t: &Json) -> Result<GsmTarget> {
+        let [project, prefix, key_key] = target("google-secret-manager", t, [("project", true), ("prefix", false), ("service_account_key", true)])?;
+        let project = project.unwrap_or_default();
+        if !ident(&project, 64, "-") || project.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(bad("project is a Google Cloud project id"));
+        }
+        let prefix = prefix.unwrap_or_default();
+        if prefix.len() > 100 || !prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err(bad("prefix is letters, digits, _ and - (shop_production_)"));
+        }
+        Ok(GsmTarget { project, prefix, key_key: key_field("google-secret-manager", "service_account_key", key_key)? })
+    }
+
+    /// An access token for the service account in `key` (its JSON key file), from Google's token
+    /// endpoint (never the one the file names): a JWT signed RS256 with its private key.
+    async fn token(&self, key: &str, what: &str) -> Result<String> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let k: Json = serde_json::from_str(key).map_err(|_| bad("the service account key isn't a JSON key file"))?;
+        let (email, pem) = (k["client_email"].as_str().unwrap_or_default(), k["private_key"].as_str().unwrap_or_default());
+        if email.is_empty() || pem.is_empty() {
+            return Err(bad("the service account key has no client_email or private_key"));
+        }
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(pem.lines().filter(|l| !l.starts_with("-----")).collect::<String>())
+            .map_err(|_| bad("the service account's private_key isn't PEM"))?;
+        let pair = ring::signature::RsaKeyPair::from_pkcs8(&der).map_err(|_| bad("the service account's private_key isn't an RSA PKCS#8 key"))?;
+        let now = chrono::Utc::now().timestamp();
+        let claims = json!({ "iss": email, "scope": "https://www.googleapis.com/auth/cloud-platform", "aud": self.0.google_token, "iat": now, "exp": now + 3600 });
+        let signing = format!("{}.{}", b64.encode(br#"{"alg":"RS256","typ":"JWT"}"#), b64.encode(claims.to_string()));
+        let mut sig = vec![0; pair.public().modulus_len()];
+        pair.sign(&ring::signature::RSA_PKCS1_SHA256, &ring::rand::SystemRandom::new(), signing.as_bytes(), &mut sig).map_err(|_| Error::Internal("signing the token request failed".into()))?;
+        let jwt = format!("{signing}.{}", b64.encode(sig));
+        let form = format!("grant_type={}&assertion={jwt}", urlencoding::encode("urn:ietf:params:oauth:grant-type:jwt-bearer"));
+        let req = self.0.client.post(&self.0.google_token).header("content-type", "application/x-www-form-urlencoded").body(form);
+        let (status, v) = self.0.send(req, what).await?;
+        match v["access_token"].as_str() {
+            Some(t) if status.is_success() => Ok(t.to_string()),
+            _ => Err(Error::Link(format!("{what}: the token request: {status} {}", v["error"].as_str().unwrap_or_default()))),
+        }
+    }
+}
+
+impl SyncTarget for GoogleSecrets {
+    fn kind(&self) -> &str {
+        "google-secret-manager"
+    }
+    fn label(&self) -> &str {
+        "Google Secret Manager"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "project", label: "Google Cloud project", required: true, placeholder: "shop-prod" },
+            SyncField { name: "prefix", label: "Secret name prefix (optional)", required: false, placeholder: "shop_production_" },
+            SyncField { name: "service_account_key", label: "Key holding a service account's JSON key", required: true, placeholder: "GCP_SYNC_KEY" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["service_account_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        use base64::Engine as _;
+        let t = self.target(t)?;
+        let key = credential(p, &t.key_key)?;
+        too_long(p, 65_536, "Secret Manager's 64 KiB")?;
+        let what = format!("google-secret-manager {}", t.project);
+        let base = format!("{}/v1/projects/{}/secrets", self.0.google, t.project);
+        // Google's `error.status` (`NOT_FOUND`, `PERMISSION_DENIED`), never the answer.
+        let status_of = |v: &Json| v["error"]["status"].as_str().unwrap_or_default().to_string();
+        block_on(async {
+            let token = self.token(key, &what).await?;
+            let ours = |v: &Json| v["labels"][GSM_LABEL.0] == GSM_LABEL.1;
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                let id = format!("{}{name}", t.prefix);
+                let (status, got) = self.0.send(self.0.client.get(format!("{base}/{id}")).bearer_auth(&token), &what).await?;
+                if status.is_success() && !ours(&got) {
+                    return Err(Error::Link(format!("{what}: {id} exists and roll didn't create it (no {}={} label): roll never writes to it", GSM_LABEL.0, GSM_LABEL.1)));
+                }
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    let body = json!({ "replication": { "automatic": {} }, "labels": { GSM_LABEL.0: GSM_LABEL.1 } });
+                    let (status, got) = self.0.send(self.0.client.post(format!("{base}?secretId={id}")).bearer_auth(&token).json(&body), &what).await?;
+                    if !status.is_success() {
+                        return Err(Error::Link(format!("{what}: creating {id}: {status} {}", status_of(&got))));
+                    }
+                } else if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {id}: {status} {}", status_of(&got))));
+                }
+                let payload = json!({ "payload": { "data": base64::engine::general_purpose::STANDARD.encode(v.expose()) } });
+                let (status, got) = self.0.send(self.0.client.post(format!("{base}/{id}:addVersion")).bearer_auth(&token).json(&payload), &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {id}: {status} {}", status_of(&got))));
+                }
+            }
+            for name in p.removed {
+                let id = format!("{}{name}", t.prefix);
+                let (status, got) = self.0.send(self.0.client.get(format!("{base}/{id}")).bearer_auth(&token), &what).await?;
+                // Gone already, or someone else's: nothing of roll's to delete.
+                if status == reqwest::StatusCode::NOT_FOUND || (status.is_success() && !ours(&got)) {
+                    continue;
+                }
+                let (status, got) = self.0.send(self.0.client.delete(format!("{base}/{id}")).bearer_auth(&token), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {id}: {status} {}", status_of(&got))));
+                }
             }
             Ok(())
         })
@@ -817,7 +952,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new() };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -1129,7 +1264,22 @@ mod tests {
     async fn mock() -> (String, Seen) {
         async fn any(State(seen): State<Seen>, method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> (StatusCode, axum::Json<Json>) {
             let pq = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
-            seen.lock().unwrap().push((method.to_string(), pq, serde_json::from_slice(&body).unwrap_or(Json::Null)));
+            // A form (Google's token request) is kept as its text.
+            seen.lock().unwrap().push((method.to_string(), pq.clone(), serde_json::from_slice(&body).unwrap_or_else(|_| Json::String(String::from_utf8_lossy(&body).into()))));
+            // Google: the token endpoint, then Secret Manager (OLD is roll's, NEW doesn't exist yet).
+            if pq == "/token" {
+                return (StatusCode::OK, axum::Json(json!({ "access_token": "ya29.test", "expires_in": 3600 })));
+            }
+            if let Some(rest) = pq.strip_prefix("/v1/projects/shop-prod/secrets") {
+                if headers.get("authorization").and_then(|a| a.to_str().ok()) != Some("Bearer ya29.test") {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": { "status": "UNAUTHENTICATED" } })));
+                }
+                return match (method.as_str(), rest) {
+                    ("GET", "/NEW") => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": { "status": "NOT_FOUND" } }))),
+                    ("GET", "/OLD") => (StatusCode::OK, axum::Json(json!({ "labels": { "managed-by": "roll-secrets" } }))),
+                    _ => (StatusCode::OK, axum::Json(json!({}))),
+                };
+            }
             if let Some(target) = headers.get("x-amz-target") {
                 use sha2::{Digest, Sha256};
                 let hs: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap().to_string())).collect();
@@ -1194,6 +1344,44 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn google_secret_manager_signs_in_as_the_service_account_and_writes_only_its_own_secrets() {
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+        use rsa::signature::Verifier;
+        let (base, seen) = mock().await;
+        // A key made now: the repository holds none.
+        let private = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let pem = private.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+        let sa = json!({ "type": "service_account", "client_email": "sync@shop-prod.iam.gserviceaccount.com", "private_key": pem, "token_uri": "https://attacker.example/token" }).to_string();
+        let t = json!({ "project": "shop-prod", "service_account_key": "GCP_SYNC_KEY" });
+        push(Arc::new(GoogleSecrets(http(&base))), t, &[("GCP_SYNC_KEY", &sa)]).await.unwrap();
+        let calls: Vec<(String, String, Json)> = seen.lock().unwrap().clone();
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        assert_eq!(
+            route,
+            [
+                ("POST", "/token"),
+                ("GET", "/v1/projects/shop-prod/secrets/NEW"),
+                ("POST", "/v1/projects/shop-prod/secrets?secretId=NEW"),
+                ("POST", "/v1/projects/shop-prod/secrets/NEW:addVersion"),
+                ("GET", "/v1/projects/shop-prod/secrets/OLD"),
+                ("DELETE", "/v1/projects/shop-prod/secrets/OLD"),
+            ]
+        );
+        assert_eq!(calls[2].2["labels"], json!({ "managed-by": "roll-secrets" }));
+        assert_eq!(calls[3].2["payload"]["data"], "di0xMjM=", "base64 of v-123");
+        // The token request is a JWT the service account's key signed (RS256), for Google's endpoint.
+        let form = calls[0].2.as_str().unwrap();
+        let jwt = form.split("assertion=").nth(1).unwrap();
+        let (signed, sig) = jwt.rsplit_once('.').unwrap();
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let key = rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(private.to_public_key());
+        key.verify(signed.as_bytes(), &rsa::pkcs1v15::Signature::try_from(b64.decode(sig).unwrap().as_slice()).unwrap()).expect("RS256 by the service account");
+        let claims: Json = serde_json::from_slice(&b64.decode(signed.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!((claims["iss"].as_str(), claims["aud"].as_str()), (Some("sync@shop-prod.iam.gserviceaccount.com"), Some(format!("{base}/token").as_str())));
     }
 
     #[tokio::test(flavor = "multi_thread")]
