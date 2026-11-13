@@ -797,6 +797,7 @@ impl code_control::PreviewBackend for Previews {
             redis: None,
             error: None,
             created_at: 1,
+            environment: None,
         })
     }
     async fn delete(&self, _r: &code_control::model::RepoRow, _c: &code_control::model::Change) -> anyhow::Result<()> {
@@ -877,6 +878,11 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(got["preview"]["state"], "running");
     a.ok("DELETE", &format!("/v1/code/changes/{id}/preview"), None).await;
     assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null }));
+
+    // budget = {budget: {project, project_name, percent, spent_usd_month, max_usd_month}, dashboard_url}
+    let budget = json!({ "budget": { "project": "prj_1", "project_name": "shop", "percent": 80, "spent_usd_month": 8.1, "max_usd_month": 10.0 }, "dashboard_url": null });
+    a.code.emit_budget(&a.code.find_repo("acme", "api").unwrap().id, budget.clone()).unwrap();
+    assert_eq!(ev.next("budget").await, budget);
 
     // review = Review, thread = Thread
     let r = a

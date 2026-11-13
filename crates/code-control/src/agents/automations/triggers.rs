@@ -95,6 +95,10 @@ fn code_event(kind: &str) -> EventInfo {
                 "state": "open", "source": "roll", "github_url": null, "claimed_by": null, "changes": [], "created_at": 1_762_000_000_000_i64, "updated_at": 1_762_000_000_000_i64 }),
         ),
         "preview" => (&["change", "preview.state", "preview.url"], json!({ "change": change_id, "preview": { "state": "running", "url": "https://chg-12.preview.roll.sh", "error": null, "created_at": 1_762_000_000_000_i64 } })),
+        "budget" => (
+            &["budget.project", "budget.percent"],
+            json!({ "budget": { "project": "prj_0123456789ab", "project_name": "shop", "percent": 80, "spent_usd_month": 8.1, "max_usd_month": 10.0 }, "dashboard_url": null }),
+        ),
         "push" => (
             &["ref", "pusher", "accepted"],
             json!({ "ref": "refs/heads/main", "before": "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "after": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391", "pusher": "ada", "accepted": true, "reason": null }),

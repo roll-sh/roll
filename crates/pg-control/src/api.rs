@@ -40,6 +40,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/projects/{id}/branches/{branch}", axum::routing::delete(delete_branch))
         .route("/v1/projects/{id}/branches/{branch}/history", get(branch_history))
         .route("/v1/projects/{id}/branches/{branch}/restore", post(restore_branch))
+        .route("/v1/projects/{id}/branches/{branch}/reset", post(reset_branch))
+        .route("/v1/projects/{id}/branches/{branch}/app-role", post(app_role))
         .route("/v1/projects/{id}/branches/{branch}/backup", post(backup_branch))
         .route("/v1/projects/{id}/branches/{branch}/evict", post(evict_branch))
         .route("/v1/projects/{id}/branches/{branch}/replicas", post(create_replica))
@@ -85,6 +87,8 @@ struct BranchView {
     endpoint: Option<EndpointView>,
     replicas: Vec<EndpointView>,
     connection_uri: Option<String>,
+    /// Signed in as the branch's own role (not a superuser), when it has one.
+    app_connection_uri: Option<String>,
     /// Local data on this host (0 when evicted).
     storage_bytes: Option<i64>,
     /// Durable history in object storage (WAL + base images).
@@ -118,6 +122,7 @@ fn project_view(c: &Control, project: Project) -> Result<ProjectView, ControlErr
             let primary = primary.into_iter().next();
             BranchView {
                 connection_uri: primary.as_ref().map(|e| c.connection_uri(&project, &e.id)),
+                app_connection_uri: primary.as_ref().and_then(|e| c.app_connection_uri(&b, &e.id)),
                 endpoint: primary.map(|e| endpoint_view(c, &project, e)),
                 replicas: replicas.into_iter().map(|e| endpoint_view(c, &project, e)).collect(),
                 storage_bytes: storage.get(&(b.id.clone(), "local".into())).copied(),
@@ -218,6 +223,13 @@ struct CreateBranch {
     name: String,
     /// Parent branch id or name; defaults to `main`.
     parent: Option<String>,
+    /// The parent's structure without its rows: every user table emptied after branching.
+    #[serde(default)]
+    schema_only: bool,
+    /// Also a role of the branch's own (`app_connection_uri`), for code that mustn't be the
+    /// superuser.
+    #[serde(default)]
+    app_role: bool,
     #[serde(flatten)]
     point: PointInTime,
 }
@@ -228,13 +240,23 @@ async fn create_branch(
     Json(body): Json<CreateBranch>,
 ) -> Result<Response, ControlError> {
     let started = std::time::Instant::now();
-    let branch = c.create_branch(&id, &body.name, body.parent.as_deref(), body.point.target()?).await?;
+    let mut branch = c.create_branch_with(&id, &body.name, body.parent.as_deref(), body.point.target()?, body.schema_only).await?;
+    if body.app_role {
+        branch = match c.ensure_app_role(&id, &branch.id).await {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = c.delete_branch(&id, &branch.id).await;
+                return Err(e);
+            }
+        };
+    }
     let project = c.store.project(&id)?.ok_or_else(|| ControlError::NotFound(id.clone()))?;
     let ep = c.store.endpoint_for_branch(&branch.id)?;
     let body = json!({
         "branch": branch,
         "endpoint": ep,
         "connection_uri": ep.as_ref().map(|e| c.connection_uri(&project, &e.id)),
+        "app_connection_uri": ep.as_ref().and_then(|e| c.app_connection_uri(&branch, &e.id)),
         "took_ms": started.elapsed().as_millis() as u64,
     });
     Ok((StatusCode::CREATED, Json(body)).into_response())
@@ -266,6 +288,29 @@ async fn restore_branch(
     let branch = c.branch_in(&id, &branch)?;
     let backup = c.restore_branch(&id, &branch.id, target).await?;
     Ok(Json(json!({ "backup_branch": backup, "took_ms": started.elapsed().as_millis() as u64 })))
+}
+
+#[derive(Deserialize, Default)]
+struct ResetBody {
+    /// Empty every user table after the reset (a structure-only branch).
+    #[serde(default)]
+    schema_only: bool,
+}
+
+/// Back to the parent's current state, same endpoint and connection string.
+async fn reset_branch(State(c): State<AppState>, Path((id, branch)): Path<(String, String)>, body: Option<Json<ResetBody>>) -> ApiResult<Value> {
+    let started = std::time::Instant::now();
+    let branch = c.branch_in(&id, &branch)?;
+    let branch = c.reset_branch(&id, &branch.id, body.is_some_and(|Json(b)| b.schema_only)).await?;
+    Ok(Json(json!({ "branch": branch, "took_ms": started.elapsed().as_millis() as u64 })))
+}
+
+/// Give a branch a role of its own (idempotent): its `app_connection_uri`.
+async fn app_role(State(c): State<AppState>, Path((id, branch)): Path<(String, String)>) -> ApiResult<Value> {
+    let branch = c.branch_in(&id, &branch)?;
+    let branch = c.ensure_app_role(&id, &branch.id).await?;
+    let ep = c.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
+    Ok(Json(json!({ "branch": branch, "app_connection_uri": c.app_connection_uri(&branch, &ep.id) })))
 }
 
 async fn backup_branch(

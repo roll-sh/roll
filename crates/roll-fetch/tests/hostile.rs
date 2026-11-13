@@ -10,6 +10,8 @@ enum E<'a> {
     Dir(&'a str),
     Link(&'a str, &'a str),
     Hard(&'a str, &'a str),
+    /// Any entry type with a body.
+    Raw(&'a str, tar::EntryType, &'a [u8]),
 }
 
 /// A bundle written header by header, names taken as they are (the tar crate's builder refuses
@@ -36,6 +38,7 @@ fn bundle(entries: &[E]) -> Vec<u8> {
             E::Dir(n) => put(n, tar::EntryType::Directory, "", b""),
             E::Link(n, t) => put(n, tar::EntryType::Symlink, t, b""),
             E::Hard(n, t) => put(n, tar::EntryType::Link, t, b""),
+            E::Raw(n, k, d) => put(n, *k, "", d),
         }
     }
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -68,6 +71,10 @@ fn hostile_bundles_are_refused_and_nothing_lands_outside_the_tree() {
         ("outside tree/", vec![E::File("x", b"x")]),
         ("a hard link", vec![E::File("tree/a", b"1"), E::Hard("tree/b", &escape)]),
         ("a second env", vec![E::File("env", b"export B='2'\n")]),
+        ("a long name over PATH_MAX", vec![E::Raw("././@LongLink", tar::EntryType::GNULongName, &[b'a'; 8192]), E::File("tree/x", b"x")]),
+        ("a PAX header", vec![E::Raw("pax", tar::EntryType::XHeader, b"30 path=tree/aaaaaaaaaaaaaaaa\n"), E::File("tree/x", b"x")]),
+        ("a symlink with a body", vec![E::Raw("tree/l", tar::EntryType::Symlink, b"padding")]),
+        ("a dangling long name", vec![E::Raw("././@LongLink", tar::EntryType::GNULongName, b"tree/x\0")]),
     ];
     for (what, entries) in cases {
         let (r, _dir) = try_unpack(&entries, Limits::default());

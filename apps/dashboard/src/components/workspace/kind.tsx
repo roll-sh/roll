@@ -1,4 +1,4 @@
-import { Boxes, Database, GitBranch, Package, Waves, Zap, type LucideIcon } from "lucide-react";
+import { Boxes, Database, GitBranch, Inbox, ListChecks, Package, Server, Waves, Zap, type LucideIcon } from "lucide-react";
 import type { ResourceKind } from "@/lib/workspace-api";
 
 export const KIND_ICON: Record<ResourceKind, LucideIcon> = {
@@ -7,7 +7,10 @@ export const KIND_ICON: Record<ResourceKind, LucideIcon> = {
   nosql: Boxes,
   stream: Waves,
   bucket: Package,
+  queue: Inbox,
+  tasks: ListChecks,
   repo: GitBranch,
+  service: Server,
 };
 
 /** A resource kind's icon on a raised tile. */

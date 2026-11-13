@@ -128,6 +128,16 @@ pub struct Chunk {
     pub key: String,
 }
 
+/// A consistent cut of a log for a branch ([`Log::branch_point`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchPoint {
+    pub log_start: i64,
+    /// One past the last offset in object storage.
+    pub end: i64,
+    /// `(producer id, first offset)` of the transactions open at the cut.
+    pub open_txns: Vec<(i64, i64)>,
+}
+
 /// State kept outside the log (in the broker's catalog) and handed back on open.
 #[derive(Clone, Debug, Default)]
 pub struct Recovered {
@@ -854,6 +864,14 @@ impl Log {
     /// Open transactions as `(producer id, first offset)`.
     pub fn open_txns(&self) -> Vec<(i64, i64)> {
         self.lock().producers.ongoing().collect()
+    }
+
+    /// Where a branch of this log is cut, read under one lock: everything below `end` is in
+    /// object storage, and `open_txns` were open at that moment (their markers, if any, come at
+    /// or after `end`).
+    pub fn branch_point(&self) -> BranchPoint {
+        let g = self.lock();
+        BranchPoint { log_start: g.log_start, end: g.uploaded_end, open_txns: g.producers.ongoing().collect() }
     }
 
     /// Producers with state on this partition: `(id, epoch, last sequence, last timestamp,
