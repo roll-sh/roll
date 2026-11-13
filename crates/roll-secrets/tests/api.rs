@@ -96,7 +96,7 @@ impl SyncTarget for FakeSync {
 
 /// Audit deliveries, kept instead of sent; and an OIDC issuer's keys, served.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool);
 
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
@@ -116,6 +116,9 @@ impl roll_secrets::Deliver for Sent {
     }
     /// A rotator outside roll: each issue is a new vendor key.
     fn call(&self, _: &str, _: &str, _: &Secret, body: &Value, _: usize) -> roll_secrets::Result<zeroize::Zeroizing<Vec<u8>>> {
+        if self.2.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(roll_secrets::Error::Link("rotator.example: connection refused".into()));
+        }
         let mut sent = self.0.lock().unwrap();
         sent.push(body.clone());
         let n = sent.iter().filter(|b| b["action"] == "issue").count();
@@ -1007,6 +1010,25 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     // The key it issues keeps it.
     let (s, _) = api.call(Method::DELETE, &format!("/rotators/{}", r["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
+
+    // The project goes while the rotator is down: what it issued is still revoked, by the
+    // sweeper, which keeps the rotator (and the project's key) until then.
+    api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    tokio::task::spawn_blocking(move || s.forget_project(&p).unwrap()).await.unwrap();
+    let count = |table: &str| {
+        let (sql, p) = (format!("SELECT COUNT(*) FROM {table} WHERE project_id = ?"), api.project.clone());
+        api.db.read(move |c| c.query_row(&sql, [p.as_str()], |r| r.get::<_, i64>(0))).unwrap()
+    };
+    assert_eq!((count("rotators"), count("projects"), count("secrets")), (1, 1, 0));
+    api.sent.2.store(false, std::sync::atomic::Ordering::Relaxed);
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let revoked: Vec<Value> = api.sent.0.lock().unwrap().iter().filter(|b| b["action"] == "revoke").map(|b| b["handle"].clone()).collect();
+    assert!(revoked.contains(&json!(2)), "the key in use when the project went is revoked: {revoked:?}");
+    assert_eq!((count("rotators"), count("projects"), count("leases")), (0, 0, 0));
 }
 
 #[tokio::test]
