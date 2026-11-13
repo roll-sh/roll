@@ -180,6 +180,13 @@ impl Grants for GrantGrants {
         self.0.allows(&r, action) == scope::Outcome::Allow
     }
 
+    /// Code read on the repository, as it sits on `project`'s canvas.
+    fn reads_code(&self, project: &str, repo: &str) -> bool {
+        use roll_auth::scope;
+        let r = scope::Resource { product: "code".into(), id: Some(repo.into()), project: Some(project.into()), ..Default::default() };
+        self.0.allows(&r, scope::Action::Read) == scope::Outcome::Allow
+    }
+
     /// The one project its secrets rules name, if they name exactly one.
     fn project(&self) -> Option<&str> {
         use roll_auth::scope::{Resources, Selector};
