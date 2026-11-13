@@ -158,6 +158,10 @@ export interface Domain {
   target: string;
   token: string;
   error: string | null;
+  /** The certificate: `none` where nothing issues them, else pending → issued, or failed. */
+  tls: "none" | "pending" | "issued" | "failed";
+  /** Why it failed, or what it's waiting for. */
+  tls_error: string | null;
   created_at: number;
 }
 

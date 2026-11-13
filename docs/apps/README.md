@@ -347,12 +347,33 @@ every deployment is immutable with instant rollback.
   out of what the app receives. roll previews sets it on every `pv-…` environment.
 - **Custom domains**: the user adds `www.example.com`, points a CNAME at the service's
   `up.roll.site` name, and roll verifies it (the CNAME, or a `_roll-challenge.<host>` TXT with the
-  domain's token for apex domains behind an ALIAS/flattening provider). On the fleet, TLS is
-  **Cloudflare for SaaS** custom hostnames (`POST /zones/{zone}/custom_hostnames`): Cloudflare
-  issues and renews the certificate at its edge, the origin needs nothing per domain, and the
-  WAF and cache apply. Self-hosted rolld issues its own over ACME HTTP-01 through `roll-edge`'s
-  ACME client and serves it by SNI. Domain states: `pending` (waiting for DNS) → `issuing` →
-  `active`, or `failed` with the reason.
+  domain's token for apex domains behind an ALIAS/flattening provider), checking pending ones
+  every minute. Domain states: `pending` (waiting for DNS) → `active`, or `failed` with the
+  reason. A domain still unverified 7 days after it was added is removed (`PENDING_CLAIM_TTL`), so
+  a squatted hostname comes free for its real owner; one verified once never expires. Removing an
+  environment or a service removes its domains (rows and provider records alike).
+- **Custom domains' certificates** (`Domain.tls`: `none`, `pending` → `issued`, or `failed`, with
+  `tls_error`): one seam, `integrations::DomainTls`, chosen by `ROLL_APPS_TLS`:
+  - `cloudflare` (the fleet): each domain is a **Cloudflare for SaaS** custom hostname on the site
+    zone (`roll_edge::saas`: `POST /zones/{zone}/custom_hostnames`, HTTP DCV, a DV certificate),
+    created when roll apps accepts and stores the domain, never before; verifying (and the
+    minute loop, until it's issued) reads its state; removing the domain deletes it. Customers'
+    CNAME target is the zone's fallback origin `up.roll.site`. Cloudflare issues and renews at its
+    edge and connects to the origin with the custom hostname as the server name; the edge answers
+    names it has no certificate for with the fallback origin's (`CertStore::set_unknown_name`).
+    Answers are read at most 1 MiB, and only `[a-z0-9.-]` hostnames outside roll's zones are sent.
+  - `acme` (a node alone, no Cloudflare): the edge orders a certificate per **active** custom
+    domain over ACME HTTP-01 (`roll_edge::domains::DomainCerts`, on the `acme` singleton like the
+    edge's own sets). It learns the domains through `roll_edge::domains::CustomDomains`, which
+    rolld implements over `Apps::active_custom_domains` and `Apps::set_domain_tls` (apps-control
+    and roll-edge don't depend on each other). The plain-HTTP listener (`ROLL_EDGE_HTTP`, port 80
+    from outside) answers `GET /.well-known/acme-challenge/<token>` for any host from the
+    in-memory tokens of the orders in flight, and redirects everything else to HTTPS. Each
+    certificate is stored sealed (`system/certs/domains/<host>.sealed`), served by SNI, renewed 30
+    days before it expires, and uninstalled and deleted when the domain goes. At most 5 orders a
+    pass (every 30 s); a failing hostname waits 5 minutes, doubling to a day. The ACME account
+    (`ROLL_ACME_DIRECTORY`) is the one the edge's DNS-01 certificates use.
+  - `none` (the default): `tls` is `none`; locally services are plain HTTP on the apps listener.
 - **Private networking**: a project's services reach each other at
   `<service>.<env>.internal:<port>` and by bare `<service>`. Locally every project and
   environment has a Docker network `roll-apps-net-<project>-<env>` and each instance joins it
@@ -532,8 +553,16 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   private registries (repository credentials), and multi-line
   variable values.
 - The edge routes `*.up.<site domain>` and unknown hosts (custom domains) to roll apps.
-- Custom domains are verified (CNAME or TXT) and routed; their TLS is the edge's job and isn't
-  issued yet (Cloudflare for SaaS on the fleet, ACME HTTP-01 self-hosted).
+- Custom domains' certificates are built and tested against Pebble (HTTP-01) and a fake
+  Cloudflare API (Cloudflare for SaaS), not against Let's Encrypt or Cloudflare. For
+  `ROLL_APPS_TLS=cloudflare` the site zone still needs Cloudflare for SaaS enabled, `up.roll.site`
+  proxied and set as the fallback origin (`PUT /zones/{zone}/custom_hostnames/fallback_origin`),
+  the token's SSL and Certificates edit on the zone, and an SSL mode for custom hostnames that
+  accepts the fallback origin's certificate for the custom hostname's server name (Full, or Full
+  (strict) with an Origin Rule overriding SNI to `up.roll.site`). Custom hostnames aren't held to
+  authenticated origin pulls, and their `CF-Connecting-IP` isn't believed yet: the edge classes
+  them as unknown hosts. Domains' state comes from the minute loop and Verify; Cloudflare's
+  webhooks for custom hostnames aren't used.
 - Links: Postgres and Redis are wired; buckets, streams, queues and NoSQL answer "not wired yet".
 - roll secrets isn't on main yet: `NoSecrets` stands in, and service variables are the env store.
 - Private networking is a Docker network per project and environment; it isn't reachable from
@@ -596,8 +625,11 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    `?q=`, `roll logs --grep … --since 2h`, the Logs tab's Search 7 days.)
 4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL: as roll secrets links per
    environment (their providers), not more apps link kinds.
-5. Custom domains' TLS: Cloudflare for SaaS custom hostnames on the fleet, ACME HTTP-01 on one
-    node; pending claims expire.
+5. Custom domains' TLS on the fleet for real: the zone settings in "Not done yet" (fallback
+   origin, SSL mode or SNI override), custom hostnames under authenticated origin pulls and their
+   `CF-Connecting-IP` believed, then a first domain through Let's Encrypt and Cloudflare. (Done:
+   Cloudflare for SaaS custom hostnames and ACME HTTP-01 on one node behind `ROLL_APPS_TLS`,
+   `Domain.tls` in the API and the Domains tab, pending claims expiring after 7 days.)
 6. **The rest of a cold start**: with the CPU boost in, what's left is dockerd starting the
    container on its network (≈250 ms here; the network, `--init` and the log driver each
    measured within noise by `scripts/bench-apps-coldstart.sh`). Snapshot restore (CRIU, or

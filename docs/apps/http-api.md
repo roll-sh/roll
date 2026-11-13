@@ -278,9 +278,20 @@ type Domain = {
   target: string;
   token: string;
   error: string | null;
+  /** The certificate (`ROLL_APPS_TLS`): `none` where nothing issues them (a node without the
+   *  edge); for a custom domain `pending` until it's `issued` (Cloudflare for SaaS, or the
+   *  edge's own over ACME HTTP-01 once DNS is verified), or `failed`. A roll domain is `issued`
+   *  behind the edge. */
+  tls: "none" | "pending" | "issued" | "failed";
+  /** Why it failed, or what it's waiting for (the provider's words, at most ~300 characters). */
+  tls_error: string | null;
   created_at: number;
 };
 ```
+
+A custom domain that is still unverified 7 days after it was added is removed, so the hostname
+is free for whoever really owns it. Removing a domain, its environment or its service removes it
+from the certificate's provider too.
 
 ## Public traffic
 

@@ -1,4 +1,4 @@
-import { ExternalLink, Globe, RefreshCw, Trash2 } from "lucide-react";
+import { ExternalLink, Globe, Lock, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { appsApi, type Domain, type Environment } from "@/lib/apps-api";
 import { btn, CopyButton, input, panel, primary, useCopy } from "../ui";
@@ -10,6 +10,25 @@ const STATUS: Record<Domain["status"], { label: string; dot: string }> = {
   active: { label: "Active", dot: "bg-ok" },
   failed: { label: "Failed", dot: "bg-danger" },
 };
+
+/** The certificate next to a custom domain (nothing where certificates aren't issued). */
+const TLS: Record<Exclude<Domain["tls"], "none">, { label: string; icon: typeof Lock; tone: string }> = {
+  pending: { label: "Certificate pending", icon: Lock, tone: "text-subtle" },
+  issued: { label: "Certificate issued", icon: Lock, tone: "text-muted" },
+  failed: { label: "Certificate failed", icon: ShieldAlert, tone: "text-danger" },
+};
+
+function TlsBadge({ d }: { d: Domain }) {
+  if (d.tls === "none") return null;
+  const t = TLS[d.tls];
+  const Icon = t.icon;
+  return (
+    <span className={`inline-flex items-center gap-1 text-[12px] ${t.tone}`} title={d.tls_error ?? undefined}>
+      <Icon className="size-3" strokeWidth={1.5} />
+      {t.label}
+    </span>
+  );
+}
 
 /** The generated hostname, then custom domains: their DNS record, Verify and Remove. */
 export function DomainsTab({ service, env, runner }: { service: string; env: Environment; runner: Runner }) {
@@ -61,6 +80,7 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                     <i className={`size-1.5 rounded-full ${s.dot}`} />
                     {s.label}
                   </span>
+                  <TlsBadge d={d} />
                   <span className="ml-auto flex gap-2">
                     {d.status !== "active" && (
                       <button className={btn} disabled={runner.busy !== null} onClick={() => runner.run(`verify:${d.hostname}`, () => appsApi.verifyDomain(service, env.name, d.hostname))}>
@@ -77,6 +97,9 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                   </span>
                 </div>
                 {d.error && <p className="text-[12px] text-danger">{d.error}</p>}
+                {d.status === "active" && d.tls !== "issued" && d.tls_error && (
+                  <p className={`text-[12px] ${d.tls === "failed" ? "text-danger" : "text-subtle"}`}>{d.tls_error}</p>
+                )}
                 {d.status !== "active" && (
                   <div className="overflow-x-auto rounded-lg border border-line bg-bg">
                     <table className="w-full font-mono text-[11.5px]">
