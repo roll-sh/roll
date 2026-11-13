@@ -103,6 +103,7 @@ impl Used {
                 Cmd::Enrich { .. } => "enrich",
                 Cmd::InlineStats { .. } => "inline_stats",
                 Cmd::Sample(_) => "sample",
+                Cmd::LookupJoin { cond: Some(_), .. } => "lookup_join_on_expression",
                 Cmd::LookupJoin { .. } => "lookup_join",
                 Cmd::Fork { branches, .. } => {
                     for b in branches {
@@ -131,6 +132,7 @@ impl Used {
             Cmd::Stats { aggs, by } | Cmd::InlineStats { aggs, by } => aggs.iter().chain(by).for_each(|n| visit(&n.expr)),
             Cmd::Sort(keys) => keys.iter().for_each(|k| visit(&k.expr)),
             Cmd::Dissect { field, .. } | Cmd::Grok { field, .. } => visit(field),
+            Cmd::LookupJoin { cond: Some(e), .. } => visit(e),
             _ => {}
         }
     }

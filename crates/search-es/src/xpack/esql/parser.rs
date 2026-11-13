@@ -347,7 +347,8 @@ pub enum Cmd {
     /// `SAMPLE probability`.
     Sample(f64),
     /// `LOOKUP JOIN index ON field, ...`.
-    LookupJoin { index: String, index_at: usize, on: Vec<(String, usize)> },
+    /// `cond`: `ON <expression>` (`on` is then empty).
+    LookupJoin { index: String, index_at: usize, on: Vec<(String, usize)>, cond: Option<Expr> },
     /// `TS index`: a time series source; its first `STATS` aggregates per time series (and
     /// time bucket) first, then across series.
     Ts { sources: Vec<String>, metadata: Vec<String>, at: usize },
@@ -796,9 +797,12 @@ impl<'a> P<'a> {
                     }
                     return Err(parse_error(self.src, it.start, &format!("invalid index pattern [{index}], * is not allowed in LOOKUP JOIN")));
                 }
+                let on_at = self.peek().start;
                 if !self.eat_kw("ON") {
                     return Err(self.mismatch("'on'"));
                 }
+                // Field names, or a boolean expression.
+                let from = self.i;
                 let mut on = Vec::new();
                 loop {
                     on.push(self.qualified()?);
@@ -806,7 +810,25 @@ impl<'a> P<'a> {
                         break;
                     }
                 }
-                Cmd::LookupJoin { index, index_at: it.start, on }
+                if matches!(self.peek().tok, Tok::Pipe | Tok::Eof) {
+                    Cmd::LookupJoin { index, index_at: it.start, on, cond: None }
+                } else {
+                    self.i = from;
+                    let cond = self.expr()?;
+                    // Some conjunct must compare a field with a field (the left index's with the
+                    // lookup index's).
+                    fn relates(e: &Expr) -> bool {
+                        match &e.kind {
+                            ExprKind::Bin(BinOp::And, a, b) => relates(a) || relates(b),
+                            ExprKind::Bin(BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte, a, b) => matches!((&a.kind, &b.kind), (ExprKind::Col(_), ExprKind::Col(_))),
+                            _ => false,
+                        }
+                    }
+                    if !relates(&cond) {
+                        return Err(parse_error(self.src, on_at, "JOIN ON clause with expressions must contain at least one condition relating the left index and the lookup index"));
+                    }
+                    Cmd::LookupJoin { index, index_at: it.start, on: Vec::new(), cond: Some(cond) }
+                }
             }
             "SORT" => {
                 let mut keys = Vec::new();

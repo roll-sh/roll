@@ -1295,6 +1295,10 @@ enum Stage {
     Sample(f64),
     /// Joins each row with the lookup rows whose `keys` equal its `on` columns.
     Lookup { on: Vec<usize>, rows: std::sync::Arc<HashMap<Vec<GroupKey>, Vec<Vec<V>>>>, add: usize, keep: Vec<usize> },
+    /// `LOOKUP JOIN ... ON <expression>`: lookup rows by the values of the left columns `eq`
+    /// (their equalities with lookup fields; all rows when there is none), each matched when
+    /// `cond` holds over the left row followed by the lookup row.
+    LookupWhere { eq: Vec<usize>, rows: std::sync::Arc<HashMap<Vec<GroupKey>, Vec<Vec<V>>>>, cond: CE, add: usize, keep: Vec<usize> },
 }
 
 /// A hashable form of a value, for group keys and joins.
@@ -1555,7 +1559,57 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
             (Stage::Enrich { key, table: table.clone(), fields: adds.into_iter().map(|a| (a.1, a.2)).collect(), keep }, out)
         }
         Cmd::Sample(p) => (Stage::Sample(*p), cols.to_vec()),
-        Cmd::LookupJoin { index, index_at, on } => {
+        Cmd::LookupJoin { index, index_at, cond: Some(cond), .. } => {
+            let Some(lt) = src.res.lookup.get(index) else { return Err(verification(src, *index_at, &format!("Unknown index [{index}]"))) };
+            // The condition reads the left row followed by the lookup row.
+            let combined: Vec<Col> = cols.iter().chain(&lt.cols).cloned().collect();
+            let (c, t) = Compiler { src, cols: &combined, aggs: None }.compile(cond)?;
+            if t != DataType::Boolean && t != DataType::Null {
+                return Err(verification(src, cond.start, &format!("Condition expression needs to be boolean, found [{}]", t.name().to_ascii_uppercase())));
+            }
+            // Equalities of a left column with a lookup field key the lookup rows.
+            fn conjuncts<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+                match &e.kind {
+                    ExprKind::Bin(BinOp::And, a, b) => {
+                        conjuncts(a, out);
+                        conjuncts(b, out);
+                    }
+                    _ => out.push(e),
+                }
+            }
+            let mut parts = Vec::new();
+            conjuncts(cond, &mut parts);
+            let (mut eq, mut lk_idx) = (Vec::new(), Vec::new());
+            for p in parts {
+                if let ExprKind::Bin(BinOp::Eq, a, b) = &p.kind
+                    && let (ExprKind::Col(x), ExprKind::Col(y)) = (&a.kind, &b.kind)
+                {
+                    let left = |n: &str| cols.iter().rposition(|c| c.name == n).filter(|_| !lt.cols.iter().any(|c| c.name == n));
+                    let right = |n: &str| lt.cols.iter().position(|c| c.name == n);
+                    let pair = match (left(x), right(y)) {
+                        (Some(i), Some(j)) => Some((i, j)),
+                        _ => left(y).zip(right(x)),
+                    };
+                    if let Some((i, j)) = pair {
+                        eq.push(i);
+                        lk_idx.push(j);
+                    }
+                }
+            }
+            let names: Vec<String> = lt.cols.iter().map(|c| c.name.clone()).collect();
+            let (keep, mut out) = keep_except(cols, &names);
+            out.extend(lt.cols.iter().cloned());
+            let mut by_key: HashMap<Vec<GroupKey>, Vec<Vec<V>>> = HashMap::new();
+            for r in &lt.rows {
+                let k: Vec<GroupKey> = lk_idx.iter().map(|j| GroupKey::of(&r[*j])).collect();
+                if k.iter().any(|x| matches!(x, GroupKey::Null | GroupKey::Multi(_))) {
+                    continue;
+                }
+                by_key.entry(k).or_default().push(r.clone());
+            }
+            (Stage::LookupWhere { eq, rows: std::sync::Arc::new(by_key), cond: c, add: lt.cols.len(), keep }, out)
+        }
+        Cmd::LookupJoin { index, index_at, on, .. } => {
             let Some(lt) = src.res.lookup.get(index) else { return Err(verification(src, *index_at, &format!("Unknown index [{index}]"))) };
             let mut on_idx = Vec::new();
             let mut lk_idx = Vec::new();
@@ -1706,6 +1760,30 @@ fn run_stage(stage: &Stage, in_cols: usize, rows: Vec<Vec<V>>, w: &mut Warnings)
                         n.extend(std::iter::repeat_n(V::Null, *add));
                         out.push(n);
                     }
+                }
+            }
+        }
+        Stage::LookupWhere { eq, rows: lk, cond, add, keep } => {
+            for r in rows {
+                // Without equalities every lookup row is under the empty key, in index order.
+                let k: Vec<GroupKey> = eq.iter().map(|i| GroupKey::of(&r[*i])).collect();
+                let candidates: &[Vec<V>] = lk.get(&k).map_or(&[], Vec::as_slice);
+                let base: Vec<V> = keep.iter().map(|i| r[*i].clone()).collect();
+                let mut matched = false;
+                for m in candidates {
+                    let mut joined = r.clone();
+                    joined.extend(m.iter().cloned());
+                    if eval(cond, &joined, &[], w)?.truthy() == Some(true) {
+                        let mut n = base.clone();
+                        n.extend(m.iter().cloned());
+                        out.push(n);
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    let mut n = base;
+                    n.extend(std::iter::repeat_n(V::Null, *add));
+                    out.push(n);
                 }
             }
         }
@@ -2938,8 +3016,11 @@ fn unmapped_references(cmds: &[Cmd], cols: &[Col]) -> Vec<String> {
                     None => return out,
                 }
             }
-            Cmd::LookupJoin { on, .. } => {
+            Cmd::LookupJoin { on, cond, .. } => {
                 on.iter().for_each(|(f, _)| note(f, &defined, &mut out));
+                if let Some(c) = cond {
+                    names_of(c).iter().for_each(|x| note(x, &defined, &mut out));
+                }
                 // The lookup index's fields join the row.
                 return out;
             }
@@ -3370,9 +3451,14 @@ fn cmd_refs(c: &Cmd, out: &mut std::collections::HashSet<String>) {
             out.insert(n.clone());
         }
         Cmd::Dissect { field, .. } | Cmd::Grok { field, .. } => refs(field, out),
-        Cmd::LookupJoin { on, .. } => on.iter().for_each(|(n, _)| {
-            out.insert(n.clone());
-        }),
+        Cmd::LookupJoin { on, cond, .. } => {
+            on.iter().for_each(|(n, _)| {
+                out.insert(n.clone());
+            });
+            if let Some(c) = cond {
+                refs(c, out);
+            }
+        }
         Cmd::Enrich { on: Some((n, _)), .. } => {
             out.insert(n.clone());
         }
