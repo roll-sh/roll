@@ -300,7 +300,7 @@ impl Engine {
         // (spec, repo, revision, whether roll apps runs it)
         let mut wanted: Vec<(ServiceSpec, String, String, bool)> = Vec::new();
         let head_of = |repo: String| async move {
-            if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.head.clone())) } else { self.source.head(&repo, None).await }
+            if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.head.clone())) } else { self.head_for(&repo, r.branch.as_deref(), None).await }
         };
         match self.apps.catalog(&r.project_id).await.map_err(|e| anyhow::anyhow!("reading the project's services: {e:#}"))? {
             Some(catalog) if !catalog.is_empty() => {

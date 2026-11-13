@@ -258,6 +258,21 @@ impl Engine {
 }
 
 impl Engine {
+    /// What another repo of the project runs in a preview of `branch`: its own `branch` when it
+    /// has one (a feature split across repos previews as one), else its default branch's head
+    /// (`default`, when the caller read it already).
+    pub(super) async fn head_for(&self, repo: &str, branch: Option<&str>, default: Option<Option<String>>) -> anyhow::Result<Option<String>> {
+        if let Some(b) = branch
+            && let Some(h) = self.source.head(repo, Some(b)).await?
+        {
+            return Ok(Some(h));
+        }
+        match default {
+            Some(d) => Ok(d),
+            None => self.source.head(repo, None).await,
+        }
+    }
+
     /// The preview's secrets resolved as its code gets them, unresolved keys said once in its
     /// activity (a check fails on them; a preview starts without them, saying which).
     pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool) -> anyhow::Result<Vec<(String, String)>> {

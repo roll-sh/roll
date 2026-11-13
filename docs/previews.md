@@ -70,8 +70,10 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - `roll preview create --repo acme/web --branch feat-x` (or `POST /v1/previews`) makes one for a
     branch with no change. It lives until it is deleted or its TTL passes.
 - **Update**: every new head redeploys the services of the change's repo at that head. Services
-  from the project's other repos run at their default branch's head, and are redeployed only
-  when that head moves. This is Railway's "focused" environment, done the cheap way. Data
+  from the project's other repos run at their own branch of the same name when they have one (a
+  feature split across a front end and a back end previews as one, as Signadot, Bunnyshell and
+  Qovery do), else at their default branch's head, and are redeployed only when that head moves.
+  This is Railway's "focused" environment, done the cheap way. Data
   branches stay (they hold the preview's own writes) unless the change resets them.
 - **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) stops. A
   request to any URL of the preview wakes it. The request is held for up to 60 s; after that the
@@ -132,7 +134,7 @@ state. A pass of the reconciler:
        "Schema changes").
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
    6. Every service whose revision is not the one it should run is redeployed (the change's head
-      for its repo, the default head for the others).
+      for its repo; for the others their branch of the same name, else their default head).
    7. The preview becomes `ready` (or `sleeping`), and the change and the PR hear about it.
    Every write that asks for a converge (a push, a delete, a reset, a refresh) bumps the row's
    `generation`. A converge settles a row only if its generation hasn't moved since it started,
@@ -711,6 +713,8 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- the same branch across a project's repos (another repo runs its own branch of the change's name,
+  and a push to it reaches the preview);
 - a look at the Previews tab and sheet from screenshots of the real thing (each row says its state
   and shows its screenshot, the sheet's schema changes wrap, masked branches say so, the
   screenshot is a thumbnail that opens full size, and on a phone the project's agents panel
@@ -729,16 +733,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The same branch across a project's repos**: a change on `feat/x` in `acme/web` runs
-   `acme/api` at its own `feat/x` when it has one (and follows it), not its default branch, so a
-   feature split across a front end and a back end previews as one (Signadot, Bunnyshell and
-   Qovery match branches by name across repos).
-2. **Skipping or asking for a preview per change**: `[skip preview]` in a change's title or a
+1. **Skipping or asking for a preview per change**: `[skip preview]` in a change's title or a
    `no-preview` label skips it (Render's `[skip render]`, Vercel's ignored builds); with
    `branches` narrowed, a `preview` label asks for one anyway.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

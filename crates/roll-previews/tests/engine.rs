@@ -323,3 +323,21 @@ async fn a_deploy_still_going_is_checked_again_and_a_failed_one_fails_the_previe
     assert_eq!(p.state, State::Failed);
     assert!(p.error.as_deref().unwrap_or("").contains("the build failed"), "{:?}", p.error);
 }
+
+#[tokio::test]
+async fn another_repo_runs_its_branch_of_the_same_name() {
+    let e = env(json!({ "enabled": true }));
+    // The feature touches both repos: web's change is on feat/9, and api has a feat/9 too.
+    e.code.heads.lock().insert("acme/api@feat/9".into(), "cs_api_feat".into());
+    e.code.open(change("chg_x", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_x").unwrap().unwrap();
+    let rev = |svc: &str| e.apps.deployed.lock().get(&(p.id.clone(), svc.to_string())).cloned();
+    assert_eq!(rev("web").as_deref(), Some("cs_9a"));
+    assert_eq!(rev("api").as_deref(), Some("cs_api_feat"), "api's own feat/9, not its default branch");
+    // A push to api's feat/9 reaches the preview though the change didn't move.
+    e.code.heads.lock().insert("acme/api@feat/9".into(), "cs_api_feat2".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(rev("api").as_deref(), Some("cs_api_feat2"));
+}

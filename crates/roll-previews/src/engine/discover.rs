@@ -196,10 +196,19 @@ impl Engine {
                     self.store.log(&r.id, "idle for an hour: its branches went cold")?;
                 }
             }
-            // A service from another repo of the project follows that repo's default branch.
-            let stale = self.store.services(&r.id)?.into_iter().any(|svc| {
-                svc.repo != r.repo && heads.get(&svc.repo).is_some_and(|h| h.is_some() && h.as_deref() != svc.revision.as_deref())
-            });
+            // A service from another repo of the project follows that repo's branch of the same name,
+            // else its default branch.
+            let mut stale = false;
+            for svc in self.store.services(&r.id)? {
+                if svc.repo == r.repo || !heads.contains_key(&svc.repo) {
+                    continue;
+                }
+                let want = self.head_for(&svc.repo, r.branch.as_deref(), heads.get(&svc.repo).cloned()).await?;
+                if want.is_some() && want.as_deref() != svc.revision.as_deref() {
+                    stale = true;
+                    break;
+                }
+            }
             // A reset that's due, or the usage reading that's due, makes it converge too.
             let reset_due = s.reset_every_hours > 0 && r.last_reset_at.unwrap_or(r.created_at) + s.reset_every_hours as i64 * 3_600_000 <= now;
             let usage_due = self.usage_read.lock().get(&r.id).is_none_or(|t| *t + self.cfg.usage_every.as_millis() as i64 <= now);
