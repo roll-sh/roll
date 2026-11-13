@@ -130,7 +130,8 @@ fn rule(r: &Rule) -> String {
             .iter()
             .map(|s| match s {
                 Selector::Project { project } => format!("project {}", lit(project)),
-                Selector::Id { id } => lit(id),
+                Selector::Id { id, index: None } => lit(id),
+                Selector::Id { id, index: Some(ix) } => format!("{}'s indices {} (only through their index routes)", lit(id), lit(ix)),
             })
             .collect::<Vec<_>>()
             .join(", "),

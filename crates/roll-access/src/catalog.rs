@@ -70,6 +70,9 @@ pub struct Row {
     /// Where the request names another environment of the same resource whose values it copies
     /// (apps' `variables_from`, secrets' promote `?from=`): it also needs `reveal` there.
     pub copies_from: Option<CopyFrom>,
+    /// The path parameter naming indices of the resource (search's `{index}`): rules can grant
+    /// some indices of it (`{"id": "cl_1", "index": "logs-*"}`).
+    pub index: Option<&'static str>,
 }
 
 /// Where a copying request names the environment it copies from.
@@ -112,7 +115,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -148,6 +151,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn index(mut self, param: &'static str) -> Row {
+        self.index = Some(param);
         self
     }
     const fn copies_from(mut self, from: CopyFrom) -> Row {
@@ -867,10 +874,15 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")),
+    // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
+    // so a rule can grant some of a cluster's indices. The console (`request`) and the index list
+    // stay the cluster's: they reach every index.
+    row("*", "/v1/search/clusters/{id}/indices/{index}", "search", M, one(PG, "cluster")).index("index"),
+    row("*", "/v1/search/clusters/{id}/indices/{index}/", "search", M, one(PG, "cluster")).index("index"),
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")).index("index"),
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")).index("index"),
     // A bulk can delete as well as index: its action lines decide.
-    row("POST", "/v1/search/clusters/{id}/indices/{index}/bulk", "search", Act::Raw(bulk_action), one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/bulk", "search", Act::Raw(bulk_action), one(PG, "cluster")).index("index"),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),

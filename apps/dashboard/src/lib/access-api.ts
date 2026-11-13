@@ -10,7 +10,18 @@ export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] 
 export type Action = (typeof ACTIONS)[number];
 export type Effect = "allow" | "ask";
 
-export type Selector = { project: string } | { id: string };
+/** `index`: only some indices of it (search: `logs-*`, `a,b`). */
+export type Selector = { project: string } | { id: string; index?: string };
+
+/**
+ * A selector as the builder writes it: an id, or for search `cluster/indices` (`cl_1/logs-*`;
+ * neither a cluster id nor an index name has a `/`).
+ */
+export const selectorText = (s: { id: string; index?: string }): string => (s.index ? `${s.id}/${s.index}` : s.id);
+export function selectorOf(product: string, text: string): { id: string; index?: string } {
+  const at = product === "search" ? text.indexOf("/") : -1;
+  return at > 0 && at < text.length - 1 ? { id: text.slice(0, at), index: text.slice(at + 1) } : { id: text };
+}
 
 export interface Rule {
   /** A product name, or "*" for every product. */
@@ -105,6 +116,8 @@ export interface Approval {
   /** The environment and path the request is about (what remembering it keeps to). */
   environment?: string | null;
   scope_path?: string | null;
+  /** The indices it was about (search). */
+  scope_index?: string | null;
 }
 
 /** Actions that destroy, ship, expose a credential or change who may do what: approve them with care. */
@@ -306,7 +319,9 @@ export function describeRule(r: Rule, projectName: (id: string) => string = (id)
   const where =
     r.resources === "*"
       ? "all resources"
-      : r.resources.map((s) => ("project" in s ? `project ${projectName(s.project)}` : resourceName(r.product, s.id))).join(", ");
+      : r.resources
+          .map((s) => ("project" in s ? `project ${projectName(s.project)}` : s.index ? `${resourceName(r.product, s.id)} indices ${s.index}` : resourceName(r.product, s.id)))
+          .join(", ");
   const parts = [productName(r.product), actions.join(", ") || "nothing", where];
   if (r.environments?.length) parts.push(r.environments.join(", "));
   if (r.paths?.length) parts.push(r.paths.join(", "));
@@ -492,7 +507,7 @@ export interface Draft {
 export const emptyDraft = (): Draft => ({ matrix: {}, project: null, environments: [], ids: {} });
 
 const onlyIds = (r: Rule): string[] | null =>
-  r.resources !== "*" && r.resources.length > 0 && r.resources.every((s) => "id" in s) ? r.resources.map((s) => ("id" in s ? s.id : "")) : null;
+  r.resources !== "*" && r.resources.length > 0 && r.resources.every((s) => "id" in s) ? r.resources.map((s) => ("id" in s ? selectorText(s) : "")) : null;
 
 /**
  * The matrix for some rules, when they fit it (every rule on all resources or the same one
@@ -531,7 +546,7 @@ export function rulesOf(d: Draft): Rule[] {
     .filter(([, a]) => Object.values(a).some(Boolean))
     .map(([product, actions]) => {
       const ids = product !== "*" ? d.ids[product] : undefined;
-      const resources: Rule["resources"] = ids?.length ? ids.map((id) => ({ id })) : d.project ? [{ project: d.project }] : "*";
+      const resources: Rule["resources"] = ids?.length ? ids.map((id) => selectorOf(product, id)) : d.project ? [{ project: d.project }] : "*";
       const r: Rule = { product, resources, actions: Object.fromEntries(Object.entries(actions).filter(([, e]) => e)) };
       if (d.environments.length) r.environments = d.environments;
       return r;
