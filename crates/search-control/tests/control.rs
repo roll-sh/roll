@@ -545,6 +545,12 @@ async fn per_index_routes() {
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(3)), "{v}");
     let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/secrets/docs/2"), None).await;
     assert_eq!((s, &v["found"]), (404, &json!(false)), "the bulk line didn't write: {v}");
+    // Nor through a lookup inside the query (read as the caller, as Elasticsearch does).
+    let lookup = |index: &str| json!({"query": {"terms": {"title": {"index": index, "id": "1", "path": "title"}}}});
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/search"), Some(lookup("secrets"))).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "{v}");
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/search"), Some(lookup("books"))).await;
+    assert_eq!(s, 200, "a lookup in the route's own index: {v}");
     let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/books/docs/1"), None).await;
     assert_eq!((s, v["_source"]["year"].as_i64()), (200, Some(2018)), "{v}");
     let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/search"), Some(json!({"query": {"term": {"year": 2021}}}))).await;

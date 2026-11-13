@@ -405,6 +405,14 @@ pub fn authorize(ctx: &Ctx) -> EsResult<Option<String>> {
     let (scope, action) = privileges::action_of(ctx.api.name());
     let st = ctx.state();
     let eff = effective(&file_roles(ctx.cluster), &st, p);
+    // Documents and indices a query reads besides its targets (a terms lookup, a stored shape or
+    // percolated document, more_like_this documents, a lookup runtime field) are read as the
+    // user, as Elasticsearch's lookups authorize them.
+    let denied_lookups: Vec<(&'static str, String)> = lookup_reads(ctx).into_iter().filter(|(a, i)| !eff.allows_index(a, i)).collect();
+    if let Some((a, _)) = denied_lookups.first() {
+        let on: Vec<String> = denied_lookups.iter().filter(|(x, _)| x == a).map(|(_, i)| i.clone()).collect();
+        return Err(denied(p, a, Some(&on)));
+    }
     match scope {
         Scope::Any => Ok(None),
         Scope::Cluster => {
@@ -538,6 +546,64 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     }
     out.sort();
     out.dedup();
+    out
+}
+
+/// APIs whose bodies are queries (and runtime mappings), scanned by [`lookup_reads`].
+const QUERY_APIS: &[&str] = &[
+    "search", "msearch", "count", "delete_by_query", "update_by_query", "explain", "indices.validate_query", "async_search.submit", "search_template",
+    "msearch_template", "field_caps", "knn_search", "open_point_in_time", "eql.search", "terms_enum", "termvectors", "mtermvectors",
+];
+
+/// The indices a request's queries read besides its targets, with the action each read is
+/// authorized as: `indices:data/read/get` for a terms lookup's document (`index` with `id` and
+/// `path`, or OpenSearch's `query`), a `geo_shape`'s `indexed_shape`, `percolate`'s stored
+/// document and `more_like_this`'s `like` / `unlike` documents; `indices:data/read/search` for a
+/// `lookup` runtime field's `target_index`. Every JSON line of the body is scanned (`msearch`).
+fn lookup_reads(ctx: &Ctx) -> Vec<(&'static str, String)> {
+    const GET: &str = "indices:data/read/get";
+    const SEARCH: &str = "indices:data/read/search";
+    fn walk(v: &Value, parent: Option<&str>, out: &mut Vec<(&'static str, String)>) {
+        match v {
+            Value::Obj(m) => {
+                let s = |k: &str| m.get(k).and_then(Value::as_str);
+                if let Some(i) = s("index") {
+                    let lookup = m.contains_key("path") && (m.contains_key("id") || m.contains_key("query"));
+                    if lookup || matches!(parent, Some("indexed_shape" | "percolate")) {
+                        out.push((GET, i.to_string()));
+                    }
+                }
+                if matches!(parent, Some("like" | "unlike")) && let Some(i) = s("_index") {
+                    out.push((GET, i.to_string()));
+                }
+                if s("type") == Some("lookup") && let Some(i) = s("target_index") {
+                    out.push((SEARCH, i.to_string()));
+                }
+                for (k, c) in m {
+                    walk(c, Some(k.as_str()), out);
+                }
+            }
+            // `like: [{...}, "text"]`: the array's documents keep their parent's key.
+            Value::Arr(a) => a.iter().for_each(|c| walk(c, parent, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    // Only bodies that hold queries: documents being written may hold any keys.
+    if ctx.body.is_empty() || !QUERY_APIS.contains(&ctx.api.name()) {
+        return out;
+    }
+    if !ctx.body.contains(&b'\n') || ctx.body.iter().filter(|b| **b == b'\n').count() == 1 {
+        if let Ok(Some(v)) = ctx.body() {
+            walk(&v, None, &mut out);
+        }
+    } else {
+        for line in ctx.body.split(|b| *b == b'\n') {
+            if let Ok(Some(v)) = crate::json::parse(line) {
+                walk(&v, None, &mut out);
+            }
+        }
+    }
     out
 }
 
