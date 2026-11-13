@@ -1591,9 +1591,9 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **MySQL outside roll**, next to #39's Postgres: the same two roles taking turns and per-lease
-   users (`CREATE USER … PASSWORD EXPIRE`/`GRANT <group role>`, `ALTER USER … IDENTIFIED BY`) over
-   TLS through the same guarded connection.
+1. **Rotating AWS IAM users' access keys** (on #38's registered roles), as Infisical's AWS IAM
+   rotation: an IAM user's two key slots take turns like a database's two roles
+   (`CreateAccessKey`, then `DeleteAccessKey` after the grace period), for what can't use a role.
 2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
 3. **Products say who owns a resource**, so a person's project can link their own databases,
@@ -1621,9 +1621,9 @@ Open pull requests after this one:
 - **#37, customer-managed keys** (after #20): a project's data key wrapped by the customer's KMS key,
   set from the project's settings.
 - **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
-- **#39, Postgres outside roll** (after #20): two login roles take turns (rotation), or a login per
-  lease in a group role (dynamic), the password sent as a SCRAM verifier over TLS to a public
-  address rolld resolved itself.
+- **#39, Postgres and MySQL outside roll** (after #20): two login roles take turns (rotation), or a
+  login per lease in a group role (dynamic), over verified TLS to a public address rolld resolved
+  itself (Postgres gets a SCRAM verifier, never the password).
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
