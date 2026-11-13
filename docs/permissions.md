@@ -56,7 +56,7 @@ access and refresh tokens. Revoking the grant revokes them all at once. A refres
 used, is kept as spent until it would have expired: presented again later than 30 seconds after
 its use, someone else has a copy (OAuth 2.1, section 4.3.1), so the connection is revoked, with why,
 and the audit log has it. Within those 30 seconds it's only refused (a client retrying after a lost
-answer keeps its connection).
+answer keeps its connection), and the audit log has that too.
 
 Grants are made by the operator: the operator's token, or a signed-in admin (docs/accounts.md:
 an admin's session acts as the operator). The grant records who made it (`created_by`: the admin's
@@ -544,12 +544,17 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 - The builder and the consent screen offer only what they reach (`GET /v1/access` answers
   `{kind: "user", reach: ["code", "agents", "workspace"]}`).
 - **Their tokens' news is mailed to them** (GitHub mails a token's owner), as well as posted
-  where approvals go: an approval one of their tokens waits on (they decide it; the mail names the
-  token, the action and the resource, never the request's arguments, which stay on roll's page), a
-  token of theirs used from a new network, one roll revoked as leaked, and, once a day, the ones
-  that expire within a week. Each person hears of their own tokens only, a
-  disabled person hears nothing, and a mail holds no secret: the token's name, the network or
-  where it was found, and a link (`roll_auth::Sessions::tell`, accounts' mailer).
+  where approvals go: an approval one of their tokens waits on (they decide it), a token of theirs
+  used from a new network, one roll revoked as leaked, and, once a day, the ones that expire
+  within a week (made for more than a day). Each person hears of their own tokens only, a
+  disabled person hears nothing (`roll_auth::Sessions::tell`, accounts' mailer).
+  - **A mail holds roll's words, not anyone else's.** Names are shown as words only (`mail_name`:
+    letters, digits, spaces, `-` and `_`, 40 characters), since a token's or client's name is
+    anyone's text; an approval's mail names the token, the product and the action, never the
+    resource or the request's arguments (a request can name anything); a leak's mail doesn't say
+    where it was found (the token's page does). No secret, and every link is to roll's own pages.
+  - **No floods:** one approval mail per token per ten minutes (more show on the approvals page),
+    and at most 20 mails a person an hour on a node.
 
 ## Managing grants
 
@@ -577,7 +582,7 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   by whoever set the identity up (none while they can't sign in), its `ip_allow` the identity's.
   The login is the authentication, so no caller is gated. Workload tokens (`kind: "workload"`)
   stay out of the token list (`?kind=workload` lists the latest 500), the checkup, the expiry
-  digest, new-network notices and the tokens' caps (10,000 live of their own), and go a day after
+  digest, new-network notices and the tokens' caps (10,000 live of their own, 1,000 per owner), and go a day after
   they end. One is fixed: never edited, rotated or grown by a remembered approval (`409`), only
   revoked or left to end; a token it makes ends no later than it does. Their requests are audited as any token's, and each mint is a row.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.

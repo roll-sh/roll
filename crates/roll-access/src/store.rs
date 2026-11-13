@@ -118,6 +118,9 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
 pub const TOKEN_PREFIX: &str = "rlt_";
 /// Live workload grants at most (an identity's logins: a CI job each), apart from tokens' caps.
 pub const MAX_WORKLOADS: usize = 10_000;
+/// Live workload grants one owner's identities hold at most, so one busy pipeline doesn't take
+/// everyone's room.
+pub const OWNER_MAX_WORKLOADS: usize = 1_000;
 /// How long a workload grant lives, in minutes.
 pub const WORKLOAD_MINUTES: std::ops::RangeInclusive<u32> = 5..=60;
 pub const ACCESS_PREFIX: &str = "rlo_";
@@ -752,9 +755,12 @@ impl Store {
         Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind <> 'workload' ORDER BY g.created_at DESC, g.id"), (), grant_row))?)
     }
 
-    /// Workload grants, newest first, at most `limit`.
-    pub fn workloads(&self, limit: usize) -> Result<Vec<Grant>> {
-        Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind = 'workload' ORDER BY g.created_at DESC, g.id LIMIT ?"), [limit as i64], grant_row))?)
+    /// Workload grants, newest first, at most `limit`: a person's own (`user`), or everyone's.
+    pub fn workloads(&self, limit: usize, user: Option<&str>) -> Result<Vec<Grant>> {
+        Ok(self.db.read(|c| match user {
+            Some(u) => c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind = 'workload' AND g.user_id = ? ORDER BY g.created_at DESC, g.id LIMIT ?"), params![u, limit as i64], grant_row),
+            None => c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind = 'workload' ORDER BY g.created_at DESC, g.id LIMIT ?"), [limit as i64], grant_row),
+        })?)
     }
 
     /// A workload grant (`Access::mint_workload`): a token for `minutes`, whose secret dies with it.
@@ -775,6 +781,10 @@ impl Store {
             let live: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE kind = 'workload' AND revoked_at IS NULL AND expires_at > ?", [now], |r| r.get(0))?;
             if live as usize >= MAX_WORKLOADS {
                 return Err(Error::Conflict(format!("at most {MAX_WORKLOADS} live workload tokens")));
+            }
+            let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND created_by = ?", params![now, created_by], |r| r.get(0))?;
+            if theirs as usize >= OWNER_MAX_WORKLOADS {
+                return Err(Error::Conflict(format!("at most {OWNER_MAX_WORKLOADS} live workload tokens for one owner's identities")));
             }
             c.execute(
                 "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise) VALUES (?, ?, 'workload', ?, ?, ?, ?, ?, NULL, ?, ?, 0)",
@@ -1454,7 +1464,7 @@ impl Store {
     pub fn refresh(&self, refresh_token: &str, client_id: &str, grace_ms: i64) -> Result<(Grant, String, String)> {
         enum Outcome {
             Fresh(String),
-            Retry,
+            Retry(String),
             Reused(String),
             Bad(&'static str),
         }
@@ -1485,7 +1495,7 @@ impl Store {
             }
             if kind == "spent_refresh" {
                 if now - at < grace_ms {
-                    return Ok(Outcome::Retry);
+                    return Ok(Outcome::Retry(grant_id));
                 }
                 c.execute(
                     "UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL",
@@ -1505,7 +1515,32 @@ impl Store {
         })?;
         match outcome {
             Outcome::Fresh(grant_id) => Ok((self.get(&grant_id)?, access, refresh)),
-            Outcome::Retry => Err(Error::OAuth("invalid_grant", "this refresh token was just used: use the tokens that answer gave".into())),
+            // Refused, not revoked (a client's own retry), but on the record: a copy used inside the
+            // grace looks the same, and the token's page should show it.
+            Outcome::Retry(grant_id) => {
+                let g = self.get(&grant_id).ok();
+                self.audit(&AuditEvent {
+                    id: crate::new_id("aud"),
+                    at: now,
+                    grant_id: Some(grant_id),
+                    grant_name: g.map(|g| g.name),
+                    source: "oauth".into(),
+                    tool: None,
+                    method: "POST".into(),
+                    route: "/v1/access/oauth/token".into(),
+                    product: Some("access".into()),
+                    action: Some("admin".into()),
+                    resource: Some("a refresh token used again within its grace".into()),
+                    decision: "deny".into(),
+                    approval: None,
+                    status: 400,
+                    args: None,
+                    ip: None,
+                    duration_ms: 0,
+                    client: None,
+                });
+                Err(Error::OAuth("invalid_grant", "this refresh token was just used: use the tokens that answer gave".into()))
+            }
             Outcome::Bad(why) => Err(Error::OAuth("invalid_grant", why.into())),
             Outcome::Reused(grant_id) => {
                 tracing::warn!(grant = %grant_id, "a spent refresh token was used again: the connection was revoked");

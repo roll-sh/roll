@@ -819,12 +819,12 @@ async fn a_users_token_acts_as_them() {
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     // She's mailed that it waits for her (her token's approvals are hers to decide).
     for _ in 0..100 {
-        if d.people.1.lock().unwrap().iter().any(|m| m.starts_with("usr_alice: Your roll token \"cursor\" asks to delete")) {
+        if d.people.1.lock().unwrap().iter().any(|m| m == "usr_alice: Your roll token \"cursor\" waits on your approval") {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(d.people.1.lock().unwrap().iter().any(|m| m.starts_with("usr_alice: Your roll token \"cursor\" asks to delete")), "{:?}", d.people.1.lock().unwrap());
+    assert!(d.people.1.lock().unwrap().iter().any(|m| m == "usr_alice: Your roll token \"cursor\" waits on your approval"), "{:?}", d.people.1.lock().unwrap());
     assert_eq!(d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(d.as_user("usr_bob", Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{apr}"), None).await.0, StatusCode::NOT_FOUND, "nor takes back hers");
     assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);

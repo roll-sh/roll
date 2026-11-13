@@ -286,7 +286,8 @@ async fn list(State(a): S, ext: Extensions, Query(f): Query<ListFilter>) -> crat
         Some("workload") => true,
         Some(k) => return Err(Error::BadRequest(format!("kind {k:?}: only workload"))),
     };
-    let (grants, activity) = blocking(a, move |a| Ok((if workloads { a.store.workloads(500)? } else { a.store.list()? }, a.store.activity()?))).await?;
+    let mine = who.mine().map(str::to_string);
+    let (grants, activity) = blocking(a, move |a| Ok((if workloads { a.store.workloads(500, mine.as_deref())? } else { a.store.list()? }, a.store.activity()?))).await?;
     let out: Vec<Value> = grants
         .into_iter()
         .filter(|g| visible(&who, g))
