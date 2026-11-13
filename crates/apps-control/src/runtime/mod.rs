@@ -48,6 +48,9 @@ pub struct InstanceSpec {
     /// After this long with no traffic the instance may end itself (Fargate's guard proxy: a
     /// task whose node went away still stops). None: never (min_instances, workers).
     pub idle_stop_s: Option<u32>,
+    /// The private registry login its image pulls with, where the runtime pulls at each start
+    /// (Fargate: the task's repository credentials). Never in `Debug`.
+    pub registry: Option<RegistryLogin>,
 }
 
 impl std::fmt::Debug for InstanceSpec {

@@ -678,6 +678,18 @@ impl Apps {
         }
         let network = network_name(&svc.project, &env.name);
         self.deps.runtime.ensure_network(&network, &svc.id).await.map_err(|e| Error::Internal(e.to_string()))?;
+        // An image service's registry login, for a runtime that pulls at each start; only the
+        // registry it's for gets it.
+        let registry = match &svc.source {
+            Source::Image { .. } => {
+                let sid = svc.id.clone();
+                self.db(move |s| s.registry_login(&sid))
+                    .await?
+                    .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(&image))
+                    .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password })
+            }
+            _ => None,
+        };
         let spec = InstanceSpec {
             name: String::new(),
             service: svc.id.clone(),
@@ -695,6 +707,7 @@ impl Apps {
             // A web service that scales to zero sleeps after `sleep_after`: an instance idle well
             // past that (its node gone) may end itself.
             idle_stop_s: (run.kind == RunType::Web && run.min_instances == 0).then(|| run.sleep_after_s.max(60) + 300),
+            registry,
         };
         Ok(Template { deployment: dep.id.clone(), spec, run })
     }

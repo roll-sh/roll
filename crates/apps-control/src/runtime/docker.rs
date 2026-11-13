@@ -604,6 +604,7 @@ mod tests {
             aliases: vec!["web".into()],
             volume: None,
             idle_stop_s: None,
+            registry: None,
         };
         let c = engine_config(&spec, Some(41234)).unwrap();
         assert_eq!(c["Env"][0], format!("TLS_KEY={pem}"));

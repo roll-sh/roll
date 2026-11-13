@@ -96,6 +96,11 @@ fn app(t: &mut Value) -> &mut Value {
 async fn aws(State(f): State<Fake>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Bytes) -> Response {
     // The image registry: every manifest has one digest.
     if uri.path().starts_with("/v2/") {
+        // A private repository answers only its login (Basic, as some registries ask).
+        let basic = headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Basic Y2k6Z2hwLXJlZ2lzdHJ5LXMzY3IzdA==");
+        if uri.path().starts_with("/v2/private/") && !basic {
+            return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic realm=\"registry\"")]).into_response();
+        }
         return if method == Method::HEAD && uri.path().contains("/manifests/") {
             (StatusCode::OK, [("docker-content-digest", DIGEST)]).into_response()
         } else {
@@ -589,6 +594,33 @@ async fn a_failed_build_fails_the_deploy_and_leaves_nothing() {
     assert!(w.fake.calls("RunTask").is_empty() && w.fake.calls("RegisterTaskDefinition").is_empty());
     assert!(w.fake.aws.lock().secrets.is_empty());
     assert_eq!(w.fake.keys("apps/"), Vec::<String>::new());
+}
+
+/// An image from a private registry: its digest read with the login, and the task pulling with
+/// the service's registry secret (repository credentials), the password in no ECS request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_image_pulls_with_its_registry_secret() {
+    let w = world().await;
+    let (st, svc) = call(
+        &w.api,
+        "POST",
+        "/v1/apps/services",
+        Some(json!({ "project": w.project, "name": "private", "source": {"kind": "image", "image": "private/api:1"}, "run": {"port": 8080, "min_instances": 1}, "registry": {"username": "ci", "password": "ghp-registry-s3cr3t"} })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d = settled(&w, &id, svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let short = id.trim_start_matches("svc_");
+    let stored = w.fake.aws.lock().secrets.get(&format!("roll-apps/registry/{short}")).cloned().expect("the login is a secret");
+    assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), json!({"username": "ci", "password": "ghp-registry-s3cr3t"}));
+    let defs = w.fake.calls("RegisterTaskDefinition");
+    let creds = defs.iter().find_map(|d| d["containerDefinitions"][0]["repositoryCredentials"]["credentialsParameter"].as_str()).unwrap_or_else(|| panic!("{defs:?}"));
+    assert!(creds.contains(&format!("roll-apps/registry/{short}")), "{creds}");
+    for op in ["RegisterTaskDefinition", "RunTask"] {
+        assert!(!w.fake.calls(op).iter().any(|c| c.to_string().contains("ghp-registry-s3cr3t")), "the password is in {op}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

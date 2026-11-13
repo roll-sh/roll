@@ -1038,6 +1038,7 @@ mod tests {
                 aliases: vec![],
                 volume: None,
                 idle_stop_s: None,
+                registry: None,
             },
             run,
         })

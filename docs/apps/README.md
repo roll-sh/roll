@@ -663,9 +663,12 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   definitions, pass the execution role, `StartBuild`/`StopBuild`/`BatchGetBuilds` on the project,
   ECR `CreateRepository`/`BatchDeleteImage` under `apps/`, Secrets Manager under
   `roll-apps/builds/`), a bucket lifecycle rule expiring `<prefix>env/` and `<prefix>builds/`
-  after a day, and the `ROLL_APPS_*` node settings. Still missing on the fleet: private
-  networking (Cloud Map), volumes (EFS; a service with a volume is refused), shells (ECS Exec),
-  private registries (repository credentials), and multi-line
+  after a day, and the `ROLL_APPS_*` node settings. A private image pulls with the service's
+  login as a Secrets Manager secret `roll-apps/registry/<service>` named in the task definition
+  (repository credentials; tested against the fake AWS): the fleet role needs
+  `CreateSecret`/`PutSecretValue` there and the execution role `GetSecretValue`; the secret
+  isn't deleted with its service yet. Still missing on the fleet: private networking (Cloud
+  Map), volumes (EFS; a service with a volume is refused), shells (ECS Exec), and multi-line
   variable values.
 - The edge routes `*.up.<site domain>` and unknown hosts (custom domains) to roll apps.
 - Custom domains' certificates are built and tested against Pebble (HTTP-01) and a fake

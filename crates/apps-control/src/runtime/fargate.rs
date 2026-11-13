@@ -25,8 +25,11 @@
 //!   one line per variable, so a value with a line break is refused at `create`.
 //! - Output goes to CloudWatch Logs (`awslogs`, stream `apps/app/<task>`) and is followed into
 //!   the instance's log until the task stops.
-//! - Not yet: private networking (Cloud Map), volumes (EFS), shells (ECS Exec), images from a
-//!   private registry (repository credentials). A spec with a volume is refused; the project
+//! - An image from a private registry pulls with the service's login, kept as a Secrets Manager
+//!   secret of its own (`roll-apps/registry/<service>`) that the task definition names as its
+//!   repository credentials: the password is never in a task definition or a `RunTask`.
+//! - Not yet: private networking (Cloud Map), volumes (EFS), shells (ECS Exec). A spec with a
+//!   volume is refused; the project
 //!   network and its aliases are ignored.
 
 use super::aws::{Bucket, FleetConfig};
@@ -166,6 +169,8 @@ pub struct Fargate {
     me: Weak<Fargate>,
     ecs: aws_sdk_ecs::Client,
     logs: aws_sdk_cloudwatchlogs::Client,
+    /// Private registry logins, as the tasks' repository credentials.
+    secrets: aws_sdk_secretsmanager::Client,
     bucket: Bucket,
     registry: reqwest::Client,
     /// Task definitions by family. Held while one is registered, so instances of a new image at
@@ -194,6 +199,7 @@ impl Fargate {
             me: me.clone(),
             ecs: aws_sdk_ecs::Client::new(&sdk),
             logs: aws_sdk_cloudwatchlogs::Client::new(&sdk),
+            secrets: aws_sdk_secretsmanager::Client::new(&sdk),
             bucket,
             registry,
             cfg,
@@ -203,12 +209,43 @@ impl Fargate {
         }))
     }
 
+    /// The service's registry login as a Secrets Manager secret
+    /// (`roll-apps/registry/<service>`, `{"username", "password"}` as ECS reads it), made or
+    /// brought up to date: its ARN.
+    async fn registry_secret(&self, service: &str, login: &RegistryLogin) -> anyhow::Result<String> {
+        let name = format!("roll-apps/registry/{}", short(service));
+        let value = serde_json::json!({ "username": login.username, "password": login.password }).to_string();
+        let made = self
+            .secrets
+            .create_secret()
+            .name(&name)
+            .description("roll apps: a service's private registry login")
+            .secret_string(&value)
+            .tags(aws_sdk_secretsmanager::types::Tag::builder().key(LABEL).value(service).build())
+            .send()
+            .await;
+        match made {
+            Ok(out) => out.arn.context("CreateSecret returned no ARN"),
+            Err(e) if e.as_service_error().is_some_and(|e| e.is_resource_exists_exception()) => {
+                let out = self.secrets.put_secret_value().secret_id(&name).secret_string(&value).send().await.map_err(|e| anyhow::anyhow!("updating {name}: {}", aws_sdk_secretsmanager::error::DisplayErrorContext(e)))?;
+                out.arn.context("PutSecretValue returned no ARN")
+            }
+            Err(e) => Err(anyhow::anyhow!("storing {name}: {}", aws_sdk_secretsmanager::error::DisplayErrorContext(e))),
+        }
+    }
+
     /// The task definition for `spec`: found or registered once, then reused.
     async fn task_def(&self, spec: &InstanceSpec) -> anyhow::Result<String> {
         let (cpu, memory) = fargate_size(spec.cpu, spec.memory_mb);
         let shell = spec.command.is_some();
         let c = &self.cfg;
-        let key = format!("{}\n{cpu}\n{memory}\n{:?}\n{shell}\n{}\n{:?}\n{}\n{}\n{}\n{}\n{:?}", spec.image, spec.port, c.execution_role, c.task_role, c.log_group, c.arch, c.guard_image, c.port, spec.idle_stop_s);
+        // A private image pulls with the service's registry secret (ECS reads it with the
+        // execution role); its ARN is part of the task definition.
+        let credentials = match &spec.registry {
+            Some(login) => Some(self.registry_secret(&spec.service, login).await?),
+            None => None,
+        };
+        let key = format!("{}\n{cpu}\n{memory}\n{:?}\n{shell}\n{}\n{:?}\n{}\n{}\n{}\n{}\n{:?}\n{:?}", spec.image, spec.port, c.execution_role, c.task_role, c.log_group, c.arch, c.guard_image, c.port, spec.idle_stop_s, credentials);
         let hash = hex::encode(Sha256::digest(key));
         let family = format!("{PREFIX}{}-{}", short(&spec.service), &hash[..16]);
         let mut defs = self.defs.lock().await;
@@ -242,6 +279,9 @@ impl Fargate {
                     .log_configuration(logs);
                 if shell {
                     app = app.entry_point("sh").entry_point("-c");
+                }
+                if let Some(arn) = &credentials {
+                    app = app.repository_credentials(aws_sdk_ecs::types::RepositoryCredentials::builder().credentials_parameter(arn).build()?);
                 }
                 // Nodes reach a web task only on the one port the isolated subnets admit: roll's
                 // guard proxy forwards it to the app's own port (containers of a task share
@@ -424,8 +464,9 @@ impl Fargate {
     }
 
     /// The image's digest from its registry: a manifest `HEAD`, anonymous or with the
-    /// registry's anonymous pull token.
-    async fn digest(&self, image: &str) -> anyhow::Result<String> {
+    /// registry's pull token (anonymous, or for `login`), or `login` itself on a registry that
+    /// asks for Basic.
+    async fn digest(&self, image: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
         let r = ImageRef::parse(image);
         let base = self.cfg.registry.clone().unwrap_or_else(|| format!("https://{}", r.registry));
         let url = format!("{}/v2/{}/manifests/{}", base.trim_end_matches('/'), r.repo, r.reference);
@@ -433,8 +474,13 @@ impl Fargate {
         let mut resp = self.registry.head(&url).header("accept", accept).send().await.with_context(|| format!("asking {} for {image}", r.registry))?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             let challenge = resp.headers().get("www-authenticate").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
-            let token = self.token(&challenge).await.with_context(|| format!("{} asked for a login", r.registry))?;
-            resp = self.registry.head(&url).header("accept", accept).bearer_auth(token).send().await?;
+            resp = match (challenge.starts_with("Basic"), login) {
+                (true, Some(l)) => self.registry.head(&url).header("accept", accept).basic_auth(&l.username, Some(&l.password)).send().await?,
+                _ => {
+                    let token = self.token(&challenge, login).await.with_context(|| format!("{} asked for a login", r.registry))?;
+                    self.registry.head(&url).header("accept", accept).bearer_auth(token).send().await?
+                }
+            };
         }
         if !resp.status().is_success() {
             bail!("{} answered {} for {image}", r.registry, resp.status());
@@ -444,8 +490,9 @@ impl Fargate {
         Ok(format!("{}@{digest}", r.name))
     }
 
-    /// An anonymous pull token, from a `Bearer realm=…,service=…,scope=…` challenge.
-    async fn token(&self, challenge: &str) -> anyhow::Result<String> {
+    /// A pull token, from a `Bearer realm=…,service=…,scope=…` challenge: anonymous, or for
+    /// `login` (Basic to the token service, as `docker login` does).
+    async fn token(&self, challenge: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
         let params = challenge.strip_prefix("Bearer ").context("not a bearer challenge")?;
         let get = |k: &str| {
             params.split(',').find_map(|p| {
@@ -463,7 +510,11 @@ impl Fargate {
                 url.query_pairs_mut().append_pair(k, &v);
             }
         }
-        let resp = self.registry.get(url).send().await?.error_for_status()?;
+        let mut req = self.registry.get(url);
+        if let Some(l) = login {
+            req = req.basic_auth(&l.username, Some(&l.password));
+        }
+        let resp = req.send().await?.error_for_status()?;
         anyhow::ensure!(resp.content_length().is_none_or(|n| n <= 64 << 10), "the token answer is too large");
         let body = resp.bytes().await?;
         anyhow::ensure!(body.len() <= 64 << 10, "the token answer is too large");
@@ -512,14 +563,11 @@ impl Runtime for Fargate {
     /// Fargate pulls at each start; this pins the image's digest, so a moving tag never changes
     /// a deployment.
     async fn pull(&self, image: &str, log: &LogSink, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
-        if login.is_some() {
-            bail!("an image from a private registry can't run on the fleet yet");
-        }
         if image.contains("@sha256:") {
             return Ok(image.to_string());
         }
         log.line(format!("resolving {image}"));
-        self.digest(image).await
+        self.digest(image, login).await
     }
 
     async fn create(&self, spec: &InstanceSpec) -> anyhow::Result<()> {
