@@ -916,6 +916,7 @@ mod tests {
                 network: None,
                 aliases: vec![],
                 volume: None,
+                idle_stop_s: None,
             },
             run,
         })

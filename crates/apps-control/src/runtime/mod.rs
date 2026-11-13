@@ -45,6 +45,9 @@ pub struct InstanceSpec {
     pub aliases: Vec<String>,
     /// A named volume and where it's mounted.
     pub volume: Option<(String, String)>,
+    /// After this long with no traffic the instance may end itself (Fargate's guard proxy: a
+    /// task whose node went away still stops). None: never (min_instances, workers).
+    pub idle_stop_s: Option<u32>,
 }
 
 impl std::fmt::Debug for InstanceSpec {

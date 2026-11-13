@@ -32,6 +32,12 @@ pub struct FleetConfig {
     /// on any TCP port (the app's port is the service's choice).
     pub subnets: Vec<String>,
     pub security_group: String,
+    /// The one port a task is reached on (its guard proxy): the port the isolated security
+    /// group and network ACL admit from nodes (`ROLL_APPS_FARGATE_PORT`, the stack's PreviewPort,
+    /// 9970 by default).
+    pub port: u16,
+    /// roll's small image (`roll-fetch`, the stack's `fetch-<tag>`): the guard proxy beside the app.
+    pub guard_image: String,
     /// A public IP per task: its only way out in subnets without a NAT gateway.
     pub public_ip: bool,
     /// The role ECS pulls images, reads environment files and writes logs with.
@@ -96,6 +102,11 @@ impl FleetConfig {
             cluster: need("ROLL_APPS_FARGATE_CLUSTER")?,
             subnets,
             security_group: need("ROLL_APPS_FARGATE_SECURITY_GROUP")?,
+            port: match get("ROLL_APPS_FARGATE_PORT") {
+                Some(p) => p.parse().map_err(|_| anyhow!("ROLL_APPS_FARGATE_PORT is a port"))?,
+                None => 9970,
+            },
+            guard_image: need("ROLL_APPS_FARGATE_GUARD_IMAGE")?,
             public_ip: get("ROLL_APPS_FARGATE_PUBLIC_IP").is_some_and(|v| v == "1" || v == "true"),
             execution_role: need("ROLL_APPS_FARGATE_EXECUTION_ROLE")?,
             task_role: get("ROLL_APPS_FARGATE_TASK_ROLE"),

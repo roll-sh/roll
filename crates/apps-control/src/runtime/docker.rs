@@ -586,6 +586,7 @@ mod tests {
             network: Some("roll-apps-net-p-production".into()),
             aliases: vec!["web".into()],
             volume: None,
+            idle_stop_s: None,
         };
         let c = engine_config(&spec, Some(41234)).unwrap();
         assert_eq!(c["Env"][0], format!("TLS_KEY={pem}"));

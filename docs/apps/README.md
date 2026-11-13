@@ -235,14 +235,20 @@ every deployment is immutable with instant rollback.
   tasks, with the isolation of docs/cloud/README.md's "Isolated work" but no template:
   - A task definition per deployment image, registered by roll and reused: family
     `roll-apps-<service>-<hash>` (the hash over the image, the size, the port, whether a start
-    command replaces the image's own, the roles, the log group and the architecture). It has one
-    container, `app`, with the image's own entrypoint (or `sh -c <start>`), `awslogs` to
+    command replaces the image's own, the roles, the log group, the architecture, the guard and
+    its idle). `app` has the image's own entrypoint (or `sh -c <start>`), `awslogs` to
     `ROLL_APPS_FARGATE_LOG_GROUP`, the execution role, and a task role only if one is set (none
-    by default: no AWS credentials in the task). `create` registers or finds it and runs nothing.
+    by default: no AWS credentials in the task). A web task also has `guard`, roll's small image
+    (`roll-fetch proxy`, `ROLL_APPS_FARGATE_GUARD_IMAGE`): the only port nodes reach is its
+    `ROLL_APPS_FARGATE_PORT` (the stack's PreviewPort, 9970, the one the isolated subnets'
+    security group and network ACL admit, as for previews), forwarded to the app's own port
+    over the task's shared localhost; it ends the task once nothing has moved for well past the
+    service's `sleep_after` (never for `min_instances` above 0), so a task whose node went away
+    still stops. `create` registers or finds it and runs nothing.
   - `start` is `RunTask` (awsvpc, `ROLL_APPS_FARGATE_SUBNETS` and `_SECURITY_GROUP`, on demand,
     `startedBy roll-apps-<service>`, tags `sh.roll.apps=<service id>` and
     `sh.roll.apps.instance=<name>`). It waits for RUNNING and answers the task's private address
-    on the app's port, which the owner's proxy health-checks and forwards to as it does a
+    on the guard's port, which the owner's proxy health-checks and forwards to as it does a
     container's. `stop` is `StopTask` (SIGTERM, then SIGKILL after the task definition's 30 s
     `stopTimeout`), and the next start is a new task. `wait` polls `DescribeTasks` to STOPPED and
     answers the `app` container's exit code (cron runs, jobs, pre-deploy commands). `list` is
@@ -267,10 +273,11 @@ every deployment is immutable with instant rollback.
     the fleet is in `## Next`: Firecracker microVM hosts with snapshot restore (what Fly and
     Lambda SnapStart do), behind the same `Runtime` trait.
   - Metering: `usage` answers nothing on Fargate (a task's cgroup isn't read). Fargate bills size
-    × time, so the fleet's meter should charge the allocation while running; until it does, it
-    records instance counts and no CPU-seconds or GB-seconds.
+    × time, so the meter charges the allocation while an instance runs (its CPU × seconds and
+    its memory).
   - Settings (`runtime::aws::FleetConfig::from_lookup`): `ROLL_APPS_RUNTIME=fargate` (default
-    `docker`), `ROLL_APPS_FARGATE_CLUSTER`, `_SUBNETS` (comma separated), `_SECURITY_GROUP`,
+    `docker`), `ROLL_APPS_FARGATE_CLUSTER`, `_SUBNETS` (comma separated, the isolated subnets),
+    `_SECURITY_GROUP` (the isolated one), `_PORT` (9970), `_GUARD_IMAGE`,
     `_EXECUTION_ROLE`, `_TASK_ROLE` (optional), `_LOG_GROUP`, `_PUBLIC_IP` (`1`), `_ARCH`
     (`ARM64` or `X86_64`), `ROLL_APPS_CODEBUILD_PROJECT`, `ROLL_APPS_ECR_REPO` (`apps`),
     `ROLL_APPS_BUCKET` (default `ROLL_S3_BUCKET`), `ROLL_APPS_PREFIX` (`apps/`) and `AWS_REGION`.
@@ -516,14 +523,13 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   `StartBuild` request), not against AWS. The stack (`deploy/cloud/aws/roll-cloud.yaml`) doesn't
   have them yet: the CodeBuild project (privileged; its role may push to `apps/*`, read
   `<prefix>builds/*` and the `roll-apps/builds/*` secrets), the execution role (pull `apps/*`,
-  read `<prefix>env/*`, write the log group), an apps security group that admits fleet nodes on
-  any TCP port, the fleet role's rights (`RunTask` of `roll-apps-*` families, register task
+  read `<prefix>env/*`, write the log group), the fleet role's rights (`RunTask` of `roll-apps-*` families, register task
   definitions, pass the execution role, `StartBuild`/`StopBuild`/`BatchGetBuilds` on the project,
   ECR `CreateRepository`/`BatchDeleteImage` under `apps/`, Secrets Manager under
   `roll-apps/builds/`), a bucket lifecycle rule expiring `<prefix>env/` and `<prefix>builds/`
   after a day, and the `ROLL_APPS_*` node settings. Still missing on the fleet: private
   networking (Cloud Map), volumes (EFS; a service with a volume is refused), shells (ECS Exec),
-  private registries (repository credentials), allocation-based metering, and multi-line
+  private registries (repository credentials), and multi-line
   variable values.
 - The edge routes `*.up.<site domain>` and unknown hosts (custom domains) to roll apps.
 - Custom domains are verified (CNAME or TXT) and routed; their TLS is the edge's job and isn't

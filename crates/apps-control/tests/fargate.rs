@@ -280,7 +280,9 @@ async fn execute(f: Fake, arn: String, n: u32, req: Value) {
     f.aws.lock().envs.insert(arn.clone(), env.clone());
     let id = arn.rsplit('/').next().unwrap().to_string();
     let stream = format!("apps/app/{id}");
-    let port = def["containerDefinitions"][0]["portMappings"][0]["containerPort"].as_u64();
+    // The port nodes reach: the one mapped (the guard's, which forwards to the app; this fake
+    // serves it directly).
+    let port = def["containerDefinitions"].as_array().unwrap().iter().find_map(|c| c["portMappings"][0]["containerPort"].as_u64());
     let ip = format!("127.{}.{}.{}", 64 + (std::process::id() % 60), n / 250, 1 + n % 250);
     set(&f, &arn, |t| {
         t["lastStatus"] = json!("RUNNING");
@@ -372,6 +374,8 @@ async fn world() -> World {
         cluster: "roll-cloud".into(),
         subnets: vec!["subnet-iso-a".into(), "subnet-iso-b".into()],
         security_group: "sg-apps".into(),
+        port: 9970,
+        guard_image: "roll/fetch:test".into(),
         public_ip: false,
         execution_role: "arn:aws:iam::1:role/apps-exec".into(),
         task_role: None,
@@ -516,8 +520,13 @@ async fn a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps() {
     assert!(def["family"].as_str().unwrap().starts_with(&format!("roll-apps-{short}-")), "{def}");
     assert_eq!((def["networkMode"].as_str(), def["cpu"].as_str(), def["memory"].as_str()), (Some("awsvpc"), Some("512"), Some("1024")), "the default 0.5 vCPU and 512 MB, rounded up to a Fargate size: {def}");
     assert_eq!(def["containerDefinitions"][0]["image"], image.as_str());
-    assert_eq!(def["containerDefinitions"][0]["portMappings"][0]["containerPort"], 8080);
     assert!(def["containerDefinitions"][0].get("environment").is_none(), "{def}");
+    // Reached only on the port the isolated subnets admit: the guard proxies it to the app's.
+    let guard = &def["containerDefinitions"][1];
+    assert_eq!(guard["name"], "guard", "{def}");
+    let cmd: Vec<&str> = guard["command"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(&cmd[..5], ["proxy", "--listen", "9970", "--to", "8080"], "{def}");
+    assert!(def["containerDefinitions"][0].get("portMappings").is_none_or(|p| p.as_array().is_some_and(Vec::is_empty)), "the app's own port isn't exposed: {def}");
     let base = format!("/v1/apps/services/{id}/environments/production");
     let (_, env) = call(&w.api, "GET", &base, None).await;
     assert_eq!(env["state"], "stopped", "{env}");

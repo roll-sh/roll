@@ -48,7 +48,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-/// The one container of an app's task.
+/// The guard proxy beside a web task's app (`roll-fetch proxy`).
+pub const GUARD: &str = "guard";
+/// The app's container of a task.
 pub const APP: &str = "app";
 /// The tag naming the instance a task is.
 pub const INSTANCE_TAG: &str = "sh.roll.apps.instance";
@@ -205,7 +207,7 @@ impl Fargate {
         let (cpu, memory) = fargate_size(spec.cpu, spec.memory_mb);
         let shell = spec.command.is_some();
         let c = &self.cfg;
-        let key = format!("{}\n{cpu}\n{memory}\n{:?}\n{shell}\n{}\n{:?}\n{}\n{}", spec.image, spec.port, c.execution_role, c.task_role, c.log_group, c.arch);
+        let key = format!("{}\n{cpu}\n{memory}\n{:?}\n{shell}\n{}\n{:?}\n{}\n{}\n{}\n{}\n{:?}", spec.image, spec.port, c.execution_role, c.task_role, c.log_group, c.arch, c.guard_image, c.port, spec.idle_stop_s);
         let hash = hex::encode(Sha256::digest(key));
         let family = format!("{PREFIX}{}-{}", short(&spec.service), &hash[..16]);
         let mut defs = self.defs.lock().await;
@@ -237,12 +239,40 @@ impl Fargate {
                     .stop_timeout(STOP_TIMEOUT)
                     .linux_parameters(LinuxParameters::builder().init_process_enabled(true).build())
                     .log_configuration(logs);
-                if let Some(p) = spec.port {
-                    app = app.port_mappings(PortMapping::builder().container_port(p as i32).protocol(TransportProtocol::Tcp).build());
-                }
                 if shell {
                     app = app.entry_point("sh").entry_point("-c");
                 }
+                // Nodes reach a web task only on the one port the isolated subnets admit: roll's
+                // guard proxy forwards it to the app's own port (containers of a task share
+                // localhost), and ends the task once it's idle well past the service's sleep, so
+                // one whose node went away still stops.
+                let mut containers = vec![];
+                if let Some(p) = spec.port {
+                    let idle = spec.idle_stop_s.unwrap_or(315_360_000).to_string();
+                    let guard = ContainerDefinition::builder()
+                        .name(GUARD)
+                        .image(&c.guard_image)
+                        .essential(true)
+                        .command("proxy")
+                        .command("--listen")
+                        .command(c.port.to_string())
+                        .command("--to")
+                        .command(p.to_string())
+                        .command("--idle")
+                        .command(idle)
+                        .port_mappings(PortMapping::builder().container_port(c.port as i32).protocol(TransportProtocol::Tcp).build())
+                        .log_configuration(
+                            LogConfiguration::builder()
+                                .log_driver(LogDriver::Awslogs)
+                                .options("awslogs-group", &c.log_group)
+                                .options("awslogs-region", c.region.as_deref().unwrap_or("us-east-1"))
+                                .options("awslogs-stream-prefix", STREAM_PREFIX)
+                                .build()?,
+                        )
+                        .build();
+                    containers.push(guard);
+                }
+                containers.insert(0, app.build());
                 let out = self
                     .ecs
                     .register_task_definition()
@@ -254,7 +284,7 @@ impl Fargate {
                     .execution_role_arn(&c.execution_role)
                     .set_task_role_arn(c.task_role.clone())
                     .runtime_platform(RuntimePlatform::builder().cpu_architecture(CpuArchitecture::from(c.arch.as_str())).operating_system_family(OsFamily::Linux).build())
-                    .container_definitions(app.build())
+                    .set_container_definitions(Some(containers))
                     .tags(Tag::builder().key(LABEL).value(&spec.service).build())
                     .send()
                     .await
@@ -608,7 +638,7 @@ impl Runtime for Fargate {
             bail!("the task stopped before the app ran: {}", stopped_reason(&t));
         }
         let addr = match spec.port {
-            Some(p) => Some(SocketAddr::new(private_ip(&t).context("the task has no private address")?, p)),
+            Some(_) => Some(SocketAddr::new(private_ip(&t).context("the task has no private address")?, self.cfg.port)),
             None => None,
         };
         if let Some(s) = self.instances.lock().get_mut(name).and_then(|i| i.task.as_mut()).filter(|s| s.arn == arn) {

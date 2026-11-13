@@ -587,6 +587,9 @@ impl Apps {
             network: Some(network),
             aliases: vec![svc.name.clone(), format!("{}.{}.internal", svc.name, env.name)],
             volume: run.volume.as_ref().map(|v| (volume_name(&svc.id, &env.name), v.mount.clone())),
+            // A web service that scales to zero sleeps after `sleep_after`: an instance idle well
+            // past that (its node gone) may end itself.
+            idle_stop_s: (run.kind == RunType::Web && run.min_instances == 0).then(|| run.sleep_after_s.max(60) + 300),
         };
         Ok(Template { deployment: dep.id.clone(), spec, run })
     }
