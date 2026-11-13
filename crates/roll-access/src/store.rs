@@ -767,8 +767,8 @@ impl Store {
         Ok(a)
     }
 
-    /// The newest approvals, in a state and of one grant when given.
-    pub fn approvals(&self, state: Option<&str>, grant: Option<&str>, limit: usize) -> Result<Vec<Approval>> {
+    /// The newest approvals, in a state and of some grants when given (`Some(&[])`: none).
+    pub fn approvals(&self, state: Option<&str>, grants: Option<&[String]>, limit: usize) -> Result<Vec<Approval>> {
         let now = code_sql::now_ms();
         let limit = limit.clamp(1, 500) as i64;
         let mut wheres = Vec::new();
@@ -784,9 +784,14 @@ impl Store {
             }
             None => {}
         }
-        if let Some(g) = grant {
-            wheres.push("grant_id = ?");
-            args.push(code_sql::Value::Text(g.to_string()));
+        let marks;
+        if let Some(gs) = grants {
+            if gs.is_empty() {
+                return Ok(Vec::new());
+            }
+            marks = format!("grant_id IN ({})", vec!["?"; gs.len()].join(", "));
+            wheres.push(&marks);
+            args.extend(gs.iter().map(|g| code_sql::Value::Text(g.clone())));
         }
         args.push(code_sql::Value::Int(limit));
         let filter = if wheres.is_empty() { String::new() } else { format!("WHERE {}", wheres.join(" AND ")) };
