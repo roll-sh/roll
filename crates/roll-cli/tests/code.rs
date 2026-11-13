@@ -708,7 +708,7 @@ async fn webhooks_statuses_blame_jobs_and_tokens() {
     assert_eq!(updated["active"], false);
     let updated = js(a(&["code", "webhooks", "update", "acme/w", &id, "--resume", "--event", "*"])).await;
     assert_eq!(updated["active"], true);
-    assert_eq!(updated["events"].as_array().unwrap().len(), 9);
+    assert_eq!(updated["events"].as_array().unwrap().len(), code_control::webhooks::EVENTS.len());
     assert_eq!(e.run(&a(&["code", "webhooks", "update", "acme/w", &id]).iter().map(String::as_str).collect::<Vec<_>>(), None).await.status.code(), Some(1), "nothing to change");
     ok(a(&["code", "webhooks", "ping", "acme/w", &id])).await;
     let mut deliveries = Value::Null;

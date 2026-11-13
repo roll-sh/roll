@@ -2,7 +2,7 @@
 //! (docs/code/http-api.md, "Webhooks and commit statuses").
 //!
 //! - **Webhooks**: a repo's writers register URLs for events (`landed`, `change`, `review`,
-//!   `thread`, `check`, `queue`, `work`, `preview`, `push`, plus `ping`). Deliveries go through
+//!   `thread`, `check`, `queue`, `work`, `preview`, `push`, `budget`, plus `ping`). Deliveries go through
 //!   the review apps' machinery ([`crate::review::apps`]): the same signature
 //!   (`X-Roll-Signature-256` over `{timestamp}.{body}`), SSRF guard, retries with backoff,
 //!   delivery log and redelivery. An event's deliveries are queued before `emit` returns, in one

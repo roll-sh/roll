@@ -494,7 +494,7 @@ Status  = {context, state: "pending" | "success" | "failure" | "error", target_u
 GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                       writers (401 anonymous, 403 others)
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
-       events: any of landed, change, review, thread, check, queue, work, preview, push, or ["*"] (default
+       events: any of landed, change, review, thread, check, queue, work, preview, push, budget, or ["*"] (default
        ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret;
        at most 20 per repo (422)
 GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} → Webhook · PATCH {url?, events?, secret?, active?} → Webhook

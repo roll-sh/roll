@@ -1430,7 +1430,7 @@ export const isNotFound = (e: unknown) => e instanceof ApiError && e.status === 
 
 export type EventHandlers = { [K in keyof CodeEvents]?: (data: CodeEvents[K]) => void } & { open?: (open: boolean) => void };
 
-const EVENT_KINDS: (keyof CodeEvents)[] = ["landed", "change", "work", "check", "preview", "queue", "review", "thread", "push"];
+const EVENT_KINDS: (keyof CodeEvents)[] = ["landed", "change", "work", "check", "preview", "queue", "review", "thread", "push", "budget"];
 
 /** Route one raw event to its handler; unknown kinds and bad JSON are dropped. */
 export function dispatchEvent(handlers: EventHandlers, kind: string, data: string) {
