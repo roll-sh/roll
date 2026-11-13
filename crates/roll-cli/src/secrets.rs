@@ -170,6 +170,15 @@ pub enum Secrets {
         file: String,
         #[arg(long)]
         out: Option<String>,
+        /// Keep running: write `--out` again when the environment changes (checked every
+        /// `--interval` seconds), renewing dynamic credentials' leases meanwhile.
+        #[arg(long, requires = "out")]
+        watch: bool,
+        #[arg(long, default_value_t = 5, requires = "watch")]
+        interval: u64,
+        /// With --watch: a command run (through `sh -c`) after each new file, such as a reload.
+        #[arg(long, requires = "watch", value_name = "COMMAND")]
+        exec: Option<String>,
     },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
@@ -852,7 +861,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Skipped {} existing (use --overwrite): {}", sk.len(), sk.iter().map(s).collect::<Vec<_>>().join(", "));
             }
         }
-        Secrets::Render { file, out } => {
+        Secrets::Render { file, out, watch, interval, exec } => {
             let tpl = if file == "-" {
                 let mut t = String::new();
                 std::io::stdin().read_to_string(&mut t)?;
@@ -860,22 +869,14 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             } else {
                 std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
             };
-            let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
-            let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
-            let text = render(&tpl, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
-                let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
-                anyhow::anyhow!("{file} names keys that have no value:\n  {}", why.join("\n  "))
-            })?;
-            match out {
-                Some(path) => {
-                    use std::io::Write;
-                    let mut o = std::fs::OpenOptions::new();
-                    o.write(true).create(true).truncate(true);
-                    #[cfg(unix)]
-                    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-                    o.open(&path).with_context(|| format!("writing {path}"))?.write_all(text.as_bytes())?;
-                }
-                None => print!("{text}"),
+            let (text, leases) = render_env(&c, &env, &file, &tpl).await?;
+            let Some(out) = out else {
+                print!("{text}");
+                return Ok(());
+            };
+            replace_private(&out, &text)?;
+            if watch {
+                render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
             }
         }
         Secrets::Export { format, name, namespace } => {
@@ -1763,6 +1764,91 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
     let file = setup::save(&all)?;
     println!("{key} → {display}, {env}{}  (kept in {})", if path == "/" { String::new() } else { format!(" {path}") }, file.display());
     Ok(())
+}
+
+/// The template filled from the environment, and the leases of the dynamic credentials in it.
+async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>)> {
+    let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
+    let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
+    let text = render(tpl, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
+        let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
+        anyhow::anyhow!("{file} names keys that have no value:\n  {}", why.join("\n  "))
+    })?;
+    let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
+    Ok((text, leases))
+}
+
+/// Replace `path` whole (a file beside it, then a rename), readable only by its owner: a reader
+/// never sees half a file.
+fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let target = std::path::Path::new(path);
+    let name = target.file_name().with_context(|| format!("{path}: not a file name"))?.to_string_lossy();
+    let tmp = target.with_file_name(format!(".{name}.roll-{}", std::process::id()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let written = o.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all())).and_then(|_| std::fs::rename(&tmp, target));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("writing {path}"))
+}
+
+/// `roll secrets render --watch`: write the file again when the environment's digest changes and
+/// the text with it, then run `exec`; renew dynamic credentials' leases every 10 minutes.
+#[allow(clippy::too_many_arguments)]
+async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
+    let digest_path = format!("{env}/digest?{}", c.q());
+    let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
+    let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = renew.tick(), if !leases.is_empty() => {
+                for l in &leases {
+                    if let Err(e) = c.call(Method::POST, &format!("{}/leases/{}/renew", c.base(), enc(l)), None).await {
+                        eprintln!("roll secrets render: couldn't renew lease {l} ({e})");
+                    }
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))) => {
+                let now = match c.call(Method::GET, &digest_path, None).await {
+                    Ok(v) => v["digest"].clone(),
+                    Err(e) => {
+                        eprintln!("roll secrets render: couldn't check {} ({e}); {out} stays as it is", c.at.env);
+                        continue;
+                    }
+                };
+                if now == last {
+                    continue;
+                }
+                last = now;
+                let (next, next_leases) = match render_env(c, env, file, tpl).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("roll secrets render: {} changed, but {e}; {out} stays as it is", c.at.env);
+                        continue;
+                    }
+                };
+                leases = next_leases;
+                if next == text {
+                    continue;
+                }
+                replace_private(out, &next)?;
+                text = next;
+                eprintln!("roll secrets render: {}:{} changed, wrote {out}", c.at.env, c.at.path);
+                if let Some(cmd) = exec {
+                    match tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await {
+                        Ok(st) if st.success() => {}
+                        Ok(st) => eprintln!("roll secrets render: {cmd} exited with {st}"),
+                        Err(e) => eprintln!("roll secrets render: running {cmd}: {e}"),
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// `${KEY}` → its value; `\${` is a literal `${`. Anything else (`$KEY`, `${a:-b}`) stays as

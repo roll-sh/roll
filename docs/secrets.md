@@ -444,7 +444,7 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
-roll secrets render  config.tpl [--out config.yml]              # ${KEY} filled in; a missing key fails
+roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
@@ -624,6 +624,13 @@ value fails the whole render, naming every such key, so a half-filled file is ne
 `\${KEY}` stays a literal `${KEY}`, and anything else (`$KEY`, `${KEY:-default}`) is left as
 written, so shell snippets in the file survive. The values are read through the same audited
 `values` route `roll run` uses; nothing new runs on the server.
+
+With `--watch` it keeps running, like `roll run --watch`: it checks the environment's digest every
+`--interval` seconds (default 5), renders again when it changes, and replaces the file whole (a
+file beside it, then a rename, so a reader never sees half of one) only when the text changed;
+then `--exec "systemctl reload nginx"` runs through `sh -c`. A render that fails (a key deleted)
+leaves the last good file in place and says why. Dynamic credentials' leases are renewed every 10
+minutes.
 
 ### Finding a key
 
@@ -1229,7 +1236,7 @@ Done and in PR #20:
 - finding a key across every project the caller may read (`roll secrets find`, the dashboard's
   "Find a key"), for rotating an organisation-wide key;
 - exports as a Docker `--env-file` and a Kubernetes Secret manifest, next to dotenv, shell, JSON and
-  YAML; `roll secrets render` fills `${KEY}` in a config file;
+  YAML; `roll secrets render [--watch --exec]` fills `${KEY}` in a config file and keeps it current;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1250,10 +1257,8 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **`roll secrets render --watch`** (the Infisical agent, consul-template): render again when the
-   environment's digest changes, and run `--exec` (a reload) after each new file.
-3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
