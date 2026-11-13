@@ -483,7 +483,7 @@ own rates (the same ones its usage page shows).
 5. sleeps it and lands the change.
 
 These are the numbers from 2026-11-12 and 2026-11-13 on ai-server (36 threads, ext4, load 25–35
-from other sessions, debug build). It also checks, each run: the link access (401 without it,
+from other sessions, debug build). It also checks, each run: the feedback button on the page and its script, the link access (401 without it,
 the bypass secret's header, a wrong secret refused), the NoSQL and Postgres masks, the service's
 Postgres role, the schema diff after a migration, a pushed log line, `roll preview wait`, a
 preview's own variable, a kept build and `[skip preview]`.
@@ -539,6 +539,28 @@ What dominates, from most to least:
 - **A Redis branch.** It reports its loaded dataset, which includes the parent's keys.
 - **Bytes the preview writes.** Everything else branches copy-on-write and pays only for those
   (streams included: a stream branch shares its parent's chunks).
+
+### Feedback on the preview page
+
+Vercel Comments, Netlify's drawer: people reviewing a preview leave notes on its pages, and they
+land on the change.
+
+- The preview's proxy adds `<script src="/__roll/feedback.js" defer>` before `</body>` of an
+  HTML page, only for a visitor who came in through roll (the preview's access cookie), only
+  when the project's `feedback` rule is on (the default), and only to bodies it can read
+  whole (asked for uncompressed, at most 2 MiB); anything else passes through untouched. The
+  script is served from the preview's own host, so a `script-src 'self'` policy allows it.
+- The script (no dependencies, in a shadow root) shows a small button; it picks an element,
+  takes a note, and opens the preview in roll's dashboard
+  (`/dashboard/projects/{project}/previews?preview={id}&fb_path=…&fb_selector=…&fb_note=…`). The
+  preview's origin never holds a roll credential: the person, signed in to roll there, reads
+  the note in the preview's sheet and posts it (nothing is posted from the link alone).
+- roll posts it as a `comment` review on the change ("**Feedback on the preview** · `/checkout`
+  linked to the preview · `button.pay`", then the note), which reaches the pull request like any
+  review. The page's own names are kept to one inert line each.
+- Previews deployed on roll apps go through apps' own proxy, which doesn't add it yet.
+- Public previews don't get it (anyone could see the button), and a branch's preview has no
+  change to post on.
 
 ## Data model
 
@@ -652,6 +674,7 @@ type Settings = {
   env: Record<string, string>;        // overrides every service gets
   github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean };   // all true but screenshot
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
+  feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
   masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}
@@ -758,6 +781,8 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- a feedback button on a preview's pages for people who came in through roll, posting on the
+  change from roll (Vercel Comments);
 - a preview's own variables over the project's (`…/env`, the sheet, `roll preview env`);
 - `[skip preview]` and `[preview]` in a change's title and `no-preview`/`preview` labels (GitHub's
   or roll's), a `manual` mode, and path filters (`paths`,
@@ -788,13 +813,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Feedback on the preview page** (Vercel Comments, Netlify's drawer): a small toolbar the
-   preview's proxy adds to its pages, for people signed in to roll, that pins a comment to the
-   page, the element and the screenshot, and lands as a thread on the change (and its pull
-   request), so review happens where the change is seen.
-2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+1. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

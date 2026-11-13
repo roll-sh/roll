@@ -130,6 +130,8 @@ export interface PreviewSettings {
   github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
+  /** A feedback button on its pages for people who came in through roll (link access). */
+  feedback: boolean;
   /** Run once on fresh data (after branching or a reset) before the services deploy. */
   seed: PreviewJob | null;
   /** Run at each new head, after the seed and before services deploy (migrations). */

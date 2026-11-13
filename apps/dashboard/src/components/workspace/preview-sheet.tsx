@@ -4,6 +4,7 @@ import { Confirm } from "@/components/ui";
 import { followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
+import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot } from "./previews-common";
 
 export const PREVIEW_KIND_ICON: Record<PreviewKind, LucideIcon> = {
@@ -46,6 +47,7 @@ export function PreviewSheet({
   act,
   onChange,
   onClose,
+  feedback,
 }: {
   preview: Preview;
   /** A parent resource's name on the canvas, by `"<kind>:<ref>"`. */
@@ -55,6 +57,8 @@ export function PreviewSheet({
   act: Act;
   onChange: (p: Preview) => void;
   onClose: () => void;
+  /** A note from the preview page's feedback button, to post on the change. */
+  feedback?: PreviewFeedback;
 }) {
   const [tab, setTab] = useState<"Overview" | "Activity" | "Logs">("Overview");
   const [busy, setBusy] = useState<string | null>(null);
@@ -111,6 +115,11 @@ export function PreviewSheet({
         {tab === "Overview" ? (
           <>
             {p.error && <p className="mb-3 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-2 text-[11.5px] break-words text-danger">{p.error}</p>}
+            {feedback && (
+              <div className="mb-3">
+                <FeedbackForm preview={p} feedback={feedback} />
+              </div>
+            )}
             {p.state === "awaiting_approval" && (
               <p className="mb-3 rounded-lg border border-accent/40 bg-accent/[0.06] px-2.5 py-2 text-[11.5px] text-muted">
                 A pull request from a fork: a writer approves its head (<span className="font-mono text-fg">approve-run</span>) before its services run.

@@ -186,6 +186,9 @@ grep -q "event: service" "$FOLLOW" && grep -q "pushed-log-line" "$FOLLOW" || { e
 BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: $BYPASS" "http://$API/")" = 200 ] || { echo "the bypass secret should open the preview"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: rpb_wrong" "http://$API/")" = 401 ] || { echo "a wrong bypass secret should be 401"; exit 1; }
+# The feedback button: on the page a visitor through roll opens, and its script from the same host.
+curl -sS -b "$JAR" -H "Host: $HOST" -H "Accept: text/html" "http://$API/" | grep -q '/__roll/feedback.js' || { echo "the page should carry the feedback button"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{content_type}' -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.js")" = "text/javascript; charset=utf-8" ] || { echo "the feedback script should load from the preview's host"; exit 1; }
 CONTAINER="roll-previews-$(echo "$HOST" | cut -d. -f1)"
 STATS=$(docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$CONTAINER")
 RSS1=$(ps -o rss= -p "$PID")

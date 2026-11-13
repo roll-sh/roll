@@ -4,6 +4,7 @@ import { openUrl, previewsApi, screenshotUrl, type Preview, type PreviewSettings
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { Inspector } from "./inspector";
+import type { PreviewFeedback } from "./preview-feedback";
 import { PreviewSettingsDialog } from "./preview-settings";
 import { PreviewSheet } from "./preview-sheet";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot, usePreviewMark, usePreviews } from "./previews-common";
@@ -26,11 +27,14 @@ export function ProjectPreviews({
   inventory,
   open: initial,
   go,
+  feedback,
 }: {
   project: WorkspaceProject;
   inventory: Map<string, ResourceView>;
   open?: string;
   go?: string;
+  /** A note from a preview page's feedback button, for the preview `open` names. */
+  feedback?: PreviewFeedback;
 }) {
   const { list, error, reload, put } = usePreviews(project.id);
   const [openId, setOpenId] = useState<string | null>(initial ?? null);
@@ -160,6 +164,7 @@ export function ProjectPreviews({
             act={act}
             onChange={put}
             onClose={() => setOpenId(null)}
+            feedback={opened.id === initial ? feedback : undefined}
           />
         )}
       </Inspector>

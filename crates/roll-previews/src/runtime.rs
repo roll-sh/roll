@@ -12,6 +12,8 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
+use futures::StreamExt;
 use code_preview::isolation::{Isolation, Job, Kind as JobKind};
 use code_preview::preview::{answers, is_upgrade, page, strip_hop_by_hop};
 use hyper_util::client::legacy::Client;
@@ -343,6 +345,20 @@ impl Runtime {
         self.store.service_for_host(label).ok().flatten()
     }
 
+    /// Where a visitor's feedback goes (the preview in roll's dashboard), when they get the button:
+    /// they came in through roll (the link access cookie), the preview is a change's, the rules
+    /// have `feedback` on and roll's dashboard is known.
+    fn feedback_target(&self, preview: &str, req: &Request) -> Option<String> {
+        let web = self.cfg.dashboard.as_deref()?;
+        let access = self.store.access(preview).ok().flatten()?;
+        if !access.required || !has_access_cookie(preview, &access.token, req) {
+            return None;
+        }
+        let row = self.store.row(preview).ok()?;
+        row.change_id.as_ref()?;
+        self.store.settings(&row.project_id).ok()?.feedback.then(|| format!("{}/dashboard/projects/{}/previews?preview={preview}", web.trim_end_matches('/'), row.project_id))
+    }
+
     /// Link access: a request carries the preview's token in its query (it gets a cookie and is
     /// sent to the same URL without it) or in that cookie; anything else is refused. `None`:
     /// let it through.
@@ -364,15 +380,7 @@ impl Runtime {
             return None;
         }
         let cookie = format!("roll_access_{preview}");
-        let has_cookie = req
-            .headers()
-            .get_all(header::COOKIE)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(';'))
-            .filter_map(|kv| kv.trim().split_once('='))
-            .any(|(k, v)| k == cookie && !token.is_empty() && same(v, &token));
-        if has_cookie {
+        if has_access_cookie(preview, &token, req) {
             return None;
         }
         let query = req.uri().query().unwrap_or("");
@@ -404,7 +412,7 @@ impl Runtime {
         Some(private_page(through.as_deref()))
     }
 
-    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, mut req: Request) -> Response {
+    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
         let mut retried = false;
         let addr = loop {
             let addr = match self.ready(preview, service, self.cfg.wait).await {
@@ -435,6 +443,10 @@ impl Runtime {
             req.headers_mut().insert(HeaderName::from_static("x-forwarded-host"), h);
         }
         req.headers_mut().insert(HeaderName::from_static("x-forwarded-proto"), HeaderValue::from_str(&self.cfg.scheme).unwrap_or(HeaderValue::from_static("http")));
+        // A page that gets the feedback button is asked for whole and uncompressed.
+        if feedback {
+            req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+        }
         let mut resp = match self.client.request(req).await {
             Ok(r) => r,
             Err(e) => return (StatusCode::BAD_GATEWAY, format!("the preview didn't answer: {e}")).into_response(),
@@ -451,7 +463,8 @@ impl Runtime {
         } else {
             strip_hop_by_hop(resp.headers_mut(), false);
         }
-        resp.map(Body::new)
+        let resp = resp.map(Body::new);
+        if feedback { add_feedback(resp).await } else { resp }
     }
 
     #[cfg(test)]
@@ -462,6 +475,52 @@ impl Runtime {
     }
 }
 
+/// Where a preview's pages load the feedback button from (its own host, so `script-src 'self'`
+/// allows it), and the tag that loads it.
+pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
+const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
+/// The biggest page the button is added to; a bigger one passes through untouched.
+const FEEDBACK_MAX: usize = 2 << 20;
+
+/// `page` with the feedback button's tag before its last `</body>` (or at its end).
+fn with_tag(mut page: Vec<u8>) -> Vec<u8> {
+    let lower = page.to_ascii_lowercase();
+    let at = lower.windows(7).rposition(|w| w == b"</body>").unwrap_or(page.len());
+    page.splice(at..at, FEEDBACK_TAG.iter().copied());
+    page
+}
+
+/// An HTML page from the service with the feedback button added; anything compressed, bigger
+/// than [`FEEDBACK_MAX`] or not HTML passes through as it came.
+async fn add_feedback(resp: Response) -> Response {
+    let html = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"));
+    let plain = resp.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_none_or(|e| e.eq_ignore_ascii_case("identity"));
+    if resp.status() != StatusCode::OK || !html || !plain {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let mut stream = body.into_data_stream();
+    let mut page = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(c) => page.extend_from_slice(&c),
+            Err(e) => return (StatusCode::BAD_GATEWAY, format!("the preview's page broke off: {e}")).into_response(),
+        }
+        if page.len() > FEEDBACK_MAX {
+            let head = futures::stream::once(async move { Ok::<_, axum::Error>(Bytes::from(page)) });
+            return Response::from_parts(parts, Body::from_stream(head.chain(stream)));
+        }
+    }
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(with_tag(page)))
+}
+
+/// The feedback button's script, sending notes to `target` (the preview in roll's dashboard).
+fn feedback_script(target: &str) -> Response {
+    let js = include_str!("feedback.js").replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()));
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
+}
+
 /// The biggest screenshot kept (a 1280×800 PNG of an ordinary page is 10–200 KiB).
 pub const SCREENSHOT_MAX: usize = 2 << 20;
 
@@ -469,6 +528,18 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
 
 /// A private preview's answer to a request without its link: where to get in, if roll knows.
+/// Whether `req` carries the preview's link access cookie.
+fn has_access_cookie(preview: &str, token: &str, req: &Request) -> bool {
+    let cookie = format!("roll_access_{preview}");
+    req.headers()
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|kv| kv.trim().split_once('='))
+        .any(|(k, v)| k == cookie && !token.is_empty() && same(v, token))
+}
+
 fn private_page(through: Option<&str>) -> Response {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
     let action = match through {
@@ -687,18 +758,27 @@ pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> 
     if let Some(r) = rt.gate(&preview, &service, &req) {
         return r;
     }
+    // The feedback button: its script, and pages (a browser's GET for HTML) that load it.
+    let target = rt.feedback_target(&preview, &req);
+    if req.uri().path() == FEEDBACK_PATH
+        && let Some(t) = &target
+    {
+        return feedback_script(t);
+    }
+    let accepts_html = req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html"));
+    let feedback = target.is_some() && req.method() == axum::http::Method::GET && accepts_html;
     match rt.cluster.get().cloned() {
         Some(cluster) => {
             let rt2 = rt.clone();
             cluster
                 .dispatch(&crate::engine::preview_key(&preview.clone()), req, move |req, guard| async move {
-                    let resp = rt2.proxy(&preview, &service, req).await;
+                    let resp = rt2.proxy(&preview, &service, req, feedback).await;
                     drop(guard);
                     resp
                 })
                 .await
         }
-        None => rt.proxy(&preview, &service, req).await,
+        None => rt.proxy(&preview, &service, req, feedback).await,
     }
 }
 
@@ -743,7 +823,12 @@ mod tests {
             })
             .unwrap();
         store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
-        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        let rt = Runtime::new(
+            RuntimeConfig { domain: "preview.test".into(), dashboard: Some("https://roll.test".into()), ..RuntimeConfig::default() },
+            Arc::new(code_preview::docker::Docker),
+            Arc::new(NoTrees),
+            store,
+        );
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let up = upstream.local_addr().unwrap();
         tokio::spawn(async move {
@@ -755,8 +840,11 @@ mod tests {
                     let head = String::from_utf8_lossy(&buf[..n]).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     let secret = if head.to_ascii_lowercase().contains("x-roll-preview-bypass") { " and the bypass secret" } else { "" };
-                    let body = format!("service saw {path}{secret}");
-                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                    let (kind, body) = match path.as_str() {
+                        "/page" => ("text/html", format!("<html><BODY><p>asked for {}</p></BODY></html>", if head.to_ascii_lowercase().contains("accept-encoding: identity") { "identity" } else { "any" })),
+                        _ => ("text/plain", format!("service saw {path}{secret}")),
+                    };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
                 });
             }
         });
@@ -794,6 +882,17 @@ mod tests {
             out
         };
         let with = |secret: &str| format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nX-Roll-Preview-Bypass: {secret}\r\nConnection: close\r\n\r\n");
+        // The feedback button: on a page a visitor through roll asked for as HTML (asked for whole),
+        // its script from the preview's own host; nothing for anyone else.
+        let page = |accept: &str| format!("GET /page HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nAccept: {accept}\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id);
+        let html = raw(page("text/html,*/*")).await;
+        assert!(html.ends_with(r#"<p>asked for identity</p><script src="/__roll/feedback.js" defer></script></BODY></html>"#), "{html}");
+        assert!(raw(page("application/json")).await.ends_with("<p>asked for any</p></BODY></html>"), "only a browser's page");
+        let script = raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(script.contains("text/javascript") && script.contains(&format!(r#""https://roll.test/dashboard/projects/prj_1/previews?preview={}""#, row.id)), "{script}");
+        assert!(raw("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
+        rt.store.put_settings("prj_1", &crate::Settings { feedback: false, ..Default::default() }).unwrap();
+        assert!(raw(page("text/html")).await.ends_with("<p>asked for any</p></BODY></html>"), "the rule turns it off");
         let (secret, _) = rt.store.rotate_bypass("prj_1").unwrap();
         assert!(raw(with(&secret)).await.ends_with("service saw /hello"));
         assert!(raw(with("rpb_wrong")).await.starts_with("HTTP/1.1 401"));
