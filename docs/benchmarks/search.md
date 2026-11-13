@@ -1273,6 +1273,68 @@ totals, ids, scores, sort values and aggregations).
 | ... and in the opensearch dialect, which had never taken it: the agreement tests run under both dialects (the opensearch general path's field names, points and dates are the reference there) | `search-es` `document/fast.rs` | nyc_taxis on an opensearch-dialect node, as above: 63.2–65.0k docs/s, 60.3–62.8 µs CPU per doc | 96.3–102.1k docs/s, 38.2–39.7 µs (peak RSS while loading 1.1–1.3 GiB against 1.0–1.2; aggregations identical) |
 | ... and the fields of plain objects (not nested, enabled, with sub-objects), walked in document order with their full names: a document with any object (`host.name`, `http.response.status_code`: ECS logs, Beats and Elastic Agent data) had gone down the general path whole. 200,000 random documents with one- and two-level objects agree with the general path in both dialects | `search-es` `document/fast.rs` (`Scope`, `FastPlan::object`) | a synthetic ECS access log (`scripts/bench-search-ecs.py`: 6 objects up to 3 levels deep, 13 leaves), 1M docs, 8 clients, as above: 46.4–50.6k docs/s, 79.5–85.7 µs CPU per doc | 77.9–89.0k docs/s, 43.9–50.5 µs (aggregations identical) |
 
+### When to BP-reorder at merge time (2026-11-13): measured, nothing adopted
+
+BP (`search-codec` `bp.rs`) costs a lot of indexing CPU on logs. It cost a third of the server's
+CPU on the synthetic ECS access log with one client. Elasticsearch 9.5.5 never reorders regular
+indices: no class in its distribution references `BPReorderingMergePolicy` or
+`BPIndexReorderer`, which only `lucene-misc` ships. Each candidate policy below was measured
+against today's (every inverted field, natural merges from 2^18 docs, forced from 2^16). It used
+a temporary env switch in a local build, and none of them is in the tree.
+
+The method: 1M docs into one shard; server on CPUs 10,11,28,29 and clients on 12,13,30,31;
+modes alternated, with 2–3 rounds each. CPU per doc is "settled": the merges are counted until
+the server has been idle for 4 s. The queries were measured on one force-merged segment, as
+server CPU per request (the median of 100). Request and query caches were off. In every mode,
+the totals, the aggregations and the sort values of every query were identical. Medians are
+followed by the range in brackets. Raw outputs and scripts are in
+`~/.cache/rsearch/bp-2026-11-13/` on the machine that ran them.
+
+| | BP on (today) | BP off | text fields only |
+|---|---:|---:|---:|
+| ECS, 1 client: settled CPU µs/doc | 61.4 (55.0–63.8) | 41.5 (41.3–44.4) | 44.1 (39.7–44.4) |
+| ECS: `_forcemerge` CPU s (bisection) | 9.6 (9.9) | 3.3 (0) | 4.6 (0.7) |
+| ECS: store MB | 153.4 | 155.5 | 155.8 |
+| ECS: range + `date_histogram` | 2.18 ms | 1.19 | 1.39 |
+| ECS: `match` on `message` | 0.94 | 0.85 | 0.73 |
+| ECS: **sort `@timestamp` desc, size 10** | **1.30** (1.18–1.47) | **31.2** (25.7–60.2) | **55.1** (27.9–56.7) |
+| ECS: term + sort desc / range + sort desc | 1.08 / 7.51 | 2.15 / 13.7 | 2.73 / 11.1 |
+| nyc_taxis, 8 clients: settled µs/doc (natural merges barely reach 2^18 at 1M docs) | 50.5 | 47.5 | |
+| http_logs, 8 clients: settled µs/doc, store MB | 27.3, 77.6 | 25.6, 78.3 | |
+| `so`, 8 clients: settled µs/doc | 145.7 (127.0–155.8) | 115.4 (107.0–138.9) | 119.1 (112.9–125.2) |
+| `so`: `match` / `match` title / phrase on `body` | 2.11 / 2.77 / 1.48 ms | 2.39 / 2.29 / 1.07 | 1.40 / 1.95 / 1.00 |
+| `so`: sort `creationDate` desc, size 10 | 0.86 | 19.9 | 1.50 |
+
+BP's real search win on time-ordered data is a desc sort, not a smaller index or faster
+postings. Docs arrive in ascending time order. With that order, `@timestamp` desc is the worst
+case for the competitive iterator (Lucene's too). The first 10,000 hits it counts are the oldest
+ones, so the queue's bottom rises only as the scan reaches newer docs, and almost nothing is
+skipped. Scattering the docs puts recent values among the first hits, so pruning starts at once.
+On ECS, the scattering comes from the keyword terms. BP over text fields only leaves the time
+order mostly intact (the sort is even slower than with no BP at all). Turning BP off makes logs
+24x slower on their most common query ("newest first") for 32% less indexing CPU. So off, text
+fields only and forced merges only were not adopted.
+
+Cheaper BP that keeps scattering the keywords, on ECS and `so` force-merged (2 rounds each):
+
+| | ECS settled µs/doc | ECS sort desc | `so` settled µs/doc | `so` `match` / `match_and` / title |
+|---|---:|---:|---:|---:|
+| today | 59.1 | 0.84 ms | 145.5 | 1.49 / 0.64 / 1.98 ms |
+| `max_doc_freq_ratio` 0.5 | 50.5 | 1.44 | 150.4 | 1.97 / 0.98 / 2.48 |
+| `min_partition_size` 256 | 52.0 | 1.72 | 132.2 | 1.98 / 1.01 / 2.43 |
+| `max_iters` 10 | 60.5 | 1.00 | 122.2 | 1.76 / 0.99 / 2.41 |
+
+Each variant saves 10–15% on ECS, but costs `so`'s text queries 20–55% more CPU. Dropping terms
+in more than half the docs also drops the frequent text terms. None was adopted.
+
+What would make dropping BP on logs a win: a top-k sort that prunes well when docs are already
+ordered by the sort field the other way. Such a sort would visit doc windows newest-first, or
+take a threshold from the points tree, check it and widen it if too few docs match. With that
+sort, BP over text fields only would save about 28% of indexing CPU on logs (ECS: 61.4 → 44.1
+µs/doc). On `so`, text fields only also scored text queries better than every field did (above).
+But a second session's "today" runs gave `match` 1.49 and title 1.98 ms, so that difference is
+within the drift between sessions and is no reason by itself.
+
 Measured and not adopted in round 6: slicing field sorts and queries with score bounds. Their
 serial competitive pruning is so effective that slices only add work: on geonames
 `desc_sort_geonameid` CPU 3.5 → 10.3 ms, `sort_country_code` 5.6 → 12.6 ms, a 1,000-hit
