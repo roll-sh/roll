@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi, deploymentUrl, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
+import { appsApi, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -165,9 +165,12 @@ function useSteps(service: string, env: string, d: Deployment) {
     let live = true;
     const load = () => appsApi.deployment(service, env, d.id).then((x) => live && setFull(x), () => {});
     void load();
-    const t = pending && visible ? setInterval(load, 1500) : undefined;
+    // A deploy's steps are ticks on the service's change stream; a slow poll is the safety net.
+    const stop = pending && visible ? followChanges(service, { onChange: () => void load() }) : undefined;
+    const t = pending && visible ? setInterval(load, 15000) : undefined;
     return () => {
       live = false;
+      stop?.();
       if (t) clearInterval(t);
     };
   }, [service, env, d.id, pending, visible]);

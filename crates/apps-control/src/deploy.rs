@@ -295,6 +295,27 @@ impl Apps {
         Ok(dep)
     }
 
+    /// `POST …/rollback` with no deployment: back to the one live before what runs, walking back
+    /// through rollbacks (after B → A, the next goes to what came before A, never forward to B).
+    pub async fn rollback_previous(self: &Arc<Self>, service: &str, env: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (row, all) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.deployments(&sid, &e, 100)?))).await?;
+        let Some(active) = row.active.and_then(|a| all.iter().find(|d| d.id == a).cloned()) else {
+            return Err(Error::Conflict(format!("{env} has nothing live to roll back from")));
+        };
+        // What the live image is: a rollback's (or promotion's) original, else itself.
+        let base = active.rollback_of.as_ref().and_then(|o| all.iter().find(|d| &d.id == o)).unwrap_or(&active);
+        let target = all
+            .iter()
+            .filter(|d| d.id != active.id && d.id != base.id && d.image.is_some() && d.created_at < base.created_at)
+            // Live once, then replaced (a superseded deploy never ran).
+            .filter(|d| d.status == DeployStatus::Inactive)
+            .max_by_key(|d| d.created_at)
+            .ok_or_else(|| Error::Conflict(format!("{env} has no earlier deployment to roll back to")))?;
+        let id = target.id.clone();
+        self.rollback(service, env, &id, actor, keep_variables).await
+    }
+
     pub async fn cancel(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
         let d = self.deployment(service, env, dep).await?;
         if !d.status.pending() {

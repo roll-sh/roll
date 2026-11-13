@@ -381,10 +381,10 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
               type="button"
               className={btn}
               disabled={busy}
-              title={`Run ${previous.id} again (its image: no build)`}
-              onClick={() => runner.run("rollback", () => appsApi.rollback(service.id, envName, previous.id))}
+              title="Run the deployment live before this one again (its image: no build, its variables)"
+              onClick={() => runner.run("rollback", () => appsApi.rollbackPrevious(service.id, envName))}
             >
-              <RotateCw className="size-3.5" /> Roll back to {previous.revision ? previous.revision.slice(0, 7) : previous.id.slice(-6)}
+              <RotateCw className="size-3.5" /> Roll back
             </button>
           )}
         </div>

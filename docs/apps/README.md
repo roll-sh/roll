@@ -1123,12 +1123,11 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **The rollback target on the server, and CLI parity**: "Roll back" without an id picks the
-   deployment before the live one on the server (two clicks can't go forward); the CLI gains
-   cancel, unlink, registry login, domain redirect and private environments; `roll apps restart`'s
-   help; the shell says when a keystroke didn't go; the deployments and jobs tabs follow
-   `/changes` instead of polling every 1.5 s; one date format; http-api.md's stray quote, the
-   `audit.*` events, the hooks' own check and the 402.
+1. **Credentials per link**: `Resources::link` (called once when a link is made; its variables
+   kept sealed with the link, read by deploys and listings) and `Resources::unlink` (revoking
+   them when it goes), so a link to roll search gets its own API key (a native user for
+   OpenSearch) instead of the cluster's password, as roll secrets' search provider does;
+   Postgres and Redis keep today's values. roll search wires its side once this lands.
 2. **Tests for what people rely on**: a crash loop's event and notification, a worker restarting
    with backoff, cron firing on schedule and skipping while the last run goes, concurrent requests
    waking one instance, a wake timeout's 503 with `Retry-After`, a web service scaling in; and

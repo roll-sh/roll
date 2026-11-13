@@ -1,6 +1,6 @@
 import { Play, Square, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appsApi, followLog, runStatus, type CronRun, type Job, type LogLine } from "@/lib/apps-api";
+import { appsApi, followChanges, followLog, runStatus, type CronRun, type Job, type LogLine } from "@/lib/apps-api";
 import { btn, EmptyPanel, input, Panel, primary } from "../ui";
 import { usePageVisible } from "./live";
 import { clock, LogView, message, type Runner } from "./shared";
@@ -52,9 +52,14 @@ export function JobsTab({ service, env, runner, cron = false }: { service: strin
   const visible = usePageVisible();
   useEffect(() => {
     if (!running || !visible) return;
-    const t = setInterval(() => void load(), 1500);
-    return () => clearInterval(t);
-  }, [running, load, visible]);
+    // A job's end is a tick on the service's change stream; a slow poll is the safety net.
+    const stop = followChanges(service, { onChange: () => void load() });
+    const t = setInterval(() => void load(), 15000);
+    return () => {
+      stop();
+      clearInterval(t);
+    };
+  }, [running, load, visible, service]);
 
   useEffect(() => {
     if (!selected) return;

@@ -75,6 +75,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
+        .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
         .route(&format!("{env}/promote"), post(promote))
@@ -706,6 +707,12 @@ async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
 async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
     let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
     let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
+    Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
+    let d = apps.rollback_previous(&id, &env, actor(&ext), keep).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 

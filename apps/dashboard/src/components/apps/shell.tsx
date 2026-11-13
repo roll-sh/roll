@@ -135,7 +135,8 @@ function Screen({ service, env, session, onEnded }: { service: string; env: stri
         timer = null;
         const data = pending;
         pending = "";
-        if (data) sending = sending.then(() => appsApi.shellKeys(service, env, session, encode(data)).catch(() => {}));
+        // A keystroke that didn't get there is said, not lost without a trace.
+        if (data) sending = sending.then(() => appsApi.shellKeys(service, env, session, encode(data)).catch(() => term.write("\r\n\x1b[31m[a keystroke didn't reach the shell: type it again]\x1b[0m\r\n")));
       };
       const onData = term.onData((d) => {
         pending += d;
