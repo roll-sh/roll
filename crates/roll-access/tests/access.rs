@@ -68,6 +68,10 @@ fn postgres() -> Router {
 
 impl Daemon {
     fn new(wait_ms: u64) -> Daemon {
+        Daemon::with(wait_ms, |_| {})
+    }
+
+    fn with(wait_ms: u64, configure: impl FnOnce(&mut Config)) -> Daemon {
         let dir = tempfile::tempdir().unwrap();
         let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let workspace = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
@@ -76,7 +80,8 @@ impl Daemon {
         resolvers.by_kind.insert("default-branch", Arc::new(DefaultBranch));
         resolvers.workspace = Some(Arc::new(WorkspaceResolver(workspace.clone())));
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
-        let config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
+        let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
+        configure(&mut config);
         let access = Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), config, resolvers).unwrap();
         let public = roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") };
         let gate = roll_auth::Gate::new(Some(roll_auth::AdminToken::new(OPERATOR).unwrap()), vec![public]);
@@ -642,4 +647,72 @@ async fn the_audit_log_streams_to_a_sink() {
     let sent: Value = serde_json::from_slice(&fake.sent.lock().unwrap()[1].1).unwrap();
     assert_eq!(ids(&sent["events"]), vec!["aud_003"]);
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await.0, StatusCode::NO_CONTENT);
+}
+
+/// A leaked token (docs/permissions.md, "Leaked tokens") is revoked as soon as roll finds it: it
+/// stops on its next request, says where it was found, and the audit log has it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leaked_token_is_revoked() {
+    let d = Daemon::new(50);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert!(roll_access::checksum_ok(&token), "new tokens carry a checksum");
+    let found = roll_access::find_secrets(&format!("ROLL_TOKEN={token}\n"));
+    let revoked = d.access.revoke_leaked(&found, "acme/site .env at 1a2b3c4d5e6f").unwrap();
+    assert_eq!(revoked.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), vec![id.as_str()]);
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["revoked_why"], "found in acme/site .env at 1a2b3c4d5e6f");
+    let (_, log) = d.call(OPERATOR, Method::GET, &format!("/v1/access/audit?grant={id}"), None).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["source"] == "leak" && e["decision"] == "revoke"), "{log}");
+    assert!(d.access.revoke_leaked(&found, "again").unwrap().is_empty(), "once");
+}
+
+/// GitHub's secret scanning partner program reports roll tokens it finds in public code: a report
+/// signed with one of GitHub's published keys revokes each live token and answers which were real;
+/// an unsigned or wrongly signed one changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn github_reports_of_leaked_tokens_revoke_them() {
+    use base64::Engine as _;
+    use ring::signature::KeyPair as _;
+    // GitHub's key list, served locally: one P-256 key as SubjectPublicKeyInfo PEM.
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+    let pair = ring::signature::EcdsaKeyPair::from_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+    let mut spki = vec![0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00];
+    spki.extend_from_slice(pair.public_key().as_ref());
+    let pem = format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----", base64::engine::general_purpose::STANDARD.encode(&spki));
+    let keys = json!({ "public_keys": [{ "key_identifier": "k1", "key": pem, "is_current": true }] });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/keys", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, Router::new().route("/keys", get(move || async move { axum::Json(keys) }))).await.unwrap() });
+
+    let d = Daemon::with(50, |c| c.github_keys_url = url);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let report = json!([
+        { "token": token, "type": "roll_token", "url": "https://github.com/someone/thing/blob/main/.env", "source": "content" },
+        { "token": format!("rlt_{}", "a".repeat(40)), "type": "roll_token", "url": "https://github.com/x/y", "source": "content" }
+    ])
+    .to_string();
+    let post = |sig: String| {
+        let req = Request::post("/v1/access/leaks/github")
+            .header("content-type", "application/json")
+            .header("github-public-key-identifier", "k1")
+            .header("github-public-key-signature", sig)
+            .body(Body::from(report.clone()))
+            .unwrap();
+        d.router.clone().oneshot(req)
+    };
+    let forged = base64::engine::general_purpose::STANDARD.encode(pair.sign(&rng, b"something else").unwrap().as_ref());
+    assert_eq!(post(forged).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::OK, "a forged report revokes nothing");
+
+    let sig = base64::engine::general_purpose::STANDARD.encode(pair.sign(&rng, report.as_bytes()).unwrap().as_ref());
+    let resp = post(sig).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let answer: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let labels: Vec<&str> = answer.as_array().unwrap().iter().map(|a| a["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, vec!["true_positive", "false_positive"], "{answer}");
+    assert_eq!(d.call(&token, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["revoked_why"], "found in https://github.com/someone/thing/blob/main/.env (GitHub secret scanning)");
 }

@@ -286,7 +286,9 @@ Ranked; the top item is in progress. A watchdog reads this list.
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 4. **Finer resources:** storage buckets in another account, apps' deploys by id.
 
-Done lately: audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in
+Done lately: leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
+secrets, roll code's landings scanned from the land log, GitHub's secret scanning partner
+endpoint); audit sinks (docs/permissions.md, "Audit sinks": the log streamed to a SIEM in
 signed batches, the same contract as roll secrets' sinks, checked live against a receiver that
 verifies signatures); per-token rate limits (docs/permissions.md, "Rate limits": GCRA per grant per node,
 `429` with `Retry-After` and `RateLimit-*`, an MCP message counted once, never above the maker's);
