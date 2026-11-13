@@ -1073,6 +1073,28 @@ minutes.
   ```
 
   A login lasts its TTL: enough for a job. A long-running `roll run --watch` uses a token.
+- **A CI job, end to end.** No stored secret: the job logs in with its own OIDC token as an
+  identity limited to staging, then checks before it tests. Each step only sees staging, since
+  check, scan and health answer what the caller may read:
+
+  ```sh
+  roll secrets identities add ci --github acme/web --claim ref=refs/heads/* --for-env staging
+  ```
+
+  ```yaml
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      permissions: { id-token: write, contents: read }
+      env: { ROLL_API_URL: https://roll.example.com, ROLL_IDENTITY: idn_…, ROLL_ENV: staging }
+      steps:
+        - uses: actions/checkout@v4
+        # roll on the runner's PATH; then:
+        - run: roll secrets check .env.example   # every key the code reads is set in staging
+        - run: roll secrets scan .               # no stored value was committed
+        - run: roll secrets health               # nothing expired, missing or exposed
+        - run: roll run -- npm test              # the tests get staging's values, never on disk
+  ```
 - When roll-access takes over tokens, identities mint its scoped tokens instead; the routes stay.
 
 ### Protected environments and approvals
@@ -1378,8 +1400,10 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **CI recipes**: one GitHub Actions job in the docs that logs in with its OIDC token (no stored
-   secret), runs `roll secrets check`, `scan` and `health`, then `roll run` for the tests.
+1. **Health in the sidebar**: each project's Secrets entry carries its count of findings to fix
+   now (expired, missing, exposed), so a project that needs attention shows without opening it.
+2. **Health across projects**: Home lists every project's serious findings, and `roll secrets
+   health --all` does in the terminal, filtered like `find` to what the caller may read.
 
 Waiting on other pull requests:
 
