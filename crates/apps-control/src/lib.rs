@@ -16,6 +16,7 @@ pub mod api;
 pub mod config;
 pub mod cron;
 pub mod deploy;
+pub mod drains;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
@@ -157,6 +158,8 @@ pub struct Apps {
     running_jobs: Mutex<HashMap<String, String>>,
     /// Services whose project reached its spend limit this month (`spend`), as last read.
     capped: Mutex<std::collections::HashSet<String>>,
+    /// Log drains whose batch came back (the drainer sends the next).
+    drain_done: Arc<Mutex<Vec<String>>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Bumped by every change to the access cache: a cold read caches what it read only if
@@ -226,6 +229,7 @@ impl Apps {
             cancels: Mutex::new(HashMap::new()),
             running_jobs: Mutex::new(HashMap::new()),
             capped: Mutex::new(Default::default()),
+            drain_done: Arc::new(Mutex::new(Vec::new())),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
             sessions: Mutex::new(HashMap::new()),

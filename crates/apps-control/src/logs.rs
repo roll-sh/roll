@@ -57,14 +57,27 @@ impl Log {
     }
 }
 
+/// Where the log tap sends `(log key, line)`.
+pub type Tap = tokio::sync::mpsc::Sender<(Arc<str>, LogLine)>;
+
 pub struct LogHub {
     logs: Mutex<HashMap<String, Log>>,
     objects: Option<Objects>,
+    /// Runtime lines (`env:…` logs) for log drains, as they're written: bounded, so a slow drain
+    /// drops lines (counted by the drainer) rather than holding memory or a writer.
+    tap: Mutex<Option<Tap>>,
 }
 
 impl LogHub {
     pub fn new(objects: Option<Objects>) -> Arc<LogHub> {
-        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects })
+        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None) })
+    }
+
+    /// Every runtime line from now on, `(log key, line)`, at most `capacity` waiting.
+    pub fn tap(&self, capacity: usize) -> tokio::sync::mpsc::Receiver<(Arc<str>, LogLine)> {
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        *self.tap.lock() = Some(tx);
+        rx
     }
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
@@ -72,6 +85,11 @@ impl LogHub {
     }
 
     fn push(&self, key: &str, line: LogLine) {
+        if key.starts_with("env:")
+            && let Some(tap) = self.tap.lock().as_ref()
+        {
+            let _ = tap.try_send((Arc::from(key), line.clone()));
+        }
         let mut logs = self.logs.lock();
         let log = logs.entry(key.to_string()).or_insert_with(Log::new);
         if log.ring.len() == RING {

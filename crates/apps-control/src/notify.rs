@@ -65,7 +65,7 @@ impl Apps {
     }
 
     /// A target's URL: HTTPS, a public host, and for Slack and Discord their webhook hosts.
-    fn check_target(&self, kind: &str, url: &str) -> Result<String> {
+    pub(crate) fn check_target(&self, kind: &str, url: &str) -> Result<String> {
         let bad = |why: &str| Err(Error::BadRequest(format!("url: {why}")));
         let u = url::Url::parse(url).map_err(|e| Error::BadRequest(format!("url: {e}")))?;
         if url.len() > 2048 {

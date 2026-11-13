@@ -164,6 +164,16 @@ pub struct Event {
 
 /// Where a project's events go (`…/projects/{project}/notifications`): a webhook (JSON, signed),
 /// a Slack or a Discord incoming webhook. The URL is sealed; only its host shows.
+/// A project's log drain (`/v1/apps/projects/{project}/drains`): where its runtime output goes.
+/// The URL is never returned, only its host.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LogDrain {
+    pub id: String,
+    pub project: String,
+    pub host: String,
+    pub created_at: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NotifyTarget {
     pub id: String,

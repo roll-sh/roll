@@ -717,6 +717,8 @@ impl Apps {
         tokio::spawn(async move { this.notifier().await });
         let this = self.clone();
         tokio::spawn(async move { this.spender().await });
+        let this = self.clone();
+        tokio::spawn(async move { this.drainer().await });
     }
 
     /// Start and stop a service's work as its lease comes and goes.

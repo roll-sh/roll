@@ -898,6 +898,51 @@ async fn sse_chunk(body: &mut Body) -> String {
     }
 }
 
+/// A project's log drain gets its services' runtime output as signed NDJSON batches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_log_drain_gets_the_runtime_output_signed() {
+    use hmac::Mac;
+    let w = world().await;
+    let got: Arc<parking_lot::Mutex<Vec<(axum::http::HeaderMap, bytes::Bytes)>>> = Default::default();
+    let g = got.clone();
+    let app = axum::Router::new().route("/logs", axum::routing::post(move |h: axum::http::HeaderMap, b: bytes::Bytes| {
+        let g = g.clone();
+        async move {
+            g.lock().push((h, b));
+            StatusCode::OK
+        }
+    }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, app).into_future());
+    let base = format!("/v1/apps/projects/{}/drains", w.project);
+    let (st, d) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{at}/logs")}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{d}");
+    let secret = d["secret"].as_str().unwrap().to_string();
+    assert!(!call(&w.api, "GET", &base, None).await.1.to_string().contains("/logs"), "the URL never comes back");
+    // A request wakes the service: its instance's output goes out.
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
+    let mut lines = Vec::new();
+    for _ in 0..200 {
+        let batches = got.lock().clone();
+        lines = batches.iter().flat_map(|(_, b)| String::from_utf8_lossy(b).lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect::<Vec<_>>()).collect();
+        if lines.iter().any(|l| l["text"].as_str().is_some_and(|t| t.contains("listening on"))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let line = lines.iter().find(|l| l["text"].as_str().is_some_and(|t| t.contains("listening on"))).unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!((line["service_name"].as_str(), line["environment"].as_str()), (Some("api"), Some("production")));
+    let (h, b) = got.lock()[0].clone();
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(h["x-roll-timestamp"].as_bytes());
+    mac.update(b".");
+    mac.update(&b);
+    let want = mac.finalize().into_bytes().iter().map(|x| format!("{x:02x}")).collect::<String>();
+    assert_eq!(h["x-roll-signature-256"].to_str().unwrap(), format!("sha256={want}"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     use hmac::Mac;

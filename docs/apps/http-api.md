@@ -38,6 +38,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `DELETE /v1/apps/projects/{project}/notifications/{nid}` | | 204 | write |
 | `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
 | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
+| `GET /v1/apps/projects/{project}/drains` | | `LogDrain[]` (the URL never returned, only its host) | read |
+| `POST /v1/apps/projects/{project}/drains` | `{ url }` (https, a public host) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `DELETE /v1/apps/projects/{project}/drains/{did}` | | 204 | write |
 | `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
 | `GET /v1/apps/events?after=&limit=` | | `{ events: Event[], next }`: what happened to services, in order, after a cursor | read |
@@ -291,6 +294,13 @@ type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" 
  *  stop, visitors get a 402 page, deploys, jobs and cron runs are refused, until the month ends or
  *  the limit is raised. */
 type SpendLimits = { alert_usd: number | null; hard_usd: number | null; month_usd: number; capped: boolean };
+/** A project's log drain: its services' runtime output (stdout, stderr, roll's lines), POSTed as
+ *  `application/x-ndjson` batches (at most 500 lines or 1 s) of
+ *  { t, service, service_name, environment, instance, deployment, stream, text }, signed as
+ *  webhooks are (X-Roll-Signature-256, X-Roll-Timestamp, X-Roll-Delivery the batch's id). Best
+ *  effort: a batch is tried three times, then dropped; a drain that can't keep up loses its
+ *  oldest lines. At most 5 a project. */
+type LogDrain = { id: string; project: string; host: string; created_at: number; secret?: string };
 type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord"; host: string; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit")[]; created_at: number; secret?: string };
 type Delivery = { id: string; event: number; kind: string; status: "pending" | "delivered" | "failed"; attempts: number; code: number | null; error: string | null; at: number };
 type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";

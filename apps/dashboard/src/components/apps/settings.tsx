@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { appsApi, SERVICE_NAME, type Build, type Environment, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, primary } from "../ui";
+import { DrainsPanel } from "./drains";
 import { EnvironmentPanel } from "./environment";
 import { NotificationsPanel } from "./notifications";
 import { SpendPanel } from "./spend";
@@ -333,6 +334,8 @@ export function SettingsTab({
       {env && <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />}
 
       <NotificationsPanel project={service.project} projectName={projectName} runner={runner} />
+
+      <DrainsPanel project={service.project} projectName={projectName} runner={runner} />
 
       <SpendPanel project={service.project} projectName={projectName} runner={runner} />
 

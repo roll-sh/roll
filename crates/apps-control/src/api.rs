@@ -61,6 +61,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/events", get(events))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
+        .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
+        .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain))
         .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
@@ -239,6 +241,19 @@ async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, Str
 
 async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>) -> R {
     apps.delete_link(&id, &kind, &r).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn drains(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.drains(&project).await?)
+}
+
+async fn add_drain(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    Ok((StatusCode::CREATED, Json(apps.add_drain(&project, body(&b)?).await?)).into_response())
+}
+
+async fn delete_drain(State(apps): S, Path((project, id)): Path<(String, String)>) -> R {
+    apps.delete_drain(&project, &id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

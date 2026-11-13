@@ -568,6 +568,19 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
 - **What roll pays for idle**: locally nothing but disk (images, stopped containers). On the
   fleet, the image in ECR ($0.10/GB-month) and the warm window's Fargate seconds.
 
+## Log drains
+
+A project can send its services' runtime output to up to five HTTPS endpoints
+(`POST /v1/apps/projects/{project}/drains`, Settings → Log drains), as Render's log streams and
+Fly's and Heroku's drains do: NDJSON batches of at most 500 lines or a second, each line its
+time, service, environment, instance, deployment, stream and text, signed as webhooks are. Each
+node sends what its own instances write (a bounded tap on its log hub), so nothing crosses
+nodes and no line waits on another node. It's best effort, as drains are: a batch is tried three
+times and then dropped, and a drain that can't keep up loses its oldest lines (counted in the
+node's log) rather than slowing a writer or holding memory. Endpoints are tenant-chosen URLs:
+the public-only client, no redirects, private addresses refused unless
+`ROLL_APPS_ALLOW_PRIVATE`.
+
 ## Spend limits
 
 A project can have a monthly alert and a hard limit (`PUT /v1/apps/projects/{project}/limits`,
@@ -732,4 +745,4 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
 6. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-7. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
+7. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

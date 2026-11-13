@@ -105,6 +105,14 @@ CREATE TABLE IF NOT EXISTS notify_deliveries (
 CREATE INDEX IF NOT EXISTS notify_due ON notify_deliveries (status, next_at);
 DELETE FROM notify_deliveries WHERE id NOT IN (SELECT MIN(id) FROM notify_deliveries GROUP BY target, event);
 CREATE UNIQUE INDEX IF NOT EXISTS notify_once ON notify_deliveries (target, event);
+CREATE TABLE IF NOT EXISTS log_drains (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    host TEXT NOT NULL,
+    url_sealed TEXT NOT NULL,
+    secret_sealed TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS project_usage (
     project TEXT NOT NULL,
     hour INTEGER NOT NULL,
@@ -1356,6 +1364,43 @@ impl Store {
         })
     }
 
+    // ── log drains ──
+
+    pub fn add_drain(&self, project: &str, host: &str, url: &str, secret: &str) -> Result<LogDrain> {
+        let id = new_id("lgd");
+        let now = self.now()?;
+        let (u, s) = (self.sealer.seal(&format!("drain:{id}:url"), url), self.sealer.seal(&format!("drain:{id}:secret"), secret));
+        self.db.execute("INSERT INTO log_drains (id, project, host, url_sealed, secret_sealed, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, project, host, u, s, now])?;
+        Ok(LogDrain { id, project: project.into(), host: host.into(), created_at: now })
+    }
+
+    pub fn drains(&self, project: &str) -> Result<Vec<LogDrain>> {
+        Ok(self.db.query("SELECT id, project, host, created_at FROM log_drains WHERE project = ? ORDER BY created_at", [project], |r| {
+            Ok(LogDrain { id: r.get(0)?, project: r.get(1)?, host: r.get(2)?, created_at: r.get(3)? })
+        })?)
+    }
+
+    /// A project's drains with their URLs and secrets opened, to send to.
+    pub fn drain_secrets(&self, project: &str) -> Result<Vec<(LogDrain, String, String)>> {
+        let rows: Vec<(LogDrain, String, String)> = self.db.query("SELECT id, project, host, created_at, url_sealed, secret_sealed FROM log_drains WHERE project = ?", [project], |r| {
+            Ok((LogDrain { id: r.get(0)?, project: r.get(1)?, host: r.get(2)?, created_at: r.get(3)? }, r.get(4)?, r.get(5)?))
+        })?;
+        rows.into_iter()
+            .map(|(d, u, s)| {
+                let url = self.sealer.open(&format!("drain:{}:url", d.id), &u)?;
+                let secret = self.sealer.open(&format!("drain:{}:secret", d.id), &s)?;
+                Ok((d, url, secret))
+            })
+            .collect()
+    }
+
+    pub fn delete_drain(&self, project: &str, id: &str) -> Result<()> {
+        match self.db.execute("DELETE FROM log_drains WHERE id = ? AND project = ?", [id, project])? {
+            0 => Err(Error::NotFound(format!("no log drain {id}"))),
+            _ => Ok(()),
+        }
+    }
+
     // ── spend limits ──
 
     pub fn spend_limits(&self, project: &str) -> Result<Option<crate::spend::Limits>> {
@@ -1479,6 +1524,23 @@ fn insert_event(c: &code_sql::Conn<'_>, now: i64, kind: &str, service: &str, env
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two notifiers (a handover) never queue an event twice for a target, the one whose
+    /// cursor moved under it queues nothing, and a claimed delivery isn't handed out again.
+    #[test]
+    fn notifications_are_queued_once_and_claimed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_sqlite(&dir.path().join("apps.db"), Default::default()).unwrap();
+        let s = Store::new(db, Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
+        s.set_state("notify", "0").unwrap();
+        let page = [("ntf_a".to_string(), 1, "deploy.failed".to_string()), ("ntf_a".to_string(), 2, "crash_loop".to_string())];
+        assert!(s.queue_deliveries(&page, 0, 2).unwrap());
+        assert!(!s.queue_deliveries(&page, 0, 2).unwrap(), "the cursor moved: the second notifier queues nothing");
+        assert!(s.queue_deliveries(&page, 2, 2).unwrap());
+        let due = s.due_deliveries(50, 60_000).unwrap();
+        assert_eq!(due.len(), 2, "one per (target, event), whatever ran: {due:?}");
+        assert!(s.due_deliveries(50, 60_000).unwrap().is_empty(), "claimed: no other node sends them meanwhile");
+    }
 
     #[test]
     fn a_node_with_an_older_lease_cannot_switch_after_a_newer_one_has() {
