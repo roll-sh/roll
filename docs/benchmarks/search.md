@@ -340,6 +340,105 @@ Elasticsearch 2,338-2,756 MiB, OpenSearch 2,682-2,709 MiB.
 | sort-status-desc-after-force-merge-1-seg | p50 service time (ms) | 4.10 (4.08-4.12) | 6.89 (5.90-7.88) | 7.03 (6.41-7.66) |
 | sort-status-asc-after-force-merge-1-seg | p50 service time (ms) | 5.26 (4.88-5.64) | 5.11 (4.99-5.23) | 6.31 (5.70-6.92) |
 
+**Rally after the aggregation work** (roll only, two rounds of each track on a binary with the
+date histogram counting, the `auto_date_histogram` array, block collection, numeric histogram
+slots and the `stats` fast path, but not yet the Painless change; Elasticsearch and OpenSearch
+columns are the races above). Measured while builds and YAML suites ran on other cores, so
+differences under ~10% are noise. Where roll is still behind the best of the two:
+`autohisto_agg` (39.6 ms against Elasticsearch's 32.2 and OpenSearch's 13.0: OpenSearch counts
+it from the points tree; Elasticsearch's shard-side rounding choice depends on document order, so
+roll can only count it in the opensearch dialect), `distance_amount_agg` (98.1 against 86.3),
+http_logs `hourly_agg` (32.9 against OpenSearch's 14.0, down from 72.7) and `terms_enum` (1.14
+against 0.57), geonames `decay_geo_gauss_script_score` (78.2 against 70.7). RSS at the end:
+roll 145-394 MiB.
+
+nyc_taxis:
+
+| task | metric | roll | es | os |
+|---|---|---:|---:|---:|
+| index | median throughput (docs/s) | 47335.52 (46952.45-47718.59) | 45766.77 (33557.60-57975.95) | 40594.88 (35717.17-45472.59) |
+| index | p50 service time (ms) | 1500.58 (1498.64-1502.52) | 1229.05 (1189.13-1268.97) | 1474.31 (1440.62-1507.99) |
+| default_no_target | p50 service time (ms) | 1.25 (0.91-1.58) | 9.37 (6.22-12.51) | 7.30 (6.44-8.15) |
+| default_1k | p50 service time (ms) | 12.97 (12.49-13.45) | 17.98 (14.61-21.35) | 21.79 (19.77-23.80) |
+| range | p50 service time (ms) | 6.98 (6.96-6.99) | 10.26 (7.65-12.87) | 7.23 (6.54-7.93) |
+| distance_amount_agg | p50 service time (ms) | 98.07 (89.32-106.81) | 86.33 (77.99-94.67) | 144.14 (131.36-156.91) |
+| autohisto_agg | p50 service time (ms) | 39.57 (38.59-40.56) | 32.20 (29.22-35.18) | 12.99 (7.87-18.11) |
+| date_histogram_agg | p50 service time (ms) | 8.09 (7.88-8.29) | 10.82 (10.31-11.34) | 8.88 (7.72-10.05) |
+
+http_logs:
+
+| task | metric | roll | es | os |
+|---|---|---:|---:|---:|
+| index-append | median throughput (docs/s) | 149038.21 (144669.65-153406.76) | 93681.85 (91171.81-96191.90) | 95421.78 (94317.75-96525.81) |
+| index-append | p50 service time (ms) | 254.44 (246.96-261.92) | 360.05 (358.40-361.69) | 385.83 (368.82-402.83) |
+| default | p50 service time (ms) | 2.45 (2.09-2.81) | 5.68 (5.55-5.81) | 4.83 (4.55-5.12) |
+| term | p50 service time (ms) | 2.07 (1.88-2.26) | 5.43 (5.16-5.70) | 5.04 (4.93-5.16) |
+| terms_enum | p50 service time (ms) | 1.14 (0.76-1.52) | 3.43 (3.40-3.45) | 0.57 (0.41-0.73) |
+| range | p50 service time (ms) | 1.36 (1.29-1.43) | 3.54 (3.41-3.67) | 3.21 (3.15-3.28) |
+| 200s-in-range | p50 service time (ms) | 9.14 (7.78-10.50) | 10.18 (9.82-10.54) | 9.38 (8.48-10.29) |
+| 400s-in-range | p50 service time (ms) | 2.89 (2.72-3.05) | 6.22 (6.20-6.23) | 6.15 (6.03-6.26) |
+| hourly_agg | p50 service time (ms) | 32.89 (31.02-34.76) | 121.10 (120.82-121.38) | 14.00 (9.99-18.01) |
+| scroll | p50 service time (ms) | 445.20 (442.40-447.99) | 489.04 (472.52-505.56) | 483.48 (466.32-500.63) |
+| desc_sort_timestamp | p50 service time (ms) | 7.40 (6.91-7.90) | 14.97 (14.35-15.59) | 13.33 (12.78-13.88) |
+| asc_sort_timestamp | p50 service time (ms) | 6.42 (6.19-6.66) | 12.42 (12.00-12.85) | 8.90 (8.31-9.50) |
+| desc_sort_with_after_timestamp | p50 service time (ms) | 8.08 (7.18-8.98) | 14.17 (12.66-15.68) | 7.47 (7.45-7.50) |
+| asc_sort_with_after_timestamp | p50 service time (ms) | 1.70 (1.64-1.76) | 6.14 (5.95-6.32) | 4.59 (4.53-4.65) |
+| desc_sort_timestamp_can_match_shortcut | p50 service time (ms) | 8.31 (7.96-8.65) | 12.45 (12.19-12.72) | 21.01 (20.44-21.59) |
+| desc_sort_timestamp_no_can_match_shortcut | p50 service time (ms) | 7.98 (7.41-8.55) | 22.09 (21.60-22.57) | 22.96 (22.45-23.47) |
+| sort_size_desc | p50 service time (ms) | 7.26 (6.14-8.39) | 7.34 (7.26-7.41) | 6.84 (6.34-7.33) |
+| sort_size_asc | p50 service time (ms) | 5.57 (5.23-5.90) | 6.75 (6.23-7.27) | 6.19 (5.72-6.65) |
+| sort_status_desc | p50 service time (ms) | 6.19 (4.86-7.52) | 7.51 (6.48-8.54) | 7.06 (6.93-7.19) |
+| sort_status_asc | p50 service time (ms) | 5.53 (4.25-6.80) | 7.02 (6.83-7.22) | 6.53 (6.38-6.67) |
+| sort_keyword_can_match_shortcut | p50 service time (ms) | 4.59 (4.07-5.12) | 6.67 (6.54-6.80) | 6.63 (6.60-6.67) |
+| sort_keyword_no_can_match_shortcut | p50 service time (ms) | 5.68 (5.33-6.02) | 5.97 (5.65-6.29) | 6.13 (6.03-6.23) |
+| sort_numeric_can_match_shortcut | p50 service time (ms) | 8.82 (5.81-11.83) | 8.23 (7.79-8.67) | 8.85 (8.28-9.41) |
+| sort_numeric_no_can_match_shortcut | p50 service time (ms) | 6.62 (6.53-6.71) | 7.65 (7.41-7.88) | 8.37 (7.64-9.10) |
+| desc-sort-timestamp-after-force-merge-1-seg | p50 service time (ms) | 5.47 (5.15-5.79) | 18.19 (10.53-25.85) | 14.72 (12.12-17.33) |
+| asc-sort-timestamp-after-force-merge-1-seg | p50 service time (ms) | 5.96 (5.51-6.41) | 6.79 (6.05-7.54) | 7.08 (5.69-8.48) |
+| desc-sort-with-after-timestamp-after-force-merge-1-seg | p50 service time (ms) | 6.78 (6.43-7.13) | 17.53 (9.31-25.74) | 6.77 (6.26-7.28) |
+| asc-sort-with-after-timestamp-after-force-merge-1-seg | p50 service time (ms) | 1.55 (1.51-1.58) | 4.84 (4.78-4.89) | 4.62 (4.37-4.87) |
+| sort-size-desc-after-force-merge-1-seg | p50 service time (ms) | 5.49 (4.93-6.06) | 9.26 (8.17-10.35) | 6.66 (6.22-7.11) |
+| sort-size-asc-after-force-merge-1-seg | p50 service time (ms) | 4.26 (4.23-4.30) | 6.50 (5.41-7.58) | 6.42 (6.01-6.83) |
+| sort-status-desc-after-force-merge-1-seg | p50 service time (ms) | 4.97 (4.37-5.56) | 6.89 (5.90-7.88) | 7.03 (6.41-7.66) |
+| sort-status-asc-after-force-merge-1-seg | p50 service time (ms) | 4.19 (3.96-4.41) | 5.11 (4.99-5.23) | 6.31 (5.70-6.92) |
+
+geonames:
+
+| task | metric | roll | es | os |
+|---|---|---:|---:|---:|
+| index-append | median throughput (docs/s) | 59895.71 (48677.46-71113.95) | 28085.74 (26573.43-29598.04) | 28683.16 (24578.01-32788.31) |
+| index-append | p50 service time (ms) | 714.47 (558.24-870.70) | 900.07 (864.09-936.06) | 989.34 (972.92-1005.76) |
+| index-stats | median throughput (docs/s) | 348.56 (315.09-382.04) | 178.15 (165.76-190.54) | 213.85 (190.66-237.04) |
+| index-stats | p50 service time (ms) | 1.67 (1.60-1.75) | 3.29 (3.16-3.42) | 2.72 (2.48-2.96) |
+| node-stats | p50 service time (ms) | 1.87 (1.78-1.96) | 6.64 (6.57-6.70) | 4.30 (3.87-4.74) |
+| default | p50 service time (ms) | 2.31 (2.26-2.37) | 4.50 (4.49-4.51) | 3.61 (3.40-3.81) |
+| term | p50 service time (ms) | 0.95 (0.69-1.20) | 2.86 (2.84-2.87) | 2.37 (2.05-2.69) |
+| phrase | p50 service time (ms) | 1.05 (0.80-1.30) | 2.86 (2.81-2.90) | 2.52 (2.27-2.77) |
+| country_agg_uncached | p50 service time (ms) | 25.48 (20.40-30.56) | 27.60 (27.36-27.85) | 39.82 (38.88-40.76) |
+| country_agg_cached | p50 service time (ms) | 1.61 (1.50-1.73) | 3.42 (3.37-3.47) | 3.14 (3.05-3.23) |
+| scroll | p50 service time (ms) | 483.73 (473.49-493.97) | 568.92 (547.15-590.69) | 526.81 (511.78-541.84) |
+| expression | p50 service time (ms) | 60.77 (51.59-69.95) | 71.30 (67.53-75.07) | 81.98 (78.43-85.54) |
+| painless_static | p50 service time (ms) | 79.77 (79.65-79.90) | 89.85 (85.53-94.16) | 91.93 (84.21-99.66) |
+| painless_dynamic | p50 service time (ms) | 79.31 (61.55-97.07) | 78.31 (74.38-82.23) | 94.16 (90.15-98.17) |
+| decay_geo_gauss_function_score | p50 service time (ms) | 45.76 (43.83-47.70) | 66.90 (62.75-71.05) | 72.99 (71.85-74.13) |
+| decay_geo_gauss_script_score | p50 service time (ms) | 78.24 (76.57-79.90) | 70.72 (68.46-72.97) | 88.57 (77.82-99.32) |
+| field_value_function_score | p50 service time (ms) | 14.50 (11.11-17.89) | 25.77 (24.66-26.88) | 28.66 (27.67-29.65) |
+| field_value_script_score | p50 service time (ms) | 42.26 (39.32-45.21) | 41.27 (39.07-43.47) | 42.07 (40.94-43.21) |
+| large_terms | p50 service time (ms) | 102.92 (81.33-124.52) | 144.34 (135.32-153.36) | 196.33 (191.65-201.01) |
+| large_filtered_terms | p50 service time (ms) | 98.00 (89.16-106.84) | 151.69 (141.53-161.84) | 218.25 (172.10-264.40) |
+| large_prohibited_terms | p50 service time (ms) | 102.30 (87.42-117.19) | 155.87 (146.78-164.96) | 203.94 (188.57-219.30) |
+| desc_sort_population | p50 service time (ms) | 3.79 (3.29-4.29) | 6.37 (5.86-6.88) | 6.54 (6.33-6.74) |
+| desc_sort_population_can_match_shortcut | p50 service time (ms) | 4.22 (3.80-4.64) | 6.41 (5.99-6.83) | 8.11 (7.11-9.11) |
+| desc_sort_population_no_can_match_shortcut | p50 service time (ms) | 3.70 (3.16-4.24) | 6.64 (6.47-6.81) | 7.99 (7.12-8.86) |
+| asc_sort_population | p50 service time (ms) | 3.12 (2.80-3.43) | 4.56 (4.45-4.68) | 4.58 (4.31-4.86) |
+| asc_sort_with_after_population | p50 service time (ms) | 3.29 (3.07-3.52) | 5.47 (5.20-5.74) | 5.02 (5.00-5.03) |
+| desc_sort_geonameid | p50 service time (ms) | 4.86 (4.22-5.50) | 6.69 (5.23-8.15) | 8.31 (8.06-8.57) |
+| desc_sort_with_after_geonameid | p50 service time (ms) | 5.27 (4.83-5.71) | 7.60 (7.25-7.96) | 8.11 (8.03-8.19) |
+| asc_sort_geonameid | p50 service time (ms) | 3.81 (3.60-4.02) | 4.77 (4.16-5.37) | 5.70 (5.54-5.85) |
+| asc_sort_with_after_geonameid | p50 service time (ms) | 2.83 (2.48-3.17) | 6.29 (5.90-6.69) | 5.45 (5.34-5.57) |
+| sort_country_code_can_match_shortcut | p50 service time (ms) | 5.49 (5.39-5.59) | 7.68 (6.68-8.67) | 9.25 (7.66-10.85) |
+| sort_country_code_no_can_match_shortcut | p50 service time (ms) | 5.42 (5.14-5.70) | 7.48 (6.01-8.95) | 9.30 (7.69-10.91) |
+
 ## Round 6: every Rally track, indexing, memory and cold start (perf-bench lane, 2026-10-28)
 
 A busy host this time (1-minute load 30–58 on 36 threads, other lanes building): Rally ran
