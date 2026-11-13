@@ -195,7 +195,7 @@ async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate:
     let by = match who(&a, &ext)? {
         Who::Operator => "operator".to_string(),
         Who::Grant(g) => {
-            check_within(&a, &g, &new.rules, new.expires_at, &new.ip_allow).await?;
+            check_within(&a, &g, &Shape { rules: &new.rules, expires_at: new.expires_at, ip_allow: &new.ip_allow, rate: new.rate_per_minute }).await?;
             g.id.to_string()
         }
     };
@@ -204,9 +204,24 @@ async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate:
     Ok((StatusCode::CREATED, Json(json!({ "grant": grant, "token": token }))).into_response())
 }
 
+/// What a grant would be: what a maker must cover.
+struct Shape<'a> {
+    rules: &'a Scope,
+    expires_at: Option<i64>,
+    ip_allow: &'a [String],
+    rate: Option<u32>,
+}
+
+impl<'a> Shape<'a> {
+    fn of(g: &'a crate::store::Grant) -> Shape<'a> {
+        Shape { rules: &g.rules, expires_at: g.expires_at, ip_allow: &g.ip_allow, rate: g.rate_per_minute }
+    }
+}
+
 /// A grant may hand out only what it has: rules it covers, for no longer than it lives, from no
-/// more addresses than it may be used from.
-async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, rules: &Scope, expires_at: Option<i64>, ip_allow: &[String]) -> crate::Result<()> {
+/// more addresses than it may be used from, at no more requests a minute than it may make.
+async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, shape: &Shape<'_>) -> crate::Result<()> {
+    let Shape { rules, expires_at, ip_allow, rate } = *shape;
     if !crate::may_grant(Some(g), rules) {
         return Err(Error::Forbidden("a token can only make tokens it covers: every rule must be within one of its own".into()));
     }
@@ -225,6 +240,11 @@ async fn check_within(a: &Arc<Access>, g: &roll_auth::Grant, rules: &Scope, expi
             return Err(Error::Forbidden(format!("a token limited to {} can only make tokens limited within those addresses", maker.ip_allow.join(", "))));
         }
     }
+    if let Some(mine) = maker.rate_per_minute
+        && rate.is_none_or(|r| r > mine)
+    {
+        return Err(Error::Forbidden(format!("a token limited to {mine} requests a minute can only make tokens limited to that or less")));
+    }
     Ok(())
 }
 
@@ -233,7 +253,7 @@ async fn may_touch(a: &Arc<Access>, g: &roll_auth::Grant, target: &crate::store:
     if *g.id == *target.id {
         return Ok(());
     }
-    check_within(a, g, &target.rules, target.expires_at, &target.ip_allow).await
+    check_within(a, g, &Shape::of(target)).await
 }
 
 async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
@@ -250,7 +270,8 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
         let rules = change.rules.clone().unwrap_or(target.rules.clone());
         let expires = change.expires_at.unwrap_or(target.expires_at);
         let ips = change.ip_allow.clone().unwrap_or(target.ip_allow.clone());
-        check_within(&a, &g, &rules, expires, &ips).await?;
+        let rate = change.rate_per_minute.unwrap_or(target.rate_per_minute);
+        check_within(&a, &g, &Shape { rules: &rules, expires_at: expires, ip_allow: &ips, rate }).await?;
     }
     // A token whose rules, lifetime or addresses change meets the policy as it is now.
     if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {

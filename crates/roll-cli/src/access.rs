@@ -53,6 +53,9 @@ pub struct Create {
     /// Addresses it may be used from (CIDRs), repeatable.
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Vec<String>,
+    /// Requests a minute it may make (per node; over it, 429 with Retry-After).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    rate: Option<u32>,
 }
 
 /// What a token may do, as flags (`create` and `edit`).
@@ -102,6 +105,9 @@ pub struct Edit {
     /// New addresses it may be used from (replaces the list; `--ip none` clears it).
     #[arg(long = "ip", value_delimiter = ',')]
     ip_allow: Option<Vec<String>>,
+    /// Requests a minute it may make (`none` takes the limit off).
+    #[arg(long)]
+    rate: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -265,7 +271,8 @@ fn print_grant(g: &Value) {
         None => "never expires".into(),
     };
     let ip = g["ip_allow"].as_array().filter(|a| !a.is_empty()).map(|a| format!(", from {}", a.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default();
-    println!("  {expires}{ip}; last used {}", when(&g["last_used_at"]));
+    let rate = g["rate_per_minute"].as_u64().map(|r| format!(", {r} requests a minute")).unwrap_or_default();
+    println!("  {expires}{ip}{rate}; last used {}", when(&g["last_used_at"]));
 }
 
 /// A unix-ms time as a UTC date.
@@ -287,7 +294,7 @@ pub fn date(ms: i64) -> String {
 pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> {
     match cmd {
         Token::Create(c) => {
-            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow });
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate });
             let made = api.post("/v1/access/tokens", body).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&made)?);
@@ -351,8 +358,15 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 let ips: Vec<&String> = ips.iter().filter(|i| i.as_str() != "none").collect();
                 patch.insert("ip_allow".into(), json!(ips));
             }
+            if let Some(r) = &e.rate {
+                let rate = match r.as_str() {
+                    "none" => Value::Null,
+                    n => json!(n.parse::<u32>().map_err(|_| anyhow::anyhow!("--rate is a number of requests a minute, or none"))?),
+                };
+                patch.insert("rate_per_minute".into(), rate);
+            }
             if patch.is_empty() {
-                bail!("nothing to change: --name, --expires, --ip, or new rules (--preset, --allow, --ask)");
+                bail!("nothing to change: --name, --expires, --ip, --rate, or new rules (--preset, --allow, --ask)");
             }
             let g = api.call(reqwest::Method::PATCH, &format!("/v1/access/tokens/{}", e.id), Some(Value::Object(patch))).await?;
             if json_out {

@@ -209,6 +209,15 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
     let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
+    // A grant's request limit: an MCP message counts once (not the route its tool calls), a hop
+    // counts where it was decided. Over it, nothing is written: a flood stays cheap.
+    let mut limit = None;
+    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && req.extensions().get::<McpCall>().is_none()) {
+        match access.limiter.check(&grant.id, rate, Instant::now()) {
+            crate::rate::Verdict::Over { retry_after } => return rate_limited(rate, retry_after),
+            crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
+        }
+    }
     let mut ctx = Ctx { access: access.clone(), grant, started, ip, mcp: req.extensions().get::<McpCall>().cloned(), method: req.method().as_str().to_string(), route, args: None };
     if !decided_before {
         let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
@@ -388,10 +397,36 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     } else {
         resp
     };
+    let mut resp = resp;
+    if let Some((rate, remaining, reset)) = limit {
+        limit_headers(resp.headers_mut(), rate, remaining, reset);
+    }
     if !decided_before {
         ctx.audit(Some(row), Some(action), resource, if approval_used.is_some() { "ask" } else { "allow" }, approval_used.as_deref(), resp.status());
     }
     resp
+}
+
+/// Over a grant's limit: 429, when to come back (`Retry-After`, whole seconds), and the limit
+/// (`RateLimit-*`, the IETF draft's fields, as Stripe and GitHub send theirs).
+fn rate_limited(rate: u32, retry_after: std::time::Duration) -> Response {
+    let secs = retry_after.as_secs_f64().ceil().max(1.0) as u64;
+    let mut r = deny(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limited",
+        format!("this token may make {rate} requests a minute: try again in {secs} s"),
+        json!({ "retry_after": secs, "limit": rate }),
+    );
+    let h = r.headers_mut();
+    h.insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    limit_headers(h, rate, 0, retry_after);
+    r
+}
+
+fn limit_headers(h: &mut axum::http::HeaderMap, rate: u32, remaining: u32, reset: std::time::Duration) {
+    h.insert("ratelimit-limit", HeaderValue::from(rate));
+    h.insert("ratelimit-remaining", HeaderValue::from(remaining));
+    h.insert("ratelimit-reset", HeaderValue::from(reset.as_secs_f64().ceil() as u64));
 }
 
 /// The decision on everything a request needs: the weakest outcome, and the action it's for

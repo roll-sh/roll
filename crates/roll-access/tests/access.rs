@@ -198,6 +198,18 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let (fenced, _) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ip_allow": ["10.0.0.0/8"] })).await;
     assert_eq!(d.call(&fenced, Method::GET, "/v1/projects", None).await.1["code"], "ip_not_allowed");
 
+    // A token limited to 2 requests a minute: told how many are left, then 429 with when to retry.
+    let (slow, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "rate_per_minute": 2 })).await;
+    let get = || async {
+        let req = Request::get("/v1/projects").header("authorization", format!("Bearer {slow}")).body(Body::empty()).unwrap();
+        let resp = d.router.clone().oneshot(req).await.unwrap();
+        let h = |n: &str| resp.headers().get(n).map(|v| v.to_str().unwrap().to_string());
+        (resp.status(), h("ratelimit-remaining"), h("retry-after"))
+    };
+    assert_eq!(get().await, (StatusCode::OK, Some("1".into()), None));
+    assert_eq!(get().await, (StatusCode::OK, Some("0".into()), None));
+    assert_eq!(get().await, (StatusCode::TOO_MANY_REQUESTS, Some("0".into()), Some("30".into())));
+
     // Secrets are per project and environment: a rule for the project's development environment
     // reaches those and only those, names but not values.
     let (secrets, _) = d
@@ -384,6 +396,12 @@ async fn a_token_never_makes_a_stronger_one() {
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({}))).await.0, StatusCode::OK);
     assert_eq!(make(json!([{ "product": "postgres", "resources": "*", "actions": { "write": "allow" } }]), Some(end)).await.0, StatusCode::FORBIDDEN);
     assert_eq!(make(read.clone(), None).await.0, StatusCode::FORBIDDEN, "outlives its maker");
+    // A limited maker makes only tokens limited as tightly.
+    let (limited, _) = d.token(json!([{ "product": "access", "resources": "*", "actions": { "admin": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "rate_per_minute": 60 })).await;
+    let child = |rate: Value| d.call(&limited, Method::POST, "/v1/access/tokens", Some(json!({ "name": "child", "rules": read, "rate_per_minute": rate })));
+    assert_eq!(child(Value::Null).await.0, StatusCode::FORBIDDEN, "unlimited from a limited maker");
+    assert_eq!(child(json!(61)).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(child(json!(60)).await.0, StatusCode::CREATED);
     assert_eq!(make(read, Some(end - 1000)).await.0, StatusCode::CREATED);
 
     let project = d.workspace.create("app", "", None).unwrap();

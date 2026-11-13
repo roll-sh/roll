@@ -1,6 +1,6 @@
 import { HorizonMark } from "@roll/brand";
 import { useEffect, useState } from "react";
-import { accessApi, describeRule, EXPIRIES, ipProblems, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
+import { accessApi, describeRule, EXPIRIES, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
@@ -15,6 +15,7 @@ export function NewToken() {
   const [rules, setRules] = useState<Rule[]>([]);
   const [expiry, setExpiry] = useState(1);
   const [ips, setIps] = useState("");
+  const [rateText, setRateText] = useState("");
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState<{ grant: Grant; token: string } | null>(null);
 
@@ -30,14 +31,20 @@ export function NewToken() {
   }, []);
 
   const ipList = ips.split(/[\s,]+/).filter(Boolean);
-  const problems = [...(name.trim() ? [] : ["Name the token"]), ...(rules.length ? [] : ["Allow at least one action"]), ...ipProblems(ipList)];
+  const rate = parseRate(rateText);
+  const problems = [
+    ...(name.trim() ? [] : ["Name the token"]),
+    ...(rules.length ? [] : ["Allow at least one action"]),
+    ...ipProblems(ipList),
+    ...(rate.problem ? [rate.problem] : []),
+  ];
 
   const create = async () => {
     setBusy(true);
     setError(null);
     try {
       const ms = EXPIRIES[expiry].ms;
-      setMade(await accessApi.create({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, ip_allow: ipList }));
+      setMade(await accessApi.create({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, ip_allow: ipList, rate_per_minute: rate.rate }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -66,7 +73,7 @@ export function NewToken() {
               </div>
             </Panel>
             <Panel title="Name, lifetime and network">
-              <div className="grid gap-4 p-5 sm:grid-cols-3">
+              <div className="grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-4">
                 <label className="block space-y-1.5">
                   <span className="block text-[12px] text-subtle">Name</span>
                   <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="ci, cursor on my laptop" maxLength={64} className={`${input} w-full`} />
@@ -84,6 +91,10 @@ export function NewToken() {
                 <label className="block space-y-1.5">
                   <span className="block text-[12px] text-subtle">Only from (optional)</span>
                   <input value={ips} onChange={(e) => setIps(e.target.value)} placeholder="10.0.0.0/8, 203.0.113.4" className={`${input} w-full font-mono text-[12px]`} />
+                </label>
+                <label className="block space-y-1.5">
+                  <span className="block text-[12px] text-subtle">Requests a minute (optional)</span>
+                  <input value={rateText} onChange={(e) => setRateText(e.target.value)} inputMode="numeric" placeholder="No limit" className={`${input} w-full font-mono text-[12px]`} />
                 </label>
               </div>
             </Panel>

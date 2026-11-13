@@ -45,6 +45,8 @@ export interface Grant {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: OAuthClient;
+  /** Requests a minute it may make (per node); absent: no limit. */
+  rate_per_minute?: number;
   /** Its requests over the last day (in the list). */
   activity?: { allowed: number; denied: number; asked: number };
 }
@@ -54,6 +56,7 @@ export interface NewGrant {
   rules: Rule[];
   expires_at?: number | null;
   ip_allow?: string[];
+  rate_per_minute?: number | null;
 }
 
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "used";
@@ -136,6 +139,7 @@ export interface Consent {
   rules: Rule[];
   expires_at?: number | null;
   ip_allow?: string[];
+  rate_per_minute?: number | null;
 }
 
 const token = (id: string) => `/v1/access/tokens/${encodeURIComponent(id)}`;
@@ -286,6 +290,18 @@ export const EXPIRIES: { label: string; ms: number | null }[] = [
 ];
 
 /** Checked CIDR-ish entries (`10.0.0.0/8`, `203.0.113.4`, `2001:db8::/32`); the API checks for real. */
+/** The most requests a minute a token may be allowed (roll-access's `MAX_RATE`). */
+export const MAX_RATE = 100_000;
+
+/** A typed requests-a-minute limit: empty is none. */
+export function parseRate(text: string): { rate: number | null; problem?: string } {
+  const t = text.trim();
+  if (!t) return { rate: null };
+  const n = Number(t);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_RATE) return { rate: null, problem: `Requests a minute is a whole number from 1 to ${MAX_RATE.toLocaleString("en")}` };
+  return { rate: n };
+}
+
 export function ipProblems(list: string[]): string[] {
   const ok = (s: string) => /^[0-9a-fA-F:.]+(\/\d{1,3})?$/.test(s) && (s.includes(".") || s.includes(":"));
   return list.filter((s) => !ok(s)).map((s) => `${s} isn't an address or CIDR`);
