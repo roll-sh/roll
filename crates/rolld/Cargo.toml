@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 getrandom.workspace = true
+apps-control.workspace = true
+async-trait.workspace = true
+code-store.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
@@ -15,6 +18,8 @@ chrono.workspace = true
 clap.workspace = true
 roll-cluster.workspace = true
 code-control.workspace = true
+code-review.workspace = true
+roll-net.workspace = true
 code-preview.workspace = true
 futures.workspace = true
 http-body.workspace = true
@@ -47,10 +52,12 @@ code-sql.workspace = true
 redis-server.workspace = true
 roll-edge.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
-async-trait.workspace = true
+roll-accounts.workspace = true
 roll-auth.workspace = true
 roll-workspace.workspace = true
 roll-previews.workspace = true
+roll-access.workspace = true
+roll-mcp.workspace = true
 s3-api.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true

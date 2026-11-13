@@ -291,7 +291,7 @@ impl Backend {
     fn environment_for(&self, repo: &RepoRow) -> Option<(Arc<Engine>, String)> {
         let engine = self.engine.get().and_then(Weak::upgrade)?;
         let full = repo.full_name();
-        let project = self.workspace.list().ok()?.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == full))?;
+        let project = self.workspace.list(roll_workspace::Scope::All).ok()?.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == full))?;
         engine.store.settings(&project.id).ok().filter(|s| s.enabled)?;
         Some((engine, project.id))
     }

@@ -1,5 +1,5 @@
 import { RollLogo } from "@roll/brand";
-import { GitBranch, House, Plus, Search } from "lucide-react";
+import { GitBranch, House, KeyRound, Plus, Search } from "lucide-react";
 import { useLocation } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Link } from "@/components/link";
@@ -8,6 +8,7 @@ import { hideAgents } from "@/lib/agents-surface";
 import { monthOf, projectMonth, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace } from "@/lib/workspace-store";
 import { useMarkState } from "../mark-state";
+import { AccountMenu } from "./account";
 import { SidebarAgents, threadsOf, useAgents } from "./agents";
 import { openNewProject } from "./new-project";
 import { ProjectIcon } from "./project-icon";
@@ -20,7 +21,7 @@ const row =
  * spend), the agents working or waiting right now, and the month's spend across everything.
  * Agents open over the page beside it, so the sidebar stays in reach.
  */
-export function Sidebar({ onSearch, header }: { onSearch: () => void; header?: ReactNode }) {
+export function Sidebar({ onSearch }: { onSearch: () => void }) {
   const ws = useWorkspace();
   const { state } = useMarkState();
   const pathname = useLocation({ select: (l) => l.pathname });
@@ -34,7 +35,6 @@ export function Sidebar({ onSearch, header }: { onSearch: () => void; header?: R
         <Link href="/dashboard" aria-label="roll home" className="py-0.5">
           <RollLogo state={state} size={17} />
         </Link>
-        <span className="ml-auto min-w-0">{header}</span>
       </div>
 
       <button
@@ -51,6 +51,9 @@ export function Sidebar({ onSearch, header }: { onSearch: () => void; header?: R
       </SideLink>
       <SideLink href="/dashboard/code" icon={<GitBranch className="size-3.5" />} active={pathname.startsWith("/dashboard/code")}>
         Code
+      </SideLink>
+      <SideLink href="/dashboard/access" icon={<KeyRound className="size-3.5" />} active={pathname.startsWith("/dashboard/access")}>
+        MCP &amp; access
       </SideLink>
 
       <Projects pathname={pathname} />
@@ -78,6 +81,7 @@ export function Sidebar({ onSearch, header }: { onSearch: () => void; header?: R
           <span>by {month.end}</span>
         </div>
       </Link>
+      <AccountMenu />
     </div>
   );
 }

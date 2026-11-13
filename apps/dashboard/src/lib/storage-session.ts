@@ -12,7 +12,7 @@
  * `storageCall` is `roll-api`'s `call` with those headers; other products keep using `call`.
  */
 
-import { operatorHeaders, requestSignIn } from "./code-token";
+import { operatorHeaders, requestSignIn, withSession } from "./code-token";
 import { ROLL_API } from "./roll-api";
 
 // --- Errors ------------------------------------------------------------------------------------
@@ -234,12 +234,15 @@ export async function storageCall<T>(method: string, path: string, body?: unknow
   const sentSession = Boolean(getSession()) && "authorization" in auth;
   const headers: Record<string, string> = { ...auth };
   if (body !== undefined) headers["content-type"] = "application/json";
-  const res = await fetch(`${ROLL_API}${path}`, {
-    method,
-    headers: Object.keys(headers).length ? headers : undefined,
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: "no-store",
-  });
+  const res = await fetch(
+    `${ROLL_API}${path}`,
+    withSession({
+      method,
+      headers: Object.keys(headers).length ? headers : undefined,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+    }),
+  );
   const text = await res.text();
   let data: { error?: string; code?: string } | null = null;
   try {
@@ -275,7 +278,7 @@ export function sessionDownload(url: string, filename: string, onError?: (messag
     (async () => {
       assertSessionLive();
       const auth = storageHeaders();
-      const res = await fetch(url, { headers: auth, cache: "no-store" });
+      const res = await fetch(url, withSession({ headers: auth, cache: "no-store" }));
       if (!res.ok) {
         onStatus(res.status, Boolean(getSession()));
         let msg = `${res.status} ${res.statusText}`.trim();

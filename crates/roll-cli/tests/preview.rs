@@ -24,8 +24,8 @@ fn server() -> Server {
         let files = serde_json::from_value(json!({ "message": "init", "files": { "index.html": { "content": "hi" } } })).unwrap();
         code.land_api(&repo, &caller, &files, None, false).await.unwrap();
         let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(path.join("ws.db")), Default::default()).unwrap());
-        let shop = ws.create("shop", "", None).unwrap();
-        ws.place(&shop.id, roll_workspace::Kind::Repo, "acme/web", 0.0, 0.0).unwrap();
+        let shop = ws.create("", "shop", "", None).unwrap();
+        ws.place(roll_workspace::Scope::All, &shop.id, roll_workspace::Kind::Repo, "acme/web", 0.0, 0.0).unwrap();
         let store = Arc::new(roll_previews::Store::open(&code_sql::Target::Sqlite(path.join("previews.db")), Default::default()).unwrap());
         let source = roll_previews::code::CodeSource::new(code.clone());
         let runtime = roll_previews::runtime::Runtime::new(Default::default(), Arc::new(code_preview::docker::Docker), source.clone(), store.clone());

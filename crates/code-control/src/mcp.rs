@@ -762,8 +762,10 @@ fn query(pairs: &[(&str, Option<String>)]) -> String {
 }
 
 struct Call<'a> {
-    m: &'a Mcp,
+    api: &'a Router,
     headers: &'a HeaderMap,
+    /// Put on every request a call makes (roll's MCP server marks its tool calls).
+    extensions: Option<&'a axum::http::Extensions>,
 }
 
 impl Call<'_> {
@@ -778,11 +780,14 @@ impl Call<'_> {
             Some(v) => b.header(header::CONTENT_TYPE, "application/json").body(AxumBody::from(v.to_string())),
             None => b.body(AxumBody::empty()),
         };
-        let req = match req {
+        let mut req = match req {
             Ok(r) => r,
             Err(e) => return Api { status: StatusCode::BAD_REQUEST, body: json!({ "error": e.to_string() }), raw: Vec::new(), content_type: String::new() },
         };
-        let resp = match self.m.api.clone().oneshot(req).await {
+        if let Some(ext) = self.extensions {
+            req.extensions_mut().extend(ext.clone());
+        }
+        let resp = match self.api.clone().oneshot(req).await {
             Ok(r) => r,
             Err(e) => match e {},
         };
@@ -905,7 +910,14 @@ fn body_of(args: &Value, drop: &[&str]) -> Value {
 }
 
 async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value) -> Value {
-    let c = Call { m, headers };
+    call(&m.api, headers, None, name, args).await
+}
+
+/// Run one of [`tools`] against `api` with the caller's headers (`Authorization`, `X-Roll-Agent`,
+/// `X-Roll-User`), `extensions` on each request it makes: the tool's MCP result. roll's own MCP
+/// server (`/v1/mcp`) fronts roll code's tools with this, through rolld's gate.
+pub async fn call(api: &Router, headers: &HeaderMap, extensions: Option<&axum::http::Extensions>, name: &str, args: &Value) -> Value {
+    let c = Call { api, headers, extensions };
     let outcome = match run(&c, name, args).await {
         Ok(o) | Err(o) => o,
     };

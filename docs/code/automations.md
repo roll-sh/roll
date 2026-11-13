@@ -122,7 +122,7 @@ Integrations plug in through `registry.rs`, without the engine knowing them:
   `secrets_at`, default retry and timeout, `run(&mut StepContext) -> StepOutcome`, and `cleanup` when
   the run ends), registered with `register_step`. `StepContext` gives the run's context and
   templates, the step's config, the automation's sealed secrets, an SSRF-guarded HTTP client
-  (`review::apps::PublicOnly`, no redirects, the literal-host check, 30 s, answers read up to 1 MiB),
+  (`roll_net::PublicOnly`, no redirects, the literal-host check, 30 s, answers read up to 1 MiB),
   the API as the automation, durable state between attempts and waits, a log, and
   `idempotency_key()` for making side effects happen once. Outcomes: `Done(output)`,
   `Wait {after}`, `Retry(why)` (transient: backoff, then fail), `Fail(why)`.
@@ -142,7 +142,7 @@ for steps that call out (`webhook`). Provider credentials are never touched (doc
 | `agent.publish` | `thread.publish`, `land` sends it to landing (the merge queue on `queue` repos) | `branch`, `commit`, `change`, `url`, `landing` |
 | `agent.script` | runs a project script in a terminal (the thread's worktree, or the project's checkout) | `terminal`, `machine` |
 | `agent.settle` | settle, archive or un-settle | `thread`, `action` |
-| `webhook` | an HTTP request to a public address (`review::apps::PublicOnly`, no redirects, the literal-host check, 30 s, answers read up to 1 MiB); signed with one of the automation's secrets like roll's own webhooks; `X-Roll-Delivery` and `Idempotency-Key` are the step's idempotency key, the same on every attempt. 5xx, 429, 408 and network errors are retried, other statuses fail. It is a step, not a delivery queue: its answer feeds later steps, and the engine's retries are its redelivery. | `status`, `headers`, `body` |
+| `webhook` | an HTTP request to a public address (`roll_net::PublicOnly`, no redirects, the literal-host check, 30 s, answers read up to 1 MiB); signed with one of the automation's secrets like roll's own webhooks; `X-Roll-Delivery` and `Idempotency-Key` are the step's idempotency key, the same on every attempt. 5xx, 429, 408 and network errors are retried, other statuses fail. It is a step, not a delivery queue: its answer feeds later steps, and the engine's retries are its redelivery. | `status`, `headers`, `body` |
 | `notify` | a `notice` on the owner's stream (a toast on every open device), kept for later (the newest 200 per owner, `GET …/automations/notices`) | `id` |
 | `delay` | waits, durably | — |
 

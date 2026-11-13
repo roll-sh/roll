@@ -98,6 +98,12 @@ impl GitBackend for GitAdapter {
             }
             return Ok(Some(format!("agent:{}", g.machine_name)));
         }
+        // rolld's gate decided this request for a scoped token (docs/permissions.md): fetch is code
+        // read, push write, deploy to the default branch. It pushes as the token.
+        if let Some(c) = credentials.filter(|c| c.vouched) {
+            self.repo(repo)?;
+            return Ok(Some(c.username.clone()));
+        }
         let caller = self.code.caller(credentials.map(|c| c.password.as_str())).map_err(|_| GitError::Unauthorized)?;
         let r = self.repo(repo)?;
         if !Code::can_read(&caller, &r) {

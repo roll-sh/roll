@@ -11,6 +11,7 @@ axum.workspace = true
 bytes.workspace = true
 code-sql.workspace = true
 getrandom.workspace = true
+roll-auth.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

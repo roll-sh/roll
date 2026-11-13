@@ -5,6 +5,7 @@
  * the same rate carried to its end.
  */
 
+import { appsApi, deployStatus, hostOf, instanceStateLabel, instanceTone, mainEnvironment, PRODUCTION, sourceLabel, type Service } from "./apps-api";
 import { codeApi, type Repo } from "./code-api";
 import { DIALECT_LABEL, nosqlApi, type NosqlDb } from "./nosql-api";
 import { redisApi, type RedisDb } from "./redis-api";
@@ -13,7 +14,7 @@ import { qapi, type VHost } from "./queues-api";
 import { storageApi, type Bucket } from "./storage-api";
 import { RESOURCE_KINDS, type PlacedResource, type ResourceKind } from "./workspace-api";
 
-export type ResourceState = "online" | "idle" | "starting" | "missing";
+export type ResourceState = "online" | "idle" | "starting" | "failed" | "missing";
 
 /** A resource as a canvas card and the inspector show it. */
 export interface ResourceView {
@@ -24,6 +25,8 @@ export interface ResourceView {
   sub: string;
   state: ResourceState;
   stateLabel: string;
+  /** A small mono note after the state on the card ("$0.00/h" for a service asleep). */
+  note?: string;
   /** Small mono figure on the card's right (memory, size, topics). */
   meta: string;
   /** A tab under the card (a database's storage), like a volume. */
@@ -46,6 +49,7 @@ export const KIND_LABEL: Record<ResourceKind, string> = {
   queue: "Queues",
   tasks: "Tasks",
   repo: "Repository",
+  service: "Service",
 };
 
 const KIND_PRODUCT: Record<ResourceKind, Product> = {
@@ -57,6 +61,7 @@ const KIND_PRODUCT: Record<ResourceKind, Product> = {
   queue: "queues",
   tasks: "tasks",
   repo: "code",
+  service: "apps",
 };
 
 const key = (kind: ResourceKind, ref: string) => `${kind}:${ref}`;
@@ -215,6 +220,36 @@ function vhost(v: VHost): ResourceView {
   };
 }
 
+/** A roll apps service: its main environment's state, URL and latest deploy. */
+export function service(s: Service): ResourceView {
+  const env = mainEnvironment(s);
+  const st = env?.state ?? "none";
+  const latest = env?.latest ? deployStatus(env.latest.status) : null;
+  const pending = latest?.tone === "busy";
+  const instances = s.run.min_instances === s.run.max_instances ? `${s.run.min_instances}` : `${s.run.min_instances}–${s.run.max_instances}`;
+  return {
+    kind: "service",
+    ref: s.id,
+    name: s.name,
+    sub: hostOf(env?.url) || sourceLabel(s.source),
+    // A deploy on its way is busy whatever the instances are doing.
+    state: pending ? "starting" : instanceTone(st),
+    stateLabel: pending ? `${latest.label}…` : instanceStateLabel(st),
+    // Asleep or frozen meters nothing: say so where the state is.
+    note: !pending && (st === "stopped" || st === "suspended") ? "$0.00/h" : undefined,
+    meta: latest && !pending ? latest.label : `${instances} ${instances === "1" ? "instance" : "instances"}`,
+    connect: env?.url ?? undefined,
+    href: `/dashboard/apps/${encodeURIComponent(s.id)}`,
+    facts: [
+      ["source", sourceLabel(s.source)],
+      ["type", s.run.type],
+      ["environments", s.environments.map((e) => e.name).join(", ") || "—"],
+      ["instances", instances],
+      ["size", `${s.run.cpu} vCPU · ${s.run.memory_mb} MB`],
+    ],
+  };
+}
+
 function tenant(id: string): ResourceView {
   return {
     kind: "tasks",
@@ -268,12 +303,24 @@ export async function loadInventory(): Promise<Inventory> {
     on("queue") ? qapi.vhosts().then((l) => l.map(vhost), () => []) : [],
     on("tasks") ? call<{ tenants: string[] }>("GET", "/_roll/tenants").then((t) => t.tenants.map(tenant), () => []) : [],
     on("repo") ? codeApi.repos().then((l) => l.map(repo), () => []) : [],
+    on("service") ? appsApi.services().then((l) => l.map(service), () => []) : [],
   ]);
   return { views: new Map(lists.flat().map((v) => [resourceKey(v), v])), kinds };
 }
 
-/** What can be made from the canvas (repos are connected, not made, here). */
-export const CREATABLE: ResourceKind[] = ["postgres", "redis", "nosql", "stream", "bucket"];
+/** A product's resources as rules name them (their ids), with their names: the token builder's picker. */
+export function resourcesByProduct(inv: Inventory): Record<string, { id: string; name: string }[]> {
+  const out: Record<string, { id: string; name: string }[]> = {};
+  for (const v of inv.views.values()) {
+    const product = KIND_PRODUCT[v.kind];
+    (out[product] ??= []).push({ id: v.ref, name: v.name });
+  }
+  for (const list of Object.values(out)) list.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
+/** What can be made from the canvas (repos are connected, not made, here; a service has its own flow). */
+export const CREATABLE: ResourceKind[] = ["service", "postgres", "redis", "nosql", "stream", "bucket"];
 
 export const KIND_BLURB: Record<ResourceKind, string> = {
   postgres: "Branches, scales to zero",
@@ -284,11 +331,12 @@ export const KIND_BLURB: Record<ResourceKind, string> = {
   queue: "RabbitMQ-compatible vhost",
   tasks: "Messages, schedules, workflows",
   repo: "Source for this project",
+  service: "Your code, scales to zero",
 };
 
 /** What a new resource of `kind` would be called in `project` (unique among `taken`). */
 export function suggestName(kind: ResourceKind, project: string, taken: Set<string>) {
-  const base = `${project}-${{ postgres: "db", redis: "cache", nosql: "nosql", stream: "events", bucket: "files", queue: "jobs", tasks: "tasks", repo: "repo" }[kind]}`;
+  const base = `${project}-${{ postgres: "db", redis: "cache", nosql: "nosql", stream: "events", bucket: "files", queue: "jobs", tasks: "tasks", repo: "repo", service: "web" }[kind]}`;
   let name = base;
   for (let i = 2; taken.has(name); i++) name = `${base}-${i}`;
   return name;
@@ -315,6 +363,8 @@ export async function createResource(kind: ResourceKind, name: string): Promise<
       return name;
     case "repo":
       throw new Error("Repositories are connected, not created, from a project.");
+    case "service":
+      throw new Error("A service needs a source: make it with New service.");
   }
 }
 
@@ -361,6 +411,8 @@ export async function spentThisMonth(kind: ResourceKind, ref: string, m: Month):
     case "tasks":
     case "repo":
       return 0;
+    case "service":
+      return (await appsApi.usage(ref, PRODUCTION, days)).total_usd;
   }
 }
 

@@ -9,7 +9,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
 use pg_storage::{Objects, StorageConfig};
-use roll_edge::acme::{Acme, AcmeConfig, Cloudflare};
+use roll_edge::acme::{Acme, AcmeAccount, AcmeConfig, Cloudflare, Solver};
 use roll_edge::certs::{CertManager, LocalSingleton};
 use roll_edge::seal::Sealer;
 use roll_edge::tls::CertStore;
@@ -153,7 +153,7 @@ async fn wildcards_are_issued_over_dns01_and_stored_sealed() {
     let sealer = Sealer::new("0123456789abcdef0123456789abcdef").unwrap();
     let dns = Arc::new(Cloudflare::new("test-token", &cf_url).unwrap());
     let cfg = AcmeConfig { email: Some("ops@roll.test".into()), ca_file: Some(ca_file), propagation: Duration::ZERO, ..AcmeConfig::new(&directory) };
-    let acme = Arc::new(Acme::new(cfg, dns, objects.clone(), sealer.clone()));
+    let acme = Arc::new(Acme::new(AcmeAccount::new(cfg, objects.clone(), sealer.clone()), Solver::Dns01(dns)));
     let hosts = Hostnames::new("roll.test", "rollsite.test", "r1");
     let store = CertStore::new();
     let manager = CertManager::new(objects.clone(), sealer, store.clone(), hosts.cert_sets(), Some(acme), Arc::new(LocalSingleton));

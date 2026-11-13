@@ -15,6 +15,7 @@ const DOT: Record<string, string> = {
   idle: "bg-subtle",
   starting: "bg-accent animate-pulse motion-reduce:animate-none",
   missing: "bg-danger",
+  failed: "bg-danger",
 };
 
 /**
@@ -23,6 +24,7 @@ const DOT: Record<string, string> = {
  */
 export function Board({
   cards,
+  edges = [],
   shift = 0,
   selected,
   onSelect,
@@ -30,6 +32,8 @@ export function Board({
   children,
 }: {
   cards: Card[];
+  /** Cards joined by a line (a service and what it links), by key. */
+  edges?: [string, string][];
   /** Move the cards right by this much (a panel open on the left), sliding with it. */
   shift?: number;
   selected: string | null;
@@ -48,12 +52,46 @@ export function Board({
         className="relative min-h-full min-w-full transition-transform duration-300 ease-drawer motion-reduce:transition-none"
         style={{ width, height, transform: shift ? `translateX(${shift}px)` : undefined }}
         onPointerDown={(e) => e.target === e.currentTarget && onSelect(null)}>
+        <Edges cards={cards} edges={edges} />
         {cards.map((c) => (
           <Node key={c.key} card={c} selected={selected === c.key} onSelect={() => onSelect(c.key)} onMove={(x, y) => onMove(c, x, y)} />
         ))}
         {children}
       </div>
     </div>
+  );
+}
+
+/** The lines between joined cards: from the right edge of one to the left edge of the other,
+ *  a soft curve in hairline ink under the cards. */
+function Edges({ cards, edges }: { cards: Card[]; edges: [string, string][] }) {
+  if (!edges.length) return null;
+  const at = new Map(cards.map((c) => [c.key, c]));
+  const mid = CARD_H / 2;
+  return (
+    <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
+      {edges.map(([a, b]) => {
+        const from = at.get(a);
+        const to = at.get(b);
+        if (!from || !to) return null;
+        // From whichever side faces the other card.
+        const leftToRight = from.x <= to.x;
+        const x1 = leftToRight ? from.x + CARD_W : from.x;
+        const x2 = leftToRight ? to.x : to.x + CARD_W;
+        const [y1, y2] = [from.y + mid, to.y + mid];
+        const bend = Math.max(40, Math.abs(x2 - x1) / 2) * (leftToRight ? 1 : -1);
+        return (
+          <path
+            key={`${a}>${b}`}
+            d={`M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`}
+            fill="none"
+            stroke="var(--line-3)"
+            strokeWidth={1.25}
+            strokeDasharray="4 3"
+          />
+        );
+      })}
+    </svg>
   );
 }
 
@@ -142,7 +180,10 @@ function Node({ card, selected, onSelect, onMove }: { card: Card; selected: bool
           ) : (
             <>
               <i className={`size-1.5 shrink-0 rounded-full ${DOT[view!.state]}`} />
-              <span className="truncate">{view!.stateLabel}</span>
+              <span className="truncate">
+                {view!.stateLabel}
+                {view!.note && <span className="font-mono text-[10.5px] text-subtle"> · {view!.note}</span>}
+              </span>
               <span className="ml-auto font-mono text-[10.5px] text-subtle">{view!.meta}</span>
             </>
           )}

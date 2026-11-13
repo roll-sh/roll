@@ -278,9 +278,9 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
 pub fn env(settings: serde_json::Value) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
-    let p = ws.create("shop", "", None).unwrap();
+    let p = ws.create("", "shop", "", None).unwrap();
     for (kind, r) in [(roll_workspace::Kind::Repo, "acme/web"), (roll_workspace::Kind::Repo, "acme/api"), (roll_workspace::Kind::Postgres, "prj_db"), (roll_workspace::Kind::Redis, "rdb_cache")] {
-        ws.place(&p.id, kind, r, 0.0, 0.0).unwrap();
+        ws.place(roll_workspace::Scope::All, &p.id, kind, r, 0.0, 0.0).unwrap();
     }
     let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("previews.db")), Default::default()).unwrap());
     let s = Settings::default().patched(&settings).unwrap();

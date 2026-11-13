@@ -1438,3 +1438,30 @@ async fn events_promised_by_a_state_change_survive_a_crash_after_its_commit() {
     assert_eq!(state_of(&id2, "closed"), 2, "c2's opening and closing, both read after the close");
     assert!(state_of(&id1, "landed") >= 4, "c1's promised events, read after it landed");
 }
+
+/// Leaked tokens (docs/permissions.md, "Leaked tokens"): what lands is read after it lands, and a
+/// file that may hold a roll token goes to roll's access service with where it is; others don't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn landed_files_are_scanned_for_roll_tokens() {
+    let a = setup().await;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let s2 = seen.clone();
+    a.code.on_leaked_secrets(Arc::new(move |text: String, at: String| {
+        s2.lock().unwrap().push((text, at));
+        1
+    }));
+    // The first pass starts at the present: nothing before the scanner is read.
+    a.code.scan_landings().await.unwrap();
+    land_file(&a, "oops", ".env", &format!("ROLL_TOKEN=rlt_{}\n", "a".repeat(40))).await;
+    land_file(&a, "fine", "b.txt", "nothing here\n").await;
+    for _ in 0..100 {
+        a.code.scan_landings().await.unwrap();
+        if !seen.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.iter().any(|(text, at)| text.contains("ROLL_TOKEN=rlt_") && at.starts_with("acme/api .env at ")), "{seen:?}");
+    assert!(seen.iter().all(|(_, at)| !at.contains("b.txt") && !at.contains("a.txt")), "{seen:?}");
+}

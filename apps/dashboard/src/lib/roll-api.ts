@@ -1,6 +1,6 @@
 /** Client for the rolld control-plane API (Postgres: crates/pg-control/src/api.rs; streams: crates/stream-broker/src/http; Redis: redis-api.ts). */
 
-import { operatorHeaders, requestSignIn } from "./code-token";
+import { operatorHeaders, requestSignIn, withSession } from "./code-token";
 
 /** The API as browsers reach it (`VITE_ROLL_API`, built in), and the server's default. */
 export const ROLL_API = import.meta.env?.VITE_ROLL_API ?? "http://127.0.0.1:7070";
@@ -67,7 +67,7 @@ export interface Health {
 }
 
 /** A product rolld can run; `GET /v1/info` lists the ones this node runs (`ROLL_PRODUCTS`). */
-export type Product = "postgres" | "redis" | "streams" | "tasks" | "storage" | "nosql" | "queues" | "code";
+export type Product = "postgres" | "redis" | "streams" | "tasks" | "storage" | "nosql" | "queues" | "code" | "apps";
 
 export interface Info {
   version: string;
@@ -94,12 +94,15 @@ export function onApiStatus(status: number) {
 }
 
 export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${ROLL_API}${path}`, {
-    method,
-    headers: apiHeaders(body),
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: "no-store",
-  });
+  const res = await fetch(
+    `${ROLL_API}${path}`,
+    withSession({
+      method,
+      headers: apiHeaders(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+    }),
+  );
   onApiStatus(res.status);
   const text = await res.text();
   let data = null;

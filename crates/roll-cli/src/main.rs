@@ -1,3 +1,4 @@
+mod access;
 mod agent;
 mod automation;
 mod code;
@@ -14,6 +15,7 @@ mod queues;
 mod preview;
 mod storage;
 mod redis;
+mod apps;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -39,12 +41,28 @@ struct Cli {
     /// and it's the default for `roll code` and `roll tasks`.
     #[arg(long, env = "ROLL_ADMIN_TOKEN", global = true, hide_env_values = true)]
     admin_token: Option<String>,
+    /// A scoped token (`rlt_…`, `roll token create`): every API takes it, within its rules. It
+    /// wins over the operator's token when both are set.
+    #[arg(long = "roll-token", env = "ROLL_TOKEN", global = true, hide_env_values = true)]
+    roll_token: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Deploy this directory to roll apps (makes the service the first time).
+    Up(apps::Up),
+    /// Deploy a service's source (a repo's branch head, a revision, or an image).
+    Deploy(apps::Deploy),
+    /// A service's runtime log, or a deployment's build log (`--build`).
+    Logs(apps::Logs),
+    /// A service's hostnames and custom domains.
+    #[command(subcommand)]
+    Domains(apps::Domains),
+    /// roll apps: services, deploys, variables, links, scaling.
+    #[command(subcommand, alias = "app")]
+    Apps(Box<apps::AppsCmd>),
     /// Run coding agents on this machine and drive them from roll (`login`, `up`, `status`, `logout`).
     #[command(subcommand)]
     Agent(agent::Agent),
@@ -79,6 +97,12 @@ enum Cmd {
     /// per change or pull request.
     #[command(subcommand, alias = "previews")]
     Preview(preview::Preview),
+    /// Scoped tokens: what an agent, a CI job or a script may do (`create`, `list`, `revoke`, …).
+    #[command(subcommand, alias = "tokens")]
+    Token(access::Token),
+    /// roll's MCP server: client config, approvals waiting for you, the audit log.
+    #[command(subcommand)]
+    Mcp(access::Mcp),
 }
 
 #[derive(Subcommand)]
@@ -381,7 +405,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
     let cli = Cli::from_arg_matches(&matches)?;
-    let admin = cli.admin_token.filter(|t| !t.trim().is_empty());
+    // A scoped token, when set, is what everything uses: the narrower credential wins.
+    let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
@@ -394,6 +419,11 @@ async fn main() -> anyhow::Result<()> {
             return code::run(&code_api, cli.json, cmd).await;
         }
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
+        Cmd::Up(u) => return apps::up(&api, cli.json, u).await,
+        Cmd::Deploy(d) => return apps::deploy(&api, cli.json, d).await,
+        Cmd::Logs(l) => return apps::logs(&api, cli.json, l).await,
+        Cmd::Domains(d) => return apps::domains(&api, cli.json, d).await,
+        Cmd::Apps(cmd) => return apps::run(&api, cli.json, *cmd).await,
         Cmd::Stream(cmd) => {
             if let Some(out) = stream::run(&api, cli.json, cmd).await? {
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -408,6 +438,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
+        Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
+        Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

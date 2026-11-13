@@ -7,12 +7,12 @@ impl Engine {
 
     /// A workspace project, or a 404.
     pub fn workspace_project(&self, id: &str) -> Result<roll_workspace::Project> {
-        Ok(self.workspace.get(id)?)
+        Ok(self.workspace.get(roll_workspace::Scope::All, id)?)
     }
 
     /// A preview for `branch` of `repo` (or for change `change`), made by hand.
     pub async fn create(&self, project_id: &str, repo: &str, branch: Option<&str>, change: Option<&str>, by: &str) -> Result<(Preview, bool)> {
-        let project = self.workspace.get(project_id)?;
+        let project = self.workspace.get(roll_workspace::Scope::All, project_id)?;
         if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) {
             return Err(Error::NotFound(format!("{repo} isn't in project {}", project.name)));
         }

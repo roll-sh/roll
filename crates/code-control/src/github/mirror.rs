@@ -174,7 +174,7 @@ async fn push(code: &Code, hub: &Hub, repo: &str, ref_name: &str, from: Option<&
         return Err(PushError::Transient("the GitHub App lost access".into()));
     }
     let creds = hub.client.git_credentials(link.installation_id, &link.owner, &link.repo).await.map_err(|e| t(&e))?;
-    let auth = Credentials { username: creds.username, password: creds.password };
+    let auth = Credentials { username: creds.username, password: creds.password, vouched: false };
     let new = ObjectId::from_hex(to.as_bytes()).ok_or_else(|| PushError::Transient(format!("bad commit {to}")))?;
     let old = from.and_then(|f| ObjectId::from_hex(f.as_bytes()));
     let haves: Vec<Oid> = old.iter().map(|o| Oid(o.0)).filter(|o| code.store.changeset_of_git(repo, o).ok().flatten().is_some()).collect();

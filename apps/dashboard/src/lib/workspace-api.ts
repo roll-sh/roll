@@ -7,12 +7,12 @@
 import type { IdentityColor } from "./agents-api";
 import { call } from "./roll-api";
 
-export const RESOURCE_KINDS = ["postgres", "redis", "stream", "bucket", "nosql", "queue", "tasks", "repo"] as const;
+export const RESOURCE_KINDS = ["postgres", "redis", "stream", "bucket", "nosql", "queue", "tasks", "repo", "service"] as const;
 export type ResourceKind = (typeof RESOURCE_KINDS)[number];
 
 export interface PlacedResource {
   kind: ResourceKind;
-  /** The product's own id: a Postgres project id, a Redis or NoSQL db id, a stream id, a bucket name, `owner/name`. */
+  /** The product's own id: a Postgres project id, a Redis or NoSQL db id, a stream id, a bucket name, `owner/name`, a service id (`svc_…`). */
   ref: string;
   x: number;
   y: number;
