@@ -24,7 +24,8 @@ pub(super) struct Http {
     client: reqwest::Client,
     vercel: String,
     cloudflare: String,
-    /// `None`: `https://ssm.<region>.amazonaws.com`.
+    /// `None`: AWS's own endpoints (`https://ssm.<region>.amazonaws.com`, `secretsmanager.…`);
+    /// tests point every AWS service at one mock.
     ssm: Option<String>,
     render: String,
     netlify: String,
@@ -823,17 +824,18 @@ impl Ssm {
     }
 }
 
-/// The `Authorization` of an AWS JSON 1.1 call to SSM (SigV4; content type, host, date and
+/// The `Authorization` of an AWS JSON 1.1 call to `service` (SigV4; content type, host, date and
 /// target signed), with s3-proto's SigV4 primitives for the key and the string to sign.
-fn sigv4(host: &str, region: &str, amz_target: &str, amz_date: &str, body: &[u8], access_key: &str, secret: &str) -> String {
+#[allow(clippy::too_many_arguments)]
+fn sigv4(host: &str, region: &str, service: &str, amz_target: &str, amz_date: &str, body: &[u8], access_key: &str, secret: &str) -> String {
     use sha2::{Digest, Sha256};
     let payload: String = Sha256::digest(body).iter().map(|b| format!("{b:02x}")).collect();
     let signed = "content-type;host;x-amz-date;x-amz-target";
     let canonical = format!("POST\n/\n\ncontent-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-target:{amz_target}\n\n{signed}\n{payload}");
     let date = &amz_date[..8];
-    let scope = format!("{date}/{region}/ssm/aws4_request");
+    let scope = format!("{date}/{region}/{service}/aws4_request");
     let sts = s3_proto::sigv4::string_to_sign(amz_date, &scope, &canonical);
-    let sig = s3_proto::sigv4::sign(&s3_proto::sigv4::signing_key(secret, date, region, "ssm"), &sts);
+    let sig = s3_proto::sigv4::sign(&s3_proto::sigv4::signing_key(secret, date, region, service), &sts);
     format!("AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed}, Signature={sig}")
 }
 
@@ -876,7 +878,7 @@ impl SyncTarget for Ssm {
             let body = serde_json::to_vec(&body).expect("JSON");
             let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
             let amz_target = format!("AmazonSSM.{op}");
-            let auth = sigv4(&host, &t.region, &amz_target, &amz_date, &body, ak, sk);
+            let auth = sigv4(&host, &t.region, "ssm", &amz_target, &amz_date, &body, ak, sk);
             self.0
                 .client
                 .post(url.clone())
@@ -911,6 +913,138 @@ impl SyncTarget for Ssm {
     }
 }
 
+// ── aws-secrets-manager ──
+
+struct SmTarget {
+    region: String,
+    secret_name: String,
+    access_key_id_key: String,
+    secret_access_key_key: String,
+    kms_key_id: Option<String>,
+}
+
+/// One AWS Secrets Manager secret holding the environment's values as a JSON object (how apps
+/// usually read it), created by roll and tagged so; one roll didn't create is never replaced.
+pub(super) struct SecretsManager(pub(super) Http);
+
+/// A secret's value at most (SecretString).
+const SM_VALUE_MAX: usize = 65_536;
+const SM_TAG: (&str, &str) = ("managed-by", "roll-secrets");
+
+impl SecretsManager {
+    fn target(&self, t: &Json) -> Result<SmTarget> {
+        let [region, name, ak, sk, kms] =
+            target("aws-secrets-manager", t, [("region", true), ("secret_name", true), ("access_key_id_key", true), ("secret_access_key_key", true), ("kms_key_id", false)])?;
+        let region = region.unwrap_or_default();
+        if !ident(&region, 32, "-") || region.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(bad("region is an AWS region (us-east-1)"));
+        }
+        let name = name.unwrap_or_default();
+        if !ident(&name, 512, "/_+=.@-") || name.to_ascii_lowercase().starts_with("aws") {
+            return Err(bad("secret_name is a Secrets Manager name such as shop/production (letters, digits and /_+=.@-; not aws…)"));
+        }
+        if kms.as_ref().is_some_and(|k| !ident(k, 2048, "-_:/.")) {
+            return Err(bad("kms_key_id is a KMS key's id, alias or ARN"));
+        }
+        Ok(SmTarget {
+            region,
+            secret_name: name,
+            access_key_id_key: key_field("aws-secrets-manager", "access_key_id_key", ak)?,
+            secret_access_key_key: key_field("aws-secrets-manager", "secret_access_key_key", sk)?,
+            kms_key_id: kms,
+        })
+    }
+}
+
+impl SyncTarget for SecretsManager {
+    fn kind(&self) -> &str {
+        "aws-secrets-manager"
+    }
+    fn label(&self) -> &str {
+        "AWS Secrets Manager"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "region", label: "Region", required: true, placeholder: "us-east-1" },
+            SyncField { name: "secret_name", label: "Secret name (one JSON secret)", required: true, placeholder: "shop/production" },
+            SyncField { name: "access_key_id_key", label: "Key holding the IAM access key id", required: true, placeholder: "AWS_SYNC_ACCESS_KEY_ID" },
+            SyncField { name: "secret_access_key_key", label: "Key holding the IAM secret key", required: true, placeholder: "AWS_SYNC_SECRET_ACCESS_KEY" },
+            SyncField { name: "kms_key_id", label: "KMS key (optional)", required: false, placeholder: "alias/shop" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["access_key_id_key", "secret_access_key_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let t = self.target(t)?;
+        let (ak, sk) = (credential(p, &t.access_key_id_key)?, credential(p, &t.secret_access_key_key)?);
+        // The whole environment each time: the secret is one JSON object, removed keys just aren't in it.
+        let all: std::collections::BTreeMap<&str, &str> = p.values.iter().map(|(k, v)| (k.as_str(), v.expose())).collect();
+        let secret = zeroize::Zeroizing::new(serde_json::to_string(&all).expect("JSON"));
+        if secret.len() > SM_VALUE_MAX {
+            return Err(Error::BadRequest(format!("the environment's values come to {} bytes as JSON, over Secrets Manager's 64 KB", secret.len())));
+        }
+        let base = self.0.ssm.clone().unwrap_or_else(|| format!("https://secretsmanager.{}.amazonaws.com", t.region));
+        let url = url::Url::parse(&format!("{base}/")).map_err(|e| Error::Internal(e.to_string()))?;
+        let host = match url.port() {
+            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+            None => url.host_str().unwrap_or_default().to_string(),
+        };
+        let what = format!("aws-secrets-manager {} {}", t.region, t.secret_name);
+        let call = |op: &str, body: Json| {
+            let body = zeroize::Zeroizing::new(serde_json::to_vec(&body).expect("JSON"));
+            let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+            let amz_target = format!("secretsmanager.{op}");
+            let auth = sigv4(&host, &t.region, "secretsmanager", &amz_target, &amz_date, &body, ak, sk);
+            self.0
+                .client
+                .post(url.clone())
+                .header("content-type", "application/x-amz-json-1.1")
+                .header("x-amz-date", amz_date)
+                .header("x-amz-target", amz_target)
+                .header("authorization", auth)
+                .body(body.to_vec())
+        };
+        // `__type` without its namespace; never the message (it may quote the request).
+        let kind = |v: &Json| v["__type"].as_str().unwrap_or_default().rsplit('#').next().unwrap_or_default().to_string();
+        block_on(async {
+            let (status, described) = self.0.send(call("DescribeSecret", json!({ "SecretId": t.secret_name })), &what).await?;
+            if status.is_success() {
+                let ours = described["Tags"].as_array().into_iter().flatten().any(|g| g["Key"] == SM_TAG.0 && g["Value"] == SM_TAG.1);
+                if !ours {
+                    return Err(Error::Link(format!("{what}: the secret exists and roll didn't create it (no {}={} tag): roll never replaces it", SM_TAG.0, SM_TAG.1)));
+                }
+                let (status, v) = self.0.send(call("PutSecretValue", json!({ "SecretId": t.secret_name, "SecretString": secret.as_str() })), &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {status} {}", kind(&v))));
+                }
+                return Ok(());
+            }
+            if kind(&described) != "ResourceNotFoundException" {
+                return Err(Error::Link(format!("{what}: {status} {}", kind(&described))));
+            }
+            let mut body = json!({
+                "Name": t.secret_name,
+                "SecretString": secret.as_str(),
+                "Description": format!("roll secrets: {} {}", p.environment, p.path),
+                "Tags": [{ "Key": SM_TAG.0, "Value": SM_TAG.1 }],
+            });
+            if let Some(k) = &t.kms_key_id {
+                body["KmsKeyId"] = json!(k);
+            }
+            let (status, v) = self.0.send(call("CreateSecret", body), &what).await?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("{what}: creating: {status} {}", kind(&v))));
+            }
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,12 +1069,18 @@ mod tests {
                 let hs: Vec<(&str, &str)> = hs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
                 let req = s3_proto::sigv4::Request { method: method.as_str(), path: uri.path(), query: uri.query().unwrap_or(""), headers: &hs };
                 let hash: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
-                let verified = s3_proto::sigv4::authenticate_service(&req, chrono::Utc::now().timestamp(), "ssm", &hash, |ak| (ak == "AKIATEST").then(|| "aws-secret".to_string()));
+                let target = target.to_str().unwrap();
+                let service = if target.starts_with("secretsmanager.") { "secretsmanager" } else { "ssm" };
+                let verified = s3_proto::sigv4::authenticate_service(&req, chrono::Utc::now().timestamp(), service, &hash, |ak| (ak == "AKIATEST").then(|| "aws-secret".to_string()));
                 if !matches!(verified, Ok(Some(_))) {
                     return (StatusCode::FORBIDDEN, axum::Json(json!({ "__type": "InvalidSignatureException", "message": "no" })));
                 }
-                return match target.to_str().unwrap() {
+                let asked: Json = serde_json::from_slice(&body).unwrap_or(Json::Null);
+                return match target {
                     "AmazonSSM.DeleteParameter" => (StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "com.amazonaws.ssm#ParameterNotFound", "message": "gone" }))),
+                    // Secrets Manager: someone else's secret exists untagged; ours doesn't yet.
+                    "secretsmanager.DescribeSecret" if asked["SecretId"] == "theirs/production" => (StatusCode::OK, axum::Json(json!({ "Name": "theirs/production", "Tags": [] }))),
+                    "secretsmanager.DescribeSecret" => (StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "ResourceNotFoundException", "message": "no" }))),
                     _ => (StatusCode::OK, axum::Json(json!({ "Version": 1 }))),
                 };
             }
@@ -987,6 +1127,19 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn aws_secrets_manager_creates_one_tagged_json_secret_and_never_replaces_anothers() {
+        let (base, seen) = mock().await;
+        let t = |name: &str| json!({ "region": "us-east-1", "secret_name": name, "access_key_id_key": "AK", "secret_access_key_key": "SK" });
+        let creds = [("AK", "AKIATEST"), ("SK", "aws-secret")];
+        push(Arc::new(SecretsManager(http(&base))), t("shop/production"), &creds).await.expect("signed for secretsmanager, created");
+        let created = seen.lock().unwrap().last().unwrap().2.clone();
+        assert_eq!((created["Name"].as_str(), created["Tags"].clone()), (Some("shop/production"), json!([{ "Key": "managed-by", "Value": "roll-secrets" }])));
+        assert_eq!(serde_json::from_str::<Json>(created["SecretString"].as_str().unwrap()).unwrap(), json!({ "NEW": "v-123" }));
+        let theirs = push(Arc::new(SecretsManager(http(&base))), t("theirs/production"), &creds).await.unwrap_err().to_string();
+        assert!(theirs.contains("roll didn't create it"), "{theirs}");
     }
 
     fn http(base: &str) -> Http {

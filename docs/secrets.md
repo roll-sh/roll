@@ -861,6 +861,7 @@ last_synced_at, error}`:
 | `vercel` | `{project: "<id or name>", team?: "<team id>", target: ["production" \| "preview" \| "development", …], token_key: "VERCEL_TOKEN"}` | A Vercel project's environment variables (`type: "encrypted"`) for those environments |
 | `cloudflare` | `{account: "<account id>", script: "<worker>", token_key: "CLOUDFLARE_API_TOKEN"}` | A Worker's secrets (`secret_text`) |
 | `aws-ssm` | `{region, prefix: "/shop/production/", access_key_id_key, secret_access_key_key, kms_key_id?}` | Parameter Store `SecureString`s named `<prefix><name>` |
+| `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
 
 ### `github`
 
@@ -876,7 +877,7 @@ last_synced_at, error}`:
 - GitHub's names are `[A-Za-z_][A-Za-z0-9_]*` and may not start with `GITHUB_`; a key that would is
   an error naming it (rename it or use `keys`/`prefix`).
 
-### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`)
+### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`, `aws-secrets-manager`)
 
 A platform's own credential is never in the sync. The target names **keys of the sync's own
 environment and folder** that hold it (`token_key`; for AWS `access_key_id_key` and
@@ -902,6 +903,12 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   signed with SigV4 by hand from s3-proto's primitives (no AWS SDK in rolld). `prefix` is a path
   that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
   it.
+- **`aws-secrets-manager`**: one secret holding the environment's values as a JSON object (what an
+  app reads with one `GetSecretValue`), sent whole on each push, so a removed key is simply gone
+  from it. `DescribeSecret`, then `PutSecretValue` on a secret roll created (tagged
+  `managed-by=roll-secrets`) or `CreateSecret` (with that tag, and `KmsKeyId` when set); a secret
+  that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
+  leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
 
 ### `render`, `netlify`, `fly` and `railway`
 
@@ -1401,7 +1408,7 @@ Done and in PR #20:
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
-  Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
+  Parameter Store and Secrets Manager, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
   identities pinned to client addresses; encrypted project backup and restore;
 - the dashboard's Secrets surface, with the deployment key's source and a rotation's progress,
@@ -1424,10 +1431,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **AWS Secrets Manager sync** (Doppler and Infisical have one; roll has Parameter Store): an
-   environment's values as one JSON secret (or one secret per key), with the platform credentials
-   the other AWS sync uses, deleting only what it created.
-2. **Weak values in change requests**: a request's proposed credential that's easy to guess is
+1. **Weak values in change requests**: a request's proposed credential that's easy to guess is
    flagged to its reviewers (who may reveal it) before they approve.
 
 Waiting on other pull requests:
