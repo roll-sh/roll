@@ -962,6 +962,12 @@ impl Store {
         })
     }
 
+    /// How many networks each grant has been used from.
+    pub fn network_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let rows: Vec<(String, i64)> = self.db.read(|c| c.query("SELECT grant_id, COUNT(*) FROM grant_networks GROUP BY grant_id", (), |r| Ok((r.get(0)?, r.get(1)?))))?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// The networks a grant has been used from: `(network, first_at, last_at)`, newest first.
     pub fn networks(&self, id: &str) -> Result<Vec<(String, i64, i64)>> {
         Ok(self.db.read(|c| c.query("SELECT network, first_at, last_at FROM grant_networks WHERE grant_id = ? ORDER BY last_at DESC LIMIT 100", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)

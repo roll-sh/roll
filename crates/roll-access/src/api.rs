@@ -27,6 +27,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
         .route("/v1/access/tokens/{id}/tighten", get(tighten).post(apply_tighten))
         .route("/v1/access/tokens/{id}/networks", get(networks))
+        .route("/v1/access/checkup", get(checkup))
         .route("/v1/access/tokens/{id}/temporary/{approval}", axum::routing::delete(forget))
         .route("/v1/access/approvals", get(approvals))
         .route("/v1/access/approvals/{id}", get(approval))
@@ -266,6 +267,42 @@ async fn list(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
 async fn get_one(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     let who = who(&a, &ext)?;
     Ok(Json(json!(visible_grant(&a, &who, &id).await?)))
+}
+
+/// Tokens checked for this many at most for a narrower tighten proposal (an audit query each).
+const CHECKUP_TIGHTEN: usize = 200;
+
+/// The access checkup: the live tokens that need attention, each with its findings and fixes.
+async fn checkup(State(a): S) -> crate::Result<Json<Value>> {
+    let out = blocking(a, |a| {
+        let now = code_sql::now_ms();
+        let counts = a.store.network_counts()?;
+        let since = now - crate::checkup::UNUSED_DAYS * 86_400_000;
+        let mut checked = 0;
+        let mut out = Vec::new();
+        for g in a.store.list()?.into_iter().filter(|g| g.live(now)) {
+            // Whether its proposal is narrower: for tokens used lately, a bounded number of them.
+            let used_lately = g.last_used_at.is_some_and(|t| t >= since);
+            let narrower = if used_lately && checked < CHECKUP_TIGHTEN {
+                checked += 1;
+                let used = a.store.used(&g.id, since)?;
+                !used.is_empty() && crate::tighten::tighten(&g.rules, &used) != g.rules
+            } else {
+                false
+            };
+            let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower };
+            let findings = crate::checkup::findings(&g, &seen, now);
+            if !findings.is_empty() {
+                out.push(json!({
+                    "grant": { "id": g.id, "name": g.name, "kind": g.kind, "last_used_at": g.last_used_at, "expires_at": g.expires_at, "created_at": g.created_at },
+                    "findings": findings,
+                }));
+            }
+        }
+        Ok(out)
+    })
+    .await?;
+    Ok(Json(json!(out)))
 }
 
 /// The networks a token has been used from (its /24 or /48), with when first and last.
