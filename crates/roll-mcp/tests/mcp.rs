@@ -24,6 +24,7 @@ fn products() -> Router {
     Router::new()
         .route("/v1/projects", get(|| async { axum::Json(json!([{ "id": "pa" }])) }))
         .route("/v1/projects/{id}", delete(|| async { axum::http::StatusCode::NO_CONTENT }))
+        .route("/v1/previews/{id}/screenshot", get(|| async { ([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]) }))
 }
 
 impl Daemon {
@@ -114,6 +115,12 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!(refused["result"]["isError"], true, "{refused}");
     let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?readonly=maybe", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a typo never means not read-only");
+    let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?read_only=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "nor a misspelled key");
+    let (_, _, both) = d
+        .http_with(OPERATOR, Method::POST, "/v1/mcp?readonly=0", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })), &[("x-mcp-readonly", "true")])
+        .await;
+    assert!(!names(&both["result"]).contains(&"postgres_execute".into()), "read-only when either asks");
 
     // A read-only token sees only tools it can use, and its calls are decided by its rules.
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
@@ -210,31 +217,50 @@ async fn tools_list_cost() {
 #[tokio::test(flavor = "multi_thread")]
 async fn prompt_arguments_complete_from_what_it_may_read() {
     let d = Daemon::with_products(vec!["postgres".into(), "secrets".into(), "workspace".into()]);
+    let mut made_ids = Vec::new();
     for name in ["billing", "blog", "api"] {
-        let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": name }))).await;
+        let (s, _, made) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": name }))).await;
         assert_eq!(s, StatusCode::CREATED);
+        made_ids.push(made["id"].as_str().unwrap().to_string());
     }
     let ask = |typed: &str| json!({ "ref": { "type": "ref/prompt", "name": "fix_secrets_health" }, "argument": { "name": "project", "value": typed } });
-    let got = d.rpc(OPERATOR, "completion/complete", ask("b")).await;
-    let mut values: Vec<&str> = got["completion"]["values"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-    values.retain(|v| !v.starts_with("prj_"));
+    // Ids only (what the tools take), never names.
+    let got = d.rpc(OPERATOR, "completion/complete", ask("")).await;
+    let mut values: Vec<String> = got["completion"]["values"].as_array().unwrap().iter().filter_map(Value::as_str).map(str::to_string).collect();
     values.sort();
-    assert_eq!(values, vec!["billing", "blog"], "{got}");
+    made_ids.sort();
+    assert_eq!(values, made_ids, "{got}");
     // A Postgres project completes from Postgres's own list, not the workspace's.
     let pg = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/prompt", "name": "try_migration_on_branch" }, "argument": { "name": "project", "value": "" } })).await;
     assert_eq!(pg["completion"]["values"], json!(["pa"]), "{pg}");
     // A project's page (a resource template): listed, read through the gate, its id completed.
     let templates = d.rpc(OPERATOR, "resources/templates/list", json!({})).await;
     assert_eq!(templates["resourceTemplates"][0]["uriTemplate"], "roll://projects/{project}", "{templates}");
-    let (_, _, made) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
-    let uri = format!("roll://projects/{}", made["id"].as_str().unwrap());
+    let uri = format!("roll://projects/{}", made_ids[0]);
     let page = d.rpc(OPERATOR, "resources/read", json!({ "uri": uri })).await;
-    assert!(page["contents"][0]["text"].as_str().unwrap().contains("\"shop\""), "{page}");
+    assert!(page["contents"][0]["text"].as_str().unwrap().contains("Workspace project \""), "{page}");
     let sneaky = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": "roll://projects/../../v1/access/tokens" } }))).await.2;
     assert_eq!(sneaky["error"]["code"], -32002, "an id that isn't one reaches no route: {sneaky}");
-    let ids = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://projects/{project}" }, "argument": { "name": "project", "value": "sh" } })).await;
-    assert!(ids["completion"]["values"].as_array().unwrap().iter().any(|v| v == "shop"), "{ids}");
+    let ids = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://projects/{project}" }, "argument": { "name": "project", "value": "" } })).await;
+    assert_eq!(ids["completion"]["values"].as_array().unwrap().len(), 3, "{ids}");
+    // A prompt this connection isn't offered: -32602.
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
-    let none = d.rpc(&reader, "completion/complete", ask("")).await;
-    assert_eq!(none["completion"]["values"], json!([]), "{none}");
+    let none = d.http(&reader, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "completion/complete", "params": ask("") }))).await.2;
+    assert_eq!(none["error"]["code"], -32602, "{none}");
+    // Typing never asks a person: a list that would ask is refused at once, and nothing waits.
+    let asker = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "read": "allow" } }, { "product": "workspace", "resources": "*", "actions": { "read": "ask" } }])).await;
+    let started = std::time::Instant::now();
+    let quiet = d.rpc(&asker, "completion/complete", ask("")).await;
+    assert_eq!(quiet["completion"]["values"], json!([]), "{quiet}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "it didn't wait on an approval");
+    let pending = d.http(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await.2;
+    assert_eq!(pending.as_array().map_or(0, Vec::len) + pending["approvals"].as_array().map_or(0, Vec::len), 0, "no approval opened: {pending}");
+}
+
+/// A screenshot comes back as MCP image content, so an agent can look at a preview.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screenshot_is_an_image_the_agent_sees() {
+    let d = Daemon::with_products(vec!["previews".into()]);
+    let shot = d.tool(OPERATOR, "previews_screenshot", json!({ "id": "pv_1" })).await;
+    assert_eq!((shot["isError"].as_bool(), shot["content"][1]["type"].as_str(), shot["content"][1]["mimeType"].as_str()), (Some(false), Some("image"), Some("image/png")), "{shot}");
 }
