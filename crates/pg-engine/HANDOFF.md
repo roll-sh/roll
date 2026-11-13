@@ -12264,3 +12264,104 @@ none in these files; regress newly differing 0; isolation 1647/1648, intra-grant
 before; pg_dump 14609 passed). The first train found the bench example not building (Bind's
 and register_backend's new arguments: `877024ec3`) and wire_waits' safe-snapshot cases
 broken by opening the transaction at a leading SET (taken back: `24792655d`).
+
+## Behaviour gaps closed by agent 229 (2026-11-13)
+
+Recorded against a private PostgreSQL 18.6 (`select version()`: 18.6, Debian 18.6-1.pgdg13+2);
+every case is in the wire test `protocol_cases` (`tests/data/protocol_cases.out` recorded from
+it with `PROTOCOL_RECORD`). `PROTOCOL_SERVER=host:port` now runs the cases against a running
+server instead of the test's own: run against a build without a change, it shows the cases
+the change fixes (52 of 171 differ on `1d59e6856`'s roll-engine, none on these commits).
+
+- **Implicit transaction blocks** (`Session::guc_in_txn`, `Settings::abort_level`,
+  `Session::set_txn_options`). A multi-statement simple query is one transaction from its
+  first statement on, and the extended protocol's runs from an Execute to the Sync, even when
+  no statement needed the engine's transaction: a SET in it is stacked and undone when a later
+  statement fails, committed at the batch's end (`end_batch`, without opening a `Txn`). That
+  is what 222's change lacked: it opened the engine's transaction at the SET, so a following
+  BEGIN found one and dropped its isolation and DEFERRABLE (wire_waits). Now a BEGIN inside
+  the block takes over the implicit transaction: with none open yet its options apply as
+  before; with one open (a statement ran) they go through the check hooks in the order given,
+  as SET TRANSACTION's do (`Txn::first_snapshot` is FirstSnapshotSet): a changed isolation
+  after a snapshot is call_enum_check_hook's 25001, DEFERRABLE / NOT DEFERRABLE after one
+  call_bool_check_hook's, read-write after read-only too, each "within a subtransaction"
+  variant in a savepoint. SET TRANSACTION in the implicit block ends with it; LOCK TABLE is
+  allowed in it. An error in an explicit block undoes its (sub)transaction level's settings
+  at once (AbortTransaction's AtEOXact_GUC), so their ParameterStatus goes out with the error,
+  and ROLLBACK AND CHAIN after an error starts with the default characteristics (PostgreSQL
+  saves them after the abort restored them). Stack entries restore the parameter stacked last
+  first (guc_stack_list), which orders the reports. Transactional: every SET'able parameter,
+  client_encoding, role and session_authorization (is_superuser with them); LISTEN too (it
+  already was); PREPARE and DEALLOCATE are not (as in PostgreSQL). Locations: the
+  transaction-block warnings and errors (CheckTransactionBlock, DefineSavepoint,
+  EndTransactionBlock / UserAbortTransactionBlock, PreventInTransactionBlock), int4 / int2 /
+  int8-by-int4 division by zero (by routine: other types' division by zero keeps the
+  engine's location).
+- **Planning at Bind** (`bind_inner`, `fold::param_folds`, `Portal::planned`). PostgreSQL
+  plans a query statement at Bind (GetCachedPlan): what planning raises, constant folding's
+  errors above all, fails the Bind; utility statements (EXPLAIN, DECLARE, COPY, CTAS, DO) are
+  planned at Execute; literal coercions fail at Parse (analysis). The generic plan folds the
+  constants (`select 1/0` fails every Bind, named or not, as no plan is ever cached), a custom
+  plan the parameters' values too (`$1::int / 0` fails the Bind; a CASE arm a value makes
+  false isn't folded); a generic plan, by plan_cache_mode or after five custom plans, leaves
+  a value's error to the Execute. The engine plans at Bind only when planning can fail there:
+  the generic binding failed when Bind described the statement (Parse already accepted it),
+  or the statement has an immutable call or cast over parameters and constants and has values
+  (found once per statement); the portal keeps the plan and the Execute runs it, so the plan
+  cache's counts and choices are as before. Point reads and short transactions plan at
+  Execute as before. Still differing: an immutable PL/pgSQL (or other procedural) function
+  over constants isn't evaluated while planning (PostgreSQL's evaluate_function folds it, so
+  its error comes at Bind and its NOTICEs once); other folding errors' locations (int4pl,
+  dsqrt, float division) name the engine.
+- **Startup role, SET SESSION AUTHORIZATION** (`Session::apply_startup_role`,
+  `refresh_superuser`). The startup packet's `role` is checked as check_role does (a missing
+  role is a FATAL 22023 after AuthenticationOk, a role the user can't become 42501), and
+  is_superuser follows it; RESET ROLE returns to it. is_superuser is stacked with role /
+  session_authorization (undone with them), and marked for its report before
+  session_authorization, so the client hears session_authorization first, as from
+  PostgreSQL.
+- **Unknown parameter type oids** (`session/badparams.rs`). Which lookup of a parameter of a
+  type no oid has fails the Parse follows transformSelectStmt's order: a one-argument
+  undecorated function call's projection check (typeOrDomainTypeRelid), a sort, group or
+  DISTINCT key (lookup_type_cache's 42704), an ARRAY of it alone or a named argument
+  (format_type_extended), coercions, operators, boolean contexts, CASE, mixed COALESCE /
+  ARRAY / VALUES, LIMIT (getBaseTypeAndTypmod), then the result row (TupleDescInitEntry).
+  IS [NOT] NULL, ROW(), EXISTS's target list, an unread CTE and VARIADIC "any" functions
+  (concat, format, ...) don't look it up: the parameter keeps its oid and the Bind fails
+  (getTypeInputInfo). 48 shapes match PostgreSQL in a probe (`~/.cache/a229/probe/c4.py`);
+  INSERT / UPDATE / DELETE, set operations, window functions and column references into a
+  sub-select with such a parameter fall back to the earlier rule.
+- **GSSENCRequest**: answered 'N', as a PostgreSQL built without GSSAPI answers (libpq then
+  goes on unencrypted, or fails with gssencmode=require as it would against such a server).
+  The reference image is built with GSSAPI and answers 'G'; a drop-in server without Kerberos
+  has nothing to offer there, so the difference stays, by decision.
+- **Scroll cursors after page splits**: not built. 222's design costs ordinary index scans
+  and modelled inserts nothing but a scroll cursor's every FETCH a scan of the model's leaf
+  pages (FETCH 1 over a large index becomes quadratic); the per-page TID index that would
+  make it cheap adds work to every modelled insert. The design note above stands.
+- **MultiXact**: not done. The observable values need a per-tuple lock state the engine
+  doesn't keep: PostgreSQL leaves a lock-only xmax (the locker's xid, or a MultiXactId once a
+  second locker or an updater joins) in the tuple after the lockers end, until it is locked,
+  updated or frozen again, and `xmax`, pgrowlocks, relminmxid, VACUUM VERBOSE's "new
+  relminmxid" and mxid_age all read that. The engine's row locks live in the lock manager
+  only while held, and `xmax` reads 0 for every row. The way in: a lock-only xmax and infomask
+  bits on `heapsim::Tup` (set where `exec::scan::lock_row` takes a lock: the locker's xid, a
+  new multi (`MultiXactIdCreate`) when a live locker is there, an expanded one when a multi
+  is), a MultiXact table on the database (next id, members with their statuses, kept with
+  the xid state across restarts), `xmax` read from the model, then VACUUM's freezing of
+  multis (FreezeMultiXactId) to give relminmxid / datminmxid and the VERBOSE line. The
+  isolation specs that exercise multixacts' behaviour (multixact-no-deadlock,
+  multixact-no-forget, pgrowlocks' spec) already pass on the lock manager.
+
+Verification (agent 229): release wire (73, `protocol_cases` 171), wire_waits, golden
+(in-process, wire, shuffled), lib (218), kept_plans (11), twophase (4), clean `cargo check`
+of every target after the rebase. Lane A, plain dist builds, `290dba2a4` against it with these
+commits, 8 clients, five alternating pairs, user instructions per operation: point reads
++0.34% at the median (pairs -1.45% to +2.49%, one flagged at 1.03 cores of foreign load),
+again with flagged pairs rerun +0.14% (-0.60% to +1.08%); short transactions +10.1% (three
+of five pairs flagged, 1.28 to 2.41 cores), again after a CHECKPOINT with flagged pairs rerun
+-1.17% (-8.90% to +0.13%). Nothing on either path does more than a few stores and tests
+(the Bind's planning check reads a flag kept with the statement's plan counts). Clients,
+`1d59e6856` against these commits: psycopg 3 4924 / 9 failing both, node-postgres 146 / 3
+both, pgjdbc 8221 / 0 both, identical lists; psql 18 (`min_protocol_version=3.2`, a cancel,
+`\copy`), pgbench simple / extended / prepared without failures.
