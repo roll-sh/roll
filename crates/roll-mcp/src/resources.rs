@@ -101,7 +101,7 @@ fn words(answer: &Value, now: i64) -> String {
         limits.push(format!("it expires in {}", span(at - now)));
     }
     if let Some(n) = g["rate_per_minute"].as_u64() {
-        limits.push(format!("it may make {n} requests a minute on each roll node"));
+        limits.push(format!("it may make about {n} requests a minute (then 429 with Retry-After)"));
     }
     if g["ip_allow"].as_array().is_some_and(|a| !a.is_empty()) {
         limits.push("it works only from the addresses its owner chose".into());

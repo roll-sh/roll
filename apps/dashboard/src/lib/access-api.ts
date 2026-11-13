@@ -56,7 +56,7 @@ export interface Grant {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: OAuthClient;
-  /** Requests a minute it may make (per node); absent: no limit. */
+  /** Requests a minute it may make, across the fleet (each node enforces its share); absent: no limit. */
   rate_per_minute?: number;
   /** Why roll revoked it (a leaked secret: "found in acme/site .env at …"). */
   revoked_why?: string;
