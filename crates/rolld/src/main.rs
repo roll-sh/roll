@@ -470,6 +470,9 @@ async fn run() -> anyhow::Result<()> {
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants))?;
     code_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
+    if let Some(c) = &code {
+        secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
+    }
     router = router.merge(roll_secrets::router(secrets));
     products_api.set(router.clone());
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).

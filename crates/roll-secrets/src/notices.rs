@@ -76,7 +76,7 @@ impl Secrets {
         let mut queued = 0;
         for (env_id, project, slug, at) in due {
             if !health.contains_key(&project) {
-                let found = self.project_health(&project, &crate::Caller::operator()).unwrap_or_else(|e| {
+                let found = self.project_health(&project, &crate::Caller::operator(), false).unwrap_or_else(|e| {
                     tracing::warn!(%project, "a project's health for its reminders failed: {e}");
                     vec![]
                 });

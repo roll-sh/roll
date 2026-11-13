@@ -577,6 +577,28 @@ impl LinkProvider for Search {
     }
 }
 
+/// roll code's search for roll secrets' health (`code` check): whether a repository's default
+/// branch mentions each key, from roll code's trigram index. Any error (code search off, the
+/// index not ready, the repository not on this node) is "can't tell": nothing gets flagged.
+pub struct CodeRefs(pub Arc<code_control::Code>);
+
+impl roll_secrets::health::CodeRefs for CodeRefs {
+    fn referenced(&self, repo: &str, keys: &[String]) -> Option<std::collections::BTreeSet<String>> {
+        let (owner, name) = repo.split_once('/')?;
+        let r = self.0.find_repo(owner, name).ok()?;
+        tokio::runtime::Handle::current().block_on(async {
+            let mut found = std::collections::BTreeSet::new();
+            for k in keys {
+                let v = self.0.search_code(&r, k, false, true, None, 1, None).await.ok()?;
+                if v["matches"].as_array().is_some_and(|m| !m.is_empty()) {
+                    found.insert(k.clone());
+                }
+            }
+            Some(found)
+        })
+    }
+}
+
 /// roll secrets for roll code's checks and sandboxes (`code_control::SecretEnv`), set once the
 /// store is open (it opens after roll code starts).
 #[derive(Clone, Default)]

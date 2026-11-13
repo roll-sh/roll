@@ -405,6 +405,19 @@ and it's older than that). Each `Finding` names the environment, folder and key 
 with a detail (the other environments, the reason, the date): never a value, and nothing is
 decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
 
+**Keys no code reads.** With `?code=1` (`roll secrets health --code`, the view's "Check the code"),
+health also lists `unreferenced` keys: ones no repository on the project's canvas mentions on its
+default branch, looked up in roll code's search index (rolld's `CodeRefs`; roll secrets reads no
+files). A mention anywhere counts, as a case-sensitive substring, so a key that might be read is
+never flagged. It's a search per key and repository (up to 500 keys), so only on request, and any
+repository that can't be searched here (the index not ready, roll code off) makes the check say
+nothing at all rather than guess. In the
+dashboard each finding fixes where it's listed: a weak key's "New value" (48 random characters
+made in the browser) and an expired or expiring key's new date, each one change, or a change
+request where the environment is protected. The Health tab and the sidebar's Secrets entry carry
+the count of findings to fix now (expired, missing, exposed), and Home lists them across every
+project (`GET /v1/secrets/findings`, `roll secrets health --all`).
+
 Health, `POST …/leaks` and `GET /v1/secrets/search` filter each finding by the caller's own access,
 so roll-access lets a token limited to some environments or folders call them (they're marked
 `filters_itself` in its catalogue): its answer just leaves the rest out. Keep that filter in each:
@@ -1070,6 +1083,28 @@ minutes.
   ```
 
   A login lasts its TTL: enough for a job. A long-running `roll run --watch` uses a token.
+- **A CI job, end to end.** No stored secret: the job logs in with its own OIDC token as an
+  identity limited to staging, then checks before it tests. Each step only sees staging, since
+  check, scan and health answer what the caller may read:
+
+  ```sh
+  roll secrets identities add ci --github acme/web --claim ref=refs/heads/* --for-env staging
+  ```
+
+  ```yaml
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      permissions: { id-token: write, contents: read }
+      env: { ROLL_API_URL: https://roll.example.com, ROLL_IDENTITY: idn_…, ROLL_ENV: staging }
+      steps:
+        - uses: actions/checkout@v4
+        # roll on the runner's PATH; then:
+        - run: roll secrets check .env.example   # every key the code reads is set in staging
+        - run: roll secrets scan .               # no stored value was committed
+        - run: roll secrets health               # nothing expired, missing or exposed
+        - run: roll run -- npm test              # the tests get staging's values, never on disk
+  ```
 - When roll-access takes over tokens, identities mint its scoped tokens instead; the routes stay.
 
 ### Protected environments and approvals
@@ -1203,7 +1238,8 @@ isn't in the workspace is 404.
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
-| `GET /health` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
+| `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
+| `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
@@ -1262,7 +1298,8 @@ type Grid = { path: string; environments: string[]; rows: { key: string; cells: 
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
-type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread"; environment: string; path: string; key: string; detail: string };
+type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
+type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
@@ -1332,6 +1369,11 @@ Postgres. Measured 2026-11-13 on ai-server under a load average of about 27 (sec
 | digest | 90 ms | 143 ms |
 | insights | 27 ms | 40 ms |
 | compare | 38 ms | 62 ms |
+| health (the whole project) | 53 ms* | 58 ms* |
+
+\* Health was measured later the same day under a load average of about 39, with the grid at 77 ms
+(SQLite) and 65 ms (Postgres) in the same runs: it stays under the grid, which the sidebar's count
+and Home rely on.
 
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).

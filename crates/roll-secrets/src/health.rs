@@ -9,6 +9,7 @@ use crate::{Result, Secrets, from_json};
 use code_sql::params;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 /// Reads of values over this many days count as use.
 const UNREAD_DAYS: i64 = 90;
@@ -31,7 +32,21 @@ pub enum Issue {
     Stale,
     /// Nobody read it in 90 days.
     Unread,
+    /// No repository on the project's canvas mentions it (health's `code` check).
+    Unreferenced,
 }
+
+/// roll code's search, as health's `code` check needs it (rolld implements it with roll code's
+/// trigram index): roll secrets reads no files.
+pub trait CodeRefs: Send + Sync {
+    /// Which of `keys` appear on repository `repo`'s (`owner/name`) default branch, anywhere, case
+    /// sensitive (a substring is enough: a key that might be read is never flagged). `None`: the
+    /// repository can't be searched here (not indexed yet, roll code off), so nothing is said.
+    fn referenced(&self, repo: &str, keys: &[String]) -> Option<BTreeSet<String>>;
+}
+
+/// The most keys one `code` check looks for.
+pub const CODE_KEYS_MAX: usize = 500;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Finding {
@@ -43,9 +58,50 @@ pub struct Finding {
     pub detail: String,
 }
 
+/// One project's findings, for health across projects.
+#[derive(Debug, Serialize)]
+pub struct ProjectFindings {
+    pub project: String,
+    pub project_name: String,
+    pub findings: Vec<Finding>,
+}
+
 impl Secrets {
+    /// Where roll code's search comes from (rolld, once roll code is open).
+    pub fn set_code_refs(&self, refs: Arc<dyn CodeRefs>) {
+        let _ = self.code_refs.set(refs);
+    }
+
+    /// Every project's findings the caller may read (`GET /v1/secrets/findings`), projects with
+    /// none left out: what Home and `roll secrets health --all` show.
+    pub fn all_health(&self, caller: &Caller) -> Result<Vec<ProjectFindings>> {
+        let projects: Vec<String> = match caller.grants.project() {
+            Some(p) => vec![p.to_string()],
+            None => self.db.read(|c| c.query("SELECT project_id FROM projects ORDER BY project_id", (), |r| r.get(0)))?,
+        };
+        let mut out = vec![];
+        for project in projects {
+            if !caller.allows(Action::Read, &Scope::project(&project)) {
+                continue;
+            }
+            let findings = match self.project_health(&project, caller, false) {
+                Ok(f) => f,
+                // A project gone from the workspace, or one the caller can't read after all.
+                Err(_) => continue,
+            };
+            if findings.is_empty() {
+                continue;
+            }
+            let project_name = self.workspace.get(&project).map(|p| p.name).unwrap_or_else(|_| project.clone());
+            out.push(ProjectFindings { project, project_name, findings });
+        }
+        Ok(out)
+    }
+
     /// Every finding in the project's standard environments the caller may read, worst first.
-    pub fn project_health(&self, project: &str, caller: &Caller) -> Result<Vec<Finding>> {
+    /// With `code`, keys no repository on the project's canvas mentions too (`unreferenced`):
+    /// a search per key and repository, so only when asked for.
+    pub fn project_health(&self, project: &str, caller: &Caller, code: bool) -> Result<Vec<Finding>> {
         caller.need(Action::Read, &Scope::project(project))?;
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;
@@ -137,6 +193,22 @@ impl Secrets {
                 let seen = self.view(project, &e.slug, &r.path, caller, false, Action::Read)?.iter().any(|x| x.row.key == r.key);
                 if !seen {
                     out.push(Finding { issue: Issue::Missing, environment: e.slug.clone(), path: r.path.clone(), key: r.key.clone(), detail: "required".into() });
+                }
+            }
+        }
+        if code && let Some(refs) = self.code_refs.get() {
+            let repos: Vec<String> = self.workspace.get(project).map(|p| p.resources.into_iter().filter(|r| r.kind == roll_workspace::Kind::Repo).map(|r| r.r#ref).collect()).unwrap_or_default();
+            let keys: Vec<String> = have.iter().map(|(_, _, k)| k.clone()).collect::<BTreeSet<_>>().into_iter().take(CODE_KEYS_MAX).collect();
+            // Every repository answers, or nothing is said: an unsearchable one might read them all.
+            let found: Option<Vec<BTreeSet<String>>> = if repos.is_empty() { None } else { repos.iter().map(|r| refs.referenced(r, &keys)).collect() };
+            if let Some(found) = found {
+                let read: BTreeSet<&String> = found.iter().flatten().collect();
+                let unread_by_code: BTreeSet<&String> = keys.iter().filter(|k| !read.contains(k)).collect();
+                for (env_id, path, key, ..) in &rows {
+                    let Some(e) = slug.get(env_id.as_str()) else { continue };
+                    if unread_by_code.contains(key) && caller.allows(Action::Read, &Scope::at(project, &e.slug, path)) {
+                        out.push(Finding { issue: Issue::Unreferenced, environment: e.slug.clone(), path: path.clone(), key: key.clone(), detail: format!("not in {}", repos.join(", ")) });
+                    }
                 }
             }
         }

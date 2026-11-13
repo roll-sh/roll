@@ -847,6 +847,22 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
     let (_, mine) = api.req(Method::GET, "/health", None, t["token"].as_str()).await;
     assert!(mine.as_array().unwrap().iter().all(|f| f["environment"] == "staging") && !mine.as_array().unwrap().is_empty(), "{mine}");
+    // Keys no repository on the canvas mentions, when asked (roll code's search is a fake here).
+    struct Code;
+    impl roll_secrets::health::CodeRefs for Code {
+        fn referenced(&self, repo: &str, keys: &[String]) -> Option<std::collections::BTreeSet<String>> {
+            (repo == "acme/web").then(|| keys.iter().filter(|k| *k == "CERT").cloned().collect())
+        }
+    }
+    api.secrets.set_code_refs(Arc::new(Code));
+    let p = api.project.clone();
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/repo/acme%2Fweb"), Some(json!({ "x": 0, "y": 0 }))).await;
+    let with_code = api.ok(Method::GET, "/health?code=1", None).await;
+    let unreferenced: Vec<(&str, &str)> = with_code.as_array().unwrap().iter().filter(|f| f["issue"] == "unreferenced").map(|f| (f["environment"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
+    assert_eq!(unreferenced, [("staging", "DB_PASSWORD"), ("production", "DB_PASSWORD")]);
+    // Across projects: this one, with its findings.
+    let all = api.ok(Method::GET, "/v1/secrets/findings", None).await;
+    assert_eq!((all.as_array().map(Vec::len), all[0]["project"].as_str(), all[0]["findings"].as_array().map(Vec::len)), (Some(1), Some(api.project.as_str()), Some(6)));
 }
 
 #[tokio::test]

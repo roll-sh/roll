@@ -38,6 +38,7 @@ fn main() {
         time("values (resolved)", &mut || drop(s.values(&project, "production", "/", true, None, &c).unwrap()));
         time("digest", &mut || drop(s.digest(&project, "production", "/", &c).unwrap()));
         time("insights", &mut || drop(s.insights(&project, "production", "/", &c).unwrap()));
+        time("health", &mut || drop(s.project_health(&project, &c, false).unwrap()));
         time("compare", &mut || drop(s.compare(&project, "production", "staging", "/", &c).unwrap()));
     }
 }
