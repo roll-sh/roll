@@ -340,6 +340,7 @@ previews are listed once those products are on.
 | `secrets_set` | Create or change a secret's value. | `PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_delete` | Delete a secret. | `DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_list_aws_roles` | A project's registered AWS roles for dynamic AWS keys (registering is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/aws-roles` |
+| `secrets_list_outside_databases` | Postgres servers roll doesn't run whose roles a project rotates (never the admin URL; adding one is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/outside-databases` |
 | `secrets_health` | What needs fixing in a project's secrets, by name, in the environments you may read (`code`: keys no repository mentions). | `GET /v1/secrets/projects/{project}/health` |
 | `secrets_findings` | Every project's secrets health findings you may read. | `GET /v1/secrets/findings` |
 | `secrets_find` | Where a key is set across the projects you may read. | `GET /v1/secrets/search` |
@@ -415,11 +416,12 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); a project's page as a resource
-template (`roll://projects/{project}`, read through the gate, its id completed); progress while a
-call waits (`notifications/progress` every 10 s for a call with a `progressToken`, checked with the
-TypeScript SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only
-connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel);
+revoked as leaked, about to expire; only their own, never a secret);
+`secrets_list_outside_databases` (secrets #39); a project's page as a resource template
+(`roll://projects/{project}`, read through the gate, its id completed); progress while a call waits
+(`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript
+SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only connections
+(`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel);
 `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and
 you say so); prompts' arguments complete from what the connection may list (`completion/complete`,
 through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do,
