@@ -962,6 +962,7 @@ Ranked by what a person notices first. Done so far:
 - screenshot comparisons off the async runtime, and a test for reading a run's pages;
 - the previews waiting for a visual review first in the list, tagged "to review";
 - `roll preview screenshot` (any screenshot or diff to a file);
+- the settings' screenshot rules in a section of their own ("Screenshots and checks");
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;

@@ -369,7 +369,12 @@ function Form({
         <Toggle label="A comment with the URLs and cost" checked={s.github.comment} onChange={(v) => set("github", { ...s.github, comment: v })} />
         <Toggle label="A commit status (roll/preview)" checked={s.github.status} onChange={(v) => set("github", { ...s.github, status: v })} />
         <Toggle label="A deployment" checked={s.github.deployment} onChange={(v) => set("github", { ...s.github, deployment: v })} />
-        <Toggle label="A screenshot of the first service at each push" checked={!!s.github.screenshot} onChange={(v) => set("github", { ...s.github, screenshot: v })} />
+        <Toggle label="Warm after each push" note="Its services start as soon as a push is deployed, so the pull request's link opens at once." checked={s.warm} onChange={(v) => set("warm", v)} />
+        <Toggle label="A feedback button on its pages" note="For people who open it through roll: a note pinned to the page posts on the change." checked={s.feedback} onChange={(v) => set("feedback", v)} />
+      </Section>
+
+      <Section title="Screenshots and checks">
+        <Toggle label="A screenshot of each push" note="The first service's page at desktop and phone widths, timed and checked for errors and accessibility, in roll and the pull request." checked={!!s.github.screenshot} onChange={(v) => set("github", { ...s.github, screenshot: v })} />
         {s.github.screenshot && (
           <Toggle
             label="Compare each change with the default branch (roll keeps a preview of it)"
@@ -410,8 +415,6 @@ function Form({
             <textarea value={hide} onChange={(e) => setHide(e.target.value)} rows={2} placeholder=".clock" className={`${field} w-full py-1.5 font-mono text-[12px]`} spellCheck={false} />
           </Field>
         )}
-        <Toggle label="Warm after each push" note="Its services start as soon as a push is deployed, so the pull request's link opens at once." checked={s.warm} onChange={(v) => set("warm", v)} />
-        <Toggle label="A feedback button on its pages" note="For people who open it through roll: a note pinned to the page posts on the change." checked={s.feedback} onChange={(v) => set("feedback", v)} />
       </Section>
 
       {error && <p className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</p>}
