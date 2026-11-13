@@ -223,12 +223,13 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
 4. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
    checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
 5. **Metering on the fleet**: a cluster that moves mid-interval is metered once (lists already
-   read where a cluster is loaded from the catalog). Previews asked for `own_bytes` on
-   `GET /v1/search/clusters/{id}`: the bytes a branch's commit points reference that its parent's
-   don't.
-6. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset), a
-   `roll_secrets::LinkProvider` (fields `url`, `username`, `password`), private networking for
-   apps; wire `resolve_id` into roll-access once #19 lands.
+   read where a cluster is loaded from the catalog). `own_bytes` (what a branch adds over its
+   parent) is on `GET /v1/search/clusters/{id}` for previews.
+6. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset);
+   private networking for apps; wire `resolve_id` into roll-access once #19 lands. roll secrets'
+   search link provider is built on feature/roll-secrets (`crates/rolld/src/secrets.rs`): it
+   issues the cluster's own API keys (`POST /v1/search/clusters/{id}/keys`, dynamic with an
+   expiry or managed), never the cluster password, and works once `Kind::Search` is on main.
 7. **CI**: measure on GitHub whether a search crate's lib tests fit the one-minute gate; the
    extended workflow (`search.yml`) runs on demand. `search-store`'s
    `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once` failed once on the loaded
