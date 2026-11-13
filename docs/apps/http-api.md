@@ -80,6 +80,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/shell?instance=&cols=&rows=` | WebSocket | a terminal: binary both ways, text `{"resize":[cols,rows]}` | admin (a shell runs anything with the environment's variables, as agents' shells) |
+| `GET /v1/apps/services/{id}/environments/{env}/tunnel` | WebSocket | one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site | admin (it reaches the port past the allow list, access and maintenance) |
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions` | `{ instance?, cols?, rows? }` | 201 `{ id }` (a shell over HTTP: the dashboard's terminal) | admin (a shell runs anything with the environment's variables, as agents' shells) |
 | `GET /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen` | | SSE: base64 chunks (the scrollback first), then `event: closed` | admin (a shell runs anything with the environment's variables, as agents' shells) |
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys` | `{ data }` (base64, at most 64 KiB) | 204 | admin (a shell runs anything with the environment's variables, as agents' shells) |

@@ -899,6 +899,18 @@ address is refused. At most 100 networks, kept canonical (`10.1.2.3/8` is `10.0.
 read with maintenance into the environment's live state on its owner, so a request reads no row.
 The project's private network doesn't go through the proxy and isn't affected.
 
+## Reaching a service from your machine
+
+`roll apps proxy [-s service] [--local-port N]` (Fly's `fly proxy`) forwards `127.0.0.1:N` (default:
+the service's port) to a web service's port through roll: each connection is a tunnel,
+`GET …/environments/{env}/tunnel`, a WebSocket whose binary messages are the connection's bytes.
+The owner wakes an instance and holds it (a lease, as a request does) while the tunnel is open,
+connects only to the service's own port, and puts `tunnel.opened` in the activity. It's how a
+private service's admin page or internal API is reached without making it public; it goes past
+the allow list, access token and maintenance, so it's `admin`, as a shell is. At most 20 per
+environment. Checked live against rolld on Docker: a private busybox `httpd`, asleep, answered
+the first `curl` through the proxy (the wake), then in 6 ms.
+
 ## Workers that follow their work
 
 A worker with `run.scale` (`{ stream, group, per_instance }`) runs one instance per

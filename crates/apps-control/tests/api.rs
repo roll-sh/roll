@@ -2127,3 +2127,31 @@ async fn a_request_past_its_timeout_is_a_504() {
     assert_eq!(visit(&w, &h, "/sleep/1500").await.0, StatusCode::GATEWAY_TIMEOUT);
     assert!(began.elapsed() < Duration::from_millis(1400), "{:?}", began.elapsed());
 }
+
+/// A tunnel carries one TCP connection to a web service's port, private or not, waking it and
+/// holding it awake; it's in the activity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tunnel_reaches_a_private_services_port() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let w = world().await;
+    let (svc, _) = image_service(&w, "internal", json!({"port": 80, "public": false})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, w.api.clone()).into_future());
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel")).await.unwrap();
+    ws.send(Message::Binary(b"GET /through HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while let Some(Ok(m)) = ws.next().await {
+        match m {
+            Message::Binary(b) => got.extend_from_slice(&b),
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    let text = String::from_utf8_lossy(&got);
+    assert!(text.starts_with("HTTP/1.1 200") && text.contains(r#""path":"/through""#), "{text}");
+    let (_, act) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert!(act.to_string().contains("audit.tunnel.opened"), "{act}");
+}

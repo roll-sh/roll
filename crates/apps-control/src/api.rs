@@ -93,6 +93,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/shell"), get(shell))
+        .route(&format!("{env}/tunnel"), get(tunnel))
         .route(&format!("{env}/shell/sessions"), post(open_session))
         .route(&format!("{env}/shell/sessions/{{sh}}"), axum::routing::delete(close_session))
         .route(&format!("{env}/shell/sessions/{{sh}}/screen"), get(session_screen))
@@ -785,6 +786,15 @@ async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q)
     // Keys and resizes are small: nothing near axum's 64 MiB default is held for a peer.
     let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
     Ok(ws.on_upgrade(move |socket| apps.bridge_shell(socket, target, slot, cols, rows)).into_response())
+}
+
+/// `GET …/tunnel` (a WebSocket): one TCP connection to the service's port; see `crate::tunnel`.
+async fn tunnel(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    let slot = apps.tunnel_slot(&id, &env)?;
+    let lease = apps.tunnel_target(&id, &env).await?;
+    apps.audit("tunnel.opened", &id, &env, actor(&ext), json!({})).await;
+    let ws = ws.max_message_size(1 << 20).max_frame_size(1 << 20);
+    Ok(ws.on_upgrade(move |socket| apps.bridge_tunnel(socket, lease, slot)).into_response())
 }
 
 #[derive(Deserialize)]

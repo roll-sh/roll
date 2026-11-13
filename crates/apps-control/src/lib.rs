@@ -18,6 +18,7 @@ pub mod hooks;
 pub mod tags;
 pub mod sites;
 pub mod site_rules;
+pub mod tunnel;
 pub mod feedback;
 pub mod scale;
 pub mod registry;
@@ -203,6 +204,8 @@ pub struct Apps {
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     /// WebSocket shells open per environment (`env_key`), counted with the HTTP sessions.
     ws_shells: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
+    /// Open tunnels per environment ([`tunnel::MAX_TUNNELS`]).
+    tunnels: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
     pub(crate) client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     /// HTTP/2 without TLS (prior knowledge), for h2c apps ([`model::Run::h2c`]).
     pub(crate) client_h2: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -281,6 +284,7 @@ impl Apps {
             sites: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
+            tunnels: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
             looping: Mutex::new(std::collections::HashSet::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http(),

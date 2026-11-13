@@ -1081,6 +1081,9 @@ static ROWS: &[Row] = &[
     // admin in every environment, as an agent's shell is: its WebSocket, and all of a session
     // (opening, keys, screen, resizing, closing: what may close an admin's shell is admin too).
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A tunnel reaches the service's port past its allow list, access token and maintenance
+    // (a private service's admin page, say): admin, as a shell is.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/tunnel", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),

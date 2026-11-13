@@ -261,6 +261,16 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Reach the service's port from this machine, a private one too (Fly's `fly proxy`):
+    /// connections to `127.0.0.1:<local port>` go to it through roll, a tunnel each, waking it
+    /// and keeping it up while they're open. Ctrl-C ends it.
+    Proxy {
+        #[command(flatten)]
+        target: Target,
+        /// The port here (default: the service's own).
+        #[arg(long)]
+        local_port: Option<u16>,
+    },
     /// A shell in a running instance (a web service asleep is woken and kept up while it's
     /// open); leave with `exit` or Ctrl-D.
     Ssh {
@@ -639,6 +649,63 @@ fn secret_env_file(name: &str) -> bool {
         Some(rest) => rest.starts_with('.') && ![".example", ".sample", ".template"].contains(&rest),
         None => false,
     }
+}
+
+/// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
+async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
+    let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
+    let url = format!("{base}{env}/tunnel");
+    let mut headers: Vec<(String, String)> = api.headers.clone();
+    if let Some(k) = &api.key {
+        headers.push(("authorization".into(), format!("Bearer {k}")));
+    }
+    eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
+    loop {
+        let (conn, _) = tokio::select! {
+            a = l.accept() => a?,
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
+        let mut req = url.as_str().into_client_request()?;
+        for (k, v) in &headers {
+            req.headers_mut().insert(reqwest::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
+        }
+        tokio::spawn(async move {
+            if let Err(e) = carry(req, conn).await {
+                eprintln!("a connection ended: {e:#}");
+            }
+        });
+    }
+}
+
+/// One local connection over one tunnel, until either side closes.
+async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, conn: tokio::net::TcpStream) -> anyhow::Result<()> {
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+    let (ws, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| match e {
+        WsError::Http(r) => anyhow::anyhow!("{}: {}", r.status(), String::from_utf8_lossy(r.body().as_deref().unwrap_or_default())),
+        e => anyhow::anyhow!("{e}"),
+    })?;
+    let (mut tx, mut rx) = ws.split();
+    let (mut rd, mut wr) = conn.into_split();
+    let mut buf = vec![0u8; 64 << 10];
+    loop {
+        tokio::select! {
+            n = rd.read(&mut buf) => match n? {
+                0 => break,
+                n => tx.send(Message::Binary(buf[..n].to_vec().into())).await?,
+            },
+            m = rx.next() => match m {
+                Some(Ok(Message::Binary(b))) => wr.write_all(&b).await?,
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+    let _ = tx.send(Message::Close(None)).await;
+    Ok(())
 }
 
 /// A shell over `…/shell`: the terminal raw, keystrokes and the screen copied both ways, the
@@ -1744,6 +1811,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
         AppsCmd::Ssh { target, instance } => {
             let svc = service(api, &target).await?;
             return ssh(api, &env_path(&svc, &target.env), instance.as_deref()).await;
+        }
+        AppsCmd::Proxy { target, local_port } => {
+            let svc = service(api, &target).await?;
+            let port = svc["run"]["port"].as_u64().unwrap_or(8080) as u16;
+            return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port)).await;
         }
         AppsCmd::Run { target, timeout, command } => {
             let svc = service(api, &target).await?;
