@@ -497,7 +497,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "get_change",
             "Get a change",
-            "A change with its blockers, checks, review status and inline threads, and any notices: `secret_missing` means it reads an environment variable a roll secrets environment doesn't set (the message names them); set it with secrets_set in those environments before merging, unless it comes from elsewhere.",
+            "A change with its blockers, checks, review status and inline threads, and any notices: `secret_missing` means it reads an environment variable some roll secrets environment doesn't set (secrets_health says which); set it with secrets_set before merging, unless it comes from elsewhere.",
             json!({ "change": change }),
             &["change"],
             true,
