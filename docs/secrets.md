@@ -1404,6 +1404,11 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Health's cost measured**: the bench times `…/health` at 9,000 keys next to the grid, since the
+   sidebar and Home call it on every page; make it fit under the grid's time.
+2. **Keys no code reads** (roll code's index): for repositories on the project's canvas, a key whose
+   name appears nowhere on the default branch is flagged `unreferenced` in health, from the
+   trigram index, never by reading files here.
 
 Waiting on other pull requests:
 
