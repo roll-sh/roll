@@ -1606,15 +1606,17 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **roll apps, the rest** (with roll apps): `may_reveal` in `ForApps` once #26 lands (apps'
-   `variables/values` asks secrets whether the caller may reveal a `secret`-sourced variable,
-   from a `Secrets::caller_of(operator, user, grant)` factored out of `caller()`), and linked keys'
-   addresses rewritten for a container (`Values.linked` → apps' `runtime.reach`; asked roll apps
-   which side does it). The wiring itself is #31.
-2. **Products say who owns a resource**, so a person's project can link their own databases,
+1. **A Kubernetes operator** (`sdk/kubernetes-operator`; pull, not push): a `RollSecret` resource
+   names a project, an environment and a folder, and the operator keeps a Secret beside it in
+   step, logging in with its own service account token through a workload identity, as
+   Infisical's and Doppler's operators do. roll then holds no cluster credential (the `kubernetes`
+   sync pushes from roll, with one). The Kubernetes API over plain HTTP, the Go standard library
+   only, tested against a fake API server.
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+   and the deploy notice when apps reads secrets (#31), refreshed once those land.
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
-3. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),
-   as Doppler's and Infisical's.
+   Waits on products serving signed-in people (today they're the operator's).
 4. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
    a project has members besides its owner. Tokens already ask through roll-access (`ask` rules,
    approvals for a while); a project's one owner reaches all of it.
@@ -1623,8 +1625,16 @@ Open pull requests after this one:
 
 - **#30, one permission system** (after #20 and #25): a project's tokens are roll-access grants,
   identities' logins get `workload` tokens, `rlst_` is gone.
-- **#31, roll apps' deploys get their project's secrets** (after #20): rolld's `ForApps`.
+- **#31, roll apps' deploys get their project's secrets** (after #20 and #26): `ForApps`, linked
+  keys marked for apps to rewrite, `may_reveal` by secrets' own rules (`Secrets::caller_of`).
+  #30 and #31 both change `caller()`: whichever lands second keeps #30's (no `rlst_`) with
+  #31's `caller_of` split.
 - **#32, Go and Python clients** (after #20): `sdk/go/secrets`, `sdk/python/roll_secrets`.
+- **#33, a Terraform provider** (after #20): environments, keys (a value or a link), identities,
+  syncs, tokens and values.
+- **#34, a GitHub Action** (after #20): a job's environment through its own OIDC token, masked.
+- **#35, `roll run --fallback`** (after #20): an encrypted copy of the last values, used through an
+  outage.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
