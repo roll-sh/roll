@@ -1581,30 +1581,40 @@ Done and in PR #20:
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
 
-Reviewed again on 2026-11-13:
-- against Infisical, Doppler, Vault, Vercel and 1Password Developer;
-- across the apps, previews, MCP and search branches (findings sent to each thread; this branch's
-  part is done: untrusted preview environments, `linked` keys, the Access table).
+Reviewed again on 2026-11-13 (evening): against Doppler, Infisical, Vault and 1Password Developer,
+and across the five branches. The core is level with them (environments, versions, references,
+approvals, dynamic secrets and rotation, OIDC identities, syncs, scanning, audit sinks). The gaps
+that matter: two permission systems; roll apps deploys without project secrets (`NoSecrets`); no
+time-boxed access requests; no runtime SDK (Doppler's and Infisical's fetch secrets in process);
+no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **One permission system** (agreed with roll MCP, 2026-11-13). New tokens are roll-access grants
-   made through `POST /v1/access/tokens` with one rule (`secrets × {project} × environments ×
-   paths × actions`, `ip_allow`, expiry): `roll secrets tokens create` and the dashboard call it,
-   so caps, policy, audit and `check_within` stay in one place (`Access::create_grant`, on #24).
-   A project's tokens are `GET /v1/access/tokens?product=secrets&resource=<project>`, revoked and
-   edited on the access page. Workload identities keep their trust configuration and OIDC
-   verification here and mint short-lived `workload` grants (`Access::mint_workload`, 5–60
-   minutes, the identity's scope, owned by its creator). Existing `rlst_` tokens work until they
-   expire or are revoked, revoked when leaked (`Access::on_leaked("rlst_", …)`), and the built-in
-   token check goes when none is left. A person's grant already acts as them (`Within`).
-2. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
+1. **One permission system** (agreed with roll MCP, 2026-11-13; built on #25's head, which holds
+   #24, on `feature/roll-secrets-access`). `rlst_` goes outright: it never reached main. New tokens
+   are roll-access grants made through `POST /v1/access/tokens` with one rule (`secrets ×
+   {project} × environments × paths × actions`, `ip_allow`, expiry), passing the request's own
+   extensions; `roll secrets tokens` and the dashboard call it. A project's tokens are `GET
+   /v1/access/tokens?product=secrets&resource=<project>`, a list acted on one token at a time
+   (never revoked in bulk: it holds tokens people made in the builder too). Workload identities
+   keep their trust configuration and OIDC verification here and mint short-lived `workload`
+   grants (`Access::mint_workload`, 5–60 minutes, the identity's scope, owned by its creator; 409
+   past 1,000 per owner). `TokenScope`, the `tokens` table's use and the built-in token check go.
+2. **roll apps' variables from roll secrets.** rolld's `SecretSource` for apps resolves the
+   service's project's environment as `app:<svc>` (`Secrets::values`, resolved), only where the
+   project trusts the service (`Workspace::trusts`); an environment roll secrets doesn't have is
+   no variables, never a failed deploy. apps' `variables?reveal` shows secrets' values: it needs
+   `reveal` on secrets too (a second resource in roll-access's catalogue row). With roll apps.
+3. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
    protected environment, and an approver grants it for minutes (the approval names the
    environment and folder).
-3. **Products say who owns a resource**, so a person's project can link their own databases,
-   buckets and streams (today only the operator's projects link roll's products): a
-   `LinkProvider::owner(ref)` answered from each product's own records, checked at link time and
-   at every use, as canvas membership is.
+4. **A runtime SDK** (`@roll/secrets` for Node and the edge, then Go and Python): fetch an
+   environment's values with a token or a workload identity, cache them in memory for a short
+   TTL, refresh on change through the existing event stream; no value on disk.
+5. **Products say who owns a resource**, so a person's project can link their own databases,
+   buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
+6. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),
+   as Doppler's and Infisical's.
 
 Waiting on other pull requests:
 
