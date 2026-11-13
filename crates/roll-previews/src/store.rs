@@ -1238,7 +1238,9 @@ impl Store {
     pub fn carry_acceptance(&self, id: &str) -> Result<bool> {
         self.db.write(|c| {
             let accepted: Option<String> = c.query_row("SELECT head FROM visual_accepts WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
-            let shot: Option<(String, Option<String>, Option<i64>, Option<i64>)> =
+            // (head, the head before, desktop change, phone change)
+            type Shot = (String, Option<String>, Option<i64>, Option<i64>);
+            let shot: Option<Shot> =
                 c.query_row("SELECT head, prev_head, change_bp, phone_change_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
             let (Some(accepted), Some((head, Some(prev), Some(0), phone))) = (accepted, shot) else { return Ok(false) };
             if accepted != prev || head == accepted || phone.is_some_and(|p| p != 0) {
