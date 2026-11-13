@@ -340,6 +340,10 @@ fn field_key(ctx: &QueryCtx, f: &FieldInfo, reverse: bool, missing: Option<&Valu
         if f.kind == Kind::GeoPoint && ctx.idx.dialect == crate::cluster::Dialect::OpenSearch {
             return Err(EsError::illegal_argument("can't sort on geo_point field without using specific sorting feature, like geo_distance"));
         }
+        // The histogram field data's `sortField`.
+        if f.kind == Kind::Histogram {
+            return Err(EsError::illegal_argument(format!("can't sort on the [{}] field", f.ty)));
+        }
         return Err(EsError::illegal_argument(format!("Can't sort on field [{}] of type [{}]", f.name, f.ty)));
     };
     if let Some(nt) = numeric_type {

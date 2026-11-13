@@ -824,6 +824,10 @@ numeric doc-values field per stored metric (`min`/`max`/`sum` sortable doubles, 
 `exponential_histogram` is one binary value per doc built with `search_aggs::exp_histogram::encode(&ExpHistogramValue
 { scale, zero_threshold, zero_count, negative, positive, sum, min, max })` (`SourceType::ExponentialHistogram`; parse and
 validate as `ExponentialHistogramParser` does; absent `sum`/`min`/`max` are estimated by `encode` exactly as the mapper does).
+`tdigest` is one binary value per doc (`search_es::document::values::tdigest_doc_value`: a flag byte, then `min`, `max` and
+`sum` when the digest has centroids, then the `histogram` centroid encoding); Elasticsearch 9.5.5 runs no query-DSL
+aggregation on it ("The [tdigest] field does not support aggregations"). All three types' synthetic `_source` is rendered
+from the doc value (`engine::synthetic`), malformed values ordered by their JSON bytes.
 `geo_shape` / `shape` fields keep search-index's shape doc value (`search_index::query::shape::doc_value`, every triangle of
 every value) and add a companion binary field with the centroid of the *original* geometry:
 `search_aggs::shape_field::encode_centroid(&calc, Coords::Geo | Coords::Cartesian)` after `CentroidCalculator::add` of each

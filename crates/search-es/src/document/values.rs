@@ -83,7 +83,7 @@ pub(crate) fn takes_array(f: &FieldMapper, p: &XParser<'_>) -> bool {
     match f.ty {
         "dense_vector" | "rank_vectors" | "knn_vector" => true,
         // One value per document: a second array element fails (`AggregateMetricDoubleFieldMapper`).
-        "aggregate_metric_double" | "histogram" => matches!(p.token(), Token::StartArray),
+        "aggregate_metric_double" | "histogram" | "exponential_histogram" | "tdigest" => matches!(p.token(), Token::StartArray),
         // `[lon, lat]` is one point; `[[lon, lat], …]` and strings are several.
         "geo_point" | "point" => matches!(p.value(), Value::Arr(a) if a.first().is_some_and(|x| matches!(x, Value::Num(_)))),
         _ => false,
@@ -768,7 +768,7 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             vec![FieldValue::Percolator(q.to_value().to_json(), w.p.token_location())]
         }
         "aggregate_metric_double" => parse_aggregate_metric(w, f, full)?,
-        "histogram" => parse_histogram(w, f, full)?,
+        "histogram" | "exponential_histogram" | "tdigest" => parse_histogram(w, f, full)?,
         // `CountedKeywordFieldMapper.parseCreateField`: strings only (nulls skipped).
         "counted_keyword" => match token {
             Token::String => vec![FieldValue::Keyword(w.p.text()?)],
@@ -927,15 +927,21 @@ fn aggregate_metric_object(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, dept
     Ok(FieldValue::AggregateMetric { min, max, sum, value_count })
 }
 
-/// `HistogramFieldMapper.parse` / `HistogramParser.parse`: `{"values": [...], "counts": [...]}`
-/// with values in increasing order and non-negative counts of the same length, once per
-/// document; `ignore_malformed` skips a bad value whole.
+/// The pre-aggregated histogram types (`histogram`, `exponential_histogram`, `tdigest`): one
+/// object per document (`HistogramFieldMapper.parse`, `ExponentialHistogramFieldMapper.parse`,
+/// `TDigestFieldMapper.parse`); `ignore_malformed` skips a bad value whole.
 fn parse_histogram(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str) -> Result<Vec<FieldValue>, ValueError> {
     let lenient = ignore_malformed(f, w.ctx);
+    let object: fn(&mut Cx<'_, '_>, &str, &mut usize) -> Result<FieldValue, ValueError> = match f.ty {
+        "exponential_histogram" => exp_histogram_object,
+        "tdigest" => tdigest_object,
+        _ => histogram_object,
+    };
+    let ty = f.ty;
     let mut depth = 0usize;
     let r = (|| -> Result<Vec<FieldValue>, ValueError> {
         if w.p.token() != Token::StartArray {
-            return Ok(vec![histogram_object(w, full, &mut depth)?]);
+            return Ok(vec![object(w, full, &mut depth)?]);
         }
         depth += 1;
         let mut out = Vec::new();
@@ -947,10 +953,10 @@ fn parse_histogram(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str) -> Result<Ve
                 }
                 Token::Null => {}
                 _ => {
-                    let v = histogram_object(w, full, &mut depth)?;
+                    let v = object(w, full, &mut depth)?;
                     if !out.is_empty() {
                         return Err(ValueError::typed(EsError::illegal_argument(format!(
-                            "Field [{full}] of type [histogram] doesn't support indexing multiple values for the same field in the same document"
+                            "Field [{full}] of type [{ty}] doesn't support indexing multiple values for the same field in the same document"
                         ))));
                     }
                     out.push(v);
@@ -979,12 +985,28 @@ fn parse_histogram(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str) -> Result<Ve
     }
 }
 
+/// `XContentParserUtils.ensureExpectedToken`'s error at the current token.
+fn expecting(w: &Cx<'_, '_>, want: &str, found: Token) -> ValueError {
+    let (l, c) = w.p.token_location();
+    ValueError::typed(EsError::parsing(l, c, format!("Failed to parse object: expecting token of type [{want}] but found [{found}]")))
+}
+
+/// `DocumentParsingException(location, "error parsing field [f], " + msg)` at the current token.
+fn field_error(w: &Cx<'_, '_>, full: &str, msg: String) -> ValueError {
+    ValueError::typed(w.doc_error(format!("error parsing field [{full}], {msg}")))
+}
+
+/// The next token, which must be `want` (`ensureExpectedToken`).
+fn expect_next(w: &mut Cx<'_, '_>, want: Token) -> Result<(), ValueError> {
+    let t = w.p.next_token().unwrap_or(Token::EndObject);
+    if t != want {
+        return Err(expecting(w, want.name(), t));
+    }
+    Ok(())
+}
+
 fn histogram_object(w: &mut Cx<'_, '_>, full: &str, depth: &mut usize) -> Result<FieldValue, ValueError> {
-    let expecting = |w: &Cx<'_, '_>, want: &str, found: Token| {
-        let (l, c) = w.p.token_location();
-        ValueError::typed(EsError::parsing(l, c, format!("Failed to parse object: expecting token of type [{want}] but found [{found}]")))
-    };
-    let field_error = |w: &Cx<'_, '_>, msg: String| ValueError::typed(w.doc_error(format!("error parsing field [{full}], {msg}")));
+    let field_error = |w: &Cx<'_, '_>, msg: String| field_error(w, full, msg);
     let token = w.p.token();
     if token != Token::StartObject {
         return Err(expecting(w, "START_OBJECT", token));
@@ -1048,6 +1070,280 @@ fn histogram_object(w: &mut Cx<'_, '_>, full: &str, depth: &mut usize) -> Result
         return Err(field_error(w, format!("expected same length from [values] and [counts] but got [{} != {}]", values.len(), counts.len())));
     }
     Ok(FieldValue::Histogram(search_aggs::histogram_field::encode_histogram(&values, &counts)))
+}
+
+/// `ExponentialHistogramParser.parse`: `{scale, sum?, min?, max?, zero?: {threshold?, count?},
+/// positive?/negative?: {indices, counts}}`, validated as Elasticsearch does: per value while
+/// reading, per bucket list at its end, the whole histogram at the end of the object.
+fn exp_histogram_object(w: &mut Cx<'_, '_>, full: &str, depth: &mut usize) -> Result<FieldValue, ValueError> {
+    use search_aggs::exp_histogram::{ExpHistogramValue, MAX_INDEX, MAX_SCALE, MIN_INDEX, MIN_SCALE};
+    let token = w.p.token();
+    if token != Token::StartObject {
+        return Err(expecting(w, "START_OBJECT", token));
+    }
+    *depth += 1;
+    let mut v = ExpHistogramValue::default();
+    let mut scale = None;
+    loop {
+        let t = w.p.next_token().unwrap_or(Token::EndObject);
+        if t == Token::EndObject {
+            *depth -= 1;
+            break;
+        }
+        if t != Token::FieldName {
+            return Err(expecting(w, "FIELD_NAME", t));
+        }
+        let name = w.p.current_name().unwrap_or("").to_string();
+        match name.as_str() {
+            "scale" => {
+                expect_next(w, Token::Number)?;
+                let s = w.p.long_value().map_err(ValueError::typed)?;
+                if s < MIN_SCALE as i64 || s > MAX_SCALE as i64 {
+                    return Err(field_error(w, full, format!("scale field must be in range [{MIN_SCALE}, {MAX_SCALE}] but got {s}")));
+                }
+                scale = Some(s as i32);
+            }
+            "sum" | "min" | "max" => {
+                let t = w.p.next_token().unwrap_or(Token::EndObject);
+                if t != Token::Number {
+                    return Err(field_error(w, full, format!("expected a number but got {t}")));
+                }
+                let d = w.p.double_value().map_err(ValueError::typed)?;
+                match name.as_str() {
+                    "sum" => v.sum = Some(d),
+                    "min" => v.min = Some(d),
+                    _ => v.max = Some(d),
+                }
+            }
+            "zero" => {
+                expect_next(w, Token::StartObject)?;
+                *depth += 1;
+                loop {
+                    let t = w.p.next_token().unwrap_or(Token::EndObject);
+                    if t == Token::EndObject {
+                        *depth -= 1;
+                        break;
+                    }
+                    if t != Token::FieldName {
+                        return Err(expecting(w, "FIELD_NAME", t));
+                    }
+                    let key = w.p.current_name().unwrap_or("").to_string();
+                    match key.as_str() {
+                        "threshold" => {
+                            expect_next(w, Token::Number)?;
+                            let d = w.p.double_value().map_err(ValueError::typed)?;
+                            if !(d >= 0.0 && d.is_finite()) {
+                                let d = crate::json::write::java_double(d);
+                                return Err(field_error(w, full, format!("zero.threshold field must be a non-negative, finite number but got {d}")));
+                            }
+                            v.zero_threshold = d;
+                        }
+                        "count" => {
+                            expect_next(w, Token::Number)?;
+                            let c = w.p.long_value().map_err(ValueError::typed)?;
+                            if c < 0 {
+                                return Err(field_error(w, full, format!("zero.count field must be a non-negative number but got {c}")));
+                            }
+                            v.zero_count = c as u64;
+                        }
+                        _ => return Err(field_error(w, full, format!("with unknown parameter for zero sub-object [{key}]"))),
+                    }
+                }
+            }
+            "positive" | "negative" => {
+                expect_next(w, Token::StartObject)?;
+                *depth += 1;
+                let (mut indices, mut counts) = (Vec::new(), Vec::new());
+                loop {
+                    let t = w.p.next_token().unwrap_or(Token::EndObject);
+                    if t == Token::EndObject {
+                        *depth -= 1;
+                        break;
+                    }
+                    if t != Token::FieldName {
+                        return Err(expecting(w, "FIELD_NAME", t));
+                    }
+                    let key = w.p.current_name().unwrap_or("").to_string();
+                    if key != "indices" && key != "counts" {
+                        return Err(field_error(w, full, format!("with unknown parameter for {name} sub-object [{key}]")));
+                    }
+                    expect_next(w, Token::StartArray)?;
+                    *depth += 1;
+                    loop {
+                        let t = w.p.next_token().unwrap_or(Token::EndArray);
+                        if t == Token::EndArray {
+                            *depth -= 1;
+                            break;
+                        }
+                        if t != Token::Number {
+                            return Err(expecting(w, "VALUE_NUMBER", t));
+                        }
+                        let n = w.p.long_value().map_err(ValueError::typed)?;
+                        if key == "indices" {
+                            if !(MIN_INDEX..=MAX_INDEX).contains(&n) {
+                                return Err(field_error(w, full, format!("{name}.indices values must all be in range [{MIN_INDEX}, {MAX_INDEX}] but got {n}")));
+                            }
+                            indices.push(n);
+                        } else {
+                            if n <= 0 {
+                                return Err(field_error(w, full, format!("{name}.counts values must all be greater than zero but got {n}")));
+                            }
+                            counts.push(n as u64);
+                        }
+                    }
+                }
+                if indices.len() != counts.len() {
+                    let (a, b) = (indices.len(), counts.len());
+                    return Err(field_error(w, full, format!("expected same length from [{name}.indices] and [{name}.counts] but got [{a} != {b}]")));
+                }
+                let mut buckets: Vec<(i64, u64)> = indices.into_iter().zip(counts).collect();
+                buckets.sort_by_key(|b| b.0);
+                if let Some(d) = buckets.windows(2).find(|p| p[0].0 == p[1].0) {
+                    let i = d[0].0;
+                    return Err(field_error(w, full, format!("expected entries of [{name}.indices] to be unique, but got {i} multiple times")));
+                }
+                if name == "positive" {
+                    v.positive = buckets;
+                } else {
+                    v.negative = buckets;
+                }
+            }
+            _ => return Err(field_error(w, full, format!("with unknown parameter [{name}]"))),
+        }
+    }
+    let Some(scale) = scale else { return Err(field_error(w, full, "expected field called [scale]".into())) };
+    v.scale = scale;
+    let total = v.negative.iter().chain(&v.positive).try_fold(v.zero_count, |t, b| t.checked_add(b.1)).filter(|&t| t <= i64::MAX as u64);
+    let Some(total) = total else {
+        return Err(ValueError::typed(EsError::illegal_argument(format!(
+            "Field [{full}] has a total value count exceeding the allowed maximum value of {}",
+            i64::MAX
+        ))));
+    };
+    if total == 0 {
+        if let Some(s) = v.sum.filter(|&s| s != 0.0) {
+            return Err(field_error(w, full, format!("sum field must be zero if the histogram is empty, but got {}", crate::json::write::java_double(s))));
+        }
+        for (k, m) in [("min", v.min), ("max", v.max)] {
+            if let Some(m) = m {
+                return Err(field_error(w, full, format!("{k} field must be null if the histogram is empty, but got {}", crate::json::write::java_double(m))));
+            }
+        }
+    }
+    Ok(FieldValue::Histogram(search_aggs::exp_histogram::encode(&v)))
+}
+
+/// `TDigestParser.parse`: `{"centroids": [...], "counts": [...]}` (centroids ascending, counts
+/// non-negative, same length) with optional `sum`, `min` and `max`; doc value as
+/// [`tdigest_doc_value`].
+fn tdigest_object(w: &mut Cx<'_, '_>, full: &str, depth: &mut usize) -> Result<FieldValue, ValueError> {
+    let token = w.p.token();
+    if token != Token::StartObject {
+        return Err(expecting(w, "START_OBJECT", token));
+    }
+    *depth += 1;
+    let (mut centroids, mut counts): (Option<Vec<f64>>, Option<Vec<u64>>) = (None, None);
+    let (mut sum, mut min, mut max) = (None, None, None);
+    loop {
+        let t = w.p.next_token().unwrap_or(Token::EndObject);
+        if t == Token::EndObject {
+            *depth -= 1;
+            break;
+        }
+        if t != Token::FieldName {
+            return Err(expecting(w, "FIELD_NAME", t));
+        }
+        let name = w.p.current_name().unwrap_or("").to_string();
+        match name.as_str() {
+            "sum" | "min" | "max" => {
+                expect_next(w, Token::Number)?;
+                let d = Some(w.p.double_value().map_err(ValueError::typed)?);
+                match name.as_str() {
+                    "sum" => sum = d,
+                    "min" => min = d,
+                    _ => max = d,
+                }
+            }
+            "centroids" | "counts" => {
+                expect_next(w, Token::StartArray)?;
+                *depth += 1;
+                let (mut vs, mut cs) = (Vec::new(), Vec::new());
+                let mut previous = -f64::MAX;
+                loop {
+                    let t = w.p.next_token().unwrap_or(Token::EndArray);
+                    if t == Token::EndArray {
+                        *depth -= 1;
+                        break;
+                    }
+                    if t != Token::Number {
+                        return Err(expecting(w, "VALUE_NUMBER", t));
+                    }
+                    if name == "centroids" {
+                        let v = w.p.double_value().map_err(ValueError::typed)?;
+                        if v < previous {
+                            let (jv, jp) = (crate::json::write::java_double(v), crate::json::write::java_double(previous));
+                            return Err(field_error(w, full, format!("[centroids] centroids must be in increasing order, got [{jv}] but previous value was [{jp}]")));
+                        }
+                        previous = v;
+                        vs.push(v);
+                    } else {
+                        let c = w.p.long_value().map_err(ValueError::typed)?;
+                        if c < 0 {
+                            return Err(field_error(w, full, format!("[counts] elements must be >= 0 but got {c}")));
+                        }
+                        cs.push(c as u64);
+                    }
+                }
+                if name == "centroids" {
+                    centroids = Some(vs);
+                } else {
+                    counts = Some(cs);
+                }
+            }
+            _ => return Err(field_error(w, full, format!("with unknown parameter [{name}]"))),
+        }
+    }
+    let Some(centroids) = centroids else { return Err(field_error(w, full, "expected field called [centroids]".into())) };
+    let Some(counts) = counts else { return Err(field_error(w, full, "expected field called [counts]".into())) };
+    if centroids.len() != counts.len() {
+        let (a, b) = (centroids.len(), counts.len());
+        return Err(field_error(w, full, format!("expected same length from [centroids] and [counts] but got [{a} != {b}]")));
+    }
+    Ok(FieldValue::Histogram(tdigest_doc_value(&centroids, &counts, sum, min, max)))
+}
+
+/// A `tdigest` field's binary doc value: a flag byte (1 when the digest has centroids), then
+/// `min`, `max` and `sum` as little-endian doubles (given, or the first and last centroid and
+/// the weighted sum, as `TDigestFieldMapper` computes them), then the centroids with a
+/// count in `EncodedTDigest`'s encoding ([`search_aggs::histogram_field::encode_histogram`]).
+pub(crate) fn tdigest_doc_value(centroids: &[f64], counts: &[u64], sum: Option<f64>, min: Option<f64>, max: Option<f64>) -> Vec<u8> {
+    let encoded = search_aggs::histogram_field::encode_histogram(centroids, counts);
+    let mut out = Vec::with_capacity(25 + encoded.len());
+    match (centroids.first(), centroids.last()) {
+        (Some(&first), Some(&last)) => {
+            let total = sum.unwrap_or_else(|| centroids.iter().zip(counts).fold(0.0, |s, (v, &c)| s + v * c as f64));
+            out.push(1);
+            for d in [min.unwrap_or(first), max.unwrap_or(last), total] {
+                out.extend_from_slice(&d.to_le_bytes());
+            }
+        }
+        _ => out.push(0),
+    }
+    out.extend_from_slice(&encoded);
+    out
+}
+
+/// A `tdigest` doc value's summary (`min`, `max`, `sum`; `None` for an empty digest) and its
+/// centroid bytes.
+pub(crate) fn tdigest_parts(b: &[u8]) -> Option<(Option<[f64; 3]>, &[u8])> {
+    match b.split_first()? {
+        (0, rest) => Some((None, rest)),
+        (1, rest) if rest.len() >= 24 => {
+            let d = |i: usize| f64::from_le_bytes(rest[i * 8..i * 8 + 8].try_into().unwrap_or_default());
+            Some((Some([d(0), d(1), d(2)]), &rest[24..]))
+        }
+        _ => None,
+    }
 }
 
 /// `ParentJoinFieldMapper.parse`: a relation name, or `{"name": …, "parent": …}`.

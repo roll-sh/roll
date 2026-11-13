@@ -121,7 +121,7 @@ fn flags(f: &FieldMapper, ctx: &MappingCtx) -> (bool, bool) {
         "dense_vector" => (index(true), false),
         "binary" => (false, dv(false)),
         "percolator" => (false, false),
-        "histogram" => (false, true),
+        "histogram" | "exponential_histogram" | "tdigest" => (false, true),
         "constant_keyword" | "wildcard" | "flattened" | "join" | "aggregate_metric_double" | "counted_keyword" | "shape" | "point" | "geo_shape"
         | "version" => (true, true),
         _ => {

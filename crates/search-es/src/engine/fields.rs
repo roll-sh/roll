@@ -147,7 +147,7 @@ impl Kind {
             "flattened" | "flat_object" => Kind::Flattened,
             "join" => Kind::Join,
             "percolator" => Kind::Percolator,
-            "histogram" | "exponential_histogram" => Kind::Histogram,
+            "histogram" | "exponential_histogram" | "tdigest" => Kind::Histogram,
             "aggregate_metric_double" => Kind::AggregateMetric,
             "counted_keyword" => Kind::CountedKeyword,
             _ => Kind::Other,

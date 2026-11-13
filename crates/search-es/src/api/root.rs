@@ -280,12 +280,13 @@ fn api_capabilities(api: routes::Api) -> &'static [&'static str] {
         IndicesGetDataLifecycle => &["data_stream_lifecycle_effective_retention", "data_stream_global_retention"],
         IndicesExplainDataLifecycle => &["data_stream_lifecycle_effective_retention"],
         IndicesPutDataLifecycle => &["dlm.downsampling_method", "dlm.frozen_after"],
-        // `RestDownsampleAction`'s but `downsampling.tdigest` (roll has no `tdigest` field type).
+        // `RestDownsampleAction`'s.
         IndicesDownsample => &[
             "downsample.sampling_mode.last_value",
             "downsample.multi_field_fix",
             "downsampling.exponential_histograms",
             "downsampling.tdigest_histograms",
+            "downsampling.tdigest",
             "downsampling.store_reset_counters",
         ],
         IndicesModifyDataStream => &["data_streams.modify.delete_index"],

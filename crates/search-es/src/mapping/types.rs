@@ -767,6 +767,15 @@ fn join_relations_merge(cur: &Value, new: &Value, conflicts: &mut Vec<String>) -
 
 pub static HISTOGRAM: &[ParamDef] = &[IGNORE_MALFORMED, COERCE, META, p("time_series_metric", Enum(&["histogram"]), Dv::Null, Fixed).nullable()];
 
+/// `TDigestFieldMapper`: the digest's settings (fixed once set), as Elasticsearch prints them.
+pub static TDIGEST: &[ParamDef] = &[
+    p("digest_type", Enum(&["DEFAULT", "HIGH_ACCURACY"]), Dv::Str("DEFAULT"), Fixed),
+    p("compression", Double { positive: false }, Dv::Float(100.0), Fixed),
+    IGNORE_MALFORMED,
+    META,
+    p("time_series_metric", Enum(&["histogram"]), Dv::Null, Fixed).nullable(),
+];
+
 pub static AGGREGATE_METRIC_DOUBLE: &[ParamDef] = &[
     IGNORE_MALFORMED,
     p("metrics", StrList, Dv::Null, Updatable).ser(Ser::Always),
@@ -827,6 +836,7 @@ pub static TYPES: &[TypeDef] = &[
     def!("shape", SHAPE, Family::Geo),
     def!("short", SHORT, Family::Numeric).with_validate(validate_number),
     TypeDef { multi_fields: false, in_multi_field: false, ..def!("sparse_vector", SPARSE_VECTOR, Family::Vector) },
+    def!("tdigest", TDIGEST, Family::Other).with_validate(validate_tdigest),
     TypeDef { fields_at: 3, validate: Some(validate_text), ..def!("text", TEXT, Family::Text) },
     TypeDef { validate: Some(validate_token_count), ..def!("token_count", TOKEN_COUNT, Family::Numeric) },
     TypeDef { validate: Some(validate_unsigned_long), ..def!("unsigned_long", UNSIGNED_LONG, Family::Numeric) },
@@ -926,6 +936,7 @@ const NOT_IN_OPENSEARCH: &[&str] = &[
     "point",
     "shape",
     "sparse_vector",
+    "tdigest",
     "version",
 ];
 
@@ -1040,6 +1051,15 @@ fn validate_number(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
     precludes(f, ctx, "time_series_metric", &["time_series_dimension"])?;
     if f.ty == "scaled_float" && f.effective("scaling_factor", ctx).is_null() {
         return Err(EsError::illegal_argument("Field [scaling_factor] is required"));
+    }
+    Ok(())
+}
+
+/// `TDigestFieldMapper.Builder`'s compression check (`TDigestState.MAX_COMPRESSION`).
+fn validate_tdigest(f: &FieldMapper, ctx: &MappingCtx) -> Result<(), EsError> {
+    let c = f.effective("compression", ctx).as_f64().unwrap_or(100.0);
+    if c <= 0.0 || c > 10000.0 {
+        return Err(EsError::illegal_argument(format!("compression must be a positive integer between 1 and 10000.0 was [{}]", crate::json::write::java_double(c))));
     }
     Ok(())
 }

@@ -426,7 +426,7 @@ fn new_field(c: &mut Ctx, parent: &str, key: &str, full: &str, value: &Value, dy
 }
 
 /// The field types whose mappers parse an array as one value (`Mapper.parsesArrayValue`).
-const PARSES_ARRAYS: &[&str] = &["geo_point", "point", "geo_shape", "shape", "dense_vector", "rank_vectors", "completion", "histogram"];
+const PARSES_ARRAYS: &[&str] = &["geo_point", "point", "geo_shape", "shape", "dense_vector", "rank_vectors", "completion", "histogram", "exponential_histogram", "tdigest"];
 
 /// `DenseVectorFieldMapper.MIN_DIMS_FOR_DYNAMIC_FLOAT_MAPPING`.
 const MIN_DIMS_FOR_DYNAMIC_FLOAT_MAPPING: usize = 128;

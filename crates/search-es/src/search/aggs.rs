@@ -696,7 +696,14 @@ impl FieldLookup for Lookup<'_> {
             Kind::Point => SourceType::CartesianPoint,
             Kind::GeoShape => SourceType::GeoShape { centroid: f.subfield("centroid") },
             Kind::Shape => SourceType::CartesianShape { centroid: f.subfield("centroid") },
-            Kind::Histogram => SourceType::Histogram,
+            Kind::Histogram => match f.ty.as_str() {
+                "exponential_histogram" => SourceType::ExponentialHistogram,
+                // `TDigestFieldMapper.TDigestFieldType.fielddataBuilder` (aggregations come with ES|QL).
+                "tdigest" => {
+                    return Err(search_aggs::AggError::new(500, "unsupported_operation_exception", "The [tdigest] field does not support aggregations"));
+                }
+                _ => SourceType::Histogram,
+            },
             Kind::IntegerRange => SourceType::Range(search_aggs::RangeType::Integer),
             Kind::LongRange => SourceType::Range(search_aggs::RangeType::Long),
             Kind::FloatRange => SourceType::Range(search_aggs::RangeType::Float),

@@ -549,6 +549,10 @@ impl<'a> QueryCtx<'a> {
             k if k.is_range() => super::range::range_field_term(self, f, value),
             Kind::Binary => Err(EsError::illegal_argument("Binary fields do not support searching".to_string())),
             Kind::DenseVector => Err(EsError::illegal_argument("[dense_vector] fields do not support term queries".to_string())),
+            // `HistogramFieldType`, `ExponentialHistogramFieldType`, `TDigestFieldType`.
+            Kind::Histogram => {
+                Err(EsError::illegal_argument(format!("[{}] field do not support searching, use dedicated aggregations instead: [{}]", f.ty, f.name)))
+            }
             // `FeatureField.newLinearQuery`: the score is the feature's stored value (the
             // inverse for `positive_score_impact: false`), times the boost.
             Kind::SparseVector | Kind::RankFeatures => {

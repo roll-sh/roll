@@ -8,7 +8,8 @@
 //! * `histogram` and `tdigest` (`TDigestHistogramFieldDownsampler.Aggregate`): every value and
 //!   count goes into a merging t-digest (compression 100), written as its unique centroids.
 
-use crate::json::{Map, Value};
+use crate::engine::synthetic::exponential_json;
+use crate::json::Value;
 use search_aggs::exp_histogram::{self, DEFAULT_MAX_BUCKETS, ExpHistogram, ExpHistogramValue, Merger};
 use search_aggs::metrics::tdigest::MergingDigest;
 
@@ -36,40 +37,6 @@ pub(super) fn parse_exponential(v: &Value) -> Option<ExpHistogram> {
     let mut h = ExpHistogram::empty();
     exp_histogram::decode_into(&exp_histogram::encode(&value), &mut h).ok()?;
     Some(h)
-}
-
-/// `ExponentialHistogramXContent.serialize`.
-pub(super) fn exponential_json(h: &ExpHistogram) -> Value {
-    let mut m = Map::new();
-    m.insert("scale".into(), Value::from(h.scale as i64));
-    if h.sum != 0.0 || h.value_count() > 0 {
-        m.insert("sum".into(), Value::from(h.sum));
-    }
-    if !h.min.is_nan() {
-        m.insert("min".into(), Value::from(h.min));
-    }
-    if !h.max.is_nan() {
-        m.insert("max".into(), Value::from(h.max));
-    }
-    let (threshold, count) = (h.zero.zero_threshold(), h.zero.count);
-    if count != 0 || threshold != 0.0 {
-        let mut z = Map::new();
-        if count != 0 {
-            z.insert("count".into(), Value::from(count as i64));
-        }
-        if threshold != 0.0 {
-            z.insert("threshold".into(), Value::from(threshold));
-        }
-        m.insert("zero".into(), Value::Obj(z));
-    }
-    for (k, buckets) in [("positive", &h.positive), ("negative", &h.negative)] {
-        if !buckets.is_empty() {
-            let indices: Vec<Value> = buckets.iter().map(|b| Value::from(b.0)).collect();
-            let counts: Vec<Value> = buckets.iter().map(|b| Value::from(b.1 as i64)).collect();
-            m.insert(k.into(), crate::obj! { "indices" => Value::Arr(indices), "counts" => Value::Arr(counts) });
-        }
-    }
-    Value::Obj(m)
 }
 
 /// `ExponentialHistogram.equals` (NaN-aware `min`/`max`).

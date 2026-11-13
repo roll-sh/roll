@@ -206,7 +206,7 @@ the discovery/store plugins.
 | `ccr` | `x-pack/plugin/ccr` | security | 10 | 10 | 0 | 0 | 10 |
 | `core` | `x-pack/plugin/core` | security | 1 | 0 | 0 | 0 | 0 |
 | `diskbbq` | `x-pack/plugin/diskbbq` | plain | 8 | 7 | 5 | 5 | 2 |
-| `downsample` | `x-pack/plugin/downsample/qa/rest:downsample` | plain | 68 | 59 | 52 | 52 | 7 |
+| `downsample` | `x-pack/plugin/downsample/qa/rest:downsample` | plain | 68 | 59 | 58 | 58 | 1 |
 | `downsample-with-security` | `x-pack/plugin/downsample/qa/rest:downsample-with-security` | security | 1 | 1 | 1 | 1 | 0 |
 | `ent-search` | `x-pack/plugin/ent-search` | security | 371 | 371 | 6 | 6 | 365 |
 | `eql` | `x-pack/plugin/eql/qa/rest` | basic | 39 | 39 | 27 | 27 | 12 |
@@ -230,7 +230,7 @@ the discovery/store plugins.
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 43 | 43 | 46 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 0 | 0 | 9 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 703 | 703 | 709 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 868 | 868 | 544 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 544 | 544 | 5 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
@@ -242,7 +242,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 3978 | 3978 | 1563 |
+| **total** | | | 6044 | 5541 | 4149 | 4149 | 1392 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -263,7 +263,7 @@ the discovery/store plugins.
 <!-- test-search: apm-data >= 1 -->
 <!-- test-search: async-search >= 1 -->
 <!-- test-search: diskbbq >= 5 -->
-<!-- test-search: downsample >= 52 -->
+<!-- test-search: downsample >= 58 -->
 <!-- test-search: downsample-with-security >= 1 -->
 <!-- test-search: ent-search >= 366 -->
 <!-- test-search: eql >= 27 -->
@@ -284,11 +284,11 @@ the discovery/store plugins.
 <!-- test-search: transform >= 108 -->
 <!-- test-search: watcher >= 43 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 829 -->
+<!-- test-search: platinum >= 868 -->
 <!-- test-search: esql >= 544 -->
 
-`platinum` by directory (roll / Elasticsearch passes): `ml` 225/618, `analytics` 103/114,
-`spatial` 92/105, `security` 25/101, `rollup` 0/52, `exponential_histogram` 13/44, `vector-tile`
+`platinum` by directory (roll / Elasticsearch passes): `ml` 225/618, `analytics` 111/114,
+`spatial` 92/105, `security` 25/101, `rollup` 0/52, `exponential_histogram` 44/44, `vector-tile`
 34/34, `api_key` 17/32, `aggregate-metrics` 26/28, `inference` 1/23, `search.vectors` 22/23,
 `wildcard` 22/22, `terms_enum` 15/20, `rank_vectors` 0/15, `users` 13/15, `constant_keyword`
 12/13, `counted_keyword` 8/11, `data_streams` 9/11, `migrate` 0/11, `change_password` 3/8,

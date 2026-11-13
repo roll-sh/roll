@@ -428,7 +428,7 @@ impl<'a> Walk<'a> {
             | Kind::Ip => !(info.doc_values || info.store),
             Kind::GeoPoint | Kind::Binary | Kind::Wildcard | Kind::Version | Kind::Flattened => !info.doc_values,
             Kind::IntegerRange | Kind::LongRange | Kind::FloatRange | Kind::DoubleRange | Kind::DateRange | Kind::IpRange => !info.doc_values,
-            Kind::ConstantKeyword | Kind::DenseVector => false,
+            Kind::ConstantKeyword | Kind::DenseVector | Kind::Histogram => false,
             _ => true,
         }
     }
@@ -550,6 +550,13 @@ impl<'a> Walk<'a> {
                         let key = kept.as_str().unwrap_or_default().as_bytes().to_vec();
                         leaf.extra.push((kept, key));
                         leaf.extra_sorted |= self.binary_fallback;
+                    }
+                    // The histogram mappers keep a copy of the value as XContent
+                    // (`IgnoreMalformedStoredValues.storedField(name, XContentBuilder)`): its
+                    // JSON bytes order it.
+                    Kind::Histogram => {
+                        leaf.extra.push((v.clone(), v.to_json().into_bytes()));
+                        leaf.extra_sorted = true;
                     }
                     _ => {
                         // `IgnoreMalformedStoredValues`: sorted binary doc values.
@@ -768,8 +775,77 @@ fn render(info: &FieldInfo, f: &FieldMapper, fv: &FieldValue, ctx: &MappingCtx) 
         FieldValue::DenseVector(v) => Dv { key: Key::Int(0), v: Value::Arr(v.iter().map(|x| float_value(*x)).collect()) },
         FieldValue::ByteVector(v) => Dv { key: Key::Int(0), v: Value::Arr(v.iter().map(|x| Value::from(*x as i64)).collect()) },
         FieldValue::Flattened(pairs) => Dv { key: Key::Int(0), v: Value::Arr(pairs.iter().map(|(k, v)| Value::Arr(vec![Value::Str(k.clone()), Value::Str(v.clone())])).collect()) },
+        // One value per document, rendered from its doc value.
+        FieldValue::Histogram(b) => Dv { key: Key::Int(0), v: histogram_json(f.ty, b)? },
         _ => return None,
     })
+}
+
+/// `ExponentialHistogramXContent.serialize`.
+pub(crate) fn exponential_json(h: &search_aggs::exp_histogram::ExpHistogram) -> Value {
+    let mut m = Map::new();
+    m.insert("scale".into(), Value::from(h.scale as i64));
+    if h.sum != 0.0 || h.value_count() > 0 {
+        m.insert("sum".into(), Value::from(h.sum));
+    }
+    if !h.min.is_nan() {
+        m.insert("min".into(), Value::from(h.min));
+    }
+    if !h.max.is_nan() {
+        m.insert("max".into(), Value::from(h.max));
+    }
+    let (threshold, count) = (h.zero.zero_threshold(), h.zero.count);
+    if count != 0 || threshold != 0.0 {
+        let mut z = Map::new();
+        if count != 0 {
+            z.insert("count".into(), Value::from(count as i64));
+        }
+        if threshold != 0.0 {
+            z.insert("threshold".into(), Value::from(threshold));
+        }
+        m.insert("zero".into(), Value::Obj(z));
+    }
+    for (k, buckets) in [("positive", &h.positive), ("negative", &h.negative)] {
+        if !buckets.is_empty() {
+            let indices: Vec<Value> = buckets.iter().map(|b| Value::from(b.0)).collect();
+            let counts: Vec<Value> = buckets.iter().map(|b| Value::from(b.1 as i64)).collect();
+            m.insert(k.into(), crate::obj! { "indices" => Value::Arr(indices), "counts" => Value::Arr(counts) });
+        }
+    }
+    Value::Obj(m)
+}
+
+/// A pre-aggregated histogram's synthetic source: `histogram` as `{values, counts}`
+/// (`HistogramFieldMapper`), `tdigest` as `{min, max, sum, centroids, counts}`
+/// (`TDigestFieldMapper`; no summary for an empty digest), both without zero counts, and
+/// `exponential_histogram` as [`exponential_json`].
+fn histogram_json(ty: &str, b: &[u8]) -> Option<Value> {
+    let centroids = |m: &mut Map, values_key: &str, bytes: &[u8]| -> Option<()> {
+        let mut c = Vec::new();
+        search_aggs::histogram_field::decode_histogram(bytes, &mut c).ok()?;
+        m.insert(values_key.into(), Value::Arr(c.iter().map(|x| Value::from(x.0)).collect()));
+        m.insert("counts".into(), Value::Arr(c.iter().map(|x| Value::from(x.1 as i64)).collect()));
+        Some(())
+    };
+    let mut m = Map::new();
+    match ty {
+        "exponential_histogram" => {
+            let mut h = search_aggs::exp_histogram::ExpHistogram::empty();
+            search_aggs::exp_histogram::decode_into(b, &mut h).ok()?;
+            return Some(exponential_json(&h));
+        }
+        "tdigest" => {
+            let (summary, bytes) = crate::document::values::tdigest_parts(b)?;
+            if let Some([min, max, sum]) = summary {
+                m.insert("min".into(), Value::from(min));
+                m.insert("max".into(), Value::from(max));
+                m.insert("sum".into(), Value::from(sum));
+            }
+            centroids(&mut m, "centroids", bytes)?;
+        }
+        _ => centroids(&mut m, "values", b)?,
+    }
+    Some(Value::Obj(m))
 }
 
 fn range_bound(info: &FieldInfo, f: &FieldMapper, ctx: &MappingCtx, b: &ranges::BoundValue, low: bool) -> Value {
