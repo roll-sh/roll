@@ -201,11 +201,25 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
         return Ok(());
     }
     // The commit status, on the head it's about.
-    if rules.status
-        && let Some(status) = status
-    {
-        let target = url.as_deref().or(log_url.as_deref());
-        hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, status, "roll/preview", Some(&description), target).await.map_err(gh)?;
+    if rules.status {
+        match status {
+            Some(status) => {
+                let target = url.as_deref().or(log_url.as_deref());
+                hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, status, "roll/preview", Some(&description), target).await.map_err(gh)?;
+            }
+            // Removed while its status was pending (landed or closed before it was ready): settle
+            // it, or that commit, now perhaps on the default branch, waits on it for good
+            // (branch protection, a deploy that waits for CI). A failure stays a failure.
+            None => {
+                if let Some(prev) = mark(code, &state_key)?
+                    && let Some((prev_sha, rest)) = prev.split_once(':')
+                    && rest.starts_with("Some(\"pending\")")
+                {
+                    let why = "Preview removed before it was ready";
+                    hub.client.create_status(l.installation_id, &l.owner, &l.repo, prev_sha, "success", "roll/preview", Some(why), None).await.map_err(gh)?;
+                }
+            }
+        }
     }
     // The deployment: one per head, its status following the preview; the last one goes
     // inactive when the preview is removed.

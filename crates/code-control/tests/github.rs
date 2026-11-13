@@ -695,6 +695,16 @@ async fn connect_import_webhooks_and_mirror() {
     assert_eq!(preview_calls("/deployments").iter().filter(|(_, p, _)| p.ends_with("/deployments")).count(), 1, "one deployment per head");
     a.code.report_environment(c5_id, None).unwrap();
     until("the deployment inactive", || async { preview_calls("/deployments/").iter().any(|(_, _, b)| b["state"] == "inactive") }).await;
+    // Removed before it was ready, its pending status is settled: nothing waits on that commit.
+    let pending = || preview_calls("/statuses/").iter().filter(|(_, _, b)| b["state"] == "pending").count();
+    let before = pending();
+    a.code.report_environment(c5_id, Some(&env("creating"))).unwrap();
+    until("a pending status", || async { pending() > before }).await;
+    a.code.report_environment(c5_id, None).unwrap();
+    until("the pending status settled", || async {
+        preview_calls("/statuses/").iter().any(|(_, _, b)| b["state"] == "success" && b["description"] == "Preview removed before it was ready")
+    })
+    .await;
 
     // Landing the PR's change: mirrored to GitHub, the PR commented on and closed.
     let landed = a.ok("POST", &format!("/v1/code/changes/{pr_change}/land"), None).await;

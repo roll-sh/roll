@@ -653,7 +653,9 @@ type Settings = {
   container.
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
-  - a commit status `roll/preview` on the head;
+  - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
+    landed or closed) settles its pending status to success, so a commit now on the default branch
+    never waits on it; a failure stays;
   - a GitHub deployment to the environment `preview/<slug>` with the URL, marked `inactive` when
     the preview is deleted.
   - with `github.screenshot`, a screenshot of the first service at each new head (Vercel's
