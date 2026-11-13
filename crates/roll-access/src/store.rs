@@ -670,6 +670,21 @@ impl Store {
         self.get(id)
     }
 
+    /// A grant's rules replaced, only if they're still `from` (a proposal made from them).
+    pub fn swap_rules(&self, id: &str, from: &Scope, to: &Scope) -> Result<Grant> {
+        check_rules(to)?;
+        self.db.write(|c| {
+            let rules: Option<String> = c.query_row("SELECT rules FROM grants WHERE id = ? AND revoked_at IS NULL", [id], |r| r.get(0)).optional()?;
+            let Some(rules) = rules else { return Err(Error::NotFound(format!("no live token {id}"))) };
+            if serde_json::from_str::<Scope>(&rules).ok().as_ref() != Some(from) {
+                return Err(Error::Conflict("its rules changed since this was proposed: look again".into()));
+            }
+            c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(to).unwrap_or_default(), id])?;
+            Ok(())
+        })?;
+        self.get(id)
+    }
+
     /// Take back what an approval allowed a grant for a while (before it lapses), and the
     /// approval itself if its request hasn't used it (the rule may have run it instead).
     pub fn forget(&self, id: &str, approval: &str) -> Result<Grant> {
@@ -678,11 +693,11 @@ impl Store {
             let temp: Option<Option<String>> = c.query_row("SELECT temp_rules FROM grants WHERE id = ?", [id], |r| r.get(0)).optional()?;
             let Some(temp) = temp else { return Err(Error::NotFound(format!("no token {id}"))) };
             let mut temp: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-            let before = temp.len();
-            temp.retain(|t| t.until > now && t.approval.as_deref() != Some(approval));
-            if temp.len() == before {
+            // Only a live rule this approval made counts (a lapsed one pruned is no match).
+            if !temp.iter().any(|t| t.until > now && t.approval.as_deref() == Some(approval)) {
                 return Err(Error::NotFound(format!("{approval} allows this token nothing now")));
             }
+            temp.retain(|t| t.until > now && t.approval.as_deref() != Some(approval));
             c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&temp).unwrap_or_default(), id])?;
             c.execute("UPDATE approvals SET state = 'expired' WHERE id = ? AND grant_id = ? AND state = 'approved'", params![approval, id])?;
             Ok(())
