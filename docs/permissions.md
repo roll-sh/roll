@@ -590,7 +590,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   digest, new-network notices and the tokens' caps (10,000 live of their own, 1,000 per owner), and go a day after
   they end. One is fixed: never edited, rotated or grown by a remembered approval (`409`), only
   revoked or left to end. It makes and changes no tokens (`403`): what it made would be a
-  credential nobody set up. Their requests are audited as any token's, and each mint is a row.
+  credential nobody set up. The product that minted it stops it with `Access::revoke_workload(id,
+  why)` (its identity deleted): only a workload grant, with why and an audit row. Their requests are audited as any token's, and each mint is a row.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
 ### Tighten to what it used

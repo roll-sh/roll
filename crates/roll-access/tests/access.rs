@@ -1398,6 +1398,12 @@ async fn a_workload_gets_a_token_for_minutes() {
     assert_eq!(edit.0, StatusCode::CONFLICT, "{}", edit.1);
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/tokens/{}/rotate", g.id), None).await.0, StatusCode::CONFLICT);
 
+    // Its identity gone, it stops at once; only a workload grant is revoked this way.
+    let (_, op_id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    assert!(!d.access.revoke_workload(&op_id, "identity deleted").unwrap(), "a person's token isn't a workload's");
+    assert!(d.access.revoke_workload(&g.id, "identity deleted").unwrap());
+    assert_eq!(d.call(&secret, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+
     d.people.remove("usr_alice");
     assert!(d.access.mint_workload(new(json!({ "read": "allow" })), &within, 15, Some("usr_alice")).await.is_err(), "its owner can't sign in");
     d.access.store.prune(30).unwrap();
