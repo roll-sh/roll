@@ -708,7 +708,7 @@ impl Session {
         self.prepared.insert(s.name.clone(), p);
         self.prepared_listed = false;
         self.prepared_meta
-            .insert(s.name.clone(), (text.to_string(), Self::now(), true));
+            .insert(s.name.clone(), (text.to_string(), self.statement_time(), true));
         Ok(QueryResult::command("PREPARE"))
     }
 
@@ -1133,6 +1133,7 @@ impl Session {
             s.options & CURSOR_OPT_SCROLL != 0
         };
         // The query only starts: it runs as FETCH and MOVE pass over its rows.
+        let created = self.statement_time();
         let c = self.with_ctx(params, |ctx| {
             bq.check_perms(ctx)?;
             let plan = match &keyed {
@@ -1155,7 +1156,7 @@ impl Session {
                 hold,
                 scroll,
                 text.to_string(),
-                Self::now(),
+                created,
             ))
         })?;
         let mut c = c;
