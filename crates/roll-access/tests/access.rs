@@ -68,6 +68,7 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
 }
 
 impl Daemon {
@@ -819,6 +820,15 @@ async fn approvals_can_be_remembered() {
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
     assert_eq!((asked["action"].as_str(), asked["environment"].as_str()), (Some("reveal"), Some("production")), "{asked}");
     assert_eq!(d.call(&dev, Method::PUT, "/v1/apps/services/svc_a/environments/dev2", Some(json!({}))).await.0, StatusCode::OK);
+    // Secrets' promote names where it copies from in the query: the same rule.
+    let (promoter, _) = d.token(json!([{ "product": "secrets", "resources": "*", "environments": ["development", "staging"], "actions": { "write": "allow", "reveal": "allow" } }]), json!({})).await;
+    let promote = |from: &'static str| {
+        let (d, t) = (&d, promoter.clone());
+        async move { d.call(&t, Method::POST, &format!("/v1/secrets/projects/prj_s/environments/staging/promote?from={from}"), Some(json!({}))).await }
+    };
+    let (s, e) = promote("production").await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    assert_eq!(promote("development").await.0, StatusCode::OK);
 
     // Remembered where it was asked: development's values, never production's.
     let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;

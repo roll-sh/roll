@@ -164,7 +164,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
     let mut action = row.action(&method, &params, c.body.as_ref());
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
-    if let Some((copied, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, c.body.as_ref(), &scope).await
+    if let Some((copied, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (copied, Action::Reveal);
