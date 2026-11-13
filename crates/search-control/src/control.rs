@@ -1007,11 +1007,14 @@ impl Control {
         self.node.handle(req).await
     }
 
-    /// One Elasticsearch request on cluster `id` as its owner (the per-index routes of the API):
-    /// the answer's status, content type and body, unchanged. Wakes the cluster.
-    pub async fn es(&self, id: &str, method: &str, uri: &str, content_type: Option<&str>, body: bytes::Bytes) -> Result<(u16, String, bytes::Bytes)> {
+    /// One Elasticsearch request on cluster `id` as its owner narrowed to the index names of
+    /// `scope` (the per-index routes of the API: the request reaches no other index, also through
+    /// a bulk line's `_index` or an expression): the answer's status, content type and body,
+    /// unchanged. Wakes the cluster.
+    pub async fn es(&self, id: &str, method: &str, uri: &str, scope: &str, content_type: Option<&str>, body: bytes::Bytes) -> Result<(u16, String, bytes::Bytes)> {
         let c = self.get(id).await?;
         let mut req = EsRequest::new(method, uri);
+        req.headers.push((search_es::xpack::security::INDEX_SCOPE_HEADER.into(), scope.to_string()));
         if let Some(ct) = content_type.filter(|_| !body.is_empty()) {
             req.headers.push(("Content-Type".into(), ct.to_string()));
         }

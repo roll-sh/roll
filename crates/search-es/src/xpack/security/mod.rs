@@ -45,6 +45,13 @@ use std::sync::OnceLock;
 /// credentials (value: the user name, `elastic` for the owner).
 pub const AUTHENTICATED_HEADER: &str = "x-roll-authenticated-user";
 
+/// Narrows a request the node authenticated as the owner to these index names and patterns
+/// (comma-separated; `-` exclusions are ignored): roll search's per-index control-plane routes
+/// (`/v1/search/clusters/{id}/indices/{index}/…`) send it, so a caller scoped to an index by
+/// roll's permissions reaches no other index through the request (a bulk line's `_index`, an
+/// expression). It can only take privileges away, so a client sending it gains nothing.
+pub const INDEX_SCOPE_HEADER: &str = "x-roll-index-scope";
+
 /// How a principal authenticated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AuthKind {
@@ -89,6 +96,23 @@ impl Principal {
             realm_name: "reserved",
             realm_type: "reserved",
             kind: AuthKind::Realm,
+        }
+    }
+
+    /// The owner narrowed to `scope` ([`INDEX_SCOPE_HEADER`]): as an API key of the owner whose
+    /// one role grants every index privilege on those names and nothing else.
+    pub fn owner_scoped(scope: &str) -> Principal {
+        let names: Vec<Value> = scope.split(',').map(str::trim).filter(|n| !n.is_empty() && !n.starts_with('-')).map(Value::from).collect();
+        let limited_by = users::reserved_roles().get("superuser").cloned().map(|d| obj! { "superuser" => d }).unwrap_or(Value::Null);
+        Principal {
+            kind: AuthKind::ApiKey(Box::new(ApiKeyAuth {
+                id: "roll-index-scope".into(),
+                name: Value::from("roll-index-scope"),
+                role_descriptors: obj! { "index_scope" => obj! { "cluster" => Value::Arr(Vec::new()), "indices" => Value::Arr(vec![obj! { "names" => Value::Arr(names), "privileges" => Value::Arr(vec![Value::from("all")]) }]) } },
+                limited_by,
+                cross_cluster: false,
+            })),
+            ..Principal::owner()
         }
     }
 
@@ -181,6 +205,9 @@ pub fn unauthorized_credentials(detail: impl Into<String>) -> EsError {
 pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     let req = ctx.request;
     if req.header(AUTHENTICATED_HEADER).is_some() {
+        if let Some(scope) = req.header(INDEX_SCOPE_HEADER) {
+            let _ = ctx.principal.set(Principal::owner_scoped(scope));
+        }
         return Ok(());
     }
     let Some(h) = req.header("authorization") else { return Ok(()) };

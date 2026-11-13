@@ -356,7 +356,7 @@ fn index_segment(index: &str, read: bool) -> Result<String, ControlError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_method: &str, es_path: String, query: Option<&str>, headers: &HeaderMap, body: Body, kind: EsBody) -> Result<Response, ControlError> {
+async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_method: &str, es_path: String, scope: &str, query: Option<&str>, headers: &HeaderMap, body: Body, kind: EsBody) -> Result<Response, ControlError> {
     let cluster = c.get(id).await?;
     let bytes = match kind {
         EsBody::None => bytes::Bytes::new(),
@@ -376,7 +376,7 @@ async fn es_route(c: &Control, id: &str, method: Method, api_path: String, es_me
         EsBody::Ndjson => Some("application/x-ndjson"),
         _ => Some("application/json"),
     };
-    let (status, ct, body) = c.es(&cluster.id, es_method, &format!("{es_path}{q}"), ct, bytes).await?;
+    let (status, ct, body) = c.es(&cluster.id, es_method, &format!("{es_path}{q}"), scope, ct, bytes).await?;
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     Ok((status, [(axum::http::header::CONTENT_TYPE, ct)], body).into_response())
 }
@@ -389,7 +389,7 @@ macro_rules! index_route {
     ($name:ident, $es_method:literal, $rest:literal, $es_rest:literal, $read:expr, $kind:expr) => {
         async fn $name(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
             let seg = index_segment(&index, $read)?;
-            es_route(&c, &id, method, api_index_path(&id, &index, $rest), $es_method, format!("/{seg}{}", $es_rest), uri.query(), &headers, body, $kind).await
+            es_route(&c, &id, method, api_index_path(&id, &index, $rest), $es_method, format!("/{seg}{}", $es_rest), &index, uri.query(), &headers, body, $kind).await
         }
     };
 }
@@ -408,7 +408,7 @@ macro_rules! doc_route {
         async fn $name(State(c): State<AppState>, Path((id, index, doc)): Path<(String, String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
             let seg = index_segment(&index, false)?;
             let d = urlencoding::encode(&doc).into_owned();
-            es_route(&c, &id, method, api_index_path(&id, &index, &format!("/docs/{d}")), $es_method, format!("/{seg}/_doc/{d}"), uri.query(), &headers, body, $kind).await
+            es_route(&c, &id, method, api_index_path(&id, &index, &format!("/docs/{d}")), $es_method, format!("/{seg}/_doc/{d}"), &index, uri.query(), &headers, body, $kind).await
         }
     };
 }

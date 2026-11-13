@@ -533,6 +533,18 @@ async fn per_index_routes() {
     let r = e.http.post(format!("{}{base}/books/bulk?refresh=true", e.api)).body(bulk).send().await.unwrap();
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["errors"], false, "{v}");
+    // A route names its index and reaches no other: not through a bulk line's `_index`, nor a
+    // read's expression.
+    e.call(reqwest::Method::PUT, &format!("{base}/secrets/docs/1?refresh=true"), Some(json!({"k": "v"}))).await;
+    let sneaky = "{\"index\":{\"_index\":\"secrets\",\"_id\":\"2\"}}\n{\"k\":\"w\"}\n";
+    let r = e.http.post(format!("{}{base}/books/bulk?refresh=true", e.api)).body(sneaky).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books,secrets/search"), Some(json!({}))).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(4)), "a scoped read names both: {v}");
+    let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/book*/search"), Some(json!({"size": 0}))).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(3)), "{v}");
+    let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/secrets/docs/2"), None).await;
+    assert_eq!((s, &v["found"]), (404, &json!(false)), "the bulk line didn't write: {v}");
     let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/books/docs/1"), None).await;
     assert_eq!((s, v["_source"]["year"].as_i64()), (200, Some(2018)), "{v}");
     let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/search"), Some(json!({"query": {"term": {"year": 2021}}}))).await;

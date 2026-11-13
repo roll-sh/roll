@@ -208,7 +208,13 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    geonames `decay_geo_gauss_script_score` (78 against ES 71). Then: `so`, a full rerun of every
    track with variance, and one allocator policy (rolld's against search-dev's purge governor,
    by a matched benchmark).
-2. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
+2. **Lookups inside a query honour index privileges.** A `terms` lookup, a `lookup` runtime
+   field, `percolate`'s stored document, `more_like_this`'s documents and an indexed
+   `geo_shape` read another index without an authorization check, for any narrowed principal
+   (a tenant's own native user or API key, and roll's per-index routes since their requests are
+   scoped to their index). Elasticsearch authorizes each such read as the user: carry the
+   principal's effective permissions in `QueryCtx` and check them in each lookup.
+2b. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
    leases, MinIO) and roll cloud's fleet test (`rolld/tests/fleet_e2e.rs`, `pnpm test:fleet`:
    three nodes from the fleet image behind HAProxy, DynamoDB leases, every product under load)
    both pass with search: through the edge's `<cluster>.search.…` hostname, 7,116 documents
