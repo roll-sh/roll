@@ -807,6 +807,9 @@ async fn a_folder_shared_by_another_project_reads_as_its_own_until_the_share_end
     api.set("staging", "REF", "${production.shared.SENTRY_DSN}").await;
     let v = api.values("staging", "/").await;
     assert_eq!((v["values"]["REF"].as_str(), v["values"]["SENTRY_DSN"].as_str()), (Some("ours"), Some("https://key@sentry.example/1")));
+    // A shared value pasted into this project's code is a leak too, named by its project.
+    let leaks = api.secrets.leaks(&api.project, &["https://key@sentry.example/1".to_string()]).unwrap();
+    assert_eq!(leaks.iter().map(|l| l.environment.as_str()).collect::<Vec<_>>(), ["platform/production"]);
     // A protected environment never reaches an untrusted consumer, shared or not.
     api.ok(Method::PUT, &theirs("/environments/production/policy"), Some(json!({ "protected": true }))).await;
     let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "preview:pr-1", "untrusted": true }))).await;

@@ -38,19 +38,35 @@ impl Secrets {
         if known.is_none() {
             return Ok(Vec::new());
         }
-        let dek = self.project(project)?;
-        let mut by_fp: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, c) in candidates.iter().enumerate().filter(|(_, c)| c.chars().count() >= MIN_LEN) {
-            by_fp.entry(dek.fingerprint(c)).or_default().push(i);
-        }
+        // Its own values (personal ones too), and the shared values other projects share with it,
+        // each fingerprinted with its own project's key: candidates are fingerprinted once per
+        // project that has rows to match.
         let rows = self.db.read(|c| {
             c.query(
-                "SELECT s.key, e.slug, s.path, s.fp FROM secrets s JOIN environments e ON e.id = s.env_id WHERE s.project_id = ? AND s.value IS NOT NULL",
-                [project],
-                |r| Ok((Leak { key: r.get(0)?, environment: r.get(1)?, path: r.get(2)? }, r.get::<_, String>(3)?)),
+                "SELECT s.key, e.slug, s.path, s.fp, s.project_id FROM secrets s JOIN environments e ON e.id = s.env_id
+                 WHERE s.value IS NOT NULL AND (s.project_id = ? OR (s.owner = '' AND EXISTS (SELECT 1 FROM exports x WHERE x.env_id = s.env_id AND x.path = s.path AND x.to_project = ?)))",
+                [project, project],
+                |r| Ok((Leak { key: r.get(0)?, environment: r.get(1)?, path: r.get(2)? }, r.get::<_, String>(3)?, r.get::<_, String>(4)?)),
             )
         })?;
-        let mut out: Vec<(usize, Leak)> = rows.into_iter().flat_map(|(l, fp)| by_fp.get(&fp).into_iter().flatten().map(move |i| (*i, l.clone()))).collect();
+        let mut fps: HashMap<String, HashMap<String, Vec<usize>>> = HashMap::new();
+        let mut out: Vec<(usize, Leak)> = vec![];
+        for (mut l, fp, p) in rows {
+            if !fps.contains_key(&p) {
+                let dek = self.project(&p)?;
+                let mut by_fp: HashMap<String, Vec<usize>> = HashMap::new();
+                for (i, c) in candidates.iter().enumerate().filter(|(_, c)| c.chars().count() >= MIN_LEN) {
+                    by_fp.entry(dek.fingerprint(c)).or_default().push(i);
+                }
+                fps.insert(p.clone(), by_fp);
+            }
+            let Some(hits) = fps[&p].get(&fp) else { continue };
+            if p != project {
+                let name = self.workspace.get(&p).map(|x| x.name).unwrap_or_else(|_| p.clone());
+                l.environment = format!("{name}/{}", l.environment);
+            }
+            out.extend(hits.iter().map(|i| (*i, l.clone())));
+        }
         out.sort();
         out.dedup();
         Ok(out)

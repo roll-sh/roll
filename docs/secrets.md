@@ -512,8 +512,9 @@ the change`. The blocker names keys and environments, never the value or the lin
 - **Bounds.** A scan reads at most 256 MiB (files for the head, patches for history) and keeps at
   most 32 MiB of candidates, then says `truncated`; two scans run at once per server. It names
   keys and environments of the projects with the repo on their canvas to the repo's managers, as
-  a blocker does on a change; values shared from another project are checked only by projects that
-  have the repo on their canvas.
+  a blocker does on a change. A project's check also covers the values other projects share with
+  it, each fingerprinted with its own project's key and named by that project
+  (`platform/production`).
 - **What it tells.** A blocker says a value is a secret's, so a writer of the repo could confirm a
   guess at a value they may not reveal by pushing it. That's accepted: they confirm a guess they
   already hold (never learn a value), only credential-like guesses count, every guess is a pushed
