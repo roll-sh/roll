@@ -274,6 +274,10 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
     let r = api.ok(Method::POST, "/environments/production/rollback", Some(json!({ "to": seq }))).await;
     assert_eq!(r["change"]["kind"], "rollback");
     assert_eq!(api.values("production", "/").await["values"], json!({ "A": "10", "B": "2" }));
+    // A local copy against it, by fingerprint: names only, never a value.
+    let d = api.ok(Method::POST, "/environments/production/diff", Some(json!({ "dotenv": "A=10\nB=stale\nNEW=x\n" }))).await;
+    assert_eq!((d["same"].clone(), d["changed"].clone(), d["added"].clone(), d["missing"].clone()), (json!(["A"]), json!(["B"]), json!(["NEW"]), json!([])));
+    assert!(!d.to_string().contains("stale"), "{d}");
         // Deleted and restored, a key keeps one history.
     let versions = api.ok(Method::GET, "/environments/production/secrets/A/versions", None).await;
     assert_eq!(versions[0]["version"], 4);

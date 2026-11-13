@@ -255,10 +255,14 @@ pub enum Secrets {
     },
     /// Compare two environments' folder (values never shown).
     Diff {
-        #[arg(long)]
-        from: String,
-        #[arg(long)]
-        to: String,
+        #[arg(long, requires = "to", conflicts_with = "file")]
+        from: Option<String>,
+        #[arg(long, requires = "from")]
+        to: Option<String>,
+        /// A local copy (`.env` or JSON) against this environment: the keys it adds, changes and
+        /// lacks, by name (values compared on the server by fingerprint, never printed).
+        #[arg(long, required_unless_present = "from")]
+        file: Option<String>,
     },
     /// Copy keys (default: every key that differs) from one environment to another.
     Promote {
@@ -1088,7 +1092,27 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             summary(&v);
         }
-        Secrets::Diff { from, to } => {
+        Secrets::Diff { file: Some(file), .. } => {
+            let text = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
+            let v = c.call(Method::POST, &format!("{env}/diff"), Some(import_body(&text, &c.at.path, false, false)?)).await?;
+            if json_out {
+                return print(&v);
+            }
+            let list = |k: &str| v[k].as_array().into_iter().flatten().map(s).collect::<Vec<_>>();
+            for (k, mark, what) in [("added", "+", "only in the file"), ("changed", "~", "different here"), ("missing", "-", "not in the file"), ("references", "?", "has references: not compared"), ("linked", "?", "linked: not compared")] {
+                for name in list(k) {
+                    println!("{mark} {name:<32} {what}");
+                }
+            }
+            let differs = list("added").len() + list("changed").len() + list("missing").len();
+            if differs == 0 {
+                eprintln!("{file} matches {}:{} ({} same)", c.at.env, c.at.path, list("same").len());
+            } else {
+                bail!("{file} differs from {}:{} in {differs} key(s)", c.at.env, c.at.path);
+            }
+        }
+        Secrets::Diff { from, to, .. } => {
+            let (from, to) = (from.unwrap_or_default(), to.unwrap_or_default());
             let v = c.call(Method::GET, &format!("{}/compare?from={}&to={}&{}", c.base(), enc(&from), enc(&to), c.q()), None).await?;
             if json_out {
                 return print(&v);
