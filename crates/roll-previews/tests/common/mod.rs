@@ -67,6 +67,8 @@ pub struct FakeData {
     pub parents: HashSet<String>,
     pub made: AtomicUsize,
     pub fail_next: AtomicUsize,
+    /// What `schema` answers: (the parent's lines, the branch's).
+    pub schema: Mutex<Option<(Vec<String>, Vec<String>)>>,
 }
 
 impl FakeData {
@@ -77,6 +79,7 @@ impl FakeData {
             parents: parents.iter().map(|s| s.to_string()).collect(),
             made: AtomicUsize::new(0),
             fail_next: AtomicUsize::new(0),
+            schema: Mutex::new(None),
         })
     }
 }
@@ -97,6 +100,9 @@ impl Brancher for FakeData {
             self.made.fetch_add(1, Ordering::SeqCst);
         }
         Ok(Branched::plain(id))
+    }
+    async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
+        Ok(self.schema.lock().clone())
     }
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
@@ -130,6 +136,9 @@ pub struct FakeApps {
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
     pub seed_exit: std::sync::atomic::AtomicI32,
+    /// Every seed or release run: (its command, the revision), and how many services were
+    /// deployed at that revision when it ran.
+    pub runs: Mutex<Vec<(String, String, usize)>>,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
@@ -158,6 +167,8 @@ impl Apps for FakeApps {
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
+        let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
+        self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
     }
     fn status(&self, _: &str, _: &str) -> Option<ServiceState> {

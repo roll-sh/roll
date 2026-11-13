@@ -94,6 +94,22 @@ impl Brancher for Postgres {
         }
     }
 
+    /// The parent branch's schema and this one's, from the catalog of each endpoint's `main`
+    /// database (`SCHEMA_SQL`). Reading the parent's starts its compute if it sleeps.
+    async fn schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let branches = p["branches"].as_array().cloned().unwrap_or_default();
+        let b = branches.iter().find(|b| b["id"] == branch).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        let from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
+        let lines = |ep: Option<String>| async move {
+            let ep = ep.ok_or_else(|| anyhow::anyhow!("a Postgres branch without an endpoint"))?;
+            let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": SCHEMA_SQL })).await?;
+            let rows = v["results"][0]["rows"].as_array().cloned().unwrap_or_default();
+            anyhow::Ok(rows.iter().filter_map(|r| r[0].as_str().map(str::to_string)).collect::<Vec<_>>())
+        };
+        Ok(Some((lines(s(&from["endpoint"]["id"])).await?, lines(s(&b["endpoint"]["id"])).await?)))
+    }
+
     /// A branch's own bytes (its local data directory, else its objects), at Postgres's rates.
     async fn usage(&self, parent: &str, branch: &str) -> anyhow::Result<Usage> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
@@ -107,6 +123,36 @@ impl Brancher for Postgres {
         Ok(Usage { bytes: local.max(objects), storage_usd_month: storage, active_usd_hour: cu * price("usd_per_cu_hour", 0.0408), month_to_date_usd: 0.0 })
     }
 }
+
+/// One line per object in the user's schemas, for `roll_previews::schema::diff`: tables, views,
+/// sequences, columns (type, nullability, default), indexes, constraints, enums, functions and
+/// extensions.
+const SCHEMA_SQL: &str = r"
+WITH s AS (SELECT oid, nspname FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema') AND nspname NOT LIKE 'pg\_%')
+SELECT line FROM (
+  SELECT format('%s %I.%I', CASE c.relkind WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'foreign table' ELSE 'table' END, s.nspname, c.relname) AS line
+    FROM pg_class c JOIN s ON s.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+  UNION ALL
+  SELECT format('column %I.%I.%I %s%s%s', s.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod),
+                CASE WHEN a.attnotnull THEN ' not null' ELSE '' END, coalesce(' default ' || pg_get_expr(d.adbin, d.adrelid), ''))
+    FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN s ON s.oid = c.relnamespace
+    LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+    WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  UNION ALL
+  SELECT format('index %s', pg_get_indexdef(i.indexrelid))
+    FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN s ON s.oid = ci.relnamespace
+  UNION ALL
+  SELECT format('constraint %I on %I.%I %s', k.conname, s.nspname, c.relname, pg_get_constraintdef(k.oid))
+    FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN s ON s.oid = c.relnamespace
+  UNION ALL
+  SELECT format('type %I.%I enum (%s)', s.nspname, t.typname, (SELECT string_agg(quote_literal(e.enumlabel), ', ' ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid))
+    FROM pg_type t JOIN s ON s.oid = t.typnamespace WHERE t.typtype = 'e'
+  UNION ALL
+  SELECT format('function %I.%I(%s) returns %s', s.nspname, p.proname, pg_get_function_identity_arguments(p.oid), coalesce(pg_get_function_result(p.oid), 'nothing'))
+    FROM pg_proc p JOIN s ON s.oid = p.pronamespace
+  UNION ALL
+  SELECT format('extension %I %s', e.extname, e.extversion) FROM pg_extension e
+) x ORDER BY line";
 
 // ── Redis ──
 

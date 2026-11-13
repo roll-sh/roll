@@ -303,6 +303,9 @@ fn preview_comment(c: &Change) -> String {
                     .collect();
                 out.push_str(&format!("Data, branched copy-on-write: {}.\n\n", data.join(", ")));
             }
+            if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
+                out.push_str(&schema_block(lines));
+            }
             out.push_str(&format!(
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
@@ -322,6 +325,14 @@ fn preview_comment(c: &Change) -> String {
     }
     out.push_str(&format!("\n{marker}"));
     out
+}
+
+/// A preview's schema changes, folded. Object names come from the change's own migrations:
+/// nothing in them may end the fence, and the comment stays well under GitHub's size limit.
+fn schema_block(lines: &[String]) -> String {
+    let fenced: Vec<String> = lines.iter().map(|l| l.replace('`', "'").chars().take(200).collect()).collect();
+    let n = lines.iter().filter(|l| l.starts_with("+ ") || l.starts_with("- ")).count();
+    format!("<details><summary>Schema changes ({n})</summary>\n\n```diff\n{}\n```\n</details>\n\n", fenced.join("\n"))
 }
 
 fn word(state: &str) -> String {
@@ -346,6 +357,7 @@ mod preview_tests {
             dashboard_url: Some("https://roll.sh/dashboard/projects/prj_x/previews".into()),
             github: PreviewGithub::default(),
             head: None,
+            schema_changes: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -355,5 +367,8 @@ mod preview_tests {
         e.state = "awaiting_approval".into();
         let waiting = Preview { environment: Some(e), ..p.clone() };
         assert_eq!(preview_states(Some(&waiting)).0, Some("pending"));
+        let block = schema_block(&["+ column public.users.nick text".into(), "+ table public.x```y".into()]);
+        assert!(block.contains("<summary>Schema changes (2)</summary>") && block.contains("+ column public.users.nick text"), "{block}");
+        assert_eq!(block.matches("```").count(), 2, "a name can't close the fence: {block}");
     }
 }

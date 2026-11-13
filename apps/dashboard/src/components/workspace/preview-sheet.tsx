@@ -181,6 +181,19 @@ export function PreviewSheet({
               <p className="text-[11.5px] text-subtle">No data branches.</p>
             )}
 
+            {p.schema_changes && p.schema_changes.length > 0 && (
+              <>
+                <Label>Schema changes</Label>
+                <pre className="max-h-48 overflow-auto rounded-lg border border-line-2 bg-raised px-2.5 py-1.5 font-mono text-[11px] leading-relaxed inset-shadow-highlight">
+                  {p.schema_changes.map((l, i) => (
+                    <div key={i} className={l.startsWith("- ") ? "text-danger" : l.startsWith("+ ") ? "text-fg" : "text-subtle"}>
+                      {l}
+                    </div>
+                  ))}
+                </pre>
+              </>
+            )}
+
             <Label>Cost</Label>
             <div className="grid grid-cols-3 gap-2">
               <Stat label="Asleep" value={money(p.cost.sleeping_usd_month)} note="a month" />

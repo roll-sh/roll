@@ -1,6 +1,6 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, type PreviewBypass, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -265,25 +265,21 @@ function Form({
         </Field>
       </Section>
 
-      <Section title="Seed">
-        <Field label="Image" note="Runs once on a preview's fresh data, before its services start: anonymise rows, migrate, load fixtures. Leave empty for none.">
-          <input
-            value={s.seed?.image ?? ""}
-            placeholder="postgres:18-alpine"
-            onChange={(e) => set("seed", e.target.value || s.seed?.run ? { ...(s.seed ?? { run: "" }), image: e.target.value } : null)}
-            className={`${field} h-8 w-full font-mono text-[12px]`}
-            spellCheck={false}
-          />
-        </Field>
-        <Field label="Command" note="Runs as sh -c in the change's tree, with the branches' DATABASE_URL, REDIS_URL and the rest.">
-          <input
-            value={s.seed?.run ?? ""}
-            placeholder='psql "$DATABASE_URL" -f seed/anonymise.sql'
-            onChange={(e) => set("seed", e.target.value || s.seed?.image ? { ...(s.seed ?? { image: "" }), run: e.target.value } : null)}
-            className={`${field} h-8 w-full font-mono text-[12px]`}
-            spellCheck={false}
-          />
-        </Field>
+      <Section title="Seed and release">
+        <Job
+          label="Seed"
+          note="Runs once on a preview's fresh data, before its services start: anonymise rows, load fixtures."
+          job={s.seed}
+          placeholder={["postgres:18-alpine", 'psql "$DATABASE_URL" -f seed/anonymise.sql']}
+          onChange={(j) => set("seed", j)}
+        />
+        <Job
+          label="Release"
+          note="Runs at each new head of the change, before its services deploy: migrations. The schema it leaves is compared with the parent's."
+          job={s.release ?? null}
+          placeholder={["node:22", "npm ci && npm run migrate"]}
+          onChange={(j) => set("release", j)}
+        />
       </Section>
 
       <Section title="Who can open them">
@@ -322,6 +318,24 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /** A labelled field; `group` for one that holds several controls (a label would click the first). */
+/** A seed or release command: its image and command, empty for none. */
+function Job({ label, note, job, placeholder, onChange }: { label: string; note: string; job: PreviewJob | null; placeholder: [string, string]; onChange: (j: PreviewJob | null) => void }) {
+  const change = (patch: Partial<PreviewJob>) => {
+    const next = { ...(job ?? { image: "", run: "" }), ...patch };
+    onChange(next.image || next.run ? next : null);
+  };
+  return (
+    <div className="grid gap-2">
+      <Field label={`${label} image`} note={note}>
+        <input value={job?.image ?? ""} placeholder={placeholder[0]} onChange={(e) => change({ image: e.target.value })} className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+      </Field>
+      <Field label={`${label} command`} note="sh -c in the change's tree, with the branches' DATABASE_URL, REDIS_URL and the rest.">
+        <input value={job?.run ?? ""} placeholder={placeholder[1]} onChange={(e) => change({ run: e.target.value })} className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+      </Field>
+    </div>
+  );
+}
+
 /** The project's bypass secret for CI (acts at once, not on Save): shown once when made. */
 function Bypass({ projectId }: { projectId: string }) {
   const [state, setState] = useState<PreviewBypass | null>(null);

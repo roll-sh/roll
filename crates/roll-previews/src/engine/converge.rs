@@ -234,24 +234,21 @@ impl Engine {
         if let Some(seed) = &s.seed
             && self.store.seed_needed(&r.id)?
         {
-            // Its secrets environment (as services get it, untrusted unless the project allows
-            // production and the change is trusted), then the branches and overrides on top.
-            let untrusted = !(s.secrets.allow_production && r.trusted);
-            let mut env = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
-            for (k, v) in &vars {
-                set(&mut env, k, v.clone());
-            }
-            set(&mut env, "ROLL_PREVIEW", r.id.clone());
-            set(&mut env, "ROLL_REPO", r.repo.clone());
-            set(&mut env, "ROLL_CHANGESET", r.head.clone());
-            let job = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.head.clone(), seed: seed.clone(), env };
-            self.store.log(&r.id, &format!("seeding: {}", seed.run.lines().next().unwrap_or("")))?;
-            let (code, tail) = self.apps.seed(&job).await.map_err(|e| anyhow::anyhow!("seed: {e:#}"))?;
-            if code != 0 {
-                anyhow::bail!("the seed command failed with exit code {code}\n\n{}", tail.trim_end());
-            }
+            self.run_job(r, &s, &vars, "seed", seed).await?;
             self.store.set_seed_needed(&r.id, false)?;
             self.store.log(&r.id, "seeded")?;
+        }
+        // 3c. The release (migrations) at each new head, on this data, before services deploy.
+        if let Some(release) = &s.release
+            && self.store.released(&r.id)?.as_deref() != Some(r.head.as_str())
+        {
+            self.run_job(r, &s, &vars, "release", release).await?;
+            self.store.set_released(&r.id, &r.head)?;
+            self.store.log(&r.id, "released")?;
+        }
+        // 3d. What that did to the schema, once per head (best effort: a reviewer's aid).
+        if self.store.schema_head(&r.id)?.as_deref() != Some(r.head.as_str()) {
+            self.read_schema(r).await;
         }
 
         // 4. Services: the change's repo at its head, every other repo at its default head.
@@ -356,6 +353,58 @@ impl Engine {
     }
 
     /// The project's column masks for a fresh branch, if it has any for this resource.
+    /// Run the project's seed or release to its end on the preview's tree: its secrets
+    /// environment (as services get it: untrusted unless the project allows production and the
+    /// change is trusted), the branches and overrides on top.
+    async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
+        let untrusted = !(s.secrets.allow_production && r.trusted);
+        let mut env = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        for (k, v) in vars {
+            set(&mut env, k, v.clone());
+        }
+        set(&mut env, "ROLL_PREVIEW", r.id.clone());
+        set(&mut env, "ROLL_REPO", r.repo.clone());
+        set(&mut env, "ROLL_CHANGESET", r.head.clone());
+        let run = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.head.clone(), seed: job.clone(), env };
+        self.store.log(&r.id, &format!("{what}: {}", job.run.lines().next().unwrap_or("")))?;
+        let (code, tail) = self.apps.seed(&run).await.map_err(|e| anyhow::anyhow!("{what}: {e:#}"))?;
+        if code != 0 {
+            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", tail.trim_end());
+        }
+        Ok(())
+    }
+
+    /// The Postgres branches' schema against their parents' (`schema::diff`), kept for `head`.
+    /// A failure is logged and read again on the next converge.
+    async fn read_schema(&self, r: &Row) {
+        let read = async {
+            let mut all: Option<Vec<String>> = None;
+            let resources = self.store.resources(&r.id)?;
+            let several = resources.iter().filter(|x| x.kind == Kind::Postgres).count() > 1;
+            for res in resources.iter().filter(|x| x.kind == Kind::Postgres) {
+                let Some(branch) = &res.r#ref else { continue };
+                let Some((parent, mine)) = self.brancher(res.kind)?.schema(&res.parent, branch).await? else { continue };
+                let lines = crate::schema::diff(&parent, &mine);
+                let out = all.get_or_insert_with(Vec::new);
+                if several && !lines.is_empty() {
+                    out.push(format!("# {}", res.parent));
+                }
+                out.extend(lines);
+            }
+            anyhow::Ok(all)
+        };
+        match read.await {
+            Ok(changes) => {
+                if let Err(e) = self.store.set_schema_changes(&r.id, &r.head, changes.as_deref()) {
+                    warn!(preview = %r.id, error = %e, "previews: keeping the schema's changes");
+                }
+            }
+            Err(e) => {
+                let _ = self.store.log(&r.id, &format!("couldn't read the schema's changes: {e:#}"));
+            }
+        }
+    }
+
     pub(super) async fn mask(&self, id: &str, b: &Arc<dyn Brancher>, key: &str, branch: &str, s: &Settings) -> anyhow::Result<()> {
         let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) else { return Ok(()) };
         b.mask(branch, cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;

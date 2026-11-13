@@ -120,6 +120,12 @@ state. A pass of the reconciler:
        as services get them) and the branches' variables on top, like a check. Use it to anonymise production rows, run migrations or load fixtures. It runs
        before services deploy; a failure fails the preview with the output's tail, and is
        retried.
+   4c. At each new head (and again on fresh data), the project's `release` runs the same way:
+       migrations, like Heroku's release phase or Render's `preDeployCommand`. Services deploy
+       only after it succeeds; a failure fails the preview and leaves its services on what they
+       ran.
+   4d. Once per head, the Postgres branches' schema is compared with their parents' (see
+       "Schema changes").
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
    6. Every service whose revision is not the one it should run is redeployed (the change's head
       for its repo, the default head for the others).
@@ -245,6 +251,20 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   or a node without roll secrets, gives its previews no environment: a service then gets the
   overrides and resource URLs only.
 - The environment is deleted with the preview.
+
+## Schema changes
+
+A reviewer of a change with a migration wants to see what it did to the database without opening
+the preview (Neon's GitHub integration posts a schema diff). Once per head, after the `release`
+(or seed) has run, rolld reads each Postgres branch's catalog and its parent's through the
+endpoints' query route: one line per table, view, sequence, column (type, nullability,
+default), index, constraint, enum, function and extension in the user's schemas. The two sets
+are compared (`roll_previews::schema::diff`), and `+ …`/`- …` lines, at most 200, go on the
+preview. The pull request comment folds them under "Schema changes", the dashboard's preview
+sheet and `roll preview show` list them. A catalog query is milliseconds; reading the parent's
+starts its compute if it sleeps, once per push. Object names come from the change's own
+migrations, so the comment keeps them inside a fence they can't close. A failure to read is
+logged and read again on the next converge; it never fails the preview.
 
 ## Safety
 
@@ -480,6 +500,7 @@ type Preview = {
   share_url: string | null;           // url with its access token (link access): the one to hand out
   services: Service[]; resources: Resource[];
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
+  schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
   created_by: string; created_at: number; updated_at: number;
 };
@@ -489,6 +510,7 @@ type Resource = { kind: Kind; parent: string; ref: string | null; mode: "branch"
                   state: "pending" | "ready" | "resetting" | "failed" | "deleting"; error: string | null; bytes: number };
 type Kind = "postgres" | "redis" | "bucket" | "nosql" | "stream" | "queue" | "tasks" | "search";
 type Activity = { at: number; message: string };
+type Job = { image: string; run: string; timeout_s?: number /* 600 */; memory_mb?: number /* 1024 */ };
 type Settings = {
   enabled: boolean;
   branches: string[];                 // globs on the change's branch; ["*"]
@@ -505,7 +527,8 @@ type Settings = {
   env: Record<string, string>;        // overrides every service gets
   github: { comment: boolean; status: boolean; deployment: boolean };   // all true
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
-  seed: { image: string; run: string; timeout_s?: number /* 600 */; memory_mb?: number /* 1024 */ } | null;
+  seed: Job | null;                   // once on fresh data
+  release: Job | null;                // at each new head, before services deploy (migrations)
   masking: Record<string, Record<string, string>>; // "nosql:<ref>" → {"ks.table.column": "mask_default()"}
 };
 ```

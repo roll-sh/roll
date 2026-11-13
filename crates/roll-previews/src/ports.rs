@@ -76,6 +76,12 @@ pub trait Brancher: Send + Sync {
     async fn idle(&self, _parent: &str, _branch: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
+    /// `None` from products without a schema to compare.
+    async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
+        Ok(None)
+    }
 }
 
 /// A change (or branch) as previews see it.

@@ -18,6 +18,7 @@ pub mod engine;
 pub mod glob;
 pub mod ports;
 pub mod runtime;
+pub mod schema;
 pub mod settings;
 pub mod store;
 
@@ -188,6 +189,10 @@ pub struct Preview {
     pub services: Vec<Service>,
     pub resources: Vec<Resource>,
     pub cost: cost::Cost,
+    /// How the Postgres branches' schema differs from their parents' once the change's
+    /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
+    /// not known (no Postgres branch, or not read yet).
+    pub schema_changes: Option<Vec<String>>,
     pub last_reset_at: Option<i64>,
     pub last_active_at: i64,
     pub expires_at: Option<i64>,

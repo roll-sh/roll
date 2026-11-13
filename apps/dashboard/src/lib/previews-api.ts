@@ -69,6 +69,8 @@ export interface Preview {
   services: PreviewService[];
   resources: PreviewResource[];
   cost: PreviewCost;
+  /** What the change did to the Postgres schema (`+ …`, `- …`), once read at `head`. */
+  schema_changes?: string[] | null;
   last_reset_at: number | null;
   last_active_at: number;
   expires_at: number | null;
@@ -83,6 +85,14 @@ export interface PreviewActivity {
 }
 
 export type ResourceRule = "branch" | "schema" | "skip";
+
+/** A command on the change's tree: the seed, or the release. */
+export interface PreviewJob {
+  image: string;
+  run: string;
+  timeout_s?: number;
+  memory_mb?: number;
+}
 
 export interface PreviewSettings {
   enabled: boolean;
@@ -107,7 +117,9 @@ export interface PreviewSettings {
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
   /** Run once on fresh data (after branching or a reset) before the services deploy. */
-  seed: { image: string; run: string; timeout_s?: number; memory_mb?: number } | null;
+  seed: PreviewJob | null;
+  /** Run at each new head, after the seed and before services deploy (migrations). */
+  release?: PreviewJob | null;
   /** NoSQL column masks: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_default()"}`. */
   masking: Record<string, Record<string, string>>;
 }

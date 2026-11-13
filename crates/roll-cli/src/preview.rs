@@ -143,6 +143,12 @@ fn print_preview(p: &Value) {
     }
     let c = &p["cost"];
     println!("cost: {}/month asleep, {}/hour in use, {} this month", usd(&c["sleeping_usd_month"]), usd(&c["active_usd_hour"]), usd(&c["month_to_date_usd"]));
+    if let Some(lines) = p["schema_changes"].as_array().filter(|l| !l.is_empty()) {
+        println!("schema changes:");
+        for l in lines.iter().filter_map(Value::as_str) {
+            println!("  {l}");
+        }
+    }
 }
 
 /// `a.b=v` into `{"a": {"b": v}}`; `v` as JSON when it parses, else a string.

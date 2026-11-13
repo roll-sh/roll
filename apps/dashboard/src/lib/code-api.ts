@@ -342,6 +342,8 @@ export interface PreviewEnvironment {
   github: { comment: boolean; status: boolean; deployment: boolean };
   /** The changeset the preview runs. */
   head?: string;
+  /** What the change did to the Postgres schema (`+ …`, `- …`). */
+  schema_changes?: string[];
 }
 
 export interface Change {

@@ -112,6 +112,7 @@ impl CodeSource {
                 dashboard_url: (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{}/previews?preview={}", p.project, p.id)),
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),
+                schema_changes: p.schema_changes.clone(),
             }),
         }
     }

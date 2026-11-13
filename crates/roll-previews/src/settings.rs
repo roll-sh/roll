@@ -39,6 +39,10 @@ pub struct Settings {
     /// A command run once on the preview's fresh data (after branching, and after each reset)
     /// before its services deploy: anonymise, migrate, load fixtures.
     pub seed: Option<Seed>,
+    /// A command run at each new head of the change (after the seed, before services deploy,
+    /// and again after a reset): migrations, Heroku's release phase. A failure fails the preview,
+    /// and its services stay on what they ran.
+    pub release: Option<Seed>,
     /// Column masks for NoSQL branches: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_inner(1, 1)"}`
     /// (Cassandra 5's mask functions). Merged onto what the branch inherits from its parent,
     /// whenever it's made or reset: the preview reads masked values, the parent is untouched.
@@ -116,6 +120,7 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             seed: None,
+            release: None,
             masking: BTreeMap::new(),
         }
     }
@@ -195,18 +200,19 @@ impl Settings {
         if is_production(base) && !self.secrets.allow_production {
             return bad(format!("secrets.base {base:?} is production's: set secrets.allow_production to inherit it"));
         }
-        if let Some(seed) = &self.seed {
-            if seed.image.trim().is_empty() || seed.image.len() > 255 || seed.image.contains(char::is_whitespace) {
-                return bad("seed.image: an image reference".into());
+        for (name, job) in [("seed", &self.seed), ("release", &self.release)] {
+            let Some(job) = job else { continue };
+            if job.image.trim().is_empty() || job.image.len() > 255 || job.image.contains(char::is_whitespace) {
+                return bad(format!("{name}.image: an image reference"));
             }
-            if seed.run.trim().is_empty() || seed.run.len() > 8192 {
-                return bad("seed.run: a command, at most 8 KiB".into());
+            if job.run.trim().is_empty() || job.run.len() > 8192 {
+                return bad(format!("{name}.run: a command, at most 8 KiB"));
             }
-            if !(10..=3600).contains(&seed.timeout_s) {
-                return bad("seed.timeout_s: 10 to 3600".into());
+            if !(10..=3600).contains(&job.timeout_s) {
+                return bad(format!("{name}.timeout_s: 10 to 3600"));
             }
-            if !(64..=16384).contains(&seed.memory_mb) {
-                return bad("seed.memory_mb: 64 to 16384".into());
+            if !(64..=16384).contains(&job.memory_mb) {
+                return bad(format!("{name}.memory_mb: 64 to 16384"));
             }
         }
         for (key, cols) in &self.masking {

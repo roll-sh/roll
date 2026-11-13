@@ -288,6 +288,10 @@ pub struct PreviewEnvironment {
     /// change's head is when they're sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// What the change did to the Postgres schema at `head` (`+ …` added, `- …` removed), once
+    /// read; untrusted text (a fork's migrations name the objects).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_changes: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

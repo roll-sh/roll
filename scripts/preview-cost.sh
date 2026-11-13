@@ -168,6 +168,21 @@ du_of() { du -sk "$HOME_DIR/$1" 2>/dev/null | cut -f1; }
 OBJ_KB=$(du_of objects)
 SLEEPING=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
+say "migrate the preview's Postgres branch, push: the next head's schema changes name the table"
+if [ -n "$PG_BRANCH" ]; then
+  PG_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
+  api POST "/v1/endpoints/$PG_EP/query" '{"sql":"CREATE TABLE preview_only (id int PRIMARY KEY, note text NOT NULL DEFAULT '"'"'x'"'"')"}' >/dev/null
+  api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"}}}' >/dev/null
+  SCHEMA=""
+  for _ in $(seq 1 120); do
+    SCHEMA=$(api GET "/v1/previews/$PV" | jq_ "'\\n'.join(d.get('schema_changes') or [])")
+    case "$SCHEMA" in *preview_only*) break;; esac
+    sleep 0.5
+  done
+  case "$SCHEMA" in *"+ table public.preview_only"*) ;; *) echo "the schema changes should name the new table: $SCHEMA"; exit 1;; esac
+  say "$SCHEMA"
+fi
+
 say "land the change: the preview and its branches go, the parents stay"
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
 for _ in $(seq 1 120); do

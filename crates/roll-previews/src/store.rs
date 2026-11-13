@@ -319,6 +319,11 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
+        if !db.has_column("previews", "released")? {
+            db.add_column("previews", "released", "TEXT")?;
+            db.add_column("previews", "schema_head", "TEXT")?;
+            db.add_column("previews", "schema_changes", "TEXT")?;
+        }
         Ok(Store { db, rates: Rates::default() })
     }
 
@@ -729,11 +734,46 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT seed_needed FROM previews WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional())?.unwrap_or(0) != 0)
     }
 
+    /// Whether the seed has yet to run. Fresh data (a new branch, a reset) needs the seed, and
+    /// the release and the schema's read again.
     pub fn set_seed_needed(&self, id: &str, needed: bool) -> Result<()> {
         self.db.write(|c| {
-            c.execute("UPDATE previews SET seed_needed = ? WHERE id = ?", params![needed as i64, id])?;
+            match needed {
+                true => c.execute("UPDATE previews SET seed_needed = 1, released = NULL, schema_head = NULL WHERE id = ?", [id])?,
+                false => c.execute("UPDATE previews SET seed_needed = 0 WHERE id = ?", [id])?,
+            };
             Ok::<_, Error>(())
         })
+    }
+
+    /// The head the project's `release` last ran at (on this data).
+    pub fn released(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT released FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_released(&self, id: &str, head: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET released = ? WHERE id = ?", [head, id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The head the schema's changes were read at.
+    pub fn schema_head(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT schema_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    pub fn set_schema_changes(&self, id: &str, head: &str, changes: Option<&[String]>) -> Result<()> {
+        let json = changes.map(|c| serde_json::to_string(c).expect("strings serialize"));
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET schema_head = ?, schema_changes = ? WHERE id = ?", params![head, json, id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    fn schema_changes(&self, id: &str) -> Result<Option<Vec<String>>> {
+        let raw: Option<String> = self.db.read(|c| c.query_row("SELECT schema_changes FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
+        Ok(raw.and_then(|j| serde_json::from_str(&j).ok()))
     }
 
     /// A preview's access token, and whether its project requires it.
@@ -827,6 +867,7 @@ impl Store {
         };
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
+        let schema_changes = self.schema_changes(&r.id)?;
         Ok(Preview {
             id: r.id,
             project: r.project_id,
@@ -856,6 +897,7 @@ impl Store {
                 .map(|x| Resource { kind: x.kind, parent: x.parent, r#ref: x.r#ref, mode: x.mode, state: x.state, error: x.error, bytes: x.bytes })
                 .collect(),
             cost: cost.rounded(),
+            schema_changes,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,

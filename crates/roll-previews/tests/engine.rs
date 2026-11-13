@@ -141,6 +141,33 @@ async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
 }
 
 #[tokio::test]
+async fn the_release_runs_at_each_new_head_before_services_and_its_schema_changes_show() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    *e.pg.schema.lock() = Some((vec!["table public.users".into()], vec!["table public.users".into(), "column public.users.nick text".into()]));
+    e.apps.seed_exit.store(1, Ordering::SeqCst);
+    e.code.open(change("chg_r", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_r").unwrap().unwrap();
+    assert_eq!(p.state, State::Failed, "a failing release fails the preview");
+    assert!(e.apps.deployed.lock().is_empty(), "nothing deploys over a failed migration");
+    e.apps.seed_exit.store(0, Ordering::SeqCst);
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    let v = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap();
+    assert_eq!(v.state, State::Ready);
+    assert_eq!(v.schema_changes.as_deref(), Some(&["+ column public.users.nick text".to_string()][..]));
+    assert_eq!(e.code.last_report("chg_r").schema_changes, v.schema_changes, "the change (and its pull request) get them");
+    // Before the services at that head; not again at the same head; again at a new one.
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    e.code.edit("chg_r", |c| c.head = "cs_3b".into());
+    e.engine.pass().await.unwrap();
+    let runs = e.apps.runs.lock().clone();
+    let heads: Vec<_> = runs.iter().map(|(_, rev, deployed)| (rev.as_str(), *deployed)).collect();
+    assert_eq!(heads, [("cs_3a", 0), ("cs_3a", 0), ("cs_3b", 0)], "{runs:?}");
+}
+
+#[tokio::test]
 async fn a_delete_during_a_converge_and_an_unrecorded_branch_leave_nothing_behind() {
     let e = env(json!({ "enabled": true }));
     e.code.open(change("chg_d", 4));
