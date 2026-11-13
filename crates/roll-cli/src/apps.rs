@@ -1008,7 +1008,9 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
 /// Redis containers as roll's own `[databases.<name>]` (linked from what depends on them), and
 /// notes on what isn't carried over (volumes, networks, commands, health checks).
 fn compose_to_toml(text: &str) -> anyhow::Result<(String, Vec<String>)> {
-    let v: serde_yaml_ng::Value = serde_yaml_ng::from_str(text).context("the Compose file isn't YAML")?;
+    let mut v: serde_yaml_ng::Value = serde_yaml_ng::from_str(text).context("the Compose file isn't YAML")?;
+    // `<<: *defaults`, as Compose files share settings.
+    v.apply_merge().context("the Compose file's merge keys")?;
     let services = v.get("services").and_then(|s| s.as_mapping()).context("the Compose file has no services")?;
     let str_of = |v: &serde_yaml_ng::Value| -> Option<String> {
         match v {
@@ -1034,10 +1036,15 @@ fn compose_to_toml(text: &str) -> anyhow::Result<(String, Vec<String>)> {
         Ok(n)
     };
     let mut dbs = std::collections::BTreeMap::new();
+    let mut names = std::collections::BTreeMap::new();
     for (k, svc) in services {
         let k = str_of(k).context("a service's name")?;
+        let n = name_of(&k)?;
+        if let Some(other) = names.insert(n.clone(), k.clone()) {
+            bail!("services {other:?} and {k:?} would both be {n}: rename one");
+        }
         if let Some(kind) = svc.get("image").and_then(str_of).as_deref().and_then(db_kind) {
-            dbs.insert(k.clone(), (name_of(&k)?, kind));
+            dbs.insert(k.clone(), (n, kind));
         }
     }
     let q = |s: &str| toml::Value::String(s.to_string()).to_string();
@@ -1073,15 +1080,26 @@ fn compose_to_toml(text: &str) -> anyhow::Result<(String, Vec<String>)> {
             Some(serde_yaml_ng::Value::Mapping(m)) => m.keys().filter_map(str_of).collect(),
             _ => Vec::new(),
         };
-        let links: Vec<String> = links.iter().filter_map(|l| dbs.get(l).map(|(n, _)| q(n))).collect();
-        if !links.is_empty() {
-            out.push_str(&format!("links = [{}]\n", links.join(", ")));
+        let linked: Vec<(&String, &(String, &str))> = links.iter().filter_map(|l| dbs.get_key_value(l)).collect();
+        if !linked.is_empty() {
+            out.push_str(&format!("links = [{}]\n", linked.iter().map(|(_, (n, _))| q(n)).collect::<Vec<_>>().join(", ")));
         }
         let vars: Vec<(String, String)> = match svc.get("environment") {
             Some(serde_yaml_ng::Value::Mapping(m)) => m.iter().filter_map(|(k, v)| Some((str_of(k)?, str_of(v).unwrap_or_default()))).collect(),
             Some(serde_yaml_ng::Value::Sequence(s)) => s.iter().filter_map(str_of).filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect(),
             _ => Vec::new(),
         };
+        // A link sets its own URL: the Compose one (`postgres://…@db:5432`) names a container
+        // that won't exist, and a service's variables would win over the link's.
+        let (vars, dropped_vars): (Vec<_>, Vec<_>) = vars.into_iter().partition(|(var, value)| {
+            !linked.iter().any(|(host, (_, kind))| {
+                let own = if *kind == "postgres" { "DATABASE_URL" } else { "REDIS_URL" };
+                var == own || value.contains(&format!("@{host}:")) || value.contains(&format!("//{host}:")) || value.contains(&format!("@{host}/")) || value.contains(&format!("//{host}/"))
+            })
+        });
+        if !dropped_vars.is_empty() {
+            notes.push(format!("{k}: {} left out: the link sets the database's URL", dropped_vars.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>().join(", ")));
+        }
         if !vars.is_empty() {
             out.push_str(&format!("[apps.{name}.variables]\n"));
             for (k, v) in vars {
@@ -1706,14 +1724,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 None => ["compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"].iter().map(PathBuf::from).find(|p| p.exists()).ok_or_else(|| anyhow::anyhow!("no compose.yaml here: name the file"))?,
             };
             let text = std::fs::read_to_string(&path).with_context(|| format!("{}", path.display()))?;
-            let (toml_text, notes) = compose_to_toml(&text)?;
+            let (mut toml_text, notes) = compose_to_toml(&text)?;
+            // Roots are the Compose file's: relative to where roll.toml is written (here).
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty() && *d != Path::new(".")) {
+                let d = dir.to_string_lossy().trim_end_matches('/').to_string();
+                toml_text = toml_text
+                    .lines()
+                    .map(|l| match l.strip_prefix("root = \"") {
+                        Some(r) => format!("root = \"{}\"", if r.trim_end_matches('"') == "." { d.clone() } else { format!("{d}/{}", r.trim_end_matches('"')) }),
+                        None => l.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n";
+            }
             for n in &notes {
                 eprintln!("# {n}");
             }
             if write {
                 let existing = std::fs::read_to_string("roll.toml").unwrap_or_default();
-                anyhow::ensure!(parse_project(&existing).is_err() || !existing.contains("[apps."), "roll.toml declares [apps] already: merge by hand (print without --write)");
+                anyhow::ensure!(!existing.contains("[apps.") && !existing.contains("[databases."), "roll.toml declares [apps] or [databases] already: merge by hand (print without --write)");
                 let joined = if existing.trim().is_empty() { toml_text.clone() } else { format!("{}\n\n{toml_text}", existing.trim_end()) };
+                // Written only if it reads back as a project.
+                parse_project(&joined).context("the joined roll.toml wouldn't parse; print without --write and merge by hand")?;
                 std::fs::write("roll.toml", joined)?;
                 eprintln!("wrote roll.toml: `roll up --all --dry-run` shows what it would do");
                 return Ok(());
@@ -1934,7 +1967,7 @@ mod tests {
 
     #[test]
     fn a_compose_file_becomes_a_projects_roll_toml() {
-        let compose = "services:\n  web:\n    build: ./apps/web\n    ports: [\"8080:3000\"]\n    environment:\n      NODE_ENV: production\n    depends_on: [db, cache]\n    volumes: [\"./data:/data\"]\n  proxy:\n    image: nginx:1.27\n    ports:\n      - target: 80\n  db:\n    image: postgres:17\n  cache:\n    image: redis:7-alpine\n";
+        let compose = "x-proxy: &proxy\n  image: nginx:1.27\nservices:\n  web:\n    build: ./apps/web\n    ports: [\"8080:3000\"]\n    environment:\n      NODE_ENV: production\n      DATABASE_URL: postgres://app:pw@db:5432/app\n    depends_on: [db, cache]\n    volumes: [\"./data:/data\"]\n  proxy:\n    <<: *proxy\n    ports:\n      - target: 80\n  db:\n    image: postgres:17\n  cache:\n    image: redis:7-alpine\n";
         let (text, notes) = compose_to_toml(compose).unwrap();
         let f = parse_project(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         let web = &f.apps["web"];
@@ -1943,6 +1976,8 @@ mod tests {
         assert_eq!((f.apps["proxy"].image.as_deref(), f.apps["proxy"].port), (Some("nginx:1.27"), Some(80)));
         assert_eq!((f.databases["db"].kind.as_str(), f.databases["cache"].kind.as_str()), ("postgres", "redis"));
         assert!(notes.iter().any(|n| n.starts_with("web: not carried over: volumes")), "{notes:?}");
+        assert!(!web.variables.contains_key("DATABASE_URL") && notes.iter().any(|n| n.contains("DATABASE_URL left out")), "the link sets it: {notes:?}");
+        assert!(compose_to_toml("services:\n  web_1:\n    image: a\n  web-1:\n    image: b\n").is_err(), "two services, one name");
     }
 
     #[test]

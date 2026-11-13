@@ -778,8 +778,14 @@ A worker with `run.scale` (`{ stream, group, per_instance }`) runs one instance 
 `max_instances`, as no general platform can: roll owns the stream (Render scales workers on CPU
 and memory, KEDA on queue length outside the platform). Every ten seconds the service's owner
 reads the group's lag (its committed offset on each partition against the partition's high
-watermark, as the broker's `GET …/groups/{g}` adds it up), only for a stream placed on the
-service's own project, so no tenant reads another's; the reaper starts instances at once and
+watermark, as the broker's `GET …/groups/{g}` adds it up). A stream is named by its id (`st_…`),
+never a name, and a group by Kafka's characters. It's read only for a stream on the service's
+own project, and only on a project the operator owns: anyone can put any reference on their own
+canvas and streams don't know their owners yet, so a person's project doesn't follow a stream
+(as roll secrets refuses links there), and roll MCP's gate wants read on the stream to set it.
+A deploy starts a scaled-out worker at the instances it wants, not back at its floor; a note
+about scaling is logged when it changes, not every ten seconds; and a web service's `scale` is
+dropped (it scales on its requests); the reaper starts instances at once and
 stops one (the newest, given the drain to finish its work) only after fewer were wanted for
 `scale_down_after`. rolld reads the lag from its own API (`GET /v1/streams/{s}/groups/{g}`, the
 operator's token), which on a fleet forwards to the stream's owner, the only node whose numbers
@@ -1013,8 +1019,9 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 
 ## With the other platform branches
 
-Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/roll-secrets
-926e6bb83, feature/roll-previews 8890f61f4 and feature/roll-search a59b01088 (pairwise
+Reviewed on 2026-11-13 against main 13d4a1b7b (#18 accounts, #19 MCP), feature/roll-mcp-next
+b691d1029 (#24), feature/roll-secrets 55a618718, feature/roll-previews 8c7f6ecdf and
+feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pairwise
 `git merge-tree` too). Ours are done or in `## Next`; theirs have been told.
 
 - **roll-mcp** (#19 merged into main at 11:15; #24, feature/roll-mcp-next, follows): every route
@@ -1030,17 +1037,19 @@ Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/rol
   - Still open: `put_link` (and create's `links`) checking `Grant::allows(<resource>, reveal)`
     itself (the catalogue's `.lends()` does it at the gate today).
   - `net.rs` and `model::private_ip` move onto mcp's `roll-net`.
-  - MCP tools (#24): `apps_deploy` takes `no_traffic`; `apps_set_environment` covers `PUT
-    …/environments/{env}` but `access` (a person sets an environment's token, not an agent).
+  - #24: `apps_deploy` takes `no_traffic`; `apps_set_environment` covers `PUT
+    …/environments/{env}` but `access` and `feedback`; `run.scale` needs read on its stream at
+    the gate (a row's lends name each resource's own action), and `apps_update_service` says
+    so.
 - **roll-previews** (`RollApps`): new Environment fields are ignored safely, `ready` falls into
   its success branch (it never sends `no_traffic`), and apps no longer runs canaries in
   ephemeral environments. Theirs: `unset` the variables it set before and no longer wants (an
   override removed today stays in the `pv-` environment); once secrets is wired, PATCH only the
   link redirects, not `t.vars` (a second copy of project secrets in apps); `catalog()`'s
   memory ignores `[app.previews.run]` and per-environment `run`; `--env K=V` on argv in
-  `code-preview/src/docker.rs`; and send `feedback: true` in its PUT of a `pv-` environment when
-  the project has feedback on (apps then serves the button: one copy of `feedback.js` and its
-  tagger after the merge).
+  `code-preview/src/docker.rs` (#20's change). Previews sends `feedback: true` (its own rule:
+  the setting, a change, an access token) once apps' follow-up is in its tree: the held #21
+  answers 400 to an unknown field. One copy of `feedback.js` and its tagger after the merge.
 - **roll-secrets** (see "Secrets and environments"). Ours on wiring:
   - Skip `Secrets::ensure_environment` for ephemeral environments: previews ensures them with
     their base and trust, and ensuring again with other values is a 409 `mismatch`.
@@ -1057,59 +1066,88 @@ Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/rol
   - A value whose source is a secret needs `Caller::allows(Reveal, Scope::at(project, env,
     path))` on top of apps' `reveal` (secrets confirmed: otherwise apps' reveal gets around
     protected environments). `Keyring::new(current, previous)`, the same key material.
-  - `rolld/src/secrets/syncs.rs`'s `PublicOnly` is resolved on wip/secrets-on-mcp (`roll_net`),
-    which whichever of #19 and #20 merges second takes.
+  - `rolld/src/secrets/syncs.rs`'s `PublicOnly`: #19 is on main, so #20 takes `roll_net`
+    (wip/secrets-on-mcp's resolution, which still needs main's #18).
+  - Once people manage secrets on their own projects, a canvas stops proving ownership: a
+    person-owned project counts only for services that person owns (apps' `SecretSource`, and
+    already scaling on a stream).
 - **roll-search** touches nothing of apps; its conflicts with apps are additions side by side
   (`Product`/`Kind` arrays grow).
-- **Conflicts with apps**: Cargo.toml/Cargo.lock everywhere (keep both); `rolld/src/main.rs`
-  with mcp, secrets and previews (open the workspace once; open secrets before `apps::start`;
-  merge every product's router, then take the copies secrets' `products_api` and mcp's
-  `auth.layer` keep); `rolld/src/cluster.rs` `DbBudget` with secrets (code 2, the rest 1, total
-  12); `project-page.tsx` with previews (keep `working` for the agent count, apps'
-  `live = useProjectServices`, and the Inspector open on `canvas && (!!current || !!newService)`);
-  roll-workspace's `Kind` array and the dashboard's kind maps with search and previews (keep
-  both).
+- **Conflicts with apps**: previews merges cleanly. With main (and #24), six files from apps
+  merging feature/accounts rather than main's squash of #18 (`AGENTS.md`, `rolld/src/{auth,
+  cluster,main}.rs`, `tests/auth.rs`, `docs/workspace.md`): take apps' side, keeping one early
+  `workspace::open`, and one `/v1/apps/hooks` row in `tests/auth.rs`; merging main into
+  feature/roll-apps clears them. With search: additions side by side (`[Product; 10]`,
+  `[Kind; 8]`, the dashboard's kind maps). With secrets: eleven files, all trivial but
+  roll-workspace's `delete` (keep main's `delete(scope, id)` with `on_delete`);
+  `routeTree.gen.ts` is regenerated, not merged.
 - **Every product sharing the system database** reserves its own share of
-  `ROLL_SYSTEM_DB_CONNECTIONS`: apps has `DbBudget::apps`; previews and mcp still borrow the
-  workspace's.
+  `ROLL_SYSTEM_DB_CONNECTIONS`: apps has `DbBudget::apps`, previews its own share; mcp still
+  borrows the workspace's. `DbBudget`'s test (`split(Some(12))`, at most 12) can't pass once
+  apps, search, secrets and previews are combined (seven weighted pools, four fixed and two
+  reserved make 13 at least): move it to 16 and count the fixed pools as reserved.
 - `scripts/test-apps.sh` runs its own `cargo test -p` calls, not `scripts/lib/gate.sh`'s shared
   package set (adding apps there would slow roll code's and agents' gates).
-- `crates/rolld/tests/auth.rs` fails on main too (`/v1/storage/` from `nest_service`); mcp and
-  search carry the one-line fix.
 - Merge order: mcp, secrets, search, apps (then the secrets wiring), previews.
 
 ## Next
 
-Ranked; the top item not marked *waiting* is what's being worked on. A bug review and an
-integration review on 2026-11-13 (after the product review against Railway, Render, Fly,
-Vercel, Cloud Run and Heroku) set this order; their findings are fixed or in "With the other
-platform branches".
+Ranked; the top item not marked *waiting* is what's being worked on. Three reviews on
+2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
+Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+1. **Private networking that wakes**: `<svc>.<env>.internal` reaching a service that's asleep, as
+   Railway's private network and Fly's Flycast do (one small forwarder per project network,
+   handing connections to the owner's waking proxy), so scale to zero works between services.
+2. **Private services**: `run.public: false` (no `up.roll.site` hostname, the proxy a 404; the
+   private name still answers), as Render's private services; then an IP allow list.
+3. **A rollback restores variables**: each deployment keeps a sealed snapshot of its service
+   variables and a rollback restores them (audited; `--keep-variables` to opt out), as Heroku's
+   and Railway's do.
+4. **The project file as a Blueprint**: `repo`/`branch`, `type`, `start`, `schedule` and a `run`
+   table in `[apps.<name>]`, checked by `[app.run]`'s checker, applied on each landing on the
+   default branch as Render's Blueprints sync (never deleting).
+5. **The rollback target on the server, and CLI parity**: "Roll back" without an id picks the
+   deployment before the live one on the server (two clicks can't go forward); the CLI gains
+   cancel, unlink, registry login, domain redirect and private environments; `roll apps restart`'s
+   help; the shell says when a keystroke didn't go; the deployments and jobs tabs follow
+   `/changes` instead of polling every 1.5 s; one date format; http-api.md's stray quote, the
+   `audit.*` events, the hooks' own check and the 402.
+6. **Tests for what people rely on**: a crash loop's event and notification, a worker restarting
+   with backoff, cron firing on schedule and skipping while the last run goes, concurrent requests
+   waking one instance, a wake timeout's 503 with `Retry-After`, a web service scaling in; and
+   the tag and wake tests reading what a user sees, not internals.
+7. **Links between services**: a `service` link kind giving `<NAME>_URL` (private) and
+   `<NAME>_PUBLIC_URL`, as Render's `fromService`.
+8. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
+   DNS-01 on a delegated `_acme-challenge` (Railway's and Render's).
+9. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
+    page (Render's `maxShutdownDelaySeconds` and `maintenanceMode`).
+10. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-2. **Region**: the region shown on the overview and each environment, defaulting to the project's
+11. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-3. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+12. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-4. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+13. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+14. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+15. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-8. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+16. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+17. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-9. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+18. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
    restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
    Firecracker microVM hosts on the fleet.
-10. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+19. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

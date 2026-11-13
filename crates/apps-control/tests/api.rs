@@ -129,7 +129,7 @@ impl apps_control::integrations::Resources for FakeResources {
     }
 
     async fn backlog(&self, stream: &str, _group: &str) -> anyhow::Result<u64> {
-        anyhow::ensure!(stream == "str_lag", "no stream {stream}");
+        anyhow::ensure!(stream == "st_ag2345678abc", "no stream {stream}");
         Ok(BACKLOG.load(Ordering::SeqCst))
     }
 }
@@ -1536,13 +1536,13 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
 }
 
 /// A worker that follows its work: its instances follow a stream group's lag within its bounds,
-/// scaling in one at a time once fewer are wanted; only a worker can.
+/// scaling in one at a time once fewer are wanted; streams by id, and only for a worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_worker_follows_its_streams_backlog() {
     let w = world_with(|c| c.live.scale_down_after = Duration::ZERO).await;
     let ws = w.apps.deps.workspace.clone().unwrap();
-    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Stream, "str_lag", 0.0, 0.0).unwrap();
-    let run = json!({"type": "worker", "min_instances": 1, "max_instances": 4, "scale": {"stream": "str_lag", "group": "billing", "per_instance": 10}});
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Stream, "st_ag2345678abc", 0.0, 0.0).unwrap();
+    let run = json!({"type": "worker", "min_instances": 1, "max_instances": 4, "scale": {"stream": "st_ag2345678abc", "group": "billing", "per_instance": 10}});
     let (svc, d) = image_service(&w, "billing", run).await;
     assert_eq!(d["status"], "active", "{d}");
     let id = svc["id"].as_str().unwrap().to_string();
@@ -1558,7 +1558,17 @@ async fn a_worker_follows_its_streams_backlog() {
     w.apps.scale_workers().await;
     live.tick().await;
     live.tick().await;
+    // Its stop runs off the wake lock, the drain to finish its work.
+    for _ in 0..200 {
+        if up(&w) == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(up(&w), 3, "caught up: one goes at a time");
-    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"type": "web", "scale": {"stream": "str_lag", "group": "g"}}}))).await.0, StatusCode::BAD_REQUEST, "a web service scales on its requests");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"scale": {"stream": "orders", "group": "g"}}}))).await.0, StatusCode::BAD_REQUEST, "a stream by its id, never a name");
+    // Becoming a web service drops it (a web service scales on its requests).
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"type": "web"}}))).await;
+    assert_eq!((st, s["run"].get("scale")), (StatusCode::OK, None), "{s}");
 }
 
