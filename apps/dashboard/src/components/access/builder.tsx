@@ -1,5 +1,5 @@
-import { Check, Hand } from "lucide-react";
-import { useState } from "react";
+import { Check, ChevronRight, Hand } from "lucide-react";
+import { Fragment, useEffect, useState } from "react";
 import {
   ACTION_HELP,
   ACTIONS,
@@ -17,6 +17,7 @@ import {
   type Preset,
   type Rule,
 } from "@/lib/access-api";
+import { loadInventory, resourcesByProduct } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { input } from "../ui";
 
@@ -32,15 +33,25 @@ export function Builder({
   catalog,
   rules,
   onChange,
+  askOtherwise = false,
 }: {
   catalog: Catalog;
   rules: Rule[];
   onChange: (rules: Rule[], preset: string | null) => void;
+  /** Whether what the rules don't allow asks instead (the summary's last line). */
+  askOtherwise?: boolean;
 }) {
   const ws = useWorkspace();
   const draft = draftOf(rules);
   const [preset, setPreset] = useState<string | null>(null);
   const products = ["*", ...catalog.products];
+  // Every product's resources by name, for "only these" (what this rolld runs).
+  const [inventory, setInventory] = useState<Record<string, { id: string; name: string }[]>>({});
+  useEffect(() => {
+    loadInventory()
+      .then((inv) => setInventory(resourcesByProduct(inv)))
+      .catch(() => {});
+  }, []);
 
   const apply = (p: Preset) => {
     setPreset(p.id);
@@ -129,14 +140,32 @@ export function Builder({
             </div>
           </fieldset>
 
-          <Matrix draft={draft} products={products} onChange={edit} />
+          <Matrix draft={draft} products={products} inventory={inventory} onChange={edit} />
         </>
       )}
+      <Summary rules={rules} askOtherwise={askOtherwise} inventory={inventory} projectName={(id) => ws.projects.find((p) => p.id === id)?.name ?? id} />
     </div>
   );
 }
 
-function Matrix({ draft, products, onChange }: { draft: Draft; products: string[]; onChange: (d: Draft) => void }) {
+function Matrix({
+  draft,
+  products,
+  inventory,
+  onChange,
+}: {
+  draft: Draft;
+  products: string[];
+  inventory: Record<string, { id: string; name: string }[]>;
+  onChange: (d: Draft) => void;
+}) {
+  const [open, setOpen] = useState<string | null>(null);
+  const setIds = (product: string, ids: string[]) => {
+    const next = { ...draft.ids };
+    if (ids.length) next[product] = ids;
+    else delete next[product];
+    onChange({ ...draft, ids: next });
+  };
   const set = (product: string, action: Action, effect: Effect | undefined) => {
     const row = { ...draft.matrix[product] };
     if (effect) row[action] = effect;
@@ -149,6 +178,7 @@ function Matrix({ draft, products, onChange }: { draft: Draft; products: string[
         <thead>
           <tr className="border-b border-line text-subtle">
             <th className="px-3 py-2 text-left font-normal">Product</th>
+            <th className="px-2 py-2 text-left font-normal">Which</th>
             {ACTIONS.map((a) => (
               <th key={a} className="px-2 py-2 text-center font-normal" title={ACTION_HELP[a]}>
                 {a}
@@ -158,8 +188,24 @@ function Matrix({ draft, products, onChange }: { draft: Draft; products: string[
         </thead>
         <tbody>
           {products.map((p) => (
-            <tr key={p} className={`border-b border-line last:border-0 ${p === "*" ? "bg-white/[0.02]" : ""}`}>
+            <Fragment key={p}>
+            <tr className={`border-b border-line last:border-0 ${p === "*" ? "bg-white/[0.02]" : ""}`}>
               <td className="px-3 py-1.5 text-muted">{productName(p)}</td>
+              <td className="px-2 py-1">
+                {p === "*" ? (
+                  <span className="text-subtle">{draft.project ? "the project" : "all"}</span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setOpen(open === p ? null : p)}
+                    aria-expanded={open === p}
+                    className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-muted hover:bg-white/[0.04] hover:text-fg"
+                  >
+                    <ChevronRight className={`size-3 transition-transform duration-150 ${open === p ? "rotate-90" : ""}`} />
+                    {draft.ids[p]?.length ? `${draft.ids[p].length} chosen` : draft.project ? "the project" : "all"}
+                  </button>
+                )}
+              </td>
               {ACTIONS.map((a) => {
                 const e = draft.matrix[p]?.[a];
                 return (
@@ -183,6 +229,14 @@ function Matrix({ draft, products, onChange }: { draft: Draft; products: string[
                 );
               })}
             </tr>
+            {open === p && (
+              <tr className="border-b border-line bg-white/[0.015]">
+                <td colSpan={ACTIONS.length + 2} className="px-3 py-2.5">
+                  <Pick product={p} chosen={draft.ids[p] ?? []} known={inventory[p] ?? []} onChange={(ids) => setIds(p, ids)} />
+                </td>
+              </tr>
+            )}
+            </Fragment>
           ))}
         </tbody>
       </table>
@@ -195,6 +249,77 @@ function Matrix({ draft, products, onChange }: { draft: Draft; products: string[
         </span>
         <span>– not allowed. "Everything" covers every product, including ones added later.</span>
       </p>
+    </div>
+  );
+}
+
+/** "Only these": a product's resources to tick by name, or ids typed (products the inventory doesn't list). */
+function Pick({ product, chosen, known, onChange }: { product: string; chosen: string[]; known: { id: string; name: string }[]; onChange: (ids: string[]) => void }) {
+  const [text, setText] = useState("");
+  const toggle = (id: string) => onChange(chosen.includes(id) ? chosen.filter((c) => c !== id) : [...chosen, id]);
+  const extra = chosen.filter((c) => !known.some((k) => k.id === c));
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] text-subtle">
+        {chosen.length ? `Only these ${productName(product)} resources, wherever they are.` : `Every ${productName(product)} resource the place above covers. Tick some to narrow it.`}
+      </p>
+      {known.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {known.map((k) => (
+            <label key={k.id} className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 ${chosen.includes(k.id) ? "border-fg/40 text-fg" : "border-line text-muted"}`}>
+              <input type="checkbox" checked={chosen.includes(k.id)} onChange={() => toggle(k.id)} className="size-3" />
+              {k.name}
+              {k.name !== k.id && <span className="font-mono text-[10px] text-subtle">{k.id}</span>}
+            </label>
+          ))}
+        </div>
+      )}
+      <form
+        className="flex flex-wrap items-center gap-1.5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const ids = text.split(/[\s,]+/).filter(Boolean);
+          if (ids.length) onChange([...new Set([...chosen, ...ids])]);
+          setText("");
+        }}
+      >
+        {extra.map((id) => (
+          <button key={id} type="button" onClick={() => toggle(id)} className="rounded-md border border-fg/40 px-2 py-0.5 font-mono text-[11px] text-fg" title="Remove">
+            {id} ×
+          </button>
+        ))}
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Add by id" className={`${input} h-7 w-44 font-mono text-[11px]`} aria-label={`${productName(product)} resource ids`} />
+      </form>
+    </div>
+  );
+}
+
+/** What the token can do, in words, with resources by name; and what happens to the rest. */
+function Summary({
+  rules,
+  askOtherwise,
+  inventory,
+  projectName,
+}: {
+  rules: Rule[];
+  askOtherwise: boolean;
+  inventory: Record<string, { id: string; name: string }[]>;
+  projectName: (id: string) => string;
+}) {
+  const resourceName = (product: string, id: string) => inventory[product]?.find((r) => r.id === id)?.name ?? id;
+  return (
+    <div className="space-y-1 rounded-lg border border-line px-3 py-2.5 text-[12px]">
+      <p className="text-subtle">This token can</p>
+      {rules.length === 0 ? (
+        <p className="text-muted">do nothing yet.</p>
+      ) : (
+        rules.map((r, i) => (
+          <p key={i} className="text-muted">
+            {describeRule(r, projectName, resourceName)}
+          </p>
+        ))
+      )}
+      <p className="text-subtle">{askOtherwise ? "Anything else waits for your approval." : "Anything else is refused."}</p>
     </div>
   );
 }
