@@ -3,8 +3,6 @@ import { LucideProvider, Menu, X } from "lucide-react";
 import { useLocation } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { AgentsControl } from "./agents/agents-control";
-import { OwnerSwitcher } from "./agents/owner-switcher";
-import { useShownOwner } from "./agents/use-connection";
 import { AskPanel } from "./ask";
 import { SignIn } from "./code/sign-in";
 import { useMarkState } from "./mark-state";
@@ -20,7 +18,6 @@ import { Sidebar } from "./workspace/sidebar";
  */
 export function AppShell({ crumb, actions, bleed = false, children }: { crumb: ReactNode; actions?: ReactNode; bleed?: boolean; children: ReactNode }) {
   const { state } = useMarkState();
-  const shown = useShownOwner();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [drawer, setDrawer] = useState(false);
   const pathname = useLocation({ select: (l) => l.pathname });
@@ -40,17 +37,7 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const who =
-    shown?.admin && shown.owner ? (
-      // An admin works as any owner: which one shows, everywhere.
-      <OwnerSwitcher owner={shown.owner} />
-    ) : shown?.owner ? (
-      <span className="flex items-center gap-1.5 truncate text-[12px] text-muted">
-        <span className="grid size-4 place-items-center rounded bg-accent text-[9px] font-bold text-white uppercase">{shown.owner[0]}</span>
-        {shown.owner}
-      </span>
-    ) : null;
-  const sidebar = <Sidebar onSearch={() => setPaletteOpen(true)} header={who} />;
+  const sidebar = <Sidebar onSearch={() => setPaletteOpen(true)} />;
 
   return (
     <LucideProvider strokeWidth={1.5}>
