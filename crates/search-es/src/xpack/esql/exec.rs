@@ -2808,6 +2808,48 @@ fn pushdown(e: &Expr, cols: &[Col], ft: &[Value]) -> Option<Value> {
     }
 }
 
+/// Splits a condition into the query of its `_ignored` conjuncts (`==`, `!=`, `IN` with
+/// string literals; Lucene's term semantics) and the rest.
+fn split_ignored(e: Expr) -> (Option<Value>, Option<Expr>) {
+    let lit = |x: &Expr| match &x.kind {
+        ExprKind::Lit(V::Str(s)) => Some(Value::from(s.as_str())),
+        _ => None,
+    };
+    let is_ignored = |x: &Expr| matches!(&x.kind, ExprKind::Col(c) if c == "_ignored");
+    let query = match &e.kind {
+        ExprKind::Bin(op @ (BinOp::Eq | BinOp::Neq), a, b) => {
+            let v = if is_ignored(a) { lit(b) } else if is_ignored(b) { lit(a) } else { None };
+            v.map(|v| {
+                let term = obj! { "term" => obj! { "_ignored" => v } };
+                if *op == BinOp::Eq { term } else { obj! { "bool" => obj! { "must_not" => term } } }
+            })
+        }
+        ExprKind::In(x, list, false) if is_ignored(x) => list.iter().map(lit).collect::<Option<Vec<Value>>>().map(|vs| obj! { "terms" => obj! { "_ignored" => Value::Arr(vs) } }),
+        ExprKind::Bin(BinOp::And, ..) => {
+            let ExprKind::Bin(_, a, b) = e.kind else { unreachable!() };
+            let (qa, ra) = split_ignored(*a);
+            let (qb, rb) = split_ignored(*b);
+            let q = match (qa, qb) {
+                (Some(x), Some(y)) => Some(obj! { "bool" => obj! { "filter" => crate::arr![x, y] } }),
+                (x, y) => x.or(y),
+            };
+            let r = match (ra, rb) {
+                (Some(x), Some(y)) => {
+                    let (s, en) = (x.start, y.end);
+                    Some(Expr { kind: ExprKind::Bin(BinOp::And, Box::new(x), Box::new(y)), start: s, end: en })
+                }
+                (x, y) => x.or(y),
+            };
+            return (q, r);
+        }
+        _ => None,
+    };
+    match query {
+        Some(q) => (Some(q), None),
+        None => (None, Some(e)),
+    }
+}
+
 pub(crate) fn refs(e: &Expr, out: &mut std::collections::HashSet<String>) {
     match &e.kind {
         ExprKind::Col(c) => {
@@ -3787,6 +3829,21 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         _ => None,
     };
     let ft = super::fulltext::extract(&src, &mut cmds, &|n| resolved.as_ref().is_some_and(|s| s.fields.iter().any(|f| f == n)))?;
+    // Conditions on `_ignored` right after the source filter in Lucene only (any of its values
+    // matches), as Elasticsearch pushes them down.
+    let mut ignored_query = None;
+    if resolved.as_ref().is_some_and(|s| s.metadata.iter().any(|m| m == "_ignored"))
+        && let Some(Cmd::Where(e)) = cmds.first_mut()
+    {
+        let (pushed, rest) = split_ignored(std::mem::replace(e, Expr { kind: ExprKind::Lit(V::Null), start: 0, end: 0 }));
+        ignored_query = pushed;
+        match rest {
+            Some(r) => *e = r,
+            None => {
+                cmds.remove(0);
+            }
+        }
+    }
     // The row-wise prefix runs on every batch.
     let split = cmds.iter().position(|c| !is_row_wise(c)).unwrap_or(cmds.len());
     let (prefix, rest) = cmds.split_at(split);
@@ -3899,6 +3956,10 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
             // Fields loaded from `_source` aren't indexed: they never narrow the scan.
             let push_cols: Vec<Col> = source.cols.iter().map(|c| if source.load.contains(&c.name) || source.constants.contains(&c.name) || (source.metadata.contains(&c.name) && !matches!(c.name.as_str(), "_index" | "_id")) { Col { name: c.name.clone(), ty: DataType::Unsupported } } else { c.clone() }).collect();
             let pushed = prefix.first().and_then(|c| if let Cmd::Where(e) = c { pushdown(e, &push_cols, &source.ft) } else { None });
+            let pushed = match (pushed, ignored_query) {
+                (Some(a), Some(b)) => Some(obj! { "bool" => obj! { "filter" => crate::arr![a, b] } }),
+                (a, b) => a.or(b),
+            };
             // The request's `filter` narrows the source like a leading `WHERE`.
             let query = match (pushed, filter) {
                 (Some(a), Some(b)) => Some(obj! { "bool" => obj! { "filter" => crate::arr![a, b] } }),
