@@ -1,0 +1,4 @@
+# Tests of Elasticsearch 9.5.5's `user-agent` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+user-agent:user-agent/10_basic/ingest-user-agent installed

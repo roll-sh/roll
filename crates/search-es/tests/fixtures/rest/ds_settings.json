@@ -1,0 +1,940 @@
+{
+ "description": "Data stream settings and mappings APIs",
+ "steps": [
+  {
+   "req": "PUT /_index_template/esm-dss",
+   "body": {
+    "index_patterns": [
+     "esm-dss*"
+    ],
+    "data_stream": {},
+    "template": {
+     "settings": {
+      "number_of_replicas": 0,
+      "lifecycle.name": "my-policy"
+     },
+     "mappings": {
+      "properties": {
+       "a": {
+        "type": "long"
+       }
+      }
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss2",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dss1/_settings",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "settings": {},
+      "effective_settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-policy"
+        },
+        "number_of_replicas": "0",
+        "routing": {
+         "allocation": {
+          "include": {
+           "_tier_preference": "data_hot"
+          }
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1/_settings",
+   "body": {
+    "index": {
+     "number_of_shards": 2,
+     "refresh_interval": "29s",
+     "lifecycle": {
+      "name": "my-new-policy",
+      "prefer_ilm": true
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "applied_to_data_stream": true,
+      "settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "number_of_shards": "2",
+        "refresh_interval": "29s"
+       }
+      },
+      "effective_settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "routing": {
+         "allocation": {
+          "include": {
+           "_tier_preference": "data_hot"
+          }
+         }
+        },
+        "refresh_interval": "29s",
+        "number_of_shards": "2",
+        "number_of_replicas": "0"
+       }
+      },
+      "index_settings_results": {
+       "applied_to_data_stream_only": [
+        "index.number_of_shards"
+       ],
+       "applied_to_data_stream_and_write_indices": [],
+       "applied_to_data_stream_and_backing_indices": [
+        "index.lifecycle.name",
+        "index.lifecycle.prefer_ilm",
+        "index.refresh_interval"
+       ]
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dss1/_settings",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "number_of_shards": "2",
+        "refresh_interval": "29s"
+       }
+      },
+      "effective_settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "routing": {
+         "allocation": {
+          "include": {
+           "_tier_preference": "data_hot"
+          }
+         }
+        },
+        "refresh_interval": "29s",
+        "number_of_shards": "2",
+        "number_of_replicas": "0"
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dss1?filter_path=**.settings,**.effective_settings",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "number_of_shards": "2",
+        "refresh_interval": "29s"
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /.ds-esm-dss1-*/_settings?expand_wildcards=all&filter_path=**.refresh_interval,**.lifecycle,**.number_of_shards,**.number_of_replicas",
+   "status": 200,
+   "response": {
+    ".ds-esm-dss1-2026.10.21-000001": {
+     "settings": {
+      "index": {
+       "lifecycle": {
+        "name": "my-new-policy",
+        "prefer_ilm": "true"
+       },
+       "refresh_interval": "29s",
+       "number_of_shards": "1",
+       "number_of_replicas": "0"
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   },
+   "unordered": true
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1,esm-dss2/_settings?dry_run=true",
+   "body": {
+    "index.number_of_replicas": 1
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "applied_to_data_stream": true,
+      "settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "refresh_interval": "29s",
+        "number_of_shards": "2",
+        "number_of_replicas": "1"
+       }
+      },
+      "effective_settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "routing": {
+         "allocation": {
+          "include": {
+           "_tier_preference": "data_hot"
+          }
+         }
+        },
+        "refresh_interval": "29s",
+        "number_of_shards": "2",
+        "number_of_replicas": "1"
+       }
+      },
+      "index_settings_results": {
+       "applied_to_data_stream_only": [],
+       "applied_to_data_stream_and_write_indices": [
+        "index.number_of_replicas"
+       ],
+       "applied_to_data_stream_and_backing_indices": []
+      }
+     },
+     {
+      "name": "esm-dss2",
+      "applied_to_data_stream": true,
+      "settings": {
+       "index": {
+        "number_of_replicas": "1"
+       }
+      },
+      "effective_settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-policy"
+        },
+        "number_of_replicas": "1",
+        "routing": {
+         "allocation": {
+          "include": {
+           "_tier_preference": "data_hot"
+          }
+         }
+        }
+       }
+      },
+      "index_settings_results": {
+       "applied_to_data_stream_only": [],
+       "applied_to_data_stream_and_write_indices": [
+        "index.number_of_replicas"
+       ],
+       "applied_to_data_stream_and_backing_indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss2/_settings",
+   "body": {
+    "index.bogus": 1,
+    "index.number_of_shards": "x"
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss2",
+      "applied_to_data_stream": false,
+      "error": "Cannot set the following settings on a data stream: [index.bogus]",
+      "settings": {},
+      "effective_settings": {},
+      "index_settings_results": {
+       "applied_to_data_stream_only": [],
+       "applied_to_data_stream_and_write_indices": [],
+       "applied_to_data_stream_and_backing_indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss2/_settings",
+   "body": {
+    "index.mode": "time_series"
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss2",
+      "applied_to_data_stream": false,
+      "error": "Cannot set the following settings on a data stream: [index.mode]",
+      "settings": {},
+      "effective_settings": {},
+      "index_settings_results": {
+       "applied_to_data_stream_only": [],
+       "applied_to_data_stream_and_write_indices": [],
+       "applied_to_data_stream_and_backing_indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss2/_settings",
+   "body": {
+    "index.number_of_shards": "x"
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss2",
+      "applied_to_data_stream": false,
+      "error": "Failed to parse int setting [index.number_of_shards] with value [x]",
+      "settings": {},
+      "effective_settings": {},
+      "index_settings_results": {
+       "applied_to_data_stream_only": [],
+       "applied_to_data_stream_and_write_indices": [],
+       "applied_to_data_stream_and_backing_indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss2/_settings",
+   "body": {
+    "number_of_replicas": "1"
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss2",
+      "applied_to_data_stream": false,
+      "error": "Cannot set the following settings on a data stream: [number_of_replicas]",
+      "settings": {},
+      "effective_settings": {},
+      "index_settings_results": {
+       "applied_to_data_stream_only": [],
+       "applied_to_data_stream_and_write_indices": [],
+       "applied_to_data_stream_and_backing_indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-nope/_settings",
+   "body": {
+    "index.number_of_replicas": 1
+   },
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-nope]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-nope",
+       "index_uuid": "_na_",
+       "index": "esm-nope"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-nope]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-nope",
+     "index_uuid": "_na_",
+     "index": "esm-nope"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1/_settings",
+   "body": {
+    "index.number_of_shards": null
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "applied_to_data_stream": true,
+      "settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "refresh_interval": "29s"
+       }
+      },
+      "effective_settings": {
+       "index": {
+        "lifecycle": {
+         "name": "my-new-policy",
+         "prefer_ilm": "true"
+        },
+        "routing": {
+         "allocation": {
+          "include": {
+           "_tier_preference": "data_hot"
+          }
+         }
+        },
+        "refresh_interval": "29s",
+        "number_of_replicas": "0"
+       }
+      },
+      "index_settings_results": {
+       "applied_to_data_stream_only": [
+        "index.number_of_shards"
+       ],
+       "applied_to_data_stream_and_write_indices": [],
+       "applied_to_data_stream_and_backing_indices": []
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-dss1/_rollover",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "old_index": ".ds-esm-dss1-2026.10.21-000001",
+    "new_index": ".ds-esm-dss1-2026.10.21-000002",
+    "rolled_over": true,
+    "dry_run": false,
+    "lazy": false,
+    "conditions": {}
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /.ds-esm-dss1-*/_settings?expand_wildcards=all&filter_path=**.refresh_interval,**.lifecycle,**.number_of_shards,**.number_of_replicas",
+   "status": 200,
+   "response": {
+    ".ds-esm-dss1-2026.10.21-000002": {
+     "settings": {
+      "index": {
+       "lifecycle": {
+        "name": "my-new-policy",
+        "prefer_ilm": "true"
+       },
+       "refresh_interval": "29s",
+       "number_of_shards": "1",
+       "number_of_replicas": "0"
+      }
+     }
+    },
+    ".ds-esm-dss1-2026.10.21-000001": {
+     "settings": {
+      "index": {
+       "lifecycle": {
+        "name": "my-new-policy",
+        "prefer_ilm": "true"
+       },
+       "refresh_interval": "29s",
+       "number_of_shards": "1",
+       "number_of_replicas": "0"
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   },
+   "unordered": true
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1/_mappings",
+   "body": {
+    "properties": {
+     "foo": {
+      "type": "keyword"
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "applied_to_data_stream": true,
+      "mappings": {
+       "properties": {
+        "foo": {
+         "type": "keyword"
+        }
+       }
+      },
+      "effective_mappings": {
+       "_data_stream_timestamp": {
+        "enabled": true
+       },
+       "properties": {
+        "@timestamp": {
+         "type": "date"
+        },
+        "a": {
+         "type": "long"
+        },
+        "foo": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1/_mappings?dry_run=true",
+   "body": {
+    "properties": {
+     "bar": {
+      "type": "long"
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "applied_to_data_stream": true,
+      "mappings": {
+       "properties": {
+        "bar": {
+         "type": "long"
+        }
+       }
+      },
+      "effective_mappings": {
+       "_data_stream_timestamp": {
+        "enabled": true
+       },
+       "properties": {
+        "@timestamp": {
+         "type": "date"
+        },
+        "a": {
+         "type": "long"
+        },
+        "bar": {
+         "type": "long"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dss1/_mappings",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "mappings": {
+       "properties": {
+        "foo": {
+         "type": "keyword"
+        }
+       }
+      },
+      "effective_mappings": {
+       "_data_stream_timestamp": {
+        "enabled": true
+       },
+       "properties": {
+        "@timestamp": {
+         "type": "date"
+        },
+        "a": {
+         "type": "long"
+        },
+        "foo": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1/_mappings",
+   "body": {
+    "properties": {
+     "a": {
+      "type": "keyword"
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "applied_to_data_stream": true,
+      "mappings": {
+       "properties": {
+        "a": {
+         "type": "keyword"
+        }
+       }
+      },
+      "effective_mappings": {
+       "_data_stream_timestamp": {
+        "enabled": true
+       },
+       "properties": {
+        "@timestamp": {
+         "type": "date"
+        },
+        "a": {
+         "type": "keyword"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1/_mappings",
+   "body": {
+    "properties": {
+     "b": {
+      "type": "bogus"
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "applied_to_data_stream": false,
+      "error": "Failed to parse mapping: The mapper type [bogus] declared on field [b] does not exist. It might have been created within a future version or requires a plugin to be installed. Check the documentation.",
+      "mappings": {
+       "_doc": {}
+      },
+      "effective_mappings": {
+       "_doc": {}
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss1/_mappings",
+   "body": {
+    "_doc": {
+     "properties": {
+      "c": {
+       "type": "long"
+      }
+     }
+    },
+    "x": 1
+   },
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss1",
+      "applied_to_data_stream": false,
+      "error": "cannot merge a map with multiple roots, one of which is [_doc]",
+      "mappings": {
+       "_doc": {}
+      },
+      "effective_mappings": {
+       "_doc": {}
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /_data_stream/esm-dss2/_mappings",
+   "body": {},
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss2",
+      "applied_to_data_stream": true,
+      "effective_mappings": {
+       "_data_stream_timestamp": {
+        "enabled": true
+       },
+       "properties": {
+        "@timestamp": {
+         "type": "date"
+        },
+        "a": {
+         "type": "long"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_data_stream/esm-dss2/_mappings",
+   "status": 200,
+   "response": {
+    "data_streams": [
+     {
+      "name": "esm-dss2",
+      "mappings": {},
+      "effective_mappings": {
+       "_data_stream_timestamp": {
+        "enabled": true
+       },
+       "properties": {
+        "@timestamp": {
+         "type": "date"
+        },
+        "a": {
+         "type": "long"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /esm-dss1/_rollover",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "old_index": ".ds-esm-dss1-2026.10.21-000002",
+    "new_index": ".ds-esm-dss1-2026.10.21-000003",
+    "rolled_over": true,
+    "dry_run": false,
+    "lazy": false,
+    "conditions": {}
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-dss1/_mapping",
+   "status": 200,
+   "response": {
+    ".ds-esm-dss1-2026.10.21-000002": {
+     "mappings": {
+      "_data_stream_timestamp": {
+       "enabled": true
+      },
+      "properties": {
+       "@timestamp": {
+        "type": "date"
+       },
+       "a": {
+        "type": "long"
+       }
+      }
+     }
+    },
+    ".ds-esm-dss1-2026.10.21-000001": {
+     "mappings": {
+      "_data_stream_timestamp": {
+       "enabled": true
+      },
+      "properties": {
+       "@timestamp": {
+        "type": "date"
+       },
+       "a": {
+        "type": "long"
+       }
+      }
+     }
+    },
+    ".ds-esm-dss1-2026.10.21-000003": {
+     "mappings": {
+      "_data_stream_timestamp": {
+       "enabled": true
+      },
+      "properties": {
+       "@timestamp": {
+        "type": "date"
+       },
+       "a": {
+        "type": "keyword"
+       }
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   },
+   "unordered": true
+  },
+  {
+   "req": "DELETE /_data_stream/esm-dss1,esm-dss2",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /_index_template/esm-dss",
+   "status": 200,
+   "response": {
+    "acknowledged": true
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  }
+ ]
+}

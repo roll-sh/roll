@@ -1,0 +1,2191 @@
+{
+  "description" : "Shard-level views (_search_shards routing incl. partitions, alias routing and filters; _shard_stores; _segments), reload_secure_settings, and task management errors.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-ss",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 5,
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ss"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ss2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 3,
+          "routing_partition_size" : 2
+        },
+        "mappings" : {
+          "_routing" : {
+            "required" : true
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ss2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ss3",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 7,
+          "number_of_routing_shards" : 14
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ss3"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_aliases",
+      "body" : {
+        "actions" : [
+          {
+            "add" : {
+              "index" : "esm-ss",
+              "alias" : "esm-a1",
+              "filter" : {
+                "term" : {
+                  "f" : {
+                    "value" : "x"
+                  }
+                }
+              },
+              "routing" : "foo"
+            }
+          },
+          {
+            "add" : {
+              "index" : "esm-ss",
+              "alias" : "esm-a2"
+            }
+          },
+          {
+            "add" : {
+              "index" : "esm-ss2",
+              "alias" : "esm-a2"
+            }
+          },
+          {
+            "add" : {
+              "index" : "esm-ss3",
+              "alias" : "esm-a3",
+              "search_routing" : "a,b,c",
+              "index_routing" : "a"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=foo&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=bar&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=hello&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=world&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=abc&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=x&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=0&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=1&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=2&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=3&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=4&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=5&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=6&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=7&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=8&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=9&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=long-routing-value-1234567890&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_search_shards?routing=hello,world,abc,%C3%BCn%C3%AF&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss2/_search_shards?routing=foo&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss2" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss2/_search_shards?routing=bar,baz&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss2" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss3/_search_shards?routing=foo&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss3" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss3/_search_shards?routing=q,r,s,t&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss3" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 6,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-a1/_search_shards?filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : {
+            "aliases" : [
+              "esm-a1"
+            ],
+            "filter" : {
+              "term" : {
+                "f" : {
+                  "value" : "x"
+                }
+              }
+            }
+          }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-a1/_search_shards?routing=bar&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : {
+            "aliases" : [
+              "esm-a1"
+            ],
+            "filter" : {
+              "term" : {
+                "f" : {
+                  "value" : "x"
+                }
+              }
+            }
+          }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-a1/_search_shards?routing=foo,bar&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : {
+            "aliases" : [
+              "esm-a1"
+            ],
+            "filter" : {
+              "term" : {
+                "f" : {
+                  "value" : "x"
+                }
+              }
+            }
+          }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-a2/_search_shards?filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss2" : {
+            "aliases" : [
+              "esm-a2"
+            ]
+          },
+          "esm-ss" : {
+            "aliases" : [
+              "esm-a2"
+            ]
+          }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-a3/_search_shards?filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss3" : {
+            "aliases" : [
+              "esm-a3"
+            ]
+          }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 5,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 6,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-a3/_search_shards?routing=b,z&filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss3" : {
+            "aliases" : [
+              "esm-a3"
+            ]
+          }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 5,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss,esm-a1/_search_shards?filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : {
+            "aliases" : [
+              "esm-a1"
+            ]
+          }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s*/_search_shards?filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss2" : { },
+          "esm-ss3" : { },
+          "esm-ss" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 5,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 6,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-*/_search_shards?filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss2" : {
+            "aliases" : [
+              "esm-a2"
+            ]
+          },
+          "esm-ss3" : {
+            "aliases" : [
+              "esm-a3"
+            ]
+          },
+          "esm-ss" : {
+            "aliases" : [
+              "esm-a1",
+              "esm-a2"
+            ]
+          }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss2",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 5,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 6,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-nope/_search_shards?filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-ss3/_close",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : {
+          "esm-ss3" : {
+            "closed" : true
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss3/_search_shards?filter_path=indices,shards.index,shards.shard,shards.primary,shards.state,shards.relocating_node,shards.relocation_failure_info",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss3" : { }
+        },
+        "shards" : [
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 0,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 1,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 2,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 3,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 4,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 5,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ],
+          [
+            {
+              "state" : "STARTED",
+              "primary" : true,
+              "relocating_node" : null,
+              "shard" : 6,
+              "index" : "esm-ss3",
+              "relocation_failure_info" : {
+                "failed_attempts" : 0
+              }
+            }
+          ]
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_shard_stores",
+      "status" : 200,
+      "response" : {
+        "indices" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss2/_shard_stores?filter_path=indices.*.shards.*.stores.allocation,indices.*.shards.*.stores.allocation_id",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss2" : {
+            "shards" : {
+              "0" : {
+                "stores" : [
+                  {
+                    "allocation_id" : "A-NUjvzqTNGNMuLiqEALMg",
+                    "allocation" : "primary"
+                  }
+                ]
+              },
+              "1" : {
+                "stores" : [
+                  {
+                    "allocation_id" : "EruwvSh4TbmiFyKz6z1eOA",
+                    "allocation" : "primary"
+                  }
+                ]
+              },
+              "2" : {
+                "stores" : [
+                  {
+                    "allocation_id" : "gIrjk0i1RWqKGM-ysUEHRg",
+                    "allocation" : "primary"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss2/_shard_stores?status=green",
+      "status" : 200,
+      "response" : {
+        "indices" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_shard_stores?status=green&filter_path=indices.*.shards.*.stores.allocation",
+      "status" : 200,
+      "response" : {
+        "indices" : {
+          "esm-ss" : {
+            "shards" : {
+              "0" : {
+                "stores" : [
+                  {
+                    "allocation" : "primary"
+                  }
+                ]
+              },
+              "1" : {
+                "stores" : [
+                  {
+                    "allocation" : "primary"
+                  }
+                ]
+              },
+              "2" : {
+                "stores" : [
+                  {
+                    "allocation" : "primary"
+                  }
+                ]
+              },
+              "3" : {
+                "stores" : [
+                  {
+                    "allocation" : "primary"
+                  }
+                ]
+              },
+              "4" : {
+                "stores" : [
+                  {
+                    "allocation" : "primary"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss2/_shard_stores?status=bad",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown cluster health status [bad]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown cluster health status [bad]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss/_segments?filter_path=_shards,indices.*.shards.*.num_committed_segments,indices.*.shards.*.num_search_segments,indices.*.shards.*.segments,indices.*.shards.*.routing.state",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 5,
+          "successful" : 5,
+          "failed" : 0
+        },
+        "indices" : {
+          "esm-ss" : {
+            "shards" : {
+              "0" : [
+                {
+                  "routing" : {
+                    "state" : "STARTED"
+                  },
+                  "num_committed_segments" : 0,
+                  "num_search_segments" : 0,
+                  "segments" : { }
+                }
+              ],
+              "1" : [
+                {
+                  "routing" : {
+                    "state" : "STARTED"
+                  },
+                  "num_committed_segments" : 0,
+                  "num_search_segments" : 0,
+                  "segments" : { }
+                }
+              ],
+              "2" : [
+                {
+                  "routing" : {
+                    "state" : "STARTED"
+                  },
+                  "num_committed_segments" : 0,
+                  "num_search_segments" : 0,
+                  "segments" : { }
+                }
+              ],
+              "3" : [
+                {
+                  "routing" : {
+                    "state" : "STARTED"
+                  },
+                  "num_committed_segments" : 0,
+                  "num_search_segments" : 0,
+                  "segments" : { }
+                }
+              ],
+              "4" : [
+                {
+                  "routing" : {
+                    "state" : "STARTED"
+                  },
+                  "num_committed_segments" : 0,
+                  "num_search_segments" : 0,
+                  "segments" : { }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss2/_segments?filter_path=_shards",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 6,
+          "successful" : 3,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ss3/_segments",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_closed_exception",
+              "reason" : "closed",
+              "index_uuid" : "bZyZND6UQSeH09-EQVnsew",
+              "index" : "esm-ss3"
+            }
+          ],
+          "type" : "index_closed_exception",
+          "reason" : "closed",
+          "index_uuid" : "bZyZND6UQSeH09-EQVnsew",
+          "index" : "esm-ss3"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-nope/_segments",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_nodes/nope/reload_secure_settings?filter_path=_nodes,nodes",
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 0,
+          "successful" : 0,
+          "failed" : 0
+        },
+        "nodes" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_tasks/abc",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "malformed task id abc"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "malformed task id abc"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_tasks/abc:1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [.tasks]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : ".tasks",
+              "index_uuid" : "_na_",
+              "index" : ".tasks"
+            }
+          ],
+          "type" : "resource_not_found_exception",
+          "reason" : "task [abc:1] belongs to the node [abc] which isn't part of the cluster and there is no record of the task",
+          "caused_by" : {
+            "type" : "resource_not_found_exception",
+            "reason" : "task [abc:1] isn't running and hasn't stored its results",
+            "caused_by" : {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [.tasks]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : ".tasks",
+              "index_uuid" : "_na_",
+              "index" : ".tasks"
+            }
+          }
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_tasks/abc:x",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "malformed task id abc:x"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "malformed task id abc:x",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"x\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_tasks?group_by=bad",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[group_by] must be one of [nodes], [parents] or [none] but was [bad]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[group_by] must be one of [nodes], [parents] or [none] but was [bad]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_tasks?actions=nothing*",
+      "status" : 200,
+      "response" : {
+        "nodes" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_tasks?actions=nothing*&group_by=none",
+      "status" : 200,
+      "response" : {
+        "tasks" : [ ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_tasks?actions=nothing*&group_by=parents",
+      "status" : 200,
+      "response" : {
+        "tasks" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_tasks/abc:1/_cancel",
+      "status" : 200,
+      "response" : {
+        "node_failures" : [
+          {
+            "type" : "failed_node_exception",
+            "reason" : "Failed node [abc]",
+            "node_id" : "abc",
+            "caused_by" : {
+              "type" : "resource_not_found_exception",
+              "reason" : "task [abc:1] is not found"
+            }
+          }
+        ],
+        "nodes" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /_tasks/_cancel?actions=nothing",
+      "status" : 200,
+      "response" : {
+        "nodes" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

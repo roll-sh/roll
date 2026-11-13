@@ -1,0 +1,81 @@
+{
+ "properties": {
+  "b": {
+   "type": "boolean"
+  },
+  "bin": {
+   "type": "binary",
+   "doc_values": true
+  },
+  "by": {
+   "type": "byte"
+  },
+  "d": {
+   "type": "double"
+  },
+  "dn": {
+   "type": "date_nanos"
+  },
+  "dt": {
+   "type": "date"
+  },
+  "f": {
+   "type": "float"
+  },
+  "g": {
+   "type": "geo_point"
+  },
+  "hf": {
+   "type": "half_float"
+  },
+  "i": {
+   "type": "integer"
+  },
+  "ip": {
+   "type": "ip"
+  },
+  "k": {
+   "type": "keyword"
+  },
+  "l": {
+   "type": "long"
+  },
+  "obj": {
+   "properties": {
+    "x": {
+     "type": "long"
+    }
+   }
+  },
+  "sf": {
+   "type": "scaled_float",
+   "scaling_factor": 100.0
+  },
+  "sh": {
+   "type": "short"
+  },
+  "t": {
+   "type": "text"
+  },
+  "tag": {
+   "type": "keyword"
+  },
+  "ul": {
+   "type": "unsigned_long"
+  },
+  "v": {
+   "type": "dense_vector",
+   "dims": 3,
+   "index": true,
+   "similarity": "cosine",
+   "index_options": {
+    "type": "int8_hnsw",
+    "m": 16,
+    "ef_construction": 100
+   }
+  },
+  "ver": {
+   "type": "version"
+  }
+ }
+}

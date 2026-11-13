@@ -1,0 +1,237 @@
+# Tests of Elasticsearch 9.5.5's `logsdb` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+logsdb:10_setting/synthetic_source_keep defaults
+logsdb:10_setting/total_fields.ignore_dynamic_beyond_limit defaults
+logsdb:15_default/default index mode
+logsdb:20_failure_store/Test failure store with logsdb
+logsdb:20_ignored_source/fetch fields by name
+logsdb:20_ignored_source/fetch fields wildcard
+logsdb:20_ignored_source/fetch stored fields by name
+logsdb:20_ignored_source/fetch stored fields wildcard
+logsdb:20_ignored_source/fields and stored fields combination
+logsdb:20_ignored_source/fields with ignored source in fields
+logsdb:20_ignored_source/fields with ignored source in stored fields
+logsdb:20_ignored_source/ignored source via fields and wildcard stored fields
+logsdb:20_ignored_source/wildcard fields and ignored source via stored fields
+logsdb:20_ignored_source/wildcard fields and stored fields combination
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom empty sorting
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom sorting and dynamically mapped host.name
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom sorting and host object
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom sorting and host.name date field
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom sorting and host.name field without doc values
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom sorting and host.name object
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom sorting and missing host.name field mapping
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom sorting on timestamp
+logsdb:30_logsdb_default_mapping/create logsdb data stream with custom sorting without host.name
+logsdb:30_logsdb_default_mapping/create logsdb data stream with default sorting on malformed host.name
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host as keyword
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host as keyword and timestamp as date
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host as text
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host as text and multi fields
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host as text and name as double
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host.name as alias and sorting on it
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host.name as integer and timestamp as date
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host.name as keyword
+logsdb:30_logsdb_default_mapping/create logsdb data stream with host.name as keyword and timestamp as date
+logsdb:30_logsdb_default_mapping/create logsdb data stream with incompatible ignore_above on host.name
+logsdb:30_logsdb_default_mapping/create logsdb data stream with multi-fields on host.name
+logsdb:30_logsdb_default_mapping/create logsdb data stream with multi-fields on host.name and no sorting
+logsdb:30_logsdb_default_mapping/create logsdb data stream with no host.name and timestamp as date
+logsdb:30_logsdb_default_mapping/create logsdb data stream with no sorting and host.name as text
+logsdb:30_logsdb_default_mapping/create logsdb data stream with timestamp mixed date_nanos and date fields
+logsdb:30_logsdb_default_mapping/create logsdb data stream with timestamp object mapping
+logsdb:30_logsdb_default_mapping/create logsdb data stream without index sorting and ignore_above on host.name
+logsdb:30_logsdb_default_mapping/rollover with host as keyword
+logsdb:31_columnar_logsdb_default_mapping/Columnar index rejects dynamic runtime at root
+logsdb:31_columnar_logsdb_default_mapping/Logsdb columnar index rejects dynamic runtime at root
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with custom empty sorting
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with custom sorting and dynamically mapped host.name
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with custom sorting and host object
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with custom sorting and host.name date field
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with custom sorting and host.name object
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with custom sorting and missing host.name field mapping
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with custom sorting on timestamp
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with custom sorting without host.name
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with default sorting on malformed host.name
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host as keyword
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host as keyword and timestamp as date
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host as text
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host as text and multi fields
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host as text and name as double
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host.name as alias and sorting on it
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host.name as integer and timestamp as date
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host.name as keyword
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host.name as keyword and timestamp as date
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with host.name field without doc values is rejected
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with incompatible ignore_above on host.name
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with multi-fields on host.name
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with multi-fields on host.name and no sorting
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with no host.name and timestamp as date
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with no sorting and host.name as text
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with timestamp mixed date_nanos and date fields
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream with timestamp object mapping
+logsdb:31_columnar_logsdb_default_mapping/create logsdb_columnar data stream without index sorting and ignore_above on host.name
+logsdb:31_columnar_logsdb_default_mapping/rollover logsdb_columnar data stream with host as keyword
+logsdb:32_columnar_passthrough/columnar: concrete root field wins over passthrough alias
+logsdb:32_columnar_passthrough/columnar: higher-priority passthrough wins alias conflict
+logsdb:32_columnar_passthrough/columnar: index created with prefix_properties.passthrough in body is preserved on get_mapping
+logsdb:32_columnar_passthrough/columnar: invalid prefix_properties.passthrough value is rejected
+logsdb:32_columnar_passthrough/columnar: nested dotted passthrough prefix stored as flat key in prefix_properties
+logsdb:32_columnar_passthrough/columnar: no prefix_properties when no passthrough objects
+logsdb:32_columnar_passthrough/columnar: passthrough priority stored in prefix_properties and alias resolves at root
+logsdb:32_columnar_passthrough/columnar: passthrough with object notation document
+logsdb:32_columnar_passthrough/columnar: put_mapping merge adds new passthrough to prefix_properties
+logsdb:32_columnar_passthrough/logsdb_columnar: higher-priority passthrough wins alias conflict
+logsdb:32_columnar_passthrough/logsdb_columnar: index created with prefix_properties.passthrough in body is preserved on get_mapping
+logsdb:32_columnar_passthrough/logsdb_columnar: no prefix_properties when no passthrough objects
+logsdb:32_columnar_passthrough/logsdb_columnar: passthrough priority stored in prefix_properties and alias resolves at root
+logsdb:32_columnar_passthrough/logsdb_columnar: put_mapping merge adds new passthrough to prefix_properties
+logsdb:33_columnar_nested/columnar: a dynamic field inside a nested object is mapped inside it, round-trips and is queryable
+logsdb:33_columnar_nested/columnar: nested field round-trips _source and is queryable
+logsdb:33_columnar_nested/columnar: nested within nested is rejected (single level only)
+logsdb:33_columnar_nested/columnar_stored: nested round-trips _source (blob materialized at ingest)
+logsdb:33_columnar_nested/logsdb_columnar: nested field round-trips _source
+logsdb:34_columnar_cluster_setting/cluster.columnar.enabled disables creation of new columnar indices without affecting existing ones
+logsdb:35_columnar_subobjects_false/logsdb_columnar data stream accepts subobjects: false at root via index template
+logsdb:35_columnar_subobjects_false/logsdb_columnar data stream accepts subobjects: false on object field via component template
+logsdb:35_columnar_subobjects_false/logsdb_columnar index accepts PUT mapping with subobjects: false
+logsdb:35_columnar_subobjects_false/logsdb_columnar index still rejects PUT mapping with subobjects: true
+logsdb:35_columnar_subobjects_false/logsdb_columnar index still rejects subobjects: true
+logsdb:35_columnar_subobjects_false/logsdb_columnar standalone index accepts subobjects: false at root
+logsdb:35_columnar_subobjects_false/logsdb_columnar standalone index accepts subobjects: false on object field
+logsdb:40_source_mode_setting/create an index with disabled source mode
+logsdb:40_source_mode_setting/create an index with disabled source mode and logsdb index mode without setting
+logsdb:40_source_mode_setting/create an index with disabled source mode and standard index mode without setting
+logsdb:40_source_mode_setting/create an index with disabled source mode and time series index mode without setting
+logsdb:40_source_mode_setting/create an index with logsdb index mode and disabled source
+logsdb:40_source_mode_setting/create an index with logsdb index mode and stored source
+logsdb:40_source_mode_setting/create an index with logsdb index mode and synthetic source
+logsdb:40_source_mode_setting/create an index with standard index mode
+logsdb:40_source_mode_setting/create an index with stored source mode
+logsdb:40_source_mode_setting/create an index with stored source mode and logsdb index mode without setting
+logsdb:40_source_mode_setting/create an index with stored source mode and standard index mode without setting
+logsdb:40_source_mode_setting/create an index with stored source mode and time series index mode without setting
+logsdb:40_source_mode_setting/create an index with synthetic source mode
+logsdb:40_source_mode_setting/create an index with synthetic source mode and logsdb index mode without setting
+logsdb:40_source_mode_setting/create an index with synthetic source mode and standard index mode without setting
+logsdb:40_source_mode_setting/create an index with synthetic source mode and time series index mode without setting
+logsdb:40_source_mode_setting/create an index with time_series index mode and disabled source
+logsdb:40_source_mode_setting/create an index with time_series index mode and stored source
+logsdb:40_source_mode_setting/create an index with time_series index mode and synthetic source
+logsdb:40_source_mode_setting/create an index with unspecified source mode
+logsdb:40_source_mode_setting/modify final setting after index creation
+logsdb:40_source_mode_setting/override unspecified to disabled source mode
+logsdb:40_source_mode_setting/override unspecified to stored source mode
+logsdb:40_source_mode_setting/override unspecified to synthetic source mode
+logsdb:40_source_mode_setting/use deprecated _source.mode attr
+logsdb:40_source_mode_setting/use no-op _source.mode attr
+logsdb:50_esql_synthetic_source_disabled_fields/Simple from
+logsdb:50_esql_synthetic_source_disabled_fields/Simple from boolean fields
+logsdb:50_esql_synthetic_source_disabled_fields/Simple from geo point
+logsdb:50_esql_synthetic_source_disabled_fields/Simple from keyword fields
+logsdb:50_esql_synthetic_source_disabled_fields/Simple from number fields
+logsdb:50_esql_synthetic_source_disabled_fields/Simple from text fields
+logsdb:50_esql_synthetic_source_disabled_fields/message field with keyword multi-field with ignore_above
+logsdb:50_esql_synthetic_source_disabled_fields/message field without keyword multi-field
+logsdb:51_esql_synthetic_source/Simple from
+logsdb:51_esql_synthetic_source/Simple from boolean fields
+logsdb:51_esql_synthetic_source/Simple from geo point
+logsdb:51_esql_synthetic_source/Simple from keyword fields
+logsdb:51_esql_synthetic_source/Simple from number fields
+logsdb:51_esql_synthetic_source/Simple from text fields
+logsdb:51_esql_synthetic_source/message field with stored keyword multi-field with ignore_above
+logsdb:52_esql_unmapped_fields_synthetic_source/Load unmapped field
+logsdb:52_esql_unmapped_fields_synthetic_source/Load unmapped fields with LIMIT 1
+logsdb:52_esql_unmapped_fields_synthetic_source/Simple from
+logsdb:53_esql_synthetic_source_mixed_disabled_fields/Simple from
+logsdb:53_esql_synthetic_source_mixed_disabled_fields/Simple from keyword fields
+logsdb:60_synthetic_source_recovery/override synthetic recovery for disabled source mode index
+logsdb:60_synthetic_source_recovery/override synthetic recovery for logsdb index
+logsdb:60_synthetic_source_recovery/override synthetic recovery for standard index
+logsdb:60_synthetic_source_recovery/override synthetic recovery for stored source mode index
+logsdb:60_synthetic_source_recovery/override synthetic recovery for synthetic source mode index
+logsdb:60_synthetic_source_recovery/override synthetic recovery for time_series index
+logsdb:60_synthetic_source_recovery/synthetic recovery for disabled source mode index
+logsdb:60_synthetic_source_recovery/synthetic recovery for logsdb index
+logsdb:60_synthetic_source_recovery/synthetic recovery for standard index
+logsdb:60_synthetic_source_recovery/synthetic recovery for stored source mode index
+logsdb:60_synthetic_source_recovery/synthetic recovery for synthetic source mode index
+logsdb:60_synthetic_source_recovery/synthetic recovery for time_series index
+logsdb:61_columnar_synthetic_recovery/columnar data stream defaults to synthetic recovery source
+logsdb:61_columnar_synthetic_recovery/columnar data stream rejects disabling synthetic recovery source
+logsdb:61_columnar_synthetic_recovery/columnar index accepts explicit synthetic recovery source
+logsdb:61_columnar_synthetic_recovery/columnar index defaults to synthetic recovery source
+logsdb:61_columnar_synthetic_recovery/columnar index rejects disabling synthetic recovery source
+logsdb:61_columnar_synthetic_recovery/logsdb_columnar component template rejects disabling synthetic recovery source
+logsdb:61_columnar_synthetic_recovery/logsdb_columnar index accepts explicit synthetic recovery source
+logsdb:61_columnar_synthetic_recovery/logsdb_columnar index defaults to synthetic recovery source
+logsdb:61_columnar_synthetic_recovery/logsdb_columnar index rejects disabling synthetic recovery source
+logsdb:70_doc_values_skipper/create logs data stream with doc values sparse index
+logsdb:70_doc_values_skipper/create logs data stream without doc values sparse index
+logsdb:80_index_sort_defaults/create logsdb data stream with host as keyword
+logsdb:80_index_sort_defaults/create logsdb data stream with host as keyword and timestamp as date
+logsdb:80_index_sort_defaults/create logsdb data stream with host as text
+logsdb:80_index_sort_defaults/create logsdb data stream with host as text and multi fields
+logsdb:80_index_sort_defaults/create logsdb data stream with host as text and name as double
+logsdb:80_index_sort_defaults/create logsdb data stream with host.name as integer and timestamp as date
+logsdb:80_index_sort_defaults/create logsdb data stream with host.name as keyword
+logsdb:80_index_sort_defaults/create logsdb data stream with host.name as keyword and timestamp as date
+logsdb:80_index_sort_defaults/create logsdb data stream with host.name as keyword, message as pattern text, and timestamp as date
+logsdb:80_index_sort_defaults/create logsdb data stream with host.name as keyword, message as pattern text, and timestamp as date, but message sort disabled
+logsdb:80_index_sort_defaults/create logsdb data stream with message as pattern text, and timestamp as date
+logsdb:80_index_sort_defaults/create logsdb data stream with no host.name and timestamp as date
+logsdb:80_index_sort_defaults/create logsdb data stream with non-default sort field
+logsdb:80_index_sort_defaults/test standard mode
+logsdb:patterntext/10_basic/Exist query
+logsdb:patterntext/10_basic/Field caps
+logsdb:patterntext/10_basic/Fuzzy intervals query
+logsdb:patterntext/10_basic/Fuzzy query
+logsdb:patterntext/10_basic/Match Phrase Prefix query
+logsdb:patterntext/10_basic/Match Phrase query
+logsdb:patterntext/10_basic/Match query
+logsdb:patterntext/10_basic/Multiple values
+logsdb:patterntext/10_basic/Prefix intervals query
+logsdb:patterntext/10_basic/Prefix query
+logsdb:patterntext/10_basic/Query String query with phrase
+logsdb:patterntext/10_basic/Regexp query
+logsdb:patterntext/10_basic/Span query
+logsdb:patterntext/10_basic/Term intervals query
+logsdb:patterntext/10_basic/Wildcard highlighting
+logsdb:patterntext/10_basic/Wildcard intervals query
+logsdb:patterntext/10_basic/Wildcard query
+logsdb:patterntext/10_basic/tsdb
+logsdb:patterntext/11_basic_positions/Exist query
+logsdb:patterntext/11_basic_positions/Field caps
+logsdb:patterntext/11_basic_positions/Fuzzy intervals query
+logsdb:patterntext/11_basic_positions/Fuzzy query
+logsdb:patterntext/11_basic_positions/Match Phrase Prefix query
+logsdb:patterntext/11_basic_positions/Match Phrase query
+logsdb:patterntext/11_basic_positions/Match query
+logsdb:patterntext/11_basic_positions/Multiple values
+logsdb:patterntext/11_basic_positions/Prefix intervals query
+logsdb:patterntext/11_basic_positions/Prefix query
+logsdb:patterntext/11_basic_positions/Query String query with phrase
+logsdb:patterntext/11_basic_positions/Regexp query
+logsdb:patterntext/11_basic_positions/Span query
+logsdb:patterntext/11_basic_positions/Term intervals query
+logsdb:patterntext/11_basic_positions/Wildcard highlighting
+logsdb:patterntext/11_basic_positions/Wildcard intervals query
+logsdb:patterntext/11_basic_positions/Wildcard query
+logsdb:patterntext/11_basic_positions/tsdb
+logsdb:patterntext/20_synthetic_source/simple
+logsdb:patterntext/20_synthetic_source/synthetic_source with copy_to
+logsdb:patterntext/30_template_id/Exist query
+logsdb:patterntext/30_template_id/Field caps
+logsdb:patterntext/30_template_id/Get template_id field
+logsdb:patterntext/30_template_id/Match query
+logsdb:patterntext/30_template_id/Range query
+logsdb:patterntext/30_template_id/Sort by template_id ascending from request
+logsdb:patterntext/30_template_id/Sort by template_id descending from index config setting
+logsdb:patterntext/30_template_id/Term aggregation
+logsdb:patterntext/40_esql/Simple from
+logsdb:patterntext/40_esql/match phrase query
+logsdb:patterntext/40_esql/match query
+logsdb:patterntext/40_esql/template_id stats
+logsdb:patterntext/50_analyzer/Match it
+logsdb:patterntext/50_analyzer/Text analysis

@@ -1,0 +1,347 @@
+{
+ "found": {
+  "case": 57,
+  "case_seed": 112000393,
+  "seed": 112
+ },
+ "signature": "POST _search .hits.total.value",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 2,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m11-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m11-a"
+  },
+  {
+   "es": {
+    "body": {
+     "errors": false,
+     "items": [
+      {
+       "index": {
+        "_id": "14",
+        "_index": "diff-m11-a",
+        "_primary_term": 1,
+        "_seq_no": 0,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "16",
+        "_index": "diff-m11-a",
+        "_primary_term": 1,
+        "_seq_no": 1,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "19",
+        "_index": "diff-m11-a",
+        "_primary_term": 1,
+        "_seq_no": 2,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      },
+      {
+       "index": {
+        "_id": "20",
+        "_index": "diff-m11-a",
+        "_primary_term": 1,
+        "_seq_no": 3,
+        "_shards": {
+         "failed": 0,
+         "successful": 1,
+         "total": 1
+        },
+        "_version": 1,
+        "result": "created",
+        "status": 201
+       }
+      }
+     ],
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "lines": [
+    {
+     "index": {
+      "_id": "14",
+      "_index": "diff-m11-a"
+     }
+    },
+    {
+     "bool0": true,
+     "comp0": "blue cats jumps",
+     "date0": "2025-01-21T06:00:00Z",
+     "int0": -21,
+     "kw0": "alpha",
+     "kw1": "Alpha",
+     "mot0": "brown green and and Quick over Dogs green cherry",
+     "o": {
+      "int0": [
+       30,
+       5
+      ],
+      "kw0": "gamma"
+     },
+     "short0": 93,
+     "text0": "and jumps elastic",
+     "ulong0": 68
+    },
+    {
+     "index": {
+      "_id": "16",
+      "_index": "diff-m11-a"
+     }
+    },
+    {
+     "bool0": false,
+     "byte0": 101,
+     "comp0": "cats index engine",
+     "date0": "2024-09-19",
+     "int0": -4,
+     "kw0": "alpha",
+     "kw1": "delta",
+     "o": {
+      "kw0": "delta"
+     },
+     "short0": 157,
+     "text0": "data dog",
+     "ulong0": 45,
+     "vec0": [
+      2.13,
+      -2.16,
+      -0.8
+     ]
+    },
+    {
+     "index": {
+      "_id": "19",
+      "_index": "diff-m11-a"
+     }
+    },
+    {
+     "bool0": false,
+     "byte0": -85,
+     "comp0": "blue ran search",
+     "date0": 1715900400000,
+     "int0": 15,
+     "kw0": [
+      "beta",
+      "gamma"
+     ],
+     "mot0": "banana and roll lazy lazy",
+     "o": {
+      "int0": -19
+     },
+     "short0": 298,
+     "ulong0": 37
+    },
+    {
+     "index": {
+      "_id": "20",
+      "_index": "diff-m11-a"
+     }
+    },
+    {
+     "bool0": false,
+     "byte0": -84,
+     "comp0": "dog index of",
+     "date0": 1726164000000,
+     "int0": -37,
+     "kw1": "rho",
+     "mot0": "Quick apple data roll red elastic",
+     "o": {
+      "int0": 3,
+      "kw0": "rho"
+     },
+     "short0": 275,
+     "text0": "and",
+     "ulong0": 71
+    }
+   ],
+   "method": "POST",
+   "path": "/_bulk"
+  },
+  {
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "successful": 2,
+      "total": 2
+     }
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m11-a/_refresh"
+  },
+  {
+   "body": {
+    "query": {
+     "exists": {
+      "field": "comp0"
+     }
+    },
+    "terminate_after": 3
+   },
+   "es": {
+    "body": {
+     "_shards": {
+      "failed": 0,
+      "skipped": 0,
+      "successful": 2,
+      "total": 2
+     },
+     "hits": {
+      "hits": [
+       {
+        "_id": "14",
+        "_index": "diff-m11-a",
+        "_score": 1.0,
+        "_source": {
+         "bool0": true,
+         "comp0": "blue cats jumps",
+         "date0": "2025-01-21T06:00:00Z",
+         "int0": -21,
+         "kw0": "alpha",
+         "kw1": "Alpha",
+         "mot0": "brown green and and Quick over Dogs green cherry",
+         "o": {
+          "int0": [
+           30,
+           5
+          ],
+          "kw0": "gamma"
+         },
+         "short0": 93,
+         "text0": "and jumps elastic",
+         "ulong0": 68
+        }
+       },
+       {
+        "_id": "16",
+        "_index": "diff-m11-a",
+        "_score": 1.0,
+        "_source": {
+         "bool0": false,
+         "byte0": 101,
+         "comp0": "cats index engine",
+         "date0": "2024-09-19",
+         "int0": -4,
+         "kw0": "alpha",
+         "kw1": "delta",
+         "o": {
+          "kw0": "delta"
+         },
+         "short0": 157,
+         "text0": "data dog",
+         "ulong0": 45,
+         "vec0": [
+          2.13,
+          -2.16,
+          -0.8
+         ]
+        }
+       },
+       {
+        "_id": "19",
+        "_index": "diff-m11-a",
+        "_score": 1.0,
+        "_source": {
+         "bool0": false,
+         "byte0": -85,
+         "comp0": "blue ran search",
+         "date0": 1715900400000,
+         "int0": 15,
+         "kw0": [
+          "beta",
+          "gamma"
+         ],
+         "mot0": "banana and roll lazy lazy",
+         "o": {
+          "int0": -19
+         },
+         "short0": 298,
+         "ulong0": 37
+        }
+       }
+      ],
+      "max_score": 1.0,
+      "total": {
+       "relation": "eq",
+       "value": 4
+      }
+     },
+     "terminated_early": true,
+     "timed_out": false,
+     "took": 0
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "POST",
+   "path": "/diff-m11-a/_search"
+  }
+ ]
+}

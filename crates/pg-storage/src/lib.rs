@@ -1,5 +1,6 @@
 //! Bottomless storage for Postgres: object storage is the source of truth, local disk is a cache.
 
+pub mod container_credentials;
 pub mod lsn;
 pub mod objects;
 pub mod receiver;

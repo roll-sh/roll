@@ -1,0 +1,562 @@
+{
+  "description" : "Open/close, index blocks and what they block.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-b1",
+      "body" : {
+        "settings" : {
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-b1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b2",
+      "body" : {
+        "settings" : {
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-b2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-b1/_close",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : {
+          "esm-b1" : {
+            "closed" : true
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-b1/_close",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : false,
+        "indices" : { }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-b1",
+      "status" : 200,
+      "response" : {
+        "esm-b1" : {
+          "aliases" : { },
+          "mappings" : { },
+          "settings" : {
+            "index" : {
+              "routing" : {
+                "allocation" : {
+                  "include" : {
+                    "_tier_preference" : "data_content"
+                  }
+                }
+              },
+              "verified_before_close" : "true",
+              "number_of_shards" : "1",
+              "provided_name" : "esm-b1",
+              "creation_date" : "1792520998223",
+              "number_of_replicas" : "0",
+              "uuid" : "M6uumNCFRz6oRoN5vEd6gA",
+              "version" : {
+                "created" : "9111000"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-b*/_settings/index.verified_before_close?flat_settings",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-b*/_settings/index.number_of_shards?flat_settings&expand_wildcards=all",
+      "status" : 200,
+      "response" : {
+        "esm-b1" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        },
+        "esm-b2" : {
+          "settings" : {
+            "index.number_of_shards" : "1"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_cat/indices/esm-b*?h=index,status&s=index",
+      "status" : 200,
+      "text" : "esm-b1 close\nesm-b2 open\n",
+      "response_headers" : {
+        "content-type" : "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_mapping",
+      "body" : {
+        "properties" : {
+          "f" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-b1/_mapping",
+      "status" : 200,
+      "response" : {
+        "esm-b1" : {
+          "mappings" : {
+            "properties" : {
+              "f" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-nope/_close",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-b*/_close",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Wildcard expressions or all indices are not allowed"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Wildcard expressions or all indices are not allowed"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-b1/_open",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-nope/_open",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-nope]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-nope",
+              "index_uuid" : "_na_",
+              "index" : "esm-nope"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-nope]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-nope",
+          "index_uuid" : "_na_",
+          "index" : "esm-nope"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_block/read_only",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : [
+          {
+            "name" : "esm-b1",
+            "blocked" : true
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_mapping",
+      "body" : {
+        "properties" : {
+          "f" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "cluster_block_exception",
+              "reason" : "index [esm-b1] blocked by: [FORBIDDEN/5/index read-only (api)];"
+            }
+          ],
+          "type" : "cluster_block_exception",
+          "reason" : "index [esm-b1] blocked by: [FORBIDDEN/5/index read-only (api)];"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_settings",
+      "body" : {
+        "index.max_result_window" : 100
+      },
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "cluster_block_exception",
+              "reason" : "index [esm-b1] blocked by: [FORBIDDEN/5/index read-only (api)];"
+            }
+          ],
+          "type" : "cluster_block_exception",
+          "reason" : "index [esm-b1] blocked by: [FORBIDDEN/5/index read-only (api)];"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_alias/esm-ba",
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "cluster_block_exception",
+              "reason" : "index [esm-b1] blocked by: [FORBIDDEN/5/index read-only (api)];"
+            }
+          ],
+          "type" : "cluster_block_exception",
+          "reason" : "index [esm-b1] blocked by: [FORBIDDEN/5/index read-only (api)];"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-b1/_block/read_only",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "indices" : [
+          {
+            "name" : "esm-b1",
+            "unblocked" : true
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_block/metadata",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : [
+          {
+            "name" : "esm-b1",
+            "blocked" : true
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-b1/_mapping",
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "cluster_block_exception",
+              "reason" : "index [esm-b1] blocked by: [FORBIDDEN/9/index metadata (api)];"
+            }
+          ],
+          "type" : "cluster_block_exception",
+          "reason" : "index [esm-b1] blocked by: [FORBIDDEN/9/index metadata (api)];"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-b1/_settings",
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "cluster_block_exception",
+              "reason" : "index [esm-b1] blocked by: [FORBIDDEN/9/index metadata (api)];"
+            }
+          ],
+          "type" : "cluster_block_exception",
+          "reason" : "index [esm-b1] blocked by: [FORBIDDEN/9/index metadata (api)];"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-b1",
+      "status" : 403,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "cluster_block_exception",
+              "reason" : "index [esm-b1] blocked by: [FORBIDDEN/9/index metadata (api)];"
+            }
+          ],
+          "type" : "cluster_block_exception",
+          "reason" : "index [esm-b1] blocked by: [FORBIDDEN/9/index metadata (api)];"
+        },
+        "status" : 403
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_settings",
+      "body" : {
+        "index.blocks.metadata" : false
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_block/write",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : [
+          {
+            "name" : "esm-b1",
+            "blocked" : true
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_block/read",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : [
+          {
+            "name" : "esm-b1",
+            "blocked" : true
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-b1/_settings?flat_settings&filter_path=*.settings.index.blocks*",
+      "status" : 200,
+      "response" : { },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b1/_block/read_only_allow_delete",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: read_only_allow_delete block is for internal use only;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: read_only_allow_delete block is for internal use only;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-b1/_block/read_only_allow_delete",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "action_request_validation_exception",
+              "reason" : "Validation Failed: 1: read_only_allow_delete block is for internal use only;"
+            }
+          ],
+          "type" : "action_request_validation_exception",
+          "reason" : "Validation Failed: 1: read_only_allow_delete block is for internal use only;"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-b*/_block/write",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Wildcard expressions or all indices are not allowed"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Wildcard expressions or all indices are not allowed"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-b1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

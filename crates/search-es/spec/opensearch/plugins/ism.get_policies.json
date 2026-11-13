@@ -1,0 +1,51 @@
+{
+  "ism.get_policies": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/im-plugin/ism/api/",
+      "description": "Lists ISM policies."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ism/policies",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_opendistro/_ism/policies",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "size": {
+        "type": "number",
+        "description": "Page size"
+      },
+      "from": {
+        "type": "number",
+        "description": "Offset"
+      },
+      "sortField": {
+        "type": "string",
+        "description": "Sort field"
+      },
+      "sortOrder": {
+        "type": "string",
+        "description": "asc or desc"
+      },
+      "queryString": {
+        "type": "string",
+        "description": "Policy query"
+      },
+      "showPolicy": {
+        "type": "boolean",
+        "description": "unused"
+      }
+    }
+  }
+}

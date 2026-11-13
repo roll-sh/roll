@@ -1,0 +1,1772 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/hw-qs?ignore_unavailable=true",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-qs",
+      "body": {
+        "settings": {
+          "number_of_shards": 1
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text"
+            },
+            "k": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-qs"
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=kw1%3A",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [kw1:]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [kw1:]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'kw1:': Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%20AND",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a AND]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a AND]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a AND': Encountered \"<EOF>\" at line 1, column 5.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 5.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%28a",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [(a]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [(a]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '(a': Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \")\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \")\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a)]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a)]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a)': Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%2B",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [+]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [+]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '+': Encountered \"<EOF>\" at line 1, column 1.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 1.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [)]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [)]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse ')': Encountered \" \")\" \") \"\" at line 1, column 0.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 0.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%3Ab%3A",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a:b:]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a:b:]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a:b:': Encountered \" \":\" \": \"\" at line 1, column 3.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \":\" \": \"\" at line 1, column 3.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=k%3A%20AND%20x",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [k: AND x]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [k: AND x]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'k: AND x': Encountered \" <AND> \"AND \"\" at line 1, column 3.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" <AND> \"AND \"\" at line 1, column 3.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%20OR%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a OR )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a OR )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a OR )': Encountered \" \")\" \") \"\" at line 1, column 5.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 5.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%28a%20b",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [(a b]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [(a b]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '(a b': Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \")\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \")\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=f%3A%28x",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [f:(x]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [f:(x]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'f:(x': Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \")\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \")\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%5E",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a^]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a^]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a^': Encountered \"<EOF>\" at line 1, column 2.\nWas expecting:\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 2.\nWas expecting:\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%28",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [(]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [(]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '(': Encountered \"<EOF>\" at line 1, column 1.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 1.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%20b%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a b)]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a b)]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a b)': Encountered \" \")\" \") \"\" at line 1, column 3.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 3.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%22x%22~2%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [\"x\"~2 )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [\"x\"~2 )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '\"x\"~2 )': Encountered \" \")\" \") \"\" at line 1, column 6.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 6.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%5B1%20TO%202%5D%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [[1 TO 2])]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [[1 TO 2])]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '[1 TO 2])': Encountered \" \")\" \") \"\" at line 1, column 8.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 8.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%C3%A9%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [\u00e9)]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [\u00e9)]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '\u00e9)': Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a~%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a~ )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a~ )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a~ )': Encountered \" \")\" \") \"\" at line 1, column 3.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 3.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%28a%29%5E2%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [(a)^2 )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [(a)^2 )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '(a)^2 )': Encountered \" \")\" \") \"\" at line 1, column 6.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 6.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%2Fx%2F%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [/x/ )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [/x/ )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '/x/ )': Encountered \" \")\" \") \"\" at line 1, column 4.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 4.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=ab%2A%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [ab* )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [ab* )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'ab* )': Encountered \" \")\" \") \"\" at line 1, column 4.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 4.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%3Fb%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a?b )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a?b )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a?b )': Encountered \" \")\" \") \"\" at line 1, column 4.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 4.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%2A%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [* )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [* )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '* )': Encountered \" \")\" \") \"\" at line 1, column 2.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 2.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=NOT",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [NOT]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [NOT]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'NOT': Encountered \"<EOF>\" at line 1, column 3.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 3.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%21",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [!]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [!]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '!': Encountered \"<EOF>\" at line 1, column 1.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 1.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%20%26%26%20%29",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a && )]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a && )]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a && )': Encountered \" \")\" \") \"\" at line 1, column 5.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 5.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=x%20%22",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [x \"]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [x \"]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'x \"': Lexical error at line 1, column 4.  Encountered: <EOF> (in lexical state 2)",
+                    "caused_by": {
+                      "type": "token_mgr_error",
+                      "reason": "Lexical error at line 1, column 4.  Encountered: <EOF> (in lexical state 2)"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%5B1%20TO",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [[1 TO]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [[1 TO]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '[1 TO': Encountered \"<EOF>\" at line 1, column 5.\nWas expecting one of:\n    \"TO\" ...\n    <RANGE_QUOTED> ...\n    <RANGE_GOOP> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 5.\nWas expecting one of:\n    \"TO\" ...\n    <RANGE_QUOTED> ...\n    <RANGE_GOOP> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%5B1",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [[1]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [[1]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '[1': Encountered \"<EOF>\" at line 1, column 2.\nWas expecting:\n    \"TO\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 2.\nWas expecting:\n    \"TO\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%5B1%20TO%202",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [[1 TO 2]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [[1 TO 2]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '[1 TO 2': Encountered \"<EOF>\" at line 1, column 7.\nWas expecting one of:\n    \"]\" ...\n    \"}\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 7.\nWas expecting one of:\n    \"]\" ...\n    \"}\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=a%5C",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a\\]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a\\]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a\\': Lexical error at line 1, column 3.  Encountered: <EOF> (in lexical state 2)",
+                    "caused_by": {
+                      "type": "token_mgr_error",
+                      "reason": "Lexical error at line 1, column 3.  Encountered: <EOF> (in lexical state 2)"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_search?q=%2Fx",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [/x]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [/x]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '/x': Lexical error at line 1, column 3.  Encountered: <EOF> after prefix \"/x\" (in lexical state 2)",
+                    "caused_by": {
+                      "type": "token_mgr_error",
+                      "reason": "Lexical error at line 1, column 3.  Encountered: <EOF> after prefix \"/x\" (in lexical state 2)"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/hw-qs/_count?q=k%3A&lenient=true",
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [k:]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [k:]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'k:': Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-qs/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "t:(a OR"
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [t:(a OR]",
+                "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                "index": "hw-qs"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "hw-qs",
+                "node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [t:(a OR]",
+                  "index_uuid": "B9bqc4_8QL6MUqVM8SKI2g",
+                  "index": "hw-qs",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 't:(a OR': Encountered \"<EOF>\" at line 1, column 7.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 7.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-qs/_validate/query?explain=true",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "a)"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "valid": false,
+          "explanations": [
+            {
+              "index": "hw-qs",
+              "valid": false,
+              "error": "[hw-qs/B9bqc4_8QL6MUqVM8SKI2g] org.elasticsearch.index.query.QueryShardException: Failed to parse query [a)]; org.apache.lucene.queryparser.classic.ParseException: Cannot parse 'a)': Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hw-qs",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

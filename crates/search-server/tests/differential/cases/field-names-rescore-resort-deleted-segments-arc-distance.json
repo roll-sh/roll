@@ -1,0 +1,1337 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "/diff-h1-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text"
+            },
+            "tn": {
+              "type": "text",
+              "norms": false
+            },
+            "k": {
+              "type": "keyword"
+            },
+            "kn": {
+              "type": "keyword",
+              "doc_values": false
+            },
+            "m": {
+              "type": "match_only_text"
+            },
+            "g": {
+              "type": "geo_point"
+            },
+            "n": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "diff-h1-a"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk",
+      "lines": [
+        {
+          "index": {
+            "_index": "diff-h1-a",
+            "_id": "1"
+          }
+        },
+        {
+          "t": "quick brown fox",
+          "tn": "",
+          "k": "",
+          "kn": "",
+          "m": "",
+          "g": {
+            "lat": 41.12,
+            "lon": -71.34
+          },
+          "n": 3
+        },
+        {
+          "index": {
+            "_index": "diff-h1-a",
+            "_id": "2"
+          }
+        },
+        {
+          "t": "quick fox",
+          "tn": "fox",
+          "k": "a",
+          "kn": "b",
+          "m": "fox jumps",
+          "g": {
+            "lat": -33.5,
+            "lon": 151.2
+          },
+          "n": 7
+        },
+        {
+          "index": {
+            "_index": "diff-h1-a",
+            "_id": "3"
+          }
+        },
+        {
+          "t": "lazy dog",
+          "g": {
+            "lat": 64.1,
+            "lon": -21.9
+          },
+          "n": 1
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "diff-h1-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "diff-h1-a",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "diff-h1-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_refresh",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk",
+      "lines": [
+        {
+          "index": {
+            "_index": "diff-h1-a",
+            "_id": "4"
+          }
+        },
+        {
+          "t": "zebra unicorn",
+          "k": "zz",
+          "n": 9
+        },
+        {
+          "index": {
+            "_index": "diff-h1-a",
+            "_id": "5"
+          }
+        },
+        {
+          "t": "zebra",
+          "k": "zy",
+          "n": 4
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "diff-h1-a",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "diff-h1-a",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_refresh",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/diff-h1-a/_doc/4",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "diff-h1-a",
+          "_id": "4",
+          "_version": 2,
+          "result": "deleted",
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 5,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/diff-h1-a/_doc/5",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_index": "diff-h1-a",
+          "_id": "5",
+          "_version": 2,
+          "result": "deleted",
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          },
+          "_seq_no": 6,
+          "_primary_term": 1
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_refresh",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_search",
+      "body": {
+        "size": 0,
+        "aggs": {
+          "k": {
+            "terms": {
+              "field": "k",
+              "min_doc_count": 0
+            }
+          }
+        },
+        "suggest": {
+          "s": {
+            "text": "zebre",
+            "term": {
+              "field": "t",
+              "suggest_mode": "always"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 3,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          },
+          "aggregations": {
+            "k": {
+              "doc_count_error_upper_bound": 0,
+              "sum_other_doc_count": 0,
+              "buckets": [
+                {
+                  "key": "",
+                  "doc_count": 1
+                },
+                {
+                  "key": "a",
+                  "doc_count": 1
+                },
+                {
+                  "key": "zy",
+                  "doc_count": 0
+                },
+                {
+                  "key": "zz",
+                  "doc_count": 0
+                }
+              ]
+            }
+          },
+          "suggest": {
+            "s": [
+              {
+                "text": "zebre",
+                "offset": 0,
+                "length": 5,
+                "options": [
+                  {
+                    "text": "zebra",
+                    "score": 0.8,
+                    "freq": 2
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_search",
+      "body": {
+        "query": {
+          "match": {
+            "t": "zebra quick"
+          }
+        },
+        "explain": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.87546873,
+            "hits": [
+              {
+                "_shard": "[diff-h1-a][0]",
+                "_node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "_index": "diff-h1-a",
+                "_id": "2",
+                "_score": 0.87546873,
+                "_source": {
+                  "t": "quick fox",
+                  "tn": "fox",
+                  "k": "a",
+                  "kn": "b",
+                  "m": "fox jumps",
+                  "g": {
+                    "lat": -33.5,
+                    "lon": 151.2
+                  },
+                  "n": 7
+                },
+                "_explanation": {
+                  "value": 0.87546873,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 0.87546873,
+                      "description": "weight(t:quick in 1) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.87546873,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.87546873,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 2,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 5,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.45454544,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2.0,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "_shard": "[diff-h1-a][0]",
+                "_node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "_index": "diff-h1-a",
+                "_id": "1",
+                "_score": 0.72680414,
+                "_source": {
+                  "t": "quick brown fox",
+                  "tn": "",
+                  "k": "",
+                  "kn": "",
+                  "m": "",
+                  "g": {
+                    "lat": 41.12,
+                    "lon": -71.34
+                  },
+                  "n": 3
+                },
+                "_explanation": {
+                  "value": 0.72680414,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 0.72680414,
+                      "description": "weight(t:quick in 0) [PerFieldSimilarity], result of:",
+                      "details": [
+                        {
+                          "value": 0.72680414,
+                          "description": "score(freq=1.0), computed as boost * idf * tf from:",
+                          "details": [
+                            {
+                              "value": 2.2,
+                              "description": "boost",
+                              "details": []
+                            },
+                            {
+                              "value": 0.87546873,
+                              "description": "idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:",
+                              "details": [
+                                {
+                                  "value": 2,
+                                  "description": "n, number of documents containing term",
+                                  "details": []
+                                },
+                                {
+                                  "value": 5,
+                                  "description": "N, total number of documents with field",
+                                  "details": []
+                                }
+                              ]
+                            },
+                            {
+                              "value": 0.37735844,
+                              "description": "tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:",
+                              "details": [
+                                {
+                                  "value": 1.0,
+                                  "description": "freq, occurrences of term within document",
+                                  "details": []
+                                },
+                                {
+                                  "value": 1.2,
+                                  "description": "k1, term saturation parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 0.75,
+                                  "description": "b, length normalization parameter",
+                                  "details": []
+                                },
+                                {
+                                  "value": 3.0,
+                                  "description": "dl, length of field",
+                                  "details": []
+                                },
+                                {
+                                  "value": 2.0,
+                                  "description": "avgdl, average length of field",
+                                  "details": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "exists": {
+                  "field": "tn"
+                }
+              },
+              {
+                "exists": {
+                  "field": "kn"
+                }
+              },
+              {
+                "exists": {
+                  "field": "m"
+                }
+              },
+              {
+                "exists": {
+                  "field": "k"
+                }
+              }
+            ]
+          }
+        },
+        "explain": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 4.0,
+            "hits": [
+              {
+                "_shard": "[diff-h1-a][0]",
+                "_node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "_index": "diff-h1-a",
+                "_id": "1",
+                "_score": 4.0,
+                "_source": {
+                  "t": "quick brown fox",
+                  "tn": "",
+                  "k": "",
+                  "kn": "",
+                  "m": "",
+                  "g": {
+                    "lat": 41.12,
+                    "lon": -71.34
+                  },
+                  "n": 3
+                },
+                "_explanation": {
+                  "value": 4.0,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 1.0,
+                      "description": "ConstantScore(_field_names:tn)",
+                      "details": []
+                    },
+                    {
+                      "value": 1.0,
+                      "description": "ConstantScore(_field_names:kn)",
+                      "details": []
+                    },
+                    {
+                      "value": 1.0,
+                      "description": "ConstantScore(_field_names:m)",
+                      "details": []
+                    },
+                    {
+                      "value": 1.0,
+                      "description": "ConstantScore(FieldExistsQuery [field=k])",
+                      "details": []
+                    }
+                  ]
+                }
+              },
+              {
+                "_shard": "[diff-h1-a][0]",
+                "_node": "u6_ulX3TS3eOpnaNOgKSqg",
+                "_index": "diff-h1-a",
+                "_id": "2",
+                "_score": 4.0,
+                "_source": {
+                  "t": "quick fox",
+                  "tn": "fox",
+                  "k": "a",
+                  "kn": "b",
+                  "m": "fox jumps",
+                  "g": {
+                    "lat": -33.5,
+                    "lon": 151.2
+                  },
+                  "n": 7
+                },
+                "_explanation": {
+                  "value": 4.0,
+                  "description": "sum of:",
+                  "details": [
+                    {
+                      "value": 1.0,
+                      "description": "ConstantScore(_field_names:tn)",
+                      "details": []
+                    },
+                    {
+                      "value": 1.0,
+                      "description": "ConstantScore(_field_names:kn)",
+                      "details": []
+                    },
+                    {
+                      "value": 1.0,
+                      "description": "ConstantScore(_field_names:m)",
+                      "details": []
+                    },
+                    {
+                      "value": 1.0,
+                      "description": "ConstantScore(FieldExistsQuery [field=k])",
+                      "details": []
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_count",
+      "body": {
+        "query": {
+          "exists": {
+            "field": "tn"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "count": 2,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_count",
+      "body": {
+        "query": {
+          "exists": {
+            "field": "m"
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "count": 2,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_count",
+      "body": {
+        "query": {
+          "wildcard": {
+            "k": {
+              "value": ""
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "count": 0,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_count",
+      "body": {
+        "query": {
+          "wildcard": {
+            "k": {
+              "value": "",
+              "case_insensitive": true
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "count": 0,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_count",
+      "body": {
+        "query": {
+          "term": {
+            "k": {
+              "value": "",
+              "case_insensitive": true
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "count": 1,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_search",
+      "body": {
+        "query": {
+          "match": {
+            "t": "quick fox"
+          }
+        },
+        "rescore": {
+          "window_size": 1,
+          "query": {
+            "score_mode": "min",
+            "rescore_query": {
+              "constant_score": {
+                "filter": {
+                  "match_all": {}
+                },
+                "boost": 0.01
+              }
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 1.4536083,
+            "hits": [
+              {
+                "_index": "diff-h1-a",
+                "_id": "1",
+                "_score": 1.4536083,
+                "_source": {
+                  "t": "quick brown fox",
+                  "tn": "",
+                  "k": "",
+                  "kn": "",
+                  "m": "",
+                  "g": {
+                    "lat": 41.12,
+                    "lon": -71.34
+                  },
+                  "n": 3
+                }
+              },
+              {
+                "_index": "diff-h1-a",
+                "_id": "2",
+                "_score": 0.01,
+                "_source": {
+                  "t": "quick fox",
+                  "tn": "fox",
+                  "k": "a",
+                  "kn": "b",
+                  "m": "fox jumps",
+                  "g": {
+                    "lat": -33.5,
+                    "lon": 151.2
+                  },
+                  "n": 7
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_search",
+      "body": {
+        "query": {
+          "match": {
+            "t": "quick fox lazy"
+          }
+        },
+        "rescore": [
+          {
+            "window_size": 2,
+            "query": {
+              "score_mode": "multiply",
+              "rescore_query": {
+                "match": {
+                  "t": "dog"
+                }
+              },
+              "rescore_query_weight": 0.1
+            }
+          },
+          {
+            "window_size": 1,
+            "query": {
+              "score_mode": "max",
+              "rescore_query": {
+                "constant_score": {
+                  "filter": {
+                    "match_all": {}
+                  },
+                  "boost": 5
+                }
+              }
+            }
+          }
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 5.0,
+            "hits": [
+              {
+                "_index": "diff-h1-a",
+                "_id": "2",
+                "_score": 5.0,
+                "_source": {
+                  "t": "quick fox",
+                  "tn": "fox",
+                  "k": "a",
+                  "kn": "b",
+                  "m": "fox jumps",
+                  "g": {
+                    "lat": -33.5,
+                    "lon": 151.2
+                  },
+                  "n": 7
+                }
+              },
+              {
+                "_index": "diff-h1-a",
+                "_id": "1",
+                "_score": 1.4536083,
+                "_source": {
+                  "t": "quick brown fox",
+                  "tn": "",
+                  "k": "",
+                  "kn": "",
+                  "m": "",
+                  "g": {
+                    "lat": 41.12,
+                    "lon": -71.34
+                  },
+                  "n": 3
+                }
+              },
+              {
+                "_index": "diff-h1-a",
+                "_id": "3",
+                "_score": 1.3862942,
+                "_source": {
+                  "t": "lazy dog",
+                  "g": {
+                    "lat": 64.1,
+                    "lon": -21.9
+                  },
+                  "n": 1
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_search",
+      "body": {
+        "_source": false,
+        "script_fields": {
+          "d": {
+            "script": {
+              "source": "doc['g'].arcDistance(params.lat, params.lon)",
+              "params": {
+                "lat": 12.5,
+                "lon": -33.25
+              }
+            }
+          },
+          "p": {
+            "script": {
+              "source": "doc['g'].planeDistance(params.lat, params.lon)",
+              "params": {
+                "lat": 12.5,
+                "lon": -33.25
+              }
+            }
+          }
+        },
+        "sort": [
+          "n"
+        ]
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 26,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": [
+              {
+                "_index": "diff-h1-a",
+                "_id": "3",
+                "_score": null,
+                "fields": {
+                  "p": [
+                    5822523.512995017
+                  ],
+                  "d": [
+                    5805182.887111342
+                  ]
+                },
+                "sort": [
+                  1
+                ]
+              },
+              {
+                "_index": "diff-h1-a",
+                "_id": "1",
+                "_score": null,
+                "fields": {
+                  "p": [
+                    4941373.401479271
+                  ],
+                  "d": [
+                    4875584.9517689105
+                  ]
+                },
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "diff-h1-a",
+                "_id": "2",
+                "_score": null,
+                "fields": {
+                  "p": [
+                    20805055.748244382
+                  ],
+                  "d": [
+                    17636768.914394774
+                  ]
+                },
+                "sort": [
+                  7
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/diff-h1-a/_search",
+      "body": {
+        "_source": false,
+        "query": {
+          "function_score": {
+            "functions": [
+              {
+                "gauss": {
+                  "g": {
+                    "origin": {
+                      "lat": 40,
+                      "lon": -70
+                    },
+                    "scale": "500km"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "sort": [
+          "n"
+        ],
+        "track_scores": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 12,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.9244773,
+            "hits": [
+              {
+                "_index": "diff-h1-a",
+                "_id": "3",
+                "_score": 8.671316e-21,
+                "sort": [
+                  1
+                ]
+              },
+              {
+                "_index": "diff-h1-a",
+                "_id": "1",
+                "_score": 0.9244773,
+                "sort": [
+                  3
+                ]
+              },
+              {
+                "_index": "diff-h1-a",
+                "_id": "2",
+                "_score": 0.0,
+                "sort": [
+                  7
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/diff-h1-a",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

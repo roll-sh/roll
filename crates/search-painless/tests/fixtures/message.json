@@ -1,0 +1,1016 @@
+[
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0} x {1}', new Object[] {1, 'a'})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1 x a"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0} x {1}', 1, 'a')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "compile error",
+      "script_stack": [
+       "return MessageFormat.format('{0} x {1}', 1, ' ...",
+       "                    ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{0} x {1}', 1, 'a')",
+      "lang": "painless",
+      "position": {
+       "offset": 20,
+       "start": 0,
+       "end": 45
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "compile error",
+    "script_stack": [
+     "return MessageFormat.format('{0} x {1}', 1, ' ...",
+     "                    ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{0} x {1}', 1, 'a')",
+    "lang": "painless",
+    "position": {
+     "offset": 20,
+     "start": 0,
+     "end": 45
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "static method [java.text.MessageFormat, format/3] not found"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format(\"It's {0}\", new Object[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Its {0}"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format(\"It''s '{0}' {0} '{'1}' ''{1}''\", new Object[] {'x', 'y'})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "It's {0} x {1} '{1}'"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0} {1} {2} {3} {4}', new Object[] {1234567.891, 42, -5L, 0.5f, new BigDecimal('12345.678')})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1,234,567.891 42 -5 0.5 12,345.678"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,number} {0,number,integer} {0,number,percent} {0,number,currency} {0,number,#.#} {0,number,0000.00}', new Object[] {1234.5678})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "1,234.568 1,235 123,457% $1,234.57 1234.6 1234.57"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0} {1}', new Object[] {null, new Date(0)})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "null 1/1/70, 12:00 AM"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,date} {0,time} {0,date,short} {0,date,long} {0,date,full} {0,time,short} {0,date,yyyy-MM-dd}', new Object[] {new Date(1600000000000L)})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "Sep 13, 2020 12:26:40 PM 9/13/20 September 13, 2020 Sunday, September 13, 2020 12:26 PM 2020-09-13"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,choice,0#no files|1#one file|1<{0,number,integer} files}', new Object[] {0}) + ' / ' + MessageFormat.format('{0,choice,0#no files|1#one file|1<{0,number,integer} files}', new Object[] {1}) + ' / ' + MessageFormat.format('{0,choice,0#no files|1#one file|1<{0,number,integer} files}', new Object[] {1234})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "no files / one file / 1,234 files"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0} {5} {1}', new Object[] {'a', 'b'})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "a {5} b"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0}', null)",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "{0}"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0', new Object[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:689)",
+       "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+       "return MessageFormat.format('{0', new Object[] {1})",
+       "                                                ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{0', new Object[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 48,
+       "start": 0,
+       "end": 51
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:689)",
+     "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+     "return MessageFormat.format('{0', new Object[] {1})",
+     "                                                ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{0', new Object[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 48,
+     "start": 0,
+     "end": 51
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Unmatched braces in the pattern."
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{x}', new Object[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1644)",
+       "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+       "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+       "return MessageFormat.format('{x}', new Object[] {1})",
+       "                                                 ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{x}', new Object[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 49,
+       "start": 0,
+       "end": 52
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1644)",
+     "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+     "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+     "return MessageFormat.format('{x}', new Object[] {1})",
+     "                                                 ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{x}', new Object[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 49,
+     "start": 0,
+     "end": 52
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "can't parse argument number: x",
+     "caused_by": {
+      "type": "number_format_exception",
+      "reason": "For input string: \"x\""
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{-1}', new Object[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1648)",
+       "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+       "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+       "return MessageFormat.format('{-1}', new Object[] {1})",
+       "                                                  ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{-1}', new Object[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 50,
+       "start": 0,
+       "end": 53
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1648)",
+     "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+     "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+     "return MessageFormat.format('{-1}', new Object[] {1})",
+     "                                                  ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{-1}', new Object[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 50,
+     "start": 0,
+     "end": 53
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "negative argument number: -1"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,foo}', new Object[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.MessageFormat.formatFromPattern(MessageFormat.java:1713)",
+       "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1679)",
+       "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+       "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+       "return MessageFormat.format('{0,foo}', new Object[] {1})",
+       "                                                     ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{0,foo}', new Object[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 53,
+       "start": 0,
+       "end": 56
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.MessageFormat.formatFromPattern(MessageFormat.java:1713)",
+     "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1679)",
+     "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+     "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+     "return MessageFormat.format('{0,foo}', new Object[] {1})",
+     "                                                     ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{0,foo}', new Object[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 53,
+     "start": 0,
+     "end": 56
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "unknown format type: foo"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,number}', new Object[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.format(DecimalFormat.java:588)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "java.base/java.text.MessageFormat.subformat(MessageFormat.java:1581)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1093)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1059)",
+       "return MessageFormat.format('{0,number}', new Object[] {'x'})",
+       "                                                        ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{0,number}', new Object[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 56,
+       "start": 0,
+       "end": 61
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.format(DecimalFormat.java:588)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "java.base/java.text.MessageFormat.subformat(MessageFormat.java:1581)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1093)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1059)",
+     "return MessageFormat.format('{0,number}', new Object[] {'x'})",
+     "                                                        ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{0,number}', new Object[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 56,
+     "start": 0,
+     "end": 61
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot format given Object as a Number"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,date}', new Object[] {'x'})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DateFormat.format(DateFormat.java:358)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "java.base/java.text.MessageFormat.subformat(MessageFormat.java:1581)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1093)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1059)",
+       "return MessageFormat.format('{0,date}', new Object[] {'x'})",
+       "                                                      ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{0,date}', new Object[] {'x'})",
+      "lang": "painless",
+      "position": {
+       "offset": 54,
+       "start": 0,
+       "end": 59
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DateFormat.format(DateFormat.java:358)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "java.base/java.text.MessageFormat.subformat(MessageFormat.java:1581)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1093)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1059)",
+     "return MessageFormat.format('{0,date}', new Object[] {'x'})",
+     "                                                      ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{0,date}', new Object[] {'x'})",
+    "lang": "painless",
+    "position": {
+     "offset": 54,
+     "start": 0,
+     "end": 59
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Cannot format given Object as a Date"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{ 0 , number , integer }', new Object[] {12.7})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1644)",
+       "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+       "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+       "return MessageFormat.format('{ 0 , number , integer }', new Object[] {12.7})",
+       "                                                                      ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{ 0 , number , integer }', new Object[] {12.7})",
+      "lang": "painless",
+      "position": {
+       "offset": 70,
+       "start": 0,
+       "end": 76
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1644)",
+     "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+     "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+     "return MessageFormat.format('{ 0 , number , integer }', new Object[] {12.7})",
+     "                                                                      ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{ 0 , number , integer }', new Object[] {12.7})",
+    "lang": "painless",
+    "position": {
+     "offset": 70,
+     "start": 0,
+     "end": 76
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "can't parse argument number:  0 ",
+     "caused_by": {
+      "type": "number_format_exception",
+      "reason": "For input string: \" 0 \""
+     }
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,  NUMBER,  INTEGER}', new Object[] {12.7})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "13"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('a}b', new Object[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "a}b"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format(\"'{0}\", new Object[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "{0}"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,number,#.#.#}', new Object[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3896)",
+       "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:523)",
+       "java.base/java.text.MessageFormat.formatFromSubformatPattern(MessageFormat.java:1842)",
+       "java.base/java.text.MessageFormat.formatFromPattern(MessageFormat.java:1730)",
+       "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1679)",
+       "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+       "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+       "return MessageFormat.format('{0,number,#.#.#}', new Object[] {1})",
+       "                                                              ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{0,number,#.#.#}', new Object[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 62,
+       "start": 0,
+       "end": 65
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.DecimalFormat.applyPattern(DecimalFormat.java:3896)",
+     "java.base/java.text.DecimalFormat.<init>(DecimalFormat.java:523)",
+     "java.base/java.text.MessageFormat.formatFromSubformatPattern(MessageFormat.java:1842)",
+     "java.base/java.text.MessageFormat.formatFromPattern(MessageFormat.java:1730)",
+     "java.base/java.text.MessageFormat.setFormatFromPattern(MessageFormat.java:1679)",
+     "java.base/java.text.MessageFormat.applyPatternImpl(MessageFormat.java:660)",
+     "java.base/java.text.MessageFormat.<init>(MessageFormat.java:516)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1058)",
+     "return MessageFormat.format('{0,number,#.#.#}', new Object[] {1})",
+     "                                                              ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{0,number,#.#.#}', new Object[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 62,
+     "start": 0,
+     "end": 65
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Multiple decimal separators in pattern \"#.#.#\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,choice,abc}', new Object[] {1})",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.ChoiceFormat.format(ChoiceFormat.java:557)",
+       "java.base/java.text.ChoiceFormat.format(ChoiceFormat.java:523)",
+       "java.base/java.text.NumberFormat.format(NumberFormat.java:331)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "java.base/java.text.MessageFormat.subformat(MessageFormat.java:1521)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1093)",
+       "java.base/java.text.Format.format(Format.java:165)",
+       "java.base/java.text.MessageFormat.format(MessageFormat.java:1059)",
+       "return MessageFormat.format('{0,choice,abc}', new Object[] {1})",
+       "                                                            ^---- HERE"
+      ],
+      "script": "return MessageFormat.format('{0,choice,abc}', new Object[] {1})",
+      "lang": "painless",
+      "position": {
+       "offset": 60,
+       "start": 0,
+       "end": 63
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.ChoiceFormat.format(ChoiceFormat.java:557)",
+     "java.base/java.text.ChoiceFormat.format(ChoiceFormat.java:523)",
+     "java.base/java.text.NumberFormat.format(NumberFormat.java:331)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "java.base/java.text.MessageFormat.subformat(MessageFormat.java:1521)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1093)",
+     "java.base/java.text.Format.format(Format.java:165)",
+     "java.base/java.text.MessageFormat.format(MessageFormat.java:1059)",
+     "return MessageFormat.format('{0,choice,abc}', new Object[] {1})",
+     "                                                            ^---- HERE"
+    ],
+    "script": "return MessageFormat.format('{0,choice,abc}', new Object[] {1})",
+    "lang": "painless",
+    "position": {
+     "offset": 60,
+     "start": 0,
+     "end": 63
+    },
+    "caused_by": {
+     "type": "array_index_out_of_bounds_exception",
+     "reason": "Index 0 out of bounds for length 0"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0} {1} {2}', new Object[] {[1, 2], ['a': 1], 'x'.charAt(0)})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[1, 2] {a=1} x"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}', new Object[] {0,1,2,3,4,5,6,7,8,9,10})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "012345678910"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,number,#,##0.00;(#,##0.00)}', new Object[] {-1234.5})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "(1,234.50)"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.format('{0,choice,-1#neg|0#zero|0<pos}', new Object[] {-0.5}) + MessageFormat.format('{0,choice,-1#neg|0#zero|0<pos}', new Object[] {Double.NaN}) + MessageFormat.format('{0,choice,-1#neg|0#zero|0<pos}', new Object[] {0.0001})",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "negnegpos"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ChoiceFormat c = new ChoiceFormat('0#none|1#one|2#many'); return [c.format(0), c.format(1.5), c.format(-1), c.format(5), c.toPattern(), c.getLimits(), c.getFormats()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[none, one, none, many, 0.0#none|1.0#one|2.0#many, [D@45120a6a, [Ljava.lang.String;@6b92702e]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ChoiceFormat c = new ChoiceFormat(new double[] {0, 1, 2}, new String[] {'a', 'b', 'c'}); return [c.format(1), c.toPattern(), ChoiceFormat.nextDouble(1.0), ChoiceFormat.previousDouble(1.0), ChoiceFormat.nextDouble(1.0, false)]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[b, 0.0#a|1.0#b|2.0#c, 1.0000000000000002, 0.9999999999999999, 0.9999999999999999]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ChoiceFormat c = new ChoiceFormat('1#a|0#b')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.ChoiceFormat.applyPatternImpl(ChoiceFormat.java:309)",
+       "java.base/java.text.ChoiceFormat.<init>(ChoiceFormat.java:433)",
+       "c = new ChoiceFormat('1#a|0#b')",
+       "    ^---- HERE"
+      ],
+      "script": "ChoiceFormat c = new ChoiceFormat('1#a|0#b')",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 13,
+       "end": 44
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.ChoiceFormat.applyPatternImpl(ChoiceFormat.java:309)",
+     "java.base/java.text.ChoiceFormat.<init>(ChoiceFormat.java:433)",
+     "c = new ChoiceFormat('1#a|0#b')",
+     "    ^---- HERE"
+    ],
+    "script": "ChoiceFormat c = new ChoiceFormat('1#a|0#b')",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 13,
+     "end": 44
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Incorrect order of intervals, must be in ascending order"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ChoiceFormat c = new ChoiceFormat('#a')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/java.text.ChoiceFormat.applyPatternImpl(ChoiceFormat.java:301)",
+       "java.base/java.text.ChoiceFormat.<init>(ChoiceFormat.java:433)",
+       "c = new ChoiceFormat('#a')",
+       "    ^---- HERE"
+      ],
+      "script": "ChoiceFormat c = new ChoiceFormat('#a')",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 13,
+       "end": 39
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/java.text.ChoiceFormat.applyPatternImpl(ChoiceFormat.java:301)",
+     "java.base/java.text.ChoiceFormat.<init>(ChoiceFormat.java:433)",
+     "c = new ChoiceFormat('#a')",
+     "    ^---- HERE"
+    ],
+    "script": "ChoiceFormat c = new ChoiceFormat('#a')",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 13,
+     "end": 39
+    },
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Each interval must contain a number before a format"
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ChoiceFormat c = new ChoiceFormat('x#a')",
+    "lang": "painless"
+   }
+  },
+  "status": 400,
+  "response": {
+   "error": {
+    "root_cause": [
+     {
+      "type": "script_exception",
+      "reason": "runtime error",
+      "script_stack": [
+       "java.base/jdk.internal.math.FloatingDecimal.check(FloatingDecimal.java:1751)",
+       "java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:1374)",
+       "java.base/jdk.internal.math.FloatingDecimal.parseDouble(FloatingDecimal.java:61)",
+       "java.base/java.lang.Double.parseDouble(Double.java:993)",
+       "java.base/java.text.ChoiceFormat.stringToNum(ChoiceFormat.java:355)",
+       "java.base/java.text.ChoiceFormat.applyPatternImpl(ChoiceFormat.java:304)",
+       "java.base/java.text.ChoiceFormat.<init>(ChoiceFormat.java:433)",
+       "c = new ChoiceFormat('x#a')",
+       "    ^---- HERE"
+      ],
+      "script": "ChoiceFormat c = new ChoiceFormat('x#a')",
+      "lang": "painless",
+      "position": {
+       "offset": 17,
+       "start": 13,
+       "end": 40
+      }
+     }
+    ],
+    "type": "script_exception",
+    "reason": "runtime error",
+    "script_stack": [
+     "java.base/jdk.internal.math.FloatingDecimal.check(FloatingDecimal.java:1751)",
+     "java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:1374)",
+     "java.base/jdk.internal.math.FloatingDecimal.parseDouble(FloatingDecimal.java:61)",
+     "java.base/java.lang.Double.parseDouble(Double.java:993)",
+     "java.base/java.text.ChoiceFormat.stringToNum(ChoiceFormat.java:355)",
+     "java.base/java.text.ChoiceFormat.applyPatternImpl(ChoiceFormat.java:304)",
+     "java.base/java.text.ChoiceFormat.<init>(ChoiceFormat.java:433)",
+     "c = new ChoiceFormat('x#a')",
+     "    ^---- HERE"
+    ],
+    "script": "ChoiceFormat c = new ChoiceFormat('x#a')",
+    "lang": "painless",
+    "position": {
+     "offset": 17,
+     "start": 13,
+     "end": 40
+    },
+    "caused_by": {
+     "type": "number_format_exception",
+     "reason": "For input string: \"x\""
+    }
+   },
+   "status": 400
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ChoiceFormat c = new ChoiceFormat('0#a|1<b|∞#c'); return [c.toPattern(), c.format(Double.POSITIVE_INFINITY), c.format(2), c.getLimits()[1]]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[0.0#a|1.0<b|∞<c, c, b, 1.0000000000000002]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "ChoiceFormat c = new ChoiceFormat('0#a'); c.applyPattern('5#x|6#y'); c.setChoices(new double[] {1}, new String[] {'z'}); return [c.format(0), c.toPattern()]",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "[z, 1.0#z]"
+  }
+ },
+ {
+  "request": {
+   "script": {
+    "source": "return MessageFormat.Field.ARGUMENT",
+    "lang": "painless"
+   }
+  },
+  "status": 200,
+  "response": {
+   "result": "java.text.MessageFormat$Field(message argument field)"
+  }
+ }
+]

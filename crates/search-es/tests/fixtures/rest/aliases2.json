@@ -1,0 +1,546 @@
+{
+ "description": "Alias consistency rules: hidden flags, write indices, removal of indices, wildcards.",
+ "steps": [
+  {
+   "req": "PUT /esm-h1",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-h1"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-h2",
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-h2"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-h3",
+   "body": {
+    "aliases": {
+     "esm-w": {
+      "is_write_index": true
+     }
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-h3"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "add": {
+       "index": "esm-h1",
+       "alias": "esm-ha",
+       "is_hidden": true
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "add": {
+       "index": "esm-h2",
+       "alias": "esm-ha"
+      }
+     }
+    ]
+   },
+   "status": 500,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_state_exception",
+       "reason": "alias [esm-ha] has is_hidden set to true on indices [esm-h1] but does not have is_hidden set to true on indices [esm-h2]; alias must have the same is_hidden setting on all indices"
+      }
+     ],
+     "type": "illegal_state_exception",
+     "reason": "alias [esm-ha] has is_hidden set to true on indices [esm-h1] but does not have is_hidden set to true on indices [esm-h2]; alias must have the same is_hidden setting on all indices"
+    },
+    "status": 500
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "add": {
+       "index": "esm-h2",
+       "alias": "esm-ha",
+       "is_hidden": true
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-h4",
+   "body": {
+    "aliases": {
+     "esm-ha": {}
+    }
+   },
+   "status": 500,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_state_exception",
+       "reason": "alias [esm-ha] has is_hidden set to true on indices [esm-h1,esm-h2] but does not have is_hidden set to true on indices [esm-h4]; alias must have the same is_hidden setting on all indices"
+      }
+     ],
+     "type": "illegal_state_exception",
+     "reason": "alias [esm-ha] has is_hidden set to true on indices [esm-h1,esm-h2] but does not have is_hidden set to true on indices [esm-h4]; alias must have the same is_hidden setting on all indices"
+    },
+    "status": 500
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-h4",
+   "body": {
+    "aliases": {
+     "esm-w": {
+      "is_write_index": true
+     }
+    }
+   },
+   "status": 500,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "illegal_state_exception",
+       "reason": "alias [esm-w] has more than one write index [esm-h3,esm-h4]"
+      }
+     ],
+     "type": "illegal_state_exception",
+     "reason": "alias [esm-w] has more than one write index [esm-h3,esm-h4]"
+    },
+    "status": 500
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "PUT /esm-h4",
+   "body": {
+    "aliases": {
+     "esm-w": {}
+    }
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "shards_acknowledged": true,
+    "index": "esm-h4"
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-w",
+   "status": 200,
+   "response": {
+    "esm-h3": {
+     "aliases": {
+      "esm-w": {
+       "is_write_index": true
+      }
+     }
+    },
+    "esm-h4": {
+     "aliases": {
+      "esm-w": {}
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-ha",
+   "status": 200,
+   "response": {
+    "esm-h2": {
+     "aliases": {
+      "esm-ha": {
+       "is_hidden": true
+      }
+     }
+    },
+    "esm-h1": {
+     "aliases": {
+      "esm-ha": {
+       "is_hidden": true
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-h*",
+   "status": 200,
+   "response": {
+    "esm-h2": {
+     "aliases": {
+      "esm-ha": {
+       "is_hidden": true
+      }
+     }
+    },
+    "esm-h1": {
+     "aliases": {
+      "esm-ha": {
+       "is_hidden": true
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-h*?expand_wildcards=all",
+   "status": 200,
+   "response": {
+    "esm-h2": {
+     "aliases": {
+      "esm-ha": {
+       "is_hidden": true
+      }
+     }
+    },
+    "esm-h1": {
+     "aliases": {
+      "esm-ha": {
+       "is_hidden": true
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "add": {
+       "index": "esm-h4",
+       "alias": "esm-w",
+       "is_write_index": true
+      }
+     },
+     {
+      "add": {
+       "index": "esm-h3",
+       "alias": "esm-w",
+       "is_write_index": false
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-w",
+   "status": 200,
+   "response": {
+    "esm-h3": {
+     "aliases": {
+      "esm-w": {
+       "is_write_index": false
+      }
+     }
+    },
+    "esm-h4": {
+     "aliases": {
+      "esm-w": {
+       "is_write_index": true
+      }
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "remove": {
+       "index": "esm-h*",
+       "alias": "esm-h*"
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /_alias/esm-ha",
+   "status": 404,
+   "response": {
+    "error": "alias [esm-ha] missing",
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "remove_index": {
+       "index": "esm-h4"
+      }
+     },
+     {
+      "add": {
+       "index": "esm-h3",
+       "alias": "esm-h4"
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-h4/_settings/index.number_of_shards?flat_settings",
+   "status": 200,
+   "response": {
+    "esm-h3": {
+     "settings": {
+      "index.number_of_shards": "1"
+     }
+    }
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "remove_index": {
+       "index": "esm-h*"
+      }
+     }
+    ]
+   },
+   "status": 200,
+   "response": {
+    "acknowledged": true,
+    "errors": false
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "POST /_aliases",
+   "body": {
+    "actions": [
+     {
+      "remove_index": {
+       "index": "esm-h4"
+      }
+     }
+    ]
+   },
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-h4]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-h4",
+       "index_uuid": "_na_",
+       "index": "esm-h4"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-h4]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-h4",
+     "index_uuid": "_na_",
+     "index": "esm-h4"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /esm-h3/_alias/_all",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-h3]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-h3",
+       "index_uuid": "_na_",
+       "index": "esm-h3"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-h3]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-h3",
+     "index_uuid": "_na_",
+     "index": "esm-h3"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "GET /esm-h3/_alias",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-h3]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-h3",
+       "index_uuid": "_na_",
+       "index": "esm-h3"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-h3]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-h3",
+     "index_uuid": "_na_",
+     "index": "esm-h3"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  },
+  {
+   "req": "DELETE /esm-h3/_alias/_all",
+   "status": 404,
+   "response": {
+    "error": {
+     "root_cause": [
+      {
+       "type": "index_not_found_exception",
+       "reason": "no such index [esm-h3]",
+       "resource.type": "index_or_alias",
+       "resource.id": "esm-h3",
+       "index_uuid": "_na_",
+       "index": "esm-h3"
+      }
+     ],
+     "type": "index_not_found_exception",
+     "reason": "no such index [esm-h3]",
+     "resource.type": "index_or_alias",
+     "resource.id": "esm-h3",
+     "index_uuid": "_na_",
+     "index": "esm-h3"
+    },
+    "status": 404
+   },
+   "response_headers": {
+    "content-type": "application/json"
+   }
+  }
+ ]
+}

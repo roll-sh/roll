@@ -1,0 +1,99 @@
+{
+  "ism.explain": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/im-plugin/ism/api/",
+      "description": "Explains the ISM state of indices."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ism/explain/{index}",
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_ism/explain/{index}",
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_ism/explain",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/_opendistro/_ism/explain",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "show_policy": {
+        "type": "boolean",
+        "description": "Include the policy"
+      },
+      "validate_action": {
+        "type": "boolean",
+        "description": "Validate the next action"
+      },
+      "size": {
+        "type": "number",
+        "description": "Page size"
+      },
+      "from": {
+        "type": "number",
+        "description": "Offset"
+      },
+      "sortField": {
+        "type": "string",
+        "description": "Sort field"
+      },
+      "sortOrder": {
+        "type": "string",
+        "description": "asc or desc"
+      },
+      "queryString": {
+        "type": "string",
+        "description": "Index query"
+      },
+      "local": {
+        "type": "boolean",
+        "description": "Local cluster state"
+      },
+      "cluster_manager_timeout": {
+        "type": "time",
+        "description": "Timeout"
+      },
+      "show_applied_policy": {
+        "type": "boolean",
+        "description": "unused"
+      }
+    },
+    "body": {
+      "description": "The request",
+      "required": false
+    }
+  }
+}

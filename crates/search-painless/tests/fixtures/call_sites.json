@@ -1,0 +1,878 @@
+[
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a + 1",
+  "runs": [
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a + 1",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a + 1",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": 1099511627776
+    },
+    "result": {
+     "result": "1099511627777"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; def b = params.b; return a * b",
+  "runs": [
+   {
+    "params": {
+     "a": 1,
+     "b": 2
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": null,
+     "b": 2
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; def b = params.b; return a * b",
+  "runs": [
+   {
+    "params": {
+     "a": 1,
+     "b": 2
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": 1,
+     "b": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"rightObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; def b = params.b; return a * b",
+  "runs": [
+   {
+    "params": {
+     "a": 1,
+     "b": 2
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": 1099511627776,
+     "b": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"right\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def b = params.b; return 1 + b",
+  "runs": [
+   {
+    "params": {
+     "b": 2
+    },
+    "result": {
+     "result": "3"
+    }
+   },
+   {
+    "params": {
+     "b": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"rightObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a + 'x'",
+  "runs": [
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "result": "nullx"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "result": "nullx"
+    }
+   },
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "1x"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "result": "nullx"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; def b = params.b; return a + b",
+  "runs": [
+   {
+    "params": {
+     "a": 1,
+     "b": 2
+    },
+    "result": {
+     "result": "3"
+    }
+   },
+   {
+    "params": {
+     "a": null,
+     "b": 2
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a > 1",
+  "runs": [
+   {
+    "params": {
+     "a": 2
+    },
+    "result": {
+     "result": "true"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a > 1",
+  "runs": [
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; def b = params.b; return a < b",
+  "runs": [
+   {
+    "params": {
+     "a": 2,
+     "b": 3
+    },
+    "result": {
+     "result": "true"
+    }
+   },
+   {
+    "params": {
+     "a": 2,
+     "b": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"rightObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; a += 1; return a",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return -a",
+  "runs": [
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"args[0]\" is null"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"args[0]\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return -a",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "-1"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a << 1",
+  "runs": [
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"args[0]\" is null"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"args[0]\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a << 1",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a + 1",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a - 1",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "0"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a * 1",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "1"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a + 1L",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a + 1.0",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "2.0"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a - 1.0",
+  "runs": [
+   {
+    "params": {
+     "a": 1.5
+    },
+    "result": {
+     "result": "0.5"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; def b = params.b; return a - b",
+  "runs": [
+   {
+    "params": {
+     "a": 1,
+     "b": 2
+    },
+    "result": {
+     "result": "-1"
+    }
+   },
+   {
+    "params": {
+     "a": null,
+     "b": 2
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; def b = params.b; return a > b",
+  "runs": [
+   {
+    "params": {
+     "a": 1,
+     "b": 2
+    },
+    "result": {
+     "result": "false"
+    }
+   },
+   {
+    "params": {
+     "a": null,
+     "b": 2
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a > 1",
+  "runs": [
+   {
+    "params": {
+     "a": 2
+    },
+    "result": {
+     "result": "true"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a - 1",
+  "runs": [
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a - 1",
+  "runs": [
+   {
+    "params": {
+     "a": 1.5
+    },
+    "result": {
+     "result": "0.5"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"left\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a / 2",
+  "runs": [
+   {
+    "params": {
+     "a": 4
+    },
+    "result": {
+     "result": "2"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a & 1",
+  "runs": [
+   {
+    "params": {
+     "a": 3
+    },
+    "result": {
+     "result": "1"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; int x = a; return x + 1",
+  "runs": [
+   {
+    "params": {
+     "a": 3
+    },
+    "result": {
+     "result": "4"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"value\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return 2 * a",
+  "runs": [
+   {
+    "params": {
+     "a": 3
+    },
+    "result": {
+     "result": "6"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"rightObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return 2 - a",
+  "runs": [
+   {
+    "params": {
+     "a": 3
+    },
+    "result": {
+     "result": "-1"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"rightObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return 2 + a",
+  "runs": [
+   {
+    "params": {
+     "a": 3
+    },
+    "result": {
+     "result": "5"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"rightObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; a -= 1; return a",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "0"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; a += 'x'; return a",
+  "runs": [
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "result": "nullx"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "result": "nullx"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return ~a",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "-2"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"leftObject\" is null"
+    }
+   },
+   {
+    "params": {
+     "a": 1099511627776
+    },
+    "result": {
+     "result": "-1099511627777"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"unary\" is null"
+    }
+   }
+  ]
+ },
+ {
+  "source": "/* 1792584885799 */ def a = params.a; return a >> 1",
+  "runs": [
+   {
+    "params": {
+     "a": 1
+    },
+    "result": {
+     "result": "0"
+    }
+   },
+   {
+    "params": {
+     "a": 1099511627776
+    },
+    "result": {
+     "result": "549755813888"
+    }
+   },
+   {
+    "params": {
+     "a": null
+    },
+    "result": {
+     "err": "Cannot invoke \"Object.getClass()\" because \"o\" is null"
+    }
+   }
+  ]
+ }
+]

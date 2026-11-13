@@ -1,0 +1,298 @@
+# Environment skips of the `platinum` extended suite (rest-resources test/platinum on XPackRestIT's
+# cluster). Format: `<glob over test ids>  # reason`; applies to Elasticsearch and roll alike.
+
+# XPackRestIT's own blacklist in release builds: these install basic or enterprise licenses
+# signed with the development key, which then breaks every licensed test after them.
+platinum:license/20_put_license/*  # blacklisted by XPackRestIT in release builds (changes the license)
+platinum:license/30_enterprise_license/*  # blacklisted by XPackRestIT in release builds (changes the license)
+platinum:xpack/15_basic/*  # blacklisted by XPackRestIT in release builds (changes the license)
+platinum:privileges/11_builtin/Test get builtin privileges  # blacklisted by XPackRestIT in release builds (feature-flagged privileges)
+
+# Watcher's own security tests, merged into the zip's security directory; they run in the
+# watcher-security suite on watcher's cluster (XPackRestIT disables watcher).
+platinum:security/10_insufficient_privs/*  # watcher's test (watcher-security suite)
+platinum:security/20_settings_filter/*  # watcher's test (watcher-security suite)
+platinum:security/20_test_run_as_execute_watch/*  # watcher's test (watcher-security suite)
+
+platinum:inference/100_semantic_text_auto_prefiltering/Test 2 must semantic matches  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test 2 must semantic matches in their own bool queries  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test auto prefiltering is applied to sibling filter clause  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test bool filter with must nested and non-nested terms - non-nested is used as prefilter  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test bool filter with should nested and non-nested terms - min_should_match is 2  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test exists on a semantic_text field is used as a prefilter to a semantic match on the same field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test filter nested term is not used as prefilter  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test filter term is used as prefilter to a filter semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test filter term is used as prefilter to a must semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test filter term is used as prefilter to a must semantic query  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test filter term is used as prefilter to a must_not semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test filter term is used as prefilter to a should semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test must term is used as prefilter to a filter semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test must term is used as prefilter to a must semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test must term is used as prefilter to a must_not semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test must term is used as prefilter to a should semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test must_not term is used as prefilter to a filter semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test must_not term is used as prefilter to a must semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test must_not term is used as prefilter to a must_not semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test must_not term is used as prefilter to a should semantic match  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test semantic knn query should not be auto prefiltered  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test should term is not used as prefilter  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/100_semantic_text_auto_prefiltering/Test two level bool query with inner semantic match and term filters  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Cannot be in an object field with subobjects disabled  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Cannot be used as a nested field on nested objects  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Cannot be used directly as a nested field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Cannot update element type in index options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Displaying default sparse vector index_options with and without include_defaults  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Field caps does not exclude multi-fields under semantic_text  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Field caps exclude chunks and embedding fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Field caps reports semantic_text fields as inference fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Field caps with semantic query does not fail  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Field caps with sparse embedding  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Field caps with text embedding  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Index option element_type or type is required  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Index option type is required when specifying more than element_type  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Indexes dense vector document  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Indexes dense vector document with bbq compatible model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Indexes sparse vector document  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Invalid element type  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Mapping always includes inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Setting use_legacy_format to true is not allowed for new indices  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Specifying dense vector index options should fail using sparse index options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Specifying incompatible dense vector index options will fail  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Specifying index options requires model information  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Specifying invalid sparse vector index options will fail  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Specifying sparse vector index options requires sparse vector model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Specifying sparse vector index options should fail using dense index options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Specifying unsupported index option types will fail  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating index options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating inference_id given dense endpoints with different dimensions should fail  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating inference_id given dense endpoints with different element_type should fail  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating inference_id given dense endpoints with different similarity should fail  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating inference_id to compatible endpoint should succeed given model settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating inference_id to different task type should fail given model settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating inference_id to different task type should succeed given no model settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating inference_id to non existing endpoint should fail given model settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating inference_id to non existing endpoint should succeed given no model settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Updating sparse vector index options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Users can set dense vector index options and index documents using those options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/10_semantic_text_field_mapping/Users can set sparse vector index options and index documents using those options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/Non-text input and multiple inputs rejected for text_embedding inference endpoint on semantic_text field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/empty input array  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/empty input object  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/inference service uses incorrect task type  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/input as array of objects  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/input as single object  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/input as string  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/invalid format in input object  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/invalid type in input object  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/110_embedding_query_vector_builder/missing required params  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/120_semantic_field_mapping/Field caps reports semantic field as an inference field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/120_semantic_field_mapping/Semantic field can index a mix of text and image chunks  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/120_semantic_field_mapping/Semantic field type can be added to a mapping  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/130_semantic_field_query/KNN search on semantic field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/130_semantic_field_query/Match query on semantic field using a byte embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/130_semantic_field_query/Match query on semantic field with image content  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/130_semantic_field_query/Semantic query on semantic field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/140_semantic_field_query_vector_builder/knn query against combined dense_vector and semantic fields still requires inference_id  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/140_semantic_field_query_vector_builder/knn query against semantic field infers inference_id from field metadata  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/140_semantic_field_query_vector_builder/knn query with image input against semantic field infers inference_id from field metadata  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/150_semantic_field_inference/Explicit null in bulk update request clears inference results  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/150_semantic_field_inference/Indexing a base64-encoded image with a short unpadded payload is accepted  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/150_semantic_field_inference/Indexing a base64-encoded image with an empty payload is rejected  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/150_semantic_field_inference/Indexing a mix of text and base64-encoded image values produces both chunk forms  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/150_semantic_field_inference/Indexing a single base64-encoded image produces an input_index-form chunk  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/160_semantic_field_highlighter/Default highlighter for semantic field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/160_semantic_field_highlighter/Highlighting copy_to values  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/160_semantic_field_highlighter/Highlighting empty field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/160_semantic_field_highlighter/Highlighting image values  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/160_semantic_field_highlighter/Highlighting mixed text and image values  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/172_semantic_field_doc_values_source/A mix of text and image values keeps document order  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/172_semantic_field_doc_values_source/Image value is rebuilt from doc values in synthetic source  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/172_semantic_field_doc_values_source/Text value is rebuilt from doc values in synthetic source  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/173_semantic_field_columnar_source/Text and image values are rebuilt from doc values in columnar  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/173_semantic_field_columnar_source/Text and image values are rebuilt in columnar_stored (blob materialized at ingest)  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/180_semantic_text_doc_values_source/Highlighting reads the field from doc values without _source  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/180_semantic_text_doc_values_source/Multi-valued original values keep document order  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/180_semantic_text_doc_values_source/Original value is rebuilt from doc values in synthetic source  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/181_semantic_text_columnar_source/Highlighting reads the field from doc values in columnar  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/181_semantic_text_columnar_source/Highlighting works in columnar_stored  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/181_semantic_text_columnar_source/Original value is rebuilt from doc values in columnar  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/181_semantic_text_columnar_source/Original value is rebuilt in columnar_stored (blob materialized at ingest)  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/190_semantic_field_auto_prefiltering/Test exists on a semantic field is used as a prefilter to a semantic match on the same field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/Bulk requests are handled appropriately  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/Invalid chunking settings will result in an error  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/We can update chunking settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/We do not set custom chunking settings for empty specified chunking settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/We do not set custom chunking settings for null chunking settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/We respect multiple semantic_text fields with different chunking configurations  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/We return chunking configurations with mappings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/We return different chunks based on configured chunking overrides or model defaults for dense embeddings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/25_semantic_text_field_mapping_chunking/We return different chunks based on configured chunking overrides or model defaults for sparse embeddings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Calculates embedding results for new documents  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Calculates embeddings for bulk operations - index  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Calculates embeddings using the default ELSER 2 endpoint  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Calculates sparse embedding and text embedding results for new documents  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Calculates sparse embedding and text embedding results for new documents with a collection of mixed data types  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Calculates sparse embedding and text embedding results for new documents with boolean value  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Calculates sparse embedding and text embedding results for new documents with integer value  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Can be used inside an object field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Deletes on bulk operation  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Dense vector results are indexed as nested chunks and searchable  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Empty Multi-Field skips embedding generation  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Empty semantic_text field skips embedding generation  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Fails for non-existent inference  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Get _inference_fields via _source_exclude_vectors  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Get _inference_fields via _source_includes  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Inference fields do not create new mappings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Inference metadata fields format is used by default  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Multi chunks skips empty input embedding generation  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Multi-fields support  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Reindex recomputes embeddings by default  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Reindex works for semantic_text fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Reindexing with empty or whitespace semantic_text skips embedding generation  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Search can rehydrate the inference metadata fields in _source  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Sparse vector results are indexed as nested chunks and searchable  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Update by query picks up new semantic_text fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/Update by query works for scripts  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/inference endpoint late creation  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/30_semantic_text_inference/semantic_text copy_to calculates embeddings for source fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Apply boost and query name  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Boolean query using a dense embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Boolean query using a sparse embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Numeric query using a dense embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Numeric query using a sparse embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query a field that has no indexed inference results  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query a field that uses the default ELSER 2 endpoint  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query a field with a search inference ID that uses the wrong dimension count  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query a field with a search inference ID that uses the wrong task type  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query a field with an invalid inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query a field with an invalid search inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query a missing field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query a missing index  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query an index alias  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query multiple indices  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query the wrong field type  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query the wrong field type with lenient: true  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a dense embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a dense embedding model that uses bfloat16 embeddings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a dense embedding model that uses bit embeddings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a dense embedding model that uses byte embeddings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a dense embedding model via a search inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a dense embedding model with size set to zero  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a sparse embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a sparse embedding model via a search inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using a sparse embedding model with size set to zero  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/40_semantic_text_query/Query using an embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/45_semantic_text_match/Apply boost and query name on multiple indices  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/45_semantic_text_match/Apply boost and query name on single index  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/45_semantic_text_match/Query a field that has no indexed inference results  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/45_semantic_text_match/Query an index alias  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/45_semantic_text_match/Query indices with both semantic_text and regular text content  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/45_semantic_text_match/Query using a dense embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/45_semantic_text_match/Query using a sparse embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/Apply boost and query name on multiple indices  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/Apply boost and query name on single index  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/Nested sparse_vector queries using the old format on semantic_text embeddings and inference still work  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/Nested sparse_vector queries using the old format on semantic_text embeddings and query vectors still work  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against an empty semantic_text field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against combined sparse_vector and semantic_text fields still requires inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against combined sparse_vector and semantic_text fields using inference  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against combined sparse_vector and semantic_text fields using query vectors  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against multiple semantic_text fields with multiple inference IDs specified in semantic_text fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against semantic_text field using a dense vector model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against semantic_text field using a specified inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against semantic_text field using inference ID configured in semantic_text field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/46_semantic_text_sparse_vector/sparse_vector query against semantic_text field using query vectors  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/Apply boost and query name on multiple indices  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/Apply boost and query name on single index  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/Nested knn queries using the old format on semantic_text embeddings and inference still work  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/Nested knn queries using the old format on semantic_text embeddings and query vectors still work  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/Text expansion query against semantic_text field using a dense vector model returns an failure  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against an empty semantic_text field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against combined dense_vector and semantic_text fields still requires inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against combined dense_vector and semantic_text fields using inference  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against combined dense_vector and semantic_text fields using query vectors  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against incompatible dense_vector and semantic_text fields using query vectors returns the matching semantic vectors and failures for incompatible dims  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against multiple semantic_text fields with multiple inference IDs specified in semantic_text fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against multiple semantic_text fields with multiple inference IDs specified in semantic_text fields with smaller k returns k for each index  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against semantic_text field using a sparse vector model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against semantic_text field using a specified inference ID  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against semantic_text field using inference ID configured in semantic_text field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query against semantic_text field using query vectors  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query respects filters  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query with semantic knn query filter  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query with semantic match query filter  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/47_semantic_text_knn/knn query with semantic match query filter within bool query  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/50_semantic_text_query_inference_endpoint_changes/create endpoint fails when the inference_id is used by a semantic text field and is incompatible  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Bypass inference on bulk update operation  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Calculates embeddings for bulk operations - update  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Calculates embeddings for bulk operations - upsert  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Explicit nulls clear inference results on bulk update operation  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Partial updates work when using the update API  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Partial updates work when using the update API and the semantic_text field's original value is null  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Update logic handles source fields in object fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Updates fail when the updated value is invalid  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Updates with script via bulk API are not allowed  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Updates with script works when using the update API  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Updating non semantic_text fields does not recalculate embeddings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/Updating semantic_text fields recalculates embeddings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/60_semantic_text_inference_update/semantic_text copy_to does not need values for every source field for bulk updates  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_diversify_retriever/MMR diversification using a query_vector_builder  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_diversify_retriever/MMR diversification using semantic_text field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_diversify_retriever/MMR diversification using semantic_text field cannot use string encoded query vector  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_diversify_retriever/MMR diversification using semantic_text field with copy_to  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_diversify_retriever/Validate diversification does not work with sparse vector data  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_diversify_retriever/Validate diversification must have a query vector or builder  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_diversify_retriever/Validate query_vector or query_vector_builder but not both  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_diversify_retriever/Validate query_vector_builder validation and proper syntax  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_exists_query/Exists query with indexed documents  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_exists_query/Exists query with indexed documents when semantic text field doesn't have a value  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_exists_query/Exists query with indexed documents with copy_to  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_exists_query/Exists query with no indexed documents  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_semantic_text_exists_query/Exists query with null indexed documents  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Explain outputs information on chunk rescorer if selected  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Profile outputs information on chunk rescorer if selected  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on chunk_rescorer specifying only max chunk size will default remaining chunking settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on chunk_rescorer will send in first chunk if no text matches found  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on rescore_chunks  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on rescore_chunks on a semantic_text field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on rescore_chunks on a semantic_text field specifying chunk size  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on rescore_chunks on a semantic_text field specifying chunking settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on rescore_chunks on a semantic_text field specifying chunking settings requires valid chunking settings  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on rescore_chunks on a semantic_text field using defaults  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Reranking based on rescore_chunks using defaults  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Simple text similarity rank retriever  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Simple text similarity rank retriever and filtering  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Test NPE regression - chunk rescorer with null chunking_settings does not throw  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Test chunk rescorer auto-resolves from parent inference_id  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Test chunk rescorer empty object defaults to size=1 and inference endpoint window  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Test chunk rescorer on semantic_text field pulls from reranker inference_id  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Test chunk rescorer with partial chunking_settings auto-completes remaining fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Test explicit chunking_settings override inference endpoint window size  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity rank retriever with a rerank service that sets top_n  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity rank retriever with a rerank service that truncates via an unreported top_n  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity reranker over a compound retriever with no matching documents returns empty results  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity reranker respects min_score  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity reranker specifying number of rescore_chunks must be > 0  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity reranker with high min_score excludes all docs  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity reranker with min_score zero includes all docs  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity reranking fails if the inference ID does not exist  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity reranking fails if the inference ID does not exist and result set is empty  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/Text similarity reranking with allowed failure maintains custom sorting  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/text similarity reranker properly handles aliases  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/70_text_similarity_rank_retriever/text similarity reranking with explain  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Default highlighter for fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting and multi chunks with empty input  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting empty field  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting using a dense embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting using a sparse embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting using an embedding model  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting with HNSW quantization index options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting with flat quantization index options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting with knn with similarity  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting with match_all and multi chunks with empty input  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting with match_all in a highlight_query  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting with match_all query  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Highlighting with type:bbq_disk index options  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/Retrieve chunks with the fields api  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:inference/90_semantic_text_highlighter/semantic highlighter ignores non-inference fields  # needs the inference-service-test plugin of Elasticsearch's test build
+platinum:ssl/10_basic/Test get SSL certificates  # needs transport TLS with XPackRestIT's test certificates

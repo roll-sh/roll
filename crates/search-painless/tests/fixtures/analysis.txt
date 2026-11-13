@@ -1,0 +1,174 @@
+#text: "The quick brown fox, 2 lazy dogs and 3.5 cats!"
+#tokenizer: standard
+----
+token.term.toString() == 'fox'
+----
+String t = token.term.toString(); return t.equals(t.toUpperCase())
+----
+token.term.subSequence(0, 1).toString() == 'q'
+----
+token.term.chars().count() == 4
+----
+token.getTerm().length() == 4 && token.position > 3
+----
+Integer.parseInt(token.term.toString()) > 0
+----
+token.term.toString().contains('.')
+----
+CharSequence cs = token.term; cs.length() > 4
+----
+Object o = token.term; o instanceof String
+----
+token.term instanceof CharSequence
+----
+def x = token.term; x.length() == 3
+----
+token.term.isEmpty()
+----
+token.term.codePoints().count() > 3
+----
+Character.isDigit(token.term.charAt(0))
+----
+token.term.charAt(10) == (char) 'x'
+----
+token.term.toString().hashCode() % 2 == 0
+----
+token.term.equals('fox')
+----
+token.term.toString().equals('fox')
+----
+token.term.compareTo('fox') > 0
+----
+CharSequence.compare(token.term, 'fox') > 0
+----
+token.term + '' == 'fox'
+----
+String.valueOf(token.term) == 'fox'
+----
+token.term.hashCode() == 'fox'.hashCode()
+----
+token.term.hashCode() > 0
+----
+token.term.toString().startsWith('T')
+----
+token.term.length() > 3
+----
+token.getTerm() =~ /o/
+----
+token.position % 2 == 0
+----
+token.getPosition() > 2 && token.getPosition() < 7
+----
+token.type == '<NUM>'
+----
+token.getType() != '<ALPHANUM>'
+----
+token.startOffset >= 10
+----
+token.getEndOffset() - token.getStartOffset() == 3
+----
+token.positionIncrement == 1
+----
+token.getPositionLength() == 1
+----
+token.isKeyword()
+----
+!token.keyword
+----
+token.term.startsWith('T')
+----
+token.term.toLowerCase().contains('a')
+----
+return token.term.charAt(0) <= (char) 'f'
+----
+String t = token.term; return t.equals(t.toUpperCase())
+----
+def t = token; t.term != 'fox'
+----
+token.term.length() == params.x
+----
+token.term.substring(5) == ''
+----
+token.term == null
+----
+Integer.parseInt(token.term) > 0
+----
+token.getClass() == null
+----
+token.term.hashCode() % 3 == 0
+----
+token.toString() != null
+----
+throw new IllegalArgumentException('no ' + token.term)
+----
+token.position > 100 ? true : token.term.length() < 4
+----
+1 / (token.position - 3) > 0
+----
+#text: "Wi-Fi e-mail ÄÖÜ naïve 東京 123-456"
+#tokenizer: standard
+token.term.length() >= 3
+----
+#text: "Wi-Fi e-mail ÄÖÜ naïve 東京 123-456"
+#tokenizer: standard
+token.type == '<IDEOGRAPHIC>'
+----
+token.type
+----
+#text: "a  b   c\td"
+#tokenizer: whitespace
+token.startOffset > 2
+----
+#text: "Hello World hello"
+#tokenizer: standard
+#filters: ["lowercase"]
+token.term == 'hello'
+----
+#text: "Hello World hello"
+#filters: ["lowercase", {"type": "stop", "stopwords": ["world"]}]
+token.positionIncrement > 1
+----
+#text: "Hello World hello"
+#filters: [{"type": "keyword_marker", "keywords": ["World"]}]
+token.keyword
+----
+#text: "Hello World hello"
+#filters: [{"type": "keyword_marker", "keywords": ["World"]}]
+token.isKeyword() || token.position == 0
+----
+#text: "running runs ran"
+#filters: ["porter_stem"]
+token.term.toString().endsWith('n')
+----
+#text: "running runs ran"
+#filters: ["porter_stem"]
+token.term.length() == 3
+----
+#text: "quick"
+#tokenizer: standard
+#filters: [{"type": "synonym", "synonyms": ["quick, fast, speedy"]}]
+token.positionIncrement == 0
+----
+#text: "quick"
+#tokenizer: standard
+#filters: [{"type": "synonym", "synonyms": ["quick, fast, speedy"]}]
+token.type == 'SYNONYM'
+----
+#text: "New York City"
+#tokenizer: standard
+#filters: [{"type": "shingle", "max_shingle_size": 3}]
+token.positionLength > 1
+----
+#text: "New York City"
+#tokenizer: standard
+#filters: [{"type": "shingle", "max_shingle_size": 3}]
+token.type == 'shingle'
+----
+#text: "New York City"
+#tokenizer: standard
+#filters: [{"type": "shingle", "max_shingle_size": 3}]
+token.positionIncrement == 0 && token.endOffset > 4
+----
+#text: "  "
+#tokenizer: standard
+true

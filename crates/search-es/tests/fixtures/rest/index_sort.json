@@ -1,0 +1,2623 @@
+{
+  "description" : "index.sort.*: settings validation, sort fields against the mapping (nested, aliases, runtime shadowing, doc values per type)",
+  "steps" : [
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "zz"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown index sort field:[zz]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown index sort field:[zz]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "t"
+        },
+        "mappings" : {
+          "properties" : {
+            "t" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[t]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[t]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is disabled on [t] in [esm-s1]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [t] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "k"
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword",
+              "doc_values" : false
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[k]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[k]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [k] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k",
+            "l"
+          ],
+          "index.sort.order" : [
+            "asc"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "l" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [standard] for setting [index.mode]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [standard] for setting [index.mode]",
+          "caused_by" : {
+            "type" : "index_out_of_bounds_exception",
+            "reason" : "Index: 1 Size: 1"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k",
+            "l"
+          ],
+          "index.sort.order" : [ ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "l" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Failed to parse value [standard] for setting [index.mode]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Failed to parse value [standard] for setting [index.mode]",
+          "caused_by" : {
+            "type" : "array_index_out_of_bounds_exception",
+            "reason" : "Index 0 out of bounds for length 0"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k",
+            "l"
+          ],
+          "index.sort.order" : [
+            "asc",
+            "desc",
+            "asc"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "l" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index.sort.field:[k, l] index.sort.order:[asc, desc, asc], size mismatch"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index.sort.field:[k, l] index.sort.order:[asc, desc, asc], size mismatch"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k"
+          ],
+          "index.sort.order" : [
+            "up"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Illegal sort order:up"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Illegal sort order:up"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k"
+          ],
+          "index.sort.mode" : [
+            "avg"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Illegal index sort mode:[AVG], must be one of [MAX, MIN]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Illegal index sort mode:[AVG], must be one of [MAX, MIN]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k"
+          ],
+          "index.sort.mode" : [
+            "foo"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Illegal sort mode: foo"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Illegal sort mode: foo"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k"
+          ],
+          "index.sort.missing" : [
+            "_foo"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Illegal missing value:[_foo], must be one of [_last, _first]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Illegal missing value:[_foo], must be one of [_last, _first]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k",
+            "l"
+          ],
+          "index.sort.mode" : [
+            "min"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "l" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index.sort.field:[k, l] index.sort.mode:[MIN], size mismatch"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index.sort.field:[k, l] index.sort.mode:[MIN], size mismatch"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : [
+            "k",
+            "l"
+          ],
+          "index.sort.missing" : [
+            "_last"
+          ]
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "l" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "index.sort.field:[k, l] index.sort.missing:[_last], size mismatch"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "index.sort.field:[k, l] index.sort.missing:[_last], size mismatch"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.order" : "asc"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "setting [index.sort.order] requires [index.sort.field] to be configured"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "setting [index.sort.order] requires [index.sort.field] to be configured"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "o"
+        },
+        "mappings" : {
+          "properties" : {
+            "o" : {
+              "type" : "object"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown index sort field:[o]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown index sort field:[o]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "a"
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "alias",
+              "path" : "k"
+            },
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Cannot use alias [a] as an index sort field"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Cannot use alias [a] as an index sort field"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "r"
+        },
+        "mappings" : {
+          "runtime" : {
+            "r" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "runtime field [r] shadows an index sort field, which would prevent shards from being allocated"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "runtime field [r] shadows an index sort field, which would prevent shards from being allocated"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "k",
+          "number_of_shards" : 2,
+          "index.sort.order" : "desc",
+          "index.sort.mode" : "max",
+          "index.sort.missing" : "_first"
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "_id"
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown index sort field:[_id]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown index sort field:[_id]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "n.foo"
+        },
+        "mappings" : {
+          "properties" : {
+            "n" : {
+              "type" : "nested",
+              "properties" : {
+                "foo" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "cannot apply index sort to field [n.foo] under nested object [n]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "cannot apply index sort to field [n.foo] under nested object [n]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "n.m.foo"
+        },
+        "mappings" : {
+          "properties" : {
+            "n" : {
+              "type" : "nested",
+              "properties" : {
+                "m" : {
+                  "type" : "object",
+                  "properties" : {
+                    "foo" : {
+                      "type" : "keyword"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "cannot apply index sort to field [n.m.foo] under nested object [n]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "cannot apply index sort to field [n.m.foo] under nested object [n]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "binary",
+              "doc_values" : true
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "binary"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[f]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [f] because fielddata is unsupported on fields of type [binary]. Use doc values instead."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "match_only_text"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[f]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "match_only_text fields do not support sorting and aggregations"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "dense_vector",
+              "dims" : 3
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Field [f] of type [dense_vector] doesn't support sort"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Field [f] of type [dense_vector] doesn't support sort"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "completion"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[f]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [f] of type [completion]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "search_as_you_type"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[f]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is not supported on field [f] of type [search_as_you_type]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "long",
+              "doc_values" : false
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[f]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [f] because fielddata is unsupported on fields of type [long]. Use doc values instead."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "date_nanos"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "version"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "half_float"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid index sort field:[f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "invalid index sort field:[f]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "integer_range"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Sorting by range field [f] is not supported"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Sorting by range field [f] is not supported"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "token_count",
+              "analyzer" : "standard"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "rank_feature"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[f]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[rank_feature] fields do not support sorting, scripting or aggregating"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "histogram"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "can't sort on the [histogram] field"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "can't sort on the [histogram] field"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "keyword",
+              "index" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "geo_shape"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "can't sort on geo_shape field without using specific sorting feature, like geo_distance"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "can't sort on geo_shape field without using specific sorting feature, like geo_distance"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "point"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "can't sort on geo_point or point field without using specific sorting feature, like geo_distance"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "can't sort on geo_point or point field without using specific sorting feature, like geo_distance"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "geo_point"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "can't sort on geo_point or point field without using specific sorting feature, like geo_distance"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "can't sort on geo_point or point field without using specific sorting feature, like geo_distance"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "ip",
+              "doc_values" : false
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "docvalues not found for index sort field:[f]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "docvalues not found for index sort field:[f]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [f] because fielddata is unsupported on fields of type [ip]. Use doc values instead."
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [esm-s1]",
+              "resource.type" : "index_or_alias",
+              "resource.id" : "esm-s1",
+              "index_uuid" : "_na_",
+              "index" : "esm-s1"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [esm-s1]",
+          "resource.type" : "index_or_alias",
+          "resource.id" : "esm-s1",
+          "index_uuid" : "_na_",
+          "index" : "esm-s1"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "date"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "boolean"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "flattened"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "f"
+        },
+        "mappings" : {
+          "properties" : {
+            "f" : {
+              "type" : "unsigned_long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s1",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "k.raw"
+        },
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "text",
+              "fields" : {
+                "raw" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s2",
+      "body" : {
+        "settings" : {
+          "index.sort.field" : "name"
+        },
+        "mappings" : {
+          "properties" : {
+            "name" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "nested",
+              "properties" : {
+                "foo" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-s2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s2/_mapping",
+      "body" : {
+        "properties" : {
+          "m" : {
+            "type" : "nested",
+            "properties" : {
+              "x" : {
+                "type" : "keyword"
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s2/_mapping",
+      "body" : {
+        "runtime" : {
+          "name" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "mapper_parsing_exception",
+              "reason" : "runtime field [name] shadows an index sort field, which would prevent shards from being allocated"
+            }
+          ],
+          "type" : "mapper_parsing_exception",
+          "reason" : "runtime field [name] shadows an index sort field, which would prevent shards from being allocated"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-s2/_mapping",
+      "body" : {
+        "runtime" : {
+          "other" : {
+            "type" : "keyword"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-s2/_settings?include_defaults=true&filter_path=**.sort",
+      "status" : 200,
+      "response" : {
+        "esm-s2" : {
+          "settings" : {
+            "index" : {
+              "sort" : {
+                "field" : "name"
+              }
+            }
+          },
+          "defaults" : {
+            "index" : {
+              "sort" : {
+                "missing" : [
+                  "_last"
+                ],
+                "mode" : [
+                  "min"
+                ],
+                "order" : [
+                  "asc"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-s2",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

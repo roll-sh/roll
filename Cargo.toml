@@ -23,8 +23,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"
 tower = { version = "0.5", features = ["util"] }
-hyper = { version = "1", features = ["server", "client", "http1"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio", "server", "server-auto"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -250,6 +250,23 @@ scylla = { version = "1.9", default-features = false, features = ["rustls-023"] 
 # `roll nosql cqlsh`: line editing, history and completion; terminal display widths.
 rustyline = { version = "19", default-features = false, features = ["with-file-history"] }
 unicode-width = "0.2"
+# roll search (Elasticsearch-compatible).
+fst = "0.4"
+memmap2 = "0.9"
+hashbrown = "0.16"
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+regex-syntax = "0.8"
+search-analysis = { path = "crates/search-analysis" }
+search-codec = { path = "crates/search-codec" }
+search-index = { path = "crates/search-index" }
+search-aggs = { path = "crates/search-aggs" }
+search-painless = { path = "crates/search-painless" }
+search-store = { path = "crates/search-store" }
+search-es = { path = "crates/search-es" }
+search-server = { path = "crates/search-server" }
+search-control = { path = "crates/search-control" }
+search-yaml = { path = "crates/search-yaml" }
 
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]

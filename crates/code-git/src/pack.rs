@@ -176,6 +176,8 @@ pub fn parse(data: &[u8], limits: &Limits) -> Result<Pack, PackError> {
     p.finish()
 }
 
+// One `State` per pack being read: boxing the inflater would add an allocation per entry.
+#[allow(clippy::large_enum_variant)]
 enum State {
     Header,
     Entry,

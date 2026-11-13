@@ -1,0 +1,2259 @@
+{
+  "description" : "Perf lane fixes: keyword sorts with a custom missing value across segments (missing and foreign values in one ordinal gap, fieldless segments), unmapped_type sorts honouring missing, numbers indexed as text as written (main fields, multi-fields, copy_to, bulk fast path of 70 items) and ignore_above counting UTF-16 units.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-pk",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "s" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-pk"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-pk/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"n0\"}}\n{\"s\": \"n\"}\n{\"index\": {\"_id\": \"n1\"}}\n{\"s\": \"n\"}\n{\"index\": {\"_id\": \"n2\"}}\n{\"s\": \"n\"}\n{\"index\": {\"_id\": \"n3\"}}\n{\"s\": \"n\"}\n{\"index\": {\"_id\": \"n4\"}}\n{\"s\": \"n\"}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-pk/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"a0\"}}\n{\"s\": \"a\"}\n{\"index\": {\"_id\": \"a1\"}}\n{\"s\": \"a\"}\n{\"index\": {\"_id\": \"m0\"}}\n{}\n{\"index\": {\"_id\": \"m1\"}}\n{}\n{\"index\": {\"_id\": \"m2\"}}\n{}\n{\"index\": {\"_id\": \"z0\"}}\n{\"s\": \"z\"}\n{\"index\": {\"_id\": \"z1\"}}\n{\"s\": \"z\"}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "m"
+            }
+          }
+        ],
+        "size" : 6
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "a0",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "a1",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                "m"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "m"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "m"
+              ]
+            },
+            {
+              "_id" : "n0",
+              "sort" : [
+                "n"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "m"
+            }
+          }
+        ],
+        "size" : 6,
+        "track_total_hits" : true
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "a0",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "a1",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                "m"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "m"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "m"
+              ]
+            },
+            {
+              "_id" : "n0",
+              "sort" : [
+                "n"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "m",
+              "order" : "desc"
+            }
+          }
+        ],
+        "size" : 6
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "z0",
+              "sort" : [
+                "z"
+              ]
+            },
+            {
+              "_id" : "z1",
+              "sort" : [
+                "z"
+              ]
+            },
+            {
+              "_id" : "n0",
+              "sort" : [
+                "n"
+              ]
+            },
+            {
+              "_id" : "n1",
+              "sort" : [
+                "n"
+              ]
+            },
+            {
+              "_id" : "n2",
+              "sort" : [
+                "n"
+              ]
+            },
+            {
+              "_id" : "n3",
+              "sort" : [
+                "n"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "o"
+            }
+          }
+        ],
+        "size" : 9
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "a0",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "a1",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "n0",
+              "sort" : [
+                "n"
+              ]
+            },
+            {
+              "_id" : "n1",
+              "sort" : [
+                "n"
+              ]
+            },
+            {
+              "_id" : "n2",
+              "sort" : [
+                "n"
+              ]
+            },
+            {
+              "_id" : "n3",
+              "sort" : [
+                "n"
+              ]
+            },
+            {
+              "_id" : "n4",
+              "sort" : [
+                "n"
+              ]
+            },
+            {
+              "_id" : "m0",
+              "sort" : [
+                "o"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "o"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "7"
+            }
+          }
+        ],
+        "size" : 4
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                "7"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "7"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "7"
+              ]
+            },
+            {
+              "_id" : "a0",
+              "sort" : [
+                "a"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "zz",
+              "order" : "desc"
+            }
+          }
+        ],
+        "size" : 4
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                "zz"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "zz"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "zz"
+              ]
+            },
+            {
+              "_id" : "z0",
+              "sort" : [
+                "z"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "m"
+            }
+          }
+        ],
+        "size" : 3,
+        "search_after" : [
+          "a"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "m0",
+              "sort" : [
+                "m"
+              ]
+            },
+            {
+              "_id" : "m1",
+              "sort" : [
+                "m"
+              ]
+            },
+            {
+              "_id" : "m2",
+              "sort" : [
+                "m"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "m"
+            }
+          },
+          {
+            "_id" : "asc"
+          }
+        ],
+        "size" : 3,
+        "search_after" : [
+          "m",
+          "m0"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-pk",
+              "node" : "UIRMBA3pTG694BPeZESlnQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-pk2",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "s" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-pk2"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-pk2/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"v0\"}}\n{\"s\": \"b\"}\n{\"index\": {\"_id\": \"v1\"}}\n{\"s\": \"c\"}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-pk2/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"e0\"}}\n{}\n{\"index\": {\"_id\": \"e1\"}}\n{}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk2/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "7"
+            }
+          }
+        ],
+        "size" : 2
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "e0",
+              "sort" : [
+                "7"
+              ]
+            },
+            {
+              "_id" : "e1",
+              "sort" : [
+                "7"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk2/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "bb"
+            }
+          }
+        ],
+        "size" : 2
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "v0",
+              "sort" : [
+                "b"
+              ]
+            },
+            {
+              "_id" : "e0",
+              "sort" : [
+                "bb"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-pk2/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "s" : {
+              "missing" : "zz",
+              "order" : "desc"
+            }
+          }
+        ],
+        "size" : 2
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "e0",
+              "sort" : [
+                "zz"
+              ]
+            },
+            {
+              "_id" : "e1",
+              "sort" : [
+                "zz"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ua",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "nope" : {
+              "type" : "long"
+            },
+            "kw" : {
+              "type" : "keyword"
+            },
+            "dd" : {
+              "type" : "double"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ua"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ub",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ub"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-ua/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"ua0\"}}\n{\"nope\": 1, \"kw\": \"a\", \"dd\": 1.5}\n{\"index\": {\"_id\": \"ua1\"}}\n{\"nope\": 9, \"kw\": \"z\", \"dd\": 9.5}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-ub/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"ub0\"}}\n{\"other\": 1}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "nope" : {
+              "missing" : 5,
+              "unmapped_type" : "long"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "nope" : {
+              "missing" : "_first",
+              "unmapped_type" : "long"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ub0",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "nope" : {
+              "missing" : "_first",
+              "unmapped_type" : "long",
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ub0",
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9
+              ]
+            },
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "nope" : {
+              "unmapped_type" : "long",
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9
+              ]
+            },
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "nope" : {
+              "missing" : "7",
+              "unmapped_type" : "integer"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                7
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "nope" : {
+              "missing" : 2.7,
+              "unmapped_type" : "long"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "kw" : {
+              "missing" : "x",
+              "unmapped_type" : "keyword"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                "x"
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                "z"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "kw" : {
+              "missing" : "_first",
+              "unmapped_type" : "keyword"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ub0",
+              "sort" : [
+                null
+              ]
+            },
+            {
+              "_id" : "ua0",
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                "z"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "dd" : {
+              "missing" : 2.5,
+              "unmapped_type" : "double"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1.5
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9.5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "dd" : {
+              "unmapped_type" : "double"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1.5
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9.5
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "dd" : {
+              "missing" : 2.5,
+              "unmapped_type" : "float"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                1.5
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                2.5
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9.5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "missing" : "_first",
+              "unmapped_type" : "date"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                -9223372036854775808
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                -9223372036854775808
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "missing" : 5,
+              "unmapped_type" : "date"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                5
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                5
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "missing" : 3,
+              "unmapped_type" : "half_float"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                3.0
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                3.0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "missing" : "_last",
+              "unmapped_type" : "double",
+              "order" : "desc"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                "-Infinity"
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                "-Infinity"
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                "-Infinity"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "missing" : "_first",
+              "unmapped_type" : "integer"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                -2147483648
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                -2147483648
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                -2147483648
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "missing" : "_first",
+              "unmapped_type" : "date_nanos"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=hits.hits._id,hits.hits.sort",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "unmapped_type" : "boolean"
+            }
+          }
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "ua0",
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "_id" : "ua1",
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "_id" : "ub0",
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=status,error.root_cause.type,error.root_cause.reason",
+      "body" : {
+        "sort" : [
+          {
+            "nope" : {
+              "missing" : "abc",
+              "unmapped_type" : "long"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "number_format_exception",
+              "reason" : "For input string: \"abc\""
+            },
+            {
+              "type" : "number_format_exception",
+              "reason" : "For input string: \"abc\""
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-ua",
+              "node" : "UIRMBA3pTG694BPeZESlnQ",
+              "reason" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"abc\""
+              }
+            },
+            {
+              "shard" : 0,
+              "index" : "esm-ub",
+              "node" : "UIRMBA3pTG694BPeZESlnQ",
+              "reason" : {
+                "type" : "number_format_exception",
+                "reason" : "For input string: \"abc\""
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"abc\"",
+            "caused_by" : {
+              "type" : "number_format_exception",
+              "reason" : "For input string: \"abc\""
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=status,error.root_cause.type,error.root_cause.reason",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "missing" : 3.7,
+              "unmapped_type" : "scaled_float"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Field [scaling_factor] is required"
+            },
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Field [scaling_factor] is required"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-ua",
+              "node" : "UIRMBA3pTG694BPeZESlnQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Field [scaling_factor] is required"
+              }
+            },
+            {
+              "shard" : 0,
+              "index" : "esm-ub",
+              "node" : "UIRMBA3pTG694BPeZESlnQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Field [scaling_factor] is required"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Field [scaling_factor] is required",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Field [scaling_factor] is required"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ua,esm-ub/_search?filter_path=status,error.root_cause.type,error.root_cause.reason",
+      "body" : {
+        "sort" : [
+          {
+            "zz" : {
+              "missing" : 3,
+              "unmapped_type" : "text"
+            }
+          }
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is disabled on [__anonymous_] in [esm-ua]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [__anonymous_] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+            },
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is disabled on [__anonymous_] in [esm-ub]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [__anonymous_] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-ua",
+              "node" : "UIRMBA3pTG694BPeZESlnQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is disabled on [__anonymous_] in [esm-ua]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [__anonymous_] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+              }
+            },
+            {
+              "shard" : 0,
+              "index" : "esm-ub",
+              "node" : "UIRMBA3pTG694BPeZESlnQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Fielddata is disabled on [__anonymous_] in [esm-ub]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [__anonymous_] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Fielddata is disabled on [__anonymous_] in [esm-ua]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [__anonymous_] in order to load field data by uninverting the inverted index. Note that this can use significant memory.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Fielddata is disabled on [__anonymous_] in [esm-ua]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [__anonymous_] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-num1",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "kk" : {
+              "type" : "keyword"
+            },
+            "t" : {
+              "type" : "text",
+              "fields" : {
+                "raw" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "d" : {
+              "type" : "double",
+              "fields" : {
+                "k" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "c" : {
+              "type" : "double",
+              "copy_to" : "ck"
+            },
+            "ck" : {
+              "type" : "keyword"
+            },
+            "l" : {
+              "type" : "long",
+              "fields" : {
+                "k" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "ia" : {
+              "type" : "keyword",
+              "ignore_above" : 5
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-num1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-num1/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"g\"}}\n{\"kk\":[1.10,-0,1e2,10000000.0,123456789012345678901234567890,-0.0,1.5E+3],\"t\":1E5,\"d\":[12345678.9,1E5],\"c\":1.10,\"l\":[-0,7],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-num1/_search?filter_path=aggregations",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "kk" : {
+            "terms" : {
+              "field" : "kk",
+              "size" : 20
+            }
+          },
+          "t.raw" : {
+            "terms" : {
+              "field" : "t.raw",
+              "size" : 20
+            }
+          },
+          "d.k" : {
+            "terms" : {
+              "field" : "d.k",
+              "size" : 20
+            }
+          },
+          "ck" : {
+            "terms" : {
+              "field" : "ck",
+              "size" : 20
+            }
+          },
+          "l.k" : {
+            "terms" : {
+              "field" : "l.k",
+              "size" : 20
+            }
+          },
+          "ia" : {
+            "terms" : {
+              "field" : "ia",
+              "size" : 20
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "aggregations" : {
+          "kk" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "-0",
+                "doc_count" : 1
+              },
+              {
+                "key" : "-0.0",
+                "doc_count" : 1
+              },
+              {
+                "key" : "1.10",
+                "doc_count" : 1
+              },
+              {
+                "key" : "1.5E+3",
+                "doc_count" : 1
+              },
+              {
+                "key" : "10000000.0",
+                "doc_count" : 1
+              },
+              {
+                "key" : "123456789012345678901234567890",
+                "doc_count" : 1
+              },
+              {
+                "key" : "1e2",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "t.raw" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "1E5",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "d.k" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "12345678.9",
+                "doc_count" : 1
+              },
+              {
+                "key" : "1E5",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "ck" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "1.10",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "l.k" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "-0",
+                "doc_count" : 1
+              },
+              {
+                "key" : "7",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "ia" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "abcde",
+                "doc_count" : 1
+              },
+              {
+                "key" : "😀😀",
+                "doc_count" : 1
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-num1/_search?filter_path=hits.total,hits.hits._ignored",
+      "body" : {
+        "size" : 1,
+        "query" : {
+          "term" : {
+            "kk" : "1.10"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "hits" : [
+            {
+              "_ignored" : [
+                "ia"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-num1/_search?filter_path=hits.total",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "term" : {
+            "_ignored" : "ia"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-num70",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "kk" : {
+              "type" : "keyword"
+            },
+            "t" : {
+              "type" : "text",
+              "fields" : {
+                "raw" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "d" : {
+              "type" : "double",
+              "fields" : {
+                "k" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "c" : {
+              "type" : "double",
+              "copy_to" : "ck"
+            },
+            "ck" : {
+              "type" : "keyword"
+            },
+            "l" : {
+              "type" : "long",
+              "fields" : {
+                "k" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "ia" : {
+              "type" : "keyword",
+              "ignore_above" : 5
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-num70"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-num70/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\": {\"_id\": \"g\"}}\n{\"kk\":[1.10,-0,1e2,10000000.0,123456789012345678901234567890,-0.0,1.5E+3],\"t\":1E5,\"d\":[12345678.9,1E5],\"c\":1.10,\"l\":[-0,7],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f0\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f1\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f2\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f3\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f4\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f5\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f6\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f7\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f8\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f9\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f10\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f11\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f12\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f13\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f14\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f15\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f16\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f17\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f18\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f19\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f20\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f21\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f22\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f23\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f24\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f25\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f26\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f27\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f28\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f29\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f30\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f31\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f32\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f33\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f34\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f35\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f36\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f37\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f38\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f39\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f40\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f41\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f42\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f43\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f44\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f45\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f46\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f47\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f48\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f49\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f50\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f51\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f52\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f53\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f54\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f55\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f56\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f57\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f58\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f59\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f60\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f61\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f62\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f63\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f64\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f65\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f66\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f67\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n{\"index\": {\"_id\": \"f68\"}}\n{\"kk\":[2.50,-0,3e2,20000000.0,-0.0,2.5E+3],\"t\":2E5,\"d\":[22345678.9,2E5],\"l\":[-0,8],\"ia\":[\"😀😀😀\",\"abcde\",\"😀😀\"]}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-num70/_search?filter_path=aggregations",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "kk" : {
+            "terms" : {
+              "field" : "kk",
+              "size" : 20
+            }
+          },
+          "t.raw" : {
+            "terms" : {
+              "field" : "t.raw",
+              "size" : 20
+            }
+          },
+          "d.k" : {
+            "terms" : {
+              "field" : "d.k",
+              "size" : 20
+            }
+          },
+          "ck" : {
+            "terms" : {
+              "field" : "ck",
+              "size" : 20
+            }
+          },
+          "l.k" : {
+            "terms" : {
+              "field" : "l.k",
+              "size" : 20
+            }
+          },
+          "ia" : {
+            "terms" : {
+              "field" : "ia",
+              "size" : 20
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "aggregations" : {
+          "kk" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "-0",
+                "doc_count" : 70
+              },
+              {
+                "key" : "-0.0",
+                "doc_count" : 70
+              },
+              {
+                "key" : "2.50",
+                "doc_count" : 69
+              },
+              {
+                "key" : "2.5E+3",
+                "doc_count" : 69
+              },
+              {
+                "key" : "20000000.0",
+                "doc_count" : 69
+              },
+              {
+                "key" : "3e2",
+                "doc_count" : 69
+              },
+              {
+                "key" : "1.10",
+                "doc_count" : 1
+              },
+              {
+                "key" : "1.5E+3",
+                "doc_count" : 1
+              },
+              {
+                "key" : "10000000.0",
+                "doc_count" : 1
+              },
+              {
+                "key" : "123456789012345678901234567890",
+                "doc_count" : 1
+              },
+              {
+                "key" : "1e2",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "t.raw" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "2E5",
+                "doc_count" : 69
+              },
+              {
+                "key" : "1E5",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "d.k" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "22345678.9",
+                "doc_count" : 69
+              },
+              {
+                "key" : "2E5",
+                "doc_count" : 69
+              },
+              {
+                "key" : "12345678.9",
+                "doc_count" : 1
+              },
+              {
+                "key" : "1E5",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "ck" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "1.10",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "l.k" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "-0",
+                "doc_count" : 70
+              },
+              {
+                "key" : "8",
+                "doc_count" : 69
+              },
+              {
+                "key" : "7",
+                "doc_count" : 1
+              }
+            ]
+          },
+          "ia" : {
+            "doc_count_error_upper_bound" : 0,
+            "sum_other_doc_count" : 0,
+            "buckets" : [
+              {
+                "key" : "abcde",
+                "doc_count" : 70
+              },
+              {
+                "key" : "😀😀",
+                "doc_count" : 70
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-num70/_search?filter_path=hits.total,hits.hits._ignored",
+      "body" : {
+        "size" : 1,
+        "query" : {
+          "term" : {
+            "kk" : "1.10"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "hits" : [
+            {
+              "_ignored" : [
+                "ia"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-num70/_search?filter_path=hits.total",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "term" : {
+            "_ignored" : "ia"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 70,
+            "relation" : "eq"
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

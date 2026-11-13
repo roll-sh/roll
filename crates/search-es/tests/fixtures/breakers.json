@@ -1,0 +1,169 @@
+{
+ "_about": "Elasticsearch 9.5.5 (private node, 1 GB heap): circuit breaker trips. in_flight: network.breaker.inflight_requests.limit=100b, then a 117-byte document and a 98-byte search body; exempt: GET _cluster/health and _nodes/stats under the same limit; parent: indices.breaker.total.limit=1b, GET _cat/health (real usage numbers are the JVM's); stats_default: _nodes/stats/breaker with default settings.",
+ "stats_default": [
+  200,
+  {
+   "nodes": {
+    "pjIbv8nSQfqmZHxDZkr8JA": {
+     "breakers": {
+      "fielddata": {
+       "limit_size_in_bytes": 429496729,
+       "limit_size": "409.5mb",
+       "estimated_size_in_bytes": 0,
+       "estimated_size": "0b",
+       "overhead": 1.03,
+       "tripped": 0
+      },
+      "request": {
+       "limit_size_in_bytes": 644245094,
+       "limit_size": "614.3mb",
+       "estimated_size_in_bytes": 0,
+       "estimated_size": "0b",
+       "overhead": 1.0,
+       "tripped": 1
+      },
+      "inflight_requests": {
+       "limit_size_in_bytes": 1073741824,
+       "limit_size": "1gb",
+       "estimated_size_in_bytes": 0,
+       "estimated_size": "0b",
+       "overhead": 2.0,
+       "tripped": 2
+      },
+      "model_inference": {
+       "limit_size_in_bytes": 536870912,
+       "limit_size": "512mb",
+       "estimated_size_in_bytes": 0,
+       "estimated_size": "0b",
+       "overhead": 1.0,
+       "tripped": 0
+      },
+      "eql_sequence": {
+       "limit_size_in_bytes": 536870912,
+       "limit_size": "512mb",
+       "estimated_size_in_bytes": 0,
+       "estimated_size": "0b",
+       "overhead": 1.0,
+       "tripped": 0
+      },
+      "parent": {
+       "limit_size_in_bytes": 1020054732,
+       "limit_size": "972.7mb",
+       "estimated_size_in_bytes": 162080120,
+       "estimated_size": "154.5mb",
+       "overhead": 1.0,
+       "tripped": 33
+      }
+     }
+    }
+   }
+  }
+ ],
+ "in_flight_document": [
+  429,
+  {
+   "error": {
+    "root_cause": [
+     {
+      "type": "circuit_breaking_exception",
+      "reason": "[inflight_requests] Data too large, data for [<http_request>] would be [234/234b], which is larger than the limit of [100/100b]; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5",
+      "bytes_wanted": 234,
+      "bytes_limit": 100,
+      "durability": "TRANSIENT"
+     }
+    ],
+    "type": "circuit_breaking_exception",
+    "reason": "[inflight_requests] Data too large, data for [<http_request>] would be [234/234b], which is larger than the limit of [100/100b]; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5",
+    "bytes_wanted": 234,
+    "bytes_limit": 100,
+    "durability": "TRANSIENT"
+   },
+   "status": 429
+  }
+ ],
+ "in_flight_search_body_len": 98,
+ "in_flight_search": [
+  429,
+  {
+   "error": {
+    "root_cause": [
+     {
+      "type": "circuit_breaking_exception",
+      "reason": "[inflight_requests] Data too large, data for [<http_request>] would be [196/196b], which is larger than the limit of [100/100b]; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5",
+      "bytes_wanted": 196,
+      "bytes_limit": 100,
+      "durability": "TRANSIENT"
+     }
+    ],
+    "type": "circuit_breaking_exception",
+    "reason": "[inflight_requests] Data too large, data for [<http_request>] would be [196/196b], which is larger than the limit of [100/100b]; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5",
+    "bytes_wanted": 196,
+    "bytes_limit": 100,
+    "durability": "TRANSIENT"
+   },
+   "status": 429
+  }
+ ],
+ "in_flight_exempt_health": [
+  200,
+  {
+   "cluster_name": "docker-cluster",
+   "status": "green",
+   "timed_out": false,
+   "number_of_nodes": 1,
+   "number_of_data_nodes": 1,
+   "active_primary_shards": 1,
+   "active_shards": 1,
+   "relocating_shards": 0,
+   "initializing_shards": 0,
+   "unassigned_shards": 0,
+   "unassigned_primary_shards": 0,
+   "delayed_unassigned_shards": 0,
+   "number_of_pending_tasks": 0,
+   "number_of_in_flight_fetch": 0,
+   "task_max_waiting_in_queue_millis": 0,
+   "active_shards_percent_as_number": 100.0
+  }
+ ],
+ "in_flight_stats": [
+  200,
+  {
+   "nodes": {
+    "pjIbv8nSQfqmZHxDZkr8JA": {
+     "breakers": {
+      "inflight_requests": {
+       "limit_size_in_bytes": 100,
+       "limit_size": "100b",
+       "estimated_size_in_bytes": 0,
+       "estimated_size": "0b",
+       "overhead": 2.0,
+       "tripped": 4
+      }
+     }
+    }
+   }
+  }
+ ],
+ "parent_cat": [
+  429,
+  {
+   "error": {
+    "root_cause": [
+     {
+      "type": "circuit_breaking_exception",
+      "reason": "[parent] Data too large, data for [<http_request>] would be [174663032/166.5mb], which is larger than the limit of [1/1b], real usage: [174663032/166.5mb], new bytes reserved: [0/0b], usages [fielddata=0/0b, request=0/0b, inflight_requests=0/0b, model_inference=0/0b, eql_sequence=0/0b]; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5",
+      "bytes_wanted": 174663032,
+      "bytes_limit": 1,
+      "durability": "TRANSIENT"
+     }
+    ],
+    "type": "circuit_breaking_exception",
+    "reason": "[parent] Data too large, data for [<http_request>] would be [174663032/166.5mb], which is larger than the limit of [1/1b], real usage: [174663032/166.5mb], new bytes reserved: [0/0b], usages [fielddata=0/0b, request=0/0b, inflight_requests=0/0b, model_inference=0/0b, eql_sequence=0/0b]; for more information, see https://www.elastic.co/docs/troubleshoot/elasticsearch/circuit-breaker-errors?version=9.5",
+    "bytes_wanted": 174663032,
+    "bytes_limit": 1,
+    "durability": "TRANSIENT"
+   },
+   "status": 429
+  }
+ ]
+}

@@ -1,0 +1,444 @@
+{
+ "found": {
+  "case": 49,
+  "case_seed": 124000421,
+  "seed": 124
+ },
+ "signature": "POST _search .error.caused_by.caused_by.caused_by.reason",
+ "steps": [
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "geo0": {
+       "type": "geo_point"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "merge.policy.segments_per_tier": 20,
+     "number_of_replicas": 0,
+     "number_of_shards": 5,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m6-a",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m6-a"
+  },
+  {
+   "body": {
+    "mappings": {
+     "properties": {
+      "comp0": {
+       "type": "completion"
+      },
+      "date0": {
+       "format": "strict_date_optional_time||epoch_millis",
+       "type": "date"
+      },
+      "geo0": {
+       "type": "geo_point"
+      },
+      "half0": {
+       "type": "half_float"
+      },
+      "int0": {
+       "type": "integer"
+      },
+      "ip0": {
+       "type": "ip"
+      },
+      "kw0": {
+       "type": "keyword"
+      },
+      "text0": {
+       "analyzer": "simple",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "text1": {
+       "analyzer": "stop",
+       "fields": {
+        "raw": {
+         "ignore_above": 32,
+         "type": "keyword"
+        }
+       },
+       "type": "text"
+      },
+      "wild0": {
+       "type": "wildcard"
+      }
+     }
+    },
+    "settings": {
+     "number_of_replicas": 0,
+     "number_of_shards": 1,
+     "refresh_interval": -1
+    }
+   },
+   "es": {
+    "body": {
+     "acknowledged": true,
+     "index": "diff-m6-b",
+     "shards_acknowledged": true
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 200
+   },
+   "method": "PUT",
+   "path": "diff-m6-b"
+  },
+  {
+   "body": {
+    "aggs": {
+     "filters_10": {
+      "filters": {
+       "filters": {
+        "a": {
+         "bool": {
+          "must": [
+           {
+            "pinned": {
+             "ids": [
+              "4",
+              "4"
+             ],
+             "organic": {
+              "match": {
+               "text0": {
+                "query": "cherry fast"
+               }
+              }
+             }
+            }
+           }
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "terms": {
+         "half0": [
+          150,
+          87
+         ]
+        }
+       },
+       {
+        "range": {
+         "ip0": {
+          "gte": "10.0.2.0",
+          "lt": "10.1.3.255"
+         }
+        }
+       }
+      ],
+      "must_not": [
+       {
+        "bool": {
+         "filter": [
+          {
+           "term": {
+            "int0": 195
+           }
+          },
+          {
+           "bool": {
+            "should": [
+             {
+              "range": {
+               "int0": {
+                "gte": 123
+               }
+              }
+             },
+             {
+              "term": {
+               "wild0": {
+                "case_insensitive": true,
+                "value": "Alpha"
+               }
+              }
+             },
+             {
+              "range": {
+               "int0": {
+                "gt": 34,
+                "lte": 157
+               }
+              }
+             }
+            ]
+           }
+          },
+          {
+           "dis_max": {
+            "queries": [
+             {
+              "intervals": {
+               "text1": {
+                "match": {
+                 "max_gaps": 2,
+                 "ordered": false,
+                 "query": "red Quick"
+                }
+               }
+              }
+             },
+             {
+              "query_string": {
+               "query": "text1:of"
+              }
+             }
+            ],
+            "tie_breaker": 0.7
+           }
+          }
+         ],
+         "must": [
+          {
+           "exists": {
+            "field": "comp0"
+           }
+          },
+          {
+           "bool": {
+            "should": [
+             {
+              "range": {
+               "half0": {
+                "gt": 79.91,
+                "lte": 162.69
+               }
+              }
+             },
+             {
+              "match_all": {}
+             },
+             {
+              "terms": {
+               "kw0": [
+                "x-1",
+                "x-2",
+                "user@example.com"
+               ]
+              }
+             }
+            ]
+           }
+          },
+          {
+           "bool": {
+            "filter": [
+             {
+              "ids": {
+               "values": [
+                "2",
+                "3",
+                "2"
+               ]
+              }
+             }
+            ],
+            "should": [
+             {
+              "ids": {
+               "values": [
+                "5",
+                "4",
+                "5"
+               ]
+              }
+             }
+            ]
+           }
+          }
+         ],
+         "should": [
+          {
+           "bool": {
+            "filter": [
+             {
+              "term": {
+               "ip0": "10.1.0.0/16"
+              }
+             },
+             {
+              "geo_distance": {
+               "distance": "4238km",
+               "geo0": {
+                "lat": 10.0,
+                "lon": 20.0
+               }
+              }
+             },
+             {
+              "term": {
+               "kw0": "delta"
+              }
+             }
+            ],
+            "should": [
+             {
+              "multi_match": {
+               "fields": [
+                "text0^3",
+                "text1^1"
+               ],
+               "fuzziness": 1,
+               "query": "fast",
+               "tie_breaker": 0.5,
+               "type": "phrase"
+              }
+             }
+            ]
+           }
+          },
+          {
+           "bool": {
+            "must": [
+             {
+              "script": {
+               "script": {
+                "params": {
+                 "v": 21
+                },
+                "source": "(doc['half0'].size() == 0 ? 0 : doc['half0'].value) > params.v"
+               }
+              }
+             },
+             {
+              "geo_distance": {
+               "distance": "2000km",
+               "distance_type": "arc",
+               "geo0": [
+                20.0,
+                10.0
+               ]
+              }
+             }
+            ],
+            "must_not": {
+             "term": {
+              "ip0": "10.0.0.0/16"
+             }
+            }
+           }
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   },
+   "es": {
+    "body": {
+     "error": {
+      "caused_by": {
+       "caused_by": {
+        "caused_by": {
+         "reason": "[pinned] duplicate id found in list: 4",
+         "type": "illegal_argument_exception"
+        },
+        "reason": "Failed to build [pinned] after last required field arrived",
+        "type": "x_content_parse_exception"
+       },
+       "col": 147,
+       "line": 1,
+       "reason": "Failed to build [pinned] after last required field arrived",
+       "type": "parsing_exception"
+      },
+      "reason": "[1:147] [bool] failed to parse field [must]",
+      "root_cause": [
+       {
+        "col": 147,
+        "line": 1,
+        "reason": "Failed to build [pinned] after last required field arrived",
+        "type": "parsing_exception"
+       }
+      ],
+      "type": "x_content_parse_exception"
+     },
+     "status": 400
+    },
+    "headers": {
+     "content-type": "application/json",
+     "x-elastic-product": "Elasticsearch"
+    },
+    "status": 400
+   },
+   "method": "POST",
+   "path": "/diff-m6-a,diff-m6-b/_search"
+  }
+ ]
+}
