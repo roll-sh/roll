@@ -727,3 +727,40 @@ async fn github_reports_of_leaked_tokens_revoke_them() {
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
     assert_eq!(g["revoked_why"], "found in https://github.com/someone/thing/blob/main/.env (GitHub secret scanning)");
 }
+
+/// Approving can also allow what's asked again (docs/permissions.md, "Remembered approvals"): the
+/// same action on the same resource for a while or for good. Another resource still asks, and a
+/// while never becomes for good through a token the token makes.
+#[tokio::test(flavor = "multi_thread")]
+async fn approvals_can_be_remembered() {
+    let d = Daemon::new(50);
+    let rules = json!([
+        { "product": "postgres", "resources": "*", "actions": { "delete": "ask" } },
+        { "product": "access", "resources": "*", "actions": { "admin": "allow" } }
+    ]);
+    let (token, id) = d.token(rules, json!({})).await;
+    let ask = |project: &'static str| {
+        let (d, token) = (&d, token.clone());
+        async move { d.call(&token, Method::DELETE, &format!("/v1/projects/{project}"), None).await }
+    };
+    let apr = ask("pa").await.1["approval"].as_str().unwrap().to_string();
+    let approve = |apr: String, remember: Value| {
+        let d = &d;
+        async move { d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": remember }))).await }
+    };
+    assert_eq!(approve(apr.clone(), json!("forever")).await.0, StatusCode::BAD_REQUEST, "nothing is decided");
+    assert_eq!(approve(apr.clone(), json!("1h")).await.0, StatusCode::OK);
+    assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.0, StatusCode::OK);
+    // For an hour: the same request runs without asking; another project still asks.
+    assert_eq!(ask("pa").await.0, StatusCode::OK);
+    assert_eq!(ask("pb").await.1["code"], "approval_pending");
+    // A while never becomes for good through a token it makes.
+    let child = json!({ "name": "child", "rules": [{ "product": "postgres", "resources": [{ "id": "pa" }], "actions": { "delete": "allow" } }] });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child)).await.0, StatusCode::FORBIDDEN);
+    // Always: a rule of the token.
+    let apr = ask("pc").await.1["approval"].as_str().unwrap().to_string();
+    assert_eq!(approve(apr, json!("always")).await.0, StatusCode::OK);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
+    assert_eq!(ask("pc").await.0, StatusCode::OK);
+}
