@@ -813,9 +813,18 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+1. **A health check before "ready"**: today a preview is ready once its service's container
+   accepts a connection, so one that answers 500 on every page still turns `roll/preview`
+   green and lets `roll preview wait` pass. With a `health` path (roll.toml `[preview]`, or the
+   rules), roll asks it once per head (as the screenshot does) and reports the preview ready only
+   on 2xx/3xx, else failed with the status and the first lines of the body (Render's and
+   Railway's health checks).
+2. **A URL per push** (Vercel's deployment URLs): the change's earlier heads stay reachable at
+   `<head>-<service>-<slug>`, asleep and costing nothing until opened, for comparing before and
+   after on the same data.
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

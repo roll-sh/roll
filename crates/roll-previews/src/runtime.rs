@@ -511,7 +511,11 @@ async fn add_feedback(resp: Response) -> Response {
             return Response::from_parts(parts, Body::from_stream(head.chain(stream)));
         }
     }
+    // This visitor's page now (a shared cache mustn't hand it to anyone else), and not the
+    // service's bytes any more.
     parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::ETAG);
+    parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
     Response::from_parts(parts, Body::from(with_tag(page)))
 }
 
@@ -887,6 +891,7 @@ mod tests {
         let page = |accept: &str| format!("GET /page HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nAccept: {accept}\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id);
         let html = raw(page("text/html,*/*")).await;
         assert!(html.ends_with(r#"<p>asked for identity</p><script src="/__roll/feedback.js" defer></script></BODY></html>"#), "{html}");
+        assert!(html.to_ascii_lowercase().contains("cache-control: private"), "only this visitor's page: {html}");
         assert!(raw(page("application/json")).await.ends_with("<p>asked for any</p></BODY></html>"), "only a browser's page");
         let script = raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(script.contains("text/javascript") && script.contains(&format!(r#""https://roll.test/dashboard/projects/prj_1/previews?preview={}""#, row.id)), "{script}");
