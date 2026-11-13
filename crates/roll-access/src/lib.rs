@@ -304,6 +304,11 @@ pub trait ApprovalChat: Send + Sync + 'static {
     fn post(&self, install: String, channel: String, a: store::Approval) -> futures::future::BoxFuture<'static, std::result::Result<String, String>>;
     /// Edit a posted card to what the approval is now.
     fn update(&self, install: String, channel: String, ts: String, a: store::Approval) -> futures::future::BoxFuture<'static, std::result::Result<(), String>>;
+    /// Post a plain message (the daily list of tokens about to expire).
+    fn notice(&self, install: String, channel: String, text: String) -> futures::future::BoxFuture<'static, std::result::Result<(), String>> {
+        let _ = (install, channel, text);
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// The access service: the store, the catalogue and the resolvers.
@@ -396,6 +401,35 @@ impl Access {
         let n = self.store.setting("notify").ok()??;
         let (i, c) = (n["chat"]["install"].as_str()?, n["chat"]["channel"].as_str()?);
         Some((i.to_string(), c.to_string()))
+    }
+
+    /// Once a day, where approvals go: the live tokens that expire within a week (GitHub mails a
+    /// week before a token expires). One node posts it (the day is claimed in the store). Whether
+    /// it posted.
+    pub async fn expiry_digest(self: &Arc<Self>) -> Result<bool> {
+        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return Ok(false) };
+        let now = code_sql::now_ms();
+        let week = now + 7 * 86_400_000;
+        let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week)).collect();
+        if soon.is_empty() {
+            return Ok(false);
+        }
+        if !self.store.claim_day("expiry_notice", now / 86_400_000)? {
+            return Ok(false);
+        }
+        soon.sort_by_key(|g| g.expires_at);
+        let names: Vec<String> = soon
+            .iter()
+            .take(20)
+            .map(|g| {
+                let days = (g.expires_at.unwrap_or(now) - now).max(0) / 86_400_000;
+                format!("{} ({})", g.name, if days == 0 { "today".to_string() } else if days == 1 { "tomorrow".to_string() } else { format!("in {days} days") })
+            })
+            .collect();
+        let count = if soon.len() == 1 { "One roll token expires".to_string() } else { format!("{} roll tokens expire", soon.len()) };
+        let text = format!("{count} within a week: {}. Give one longer at {}/dashboard/access, or let it go.", names.join(", "), self.config.web_url.trim_end_matches('/'));
+        chat.notice(install, channel, text).await.map_err(Error::Internal)?;
+        Ok(true)
     }
 
     /// A new approval: posted to chat, when approvals go there (in the background).

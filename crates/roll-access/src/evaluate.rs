@@ -144,7 +144,8 @@ fn storage_account(row: &Row, query: Option<&str>, headers: &axum::http::HeaderM
     if row.product != "storage" {
         return None;
     }
-    let from_query = || query.and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.into_owned()));
+    // Trimmed as storage itself reads it (s3-control's account parameter).
+    let from_query = || query.and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.trim().to_string()));
     headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).or_else(from_query).filter(|a| !a.is_empty())
 }
 
@@ -231,10 +232,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
     let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
-    // A grant's request limit: an MCP message counts once (not the route its tool calls), a hop
-    // counts where it was decided. Over it, nothing is written: a flood stays cheap.
+    // A grant's request limit: every request counts, an MCP tool call too (as the route it calls),
+    // but not the MCP envelope around it (a batch of calls is each call); a hop counts where it was
+    // decided. Over it, nothing is written: a flood stays cheap.
     let mut limit = None;
-    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && req.extensions().get::<McpCall>().is_none()) {
+    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && route != "/v1/mcp") {
         match access.limiter.check(&grant.id, rate, Instant::now()) {
             crate::rate::Verdict::Over { retry_after } => return rate_limited(rate, retry_after),
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),
@@ -400,7 +402,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 target,
                 bound.join("\n")
             ));
-            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone() };
+            let (environment, scope_path) = match &target {
+                Target::One(r) => (r.environment.clone(), r.path.clone()),
+                _ => (None, None),
+            };
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(id) => approval_used = Some(id),
                 Err(resp) => return *resp,
@@ -545,11 +551,14 @@ struct Asked<'a> {
     request_hash: String,
     /// What it does, when its body isn't JSON (a push's ref updates).
     args: Option<Value>,
+    /// The environment and path the request is about.
+    environment: Option<String>,
+    scope_path: Option<String>,
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
-    let Asked { headers, path, body, request_hash, args } = req;
+    let Asked { headers, path, body, request_hash, args, environment, scope_path } = req;
     let access = &ctx.access;
     let existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     let approval = match existing {
@@ -583,6 +592,8 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
                     args,
                     tool: tool.as_deref(),
                     request_hash,
+                    environment: environment.as_deref(),
+                    scope_path: scope_path.as_deref(),
                 })
             })
             .await

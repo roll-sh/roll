@@ -28,9 +28,30 @@ const P256_SPKI: [u8; 26] = [0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x4
 /// Keys by identifier: each one's uncompressed P-256 point.
 type Keys = HashMap<String, Vec<u8>>;
 
-/// GitHub's keys, and when they were fetched.
+/// GitHub's keys as last fetched, when, and when a fetch was last tried (a failed one too): a fetch
+/// happens at most once a minute, one at a time, and a failed one leaves the keys there were.
 #[derive(Default)]
-pub struct GithubKeys(Mutex<Option<(Instant, Keys)>>);
+pub struct GithubKeys {
+    state: Mutex<KeyState>,
+    fetching: tokio::sync::Mutex<()>,
+}
+
+#[derive(Default)]
+struct KeyState {
+    keys: Keys,
+    fetched_at: Option<Instant>,
+    tried_at: Option<Instant>,
+}
+
+impl KeyState {
+    fn fresh(&self) -> bool {
+        self.fetched_at.is_some_and(|t| t.elapsed() < KEYS_FOR)
+    }
+
+    fn may_try(&self) -> bool {
+        self.tried_at.is_none_or(|t| t.elapsed() >= REFETCH_EVERY)
+    }
+}
 
 /// A PEM public key's P-256 point.
 fn p256_point(pem: &str) -> Option<Vec<u8>> {
@@ -40,33 +61,36 @@ fn p256_point(pem: &str) -> Option<Vec<u8>> {
 }
 
 impl Access {
-    /// The key GitHub signed with: from the cache, else fetched (at most once a minute).
+    /// The key GitHub signed with: a fresh one from the cache; else fetched again (at most once a
+    /// minute, one fetch at a time); else whatever the cache has.
     async fn github_key(&self, id: &str) -> Option<Vec<u8>> {
-        let stale = {
-            let keys = self.github_keys.0.lock().unwrap_or_else(|e| e.into_inner());
-            match &*keys {
-                Some((at, k)) if at.elapsed() < KEYS_FOR && k.contains_key(id) => return k.get(id).cloned(),
-                Some((at, _)) => at.elapsed() >= REFETCH_EVERY,
-                None => true,
-            }
-        };
-        if !stale {
-            return None;
+        let state = |f: &dyn Fn(&mut KeyState) -> Option<Vec<u8>>| f(&mut self.github_keys.state.lock().unwrap_or_else(|e| e.into_inner()));
+        let cached = |s: &mut KeyState| s.keys.get(id).cloned();
+        if let Some(k) = state(&|s| if s.fresh() { cached(s) } else { None }) {
+            return Some(k);
         }
-        let fetched = fetch_keys(&self.config.github_keys_url).await;
-        let mut keys = self.github_keys.0.lock().unwrap_or_else(|e| e.into_inner());
-        match fetched {
+        if state(&|s| (!s.may_try()).then(Vec::new)).is_some() {
+            return state(&cached);
+        }
+        // One fetch at a time: whoever waited reads what it found.
+        let _one = self.github_keys.fetching.lock().await;
+        if state(&|s| (!s.may_try()).then(Vec::new)).is_some() {
+            return state(&cached);
+        }
+        state(&|s| {
+            s.tried_at = Some(Instant::now());
+            None
+        });
+        match fetch_keys(&self.config.github_keys_url).await {
             Ok(k) => {
-                let found = k.get(id).cloned();
-                *keys = Some((Instant::now(), k));
-                found
+                let mut s = self.github_keys.state.lock().unwrap_or_else(|e| e.into_inner());
+                s.keys = k;
+                s.fetched_at = Some(Instant::now());
+                cached(&mut s)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "fetching GitHub's secret scanning keys");
-                // Don't ask again for a minute; keep what we had.
-                let old = keys.take().map(|(_, k)| k).unwrap_or_default();
-                *keys = Some((Instant::now() - KEYS_FOR + REFETCH_EVERY, old));
-                None
+                state(&cached)
             }
         }
     }
