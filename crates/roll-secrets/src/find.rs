@@ -9,6 +9,9 @@ use serde::Serialize;
 
 /// The most places one search answers.
 const FOUND_MAX: usize = 500;
+/// Rows read a page at a time, and at most this many in all.
+const PAGE: i64 = 5000;
+const SCANNED_MAX: i64 = 100_000;
 
 #[derive(Debug, Serialize)]
 pub struct Place {
@@ -38,29 +41,35 @@ impl Secrets {
         // A caller bound to one project (a token) is looked for there, before the window: other
         // projects' rows must not crowd its own out.
         let only = caller.grants.project().map(String::from);
-        let rows: Vec<Row> = self.db.read(|c| {
-            let (matching, arg) = match exact {
-                Some(k) => ("s.key = ?", k.to_string()),
-                // Keys are [A-Za-z0-9_]: `_` is LIKE's one-character wildcard, so escape it.
-                None => ("s.key LIKE ? ESCAPE '\\'", format!("{}%", probe.replace('_', "\\_"))),
-            };
-            let sql = format!(
-                "SELECT s.project_id, e.slug, s.path, s.key, s.version, s.updated_at, s.link FROM secrets s JOIN environments e ON e.id = s.env_id
-                 WHERE s.owner = '' AND {matching} AND (CAST(? AS TEXT) IS NULL OR s.project_id = ?) ORDER BY s.project_id, e.position, s.path, s.key LIMIT 5000"
-            );
-            Ok::<_, Error>(c.query(&sql, params![arg, only, only], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?)
-        })?;
+        let (matching, arg) = match exact {
+            Some(k) => ("s.key = ?", k.to_string()),
+            // Keys are [A-Za-z0-9_]: `_` is LIKE's one-character wildcard, so escape it.
+            None => ("s.key LIKE ? ESCAPE '\\'", format!("{}%", probe.replace('_', "\\_"))),
+        };
+        let sql = format!(
+            "SELECT s.project_id, e.slug, s.path, s.key, s.version, s.updated_at, s.link FROM secrets s JOIN environments e ON e.id = s.env_id
+             WHERE s.owner = '' AND {matching} AND (CAST(? AS TEXT) IS NULL OR s.project_id = ?) ORDER BY s.project_id, e.position, s.path, s.key LIMIT ? OFFSET ?"
+        );
         let mut names_of = std::collections::HashMap::new();
         let mut out = vec![];
-        for (project, env, path, key, version, updated_at, link) in rows {
-            if out.len() >= FOUND_MAX {
+        // Pages of rows, filtered by what the caller may read, until enough places or the end:
+        // rows it can't read never crowd out ones it can.
+        for page in 0..(SCANNED_MAX / PAGE) {
+            let rows: Vec<Row> = self.db.read(|c| Ok::<_, Error>(c.query(&sql, params![arg, only, only, PAGE, page * PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?))?;
+            let last = (rows.len() as i64) < PAGE;
+            for (project, env, path, key, version, updated_at, link) in rows {
+                if out.len() >= FOUND_MAX {
+                    return Ok(out);
+                }
+                if !caller.allows(Action::Read, &Scope::at(&project, &env, &path)) {
+                    continue;
+                }
+                let project_name = names_of.entry(project.clone()).or_insert_with(|| self.workspace.get(&project).map(|p| p.name).unwrap_or_else(|_| project.clone())).clone();
+                out.push(Place { project, project_name, environment: env, path, key, version, updated_at, linked: link.is_some() });
+            }
+            if last {
                 break;
             }
-            if !caller.allows(Action::Read, &Scope::at(&project, &env, &path)) {
-                continue;
-            }
-            let project_name = names_of.entry(project.clone()).or_insert_with(|| self.workspace.get(&project).map(|p| p.name).unwrap_or_else(|_| project.clone())).clone();
-            out.push(Place { project, project_name, environment: env, path, key, version, updated_at, linked: link.is_some() });
         }
         Ok(out)
     }

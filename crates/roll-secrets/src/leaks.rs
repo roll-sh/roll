@@ -42,8 +42,10 @@ impl Secrets {
             return Err(Error::BadRequest(format!("at most {SCAN_MAX} candidates a scan")));
         }
         self.project(project)?;
+        // Shared values and the caller's own personal ones: never someone else's personal value,
+        // which no other caller ever sees.
         let found: Vec<Found> = self
-            .leak_matches(project, candidates)?
+            .matches(project, candidates, Some(&caller.principal))?
             .into_iter()
             .filter(|(_, l)| !l.environment.contains('/') && caller.allows(Action::Reveal, &Scope::at(project, &l.environment, &l.path)))
             .map(|(index, leak)| Found { index, leak })
@@ -62,7 +64,13 @@ impl Secrets {
     }
 
     /// [`leaks`](Self::leaks) with which candidate (its index) each one was: a scan says where.
+    /// Personal values count too: one pushed into code leaked as much as a shared one.
     pub fn leak_matches(&self, project: &str, candidates: &[String]) -> Result<Vec<(usize, Leak)>> {
+        self.matches(project, candidates, None)
+    }
+
+    /// The matches, among personal values only `owner`'s when one is given.
+    fn matches(&self, project: &str, candidates: &[String], owner: Option<&str>) -> Result<Vec<(usize, Leak)>> {
         if !candidates.iter().any(|c| c.chars().count() >= MIN_LEN) {
             return Ok(Vec::new());
         }
@@ -76,8 +84,9 @@ impl Secrets {
         let rows = self.db.read(|c| {
             c.query(
                 "SELECT s.key, e.slug, s.path, s.fp, s.project_id FROM secrets s JOIN environments e ON e.id = s.env_id
-                 WHERE s.value IS NOT NULL AND (s.project_id = ? OR (s.owner = '' AND EXISTS (SELECT 1 FROM exports x WHERE x.env_id = s.env_id AND x.path = s.path AND x.to_project = ?)))",
-                [project, project],
+                 WHERE s.value IS NOT NULL AND (CAST(? AS TEXT) IS NULL OR s.owner = '' OR s.owner = ?)
+                   AND (s.project_id = ? OR (s.owner = '' AND EXISTS (SELECT 1 FROM exports x WHERE x.env_id = s.env_id AND x.path = s.path AND x.to_project = ?)))",
+                code_sql::params![owner, owner, project, project],
                 |r| Ok((Leak { key: r.get(0)?, environment: r.get(1)?, path: r.get(2)? }, r.get::<_, String>(3)?, r.get::<_, String>(4)?)),
             )
         })?;

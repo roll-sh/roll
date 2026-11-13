@@ -535,7 +535,8 @@ every roll webhook is (`X-Roll-Signature-256`, `X-Roll-Timestamp`, `X-Roll-Deliv
 
 The URL (which may carry a token) and the signing secret are sealed with the project's data key;
 only the host is shown. An answer is read once, never logged, and never part of an error. A rotator
-a key still links to can't be deleted.
+a key still links to can't be deleted, nor one with a retired credential still waiting out its
+grace period (its revocation goes through the rotator).
 
 ## Consumption
 
@@ -704,8 +705,8 @@ non-zero when it found one, so it works as a hook:
 exec roll secrets scan --staged
 ```
 
-A scan only names values its caller may reveal: otherwise it would confirm guesses at values the
-caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
+A scan only names values its caller may reveal, and among personal values only the caller's own:
+otherwise it would confirm guesses at values the caller can't read. Each scan is audited (`secrets.scan`, the keys it found).
 
 ### Moving from another manager
 
@@ -800,7 +801,7 @@ open it.
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
 they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
-Railway, Heroku, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
+Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -920,7 +921,8 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   Key Vault allows only letters, digits and `-`, and roll's keys never hold a `-`), and `PUT` the
   value with the tag `managed-by=roll-secrets`; per removed key, delete it only when it carries the
   tag. A secret roll deleted earlier is kept by the vault's soft delete: setting it again recovers it
-  first. One that exists without the tag is someone else's, never written. Errors carry Key Vault's
+  first, once the deleted secret's tag shows it was roll's. Whether a secret is roll's must be known
+  before anything is written or deleted: a refused read stops the push. One that exists without the tag is someone else's, never written. Errors carry Key Vault's
   `error.code`, never an answer.
 - **`aws-secrets-manager`**: one secret holding the environment's values as a JSON object (what an
   app reads with one `GetSecretValue`), sent whole on each push, so a removed key is simply gone
@@ -929,7 +931,7 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
   leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
 
-### `render`, `netlify`, `fly`, `railway` and `heroku`
+### `render`, `netlify`, `fly`, `railway`, `heroku`, `digitalocean`, `circleci`, `bitbucket` and `terraform-cloud`
 
 - **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
   environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
@@ -947,6 +949,22 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   variables in one environment (the environment's shared variables without `service`), through its
   public GraphQL API (`variableCollectionUpsert`, `variableDelete`). The token is a project token
   (`Project-Access-Token`) by default, or an account token with `token_kind: "account"`.
+- **`circleci`**, `{project: "gh/acme/web", token_key}`: a CircleCI project's environment variables
+  (`POST …/project/{slug}/envvar` per changed name, `DELETE` per removed one, `Circle-Token`).
+  CircleCI keeps no tag on a variable, so only names this sync pushed before are ever removed.
+- **`bitbucket`**, `{workspace, repo, environment?, token_key}`: a repository's Pipelines variables,
+  or one deployment environment's (its uuid), all secured. The sync lists them for their uuids
+  (following `next` only on Bitbucket's API host), then `PUT`s an existing one, `POST`s a new one and
+  `DELETE`s a removed one.
+- **`terraform-cloud`**, `{workspace_id, category?, token_key}`: a Terraform Cloud workspace's
+  variables (`category` `env`, the default, or `terraform`), all `sensitive`, over its JSON:API
+  (`…/workspaces/{id}/vars`). Terraform Cloud keeps no tag on a variable, so roll describes its own
+  as `managed by roll secrets` and never writes to or deletes one without that description.
+- **`digitalocean`**, `{app, component?, token_key}`: an App Platform app's environment variables,
+  app-wide or one component's (a service, worker, job, function or static site, by name). The sync
+  reads the app spec, replaces only the keys it pushes (as encrypted `SECRET`s, run and build time),
+  drops the keys it removes, leaves every other variable as it came (already-encrypted values go
+  back unchanged), and puts the spec back. Updating the spec redeploys the app.
 - **`heroku`**, `{app, token_key}`: a Heroku app's config vars, in one `PATCH /apps/{app}/config-vars`
   per push (changed names with their values, removed ones as `null`). A failure names Heroku's error
   `id`, never the answer, which echoes the vars.
@@ -1429,7 +1447,8 @@ Done and in PR #20:
   outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
-- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Heroku, Cloudflare Workers, AWS
+- syncs: GitHub, GitLab CI, CircleCI, Bitbucket Pipelines, Terraform Cloud, Vercel, Netlify, Render, Fly.io, Railway,
+  Heroku, DigitalOcean App Platform, Cloudflare Workers, AWS
   Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
   identities pinned to client addresses; encrypted project backup and restore;

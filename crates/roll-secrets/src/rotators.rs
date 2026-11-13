@@ -184,6 +184,15 @@ impl Secrets {
             if !linked.is_empty() {
                 return Err(Error::Conflict("in_use", format!("{name} still issues {}: unlink them first", linked.join(", "))));
             }
+            // A credential it issued that's still in its grace period is revoked through it.
+            let waiting: i64 = c.query_row(
+                "SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?",
+                params![project, format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%")],
+                |r| r.get(0),
+            )?;
+            if waiting > 0 {
+                return Err(Error::Conflict("in_use", format!("{name} has {waiting} retired credential(s) still to revoke after their grace period: delete it once they're revoked")));
+            }
             c.execute("DELETE FROM rotators WHERE id = ?", [id])?;
             audit::record(c, project, caller, "rotator.delete", None, None, &[], &format!("deleted rotator {name}"), now)
         })

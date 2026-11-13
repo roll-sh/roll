@@ -129,15 +129,16 @@ impl Secrets {
             }
         }
         // Plain values of unprotected environments, by fingerprint: where a protected one's also is.
-        let mut unprotected: HashMap<&str, BTreeSet<&str>> = HashMap::new();
-        for (env_id, _, _, fp, link, refs, ..) in &rows {
+        // (environment, folder) of each: access is checked where the copy actually is.
+        let mut unprotected: HashMap<&str, BTreeSet<(&str, &str)>> = HashMap::new();
+        for (env_id, at, _, fp, link, refs, ..) in &rows {
             if let Some(e) = slug.get(env_id.as_str())
                 && !e.protected
                 && link.is_none()
                 && refs.as_deref().is_none_or(|r| r == "[]")
                 && *fp != empty
             {
-                unprotected.entry(fp.as_str()).or_default().insert(e.slug.as_str());
+                unprotected.entry(fp.as_str()).or_default().insert((e.slug.as_str(), at.as_str()));
             }
         }
         let mut out = vec![];
@@ -168,7 +169,7 @@ impl Secrets {
                 && *fp != empty
                 && let Some(others) = unprotected.get(fp.as_str())
             {
-                let named: Vec<&str> = others.iter().copied().filter(|o| caller.allows(Action::Read, &Scope::at(project, o, path))).collect();
+                let named: Vec<&str> = others.iter().filter(|(o, at)| caller.allows(Action::Read, &Scope::at(project, o, at))).map(|(o, _)| *o).collect::<BTreeSet<_>>().into_iter().collect();
                 if !named.is_empty() {
                     add(Issue::Exposed, format!("also in {}", named.join(", ")));
                 }
