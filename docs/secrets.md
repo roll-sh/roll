@@ -1424,6 +1424,11 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **AWS Secrets Manager sync** (Doppler and Infisical have one; roll has Parameter Store): an
+   environment's values as one JSON secret (or one secret per key), with the platform credentials
+   the other AWS sync uses, deleting only what it created.
+2. **Weak values in change requests**: a request's proposed credential that's easy to guess is
+   flagged to its reviewers (who may reveal it) before they approve.
 
 Waiting on other pull requests:
 
