@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { accessApi, describeRule, productName, RISKY, type Approval, type AuditEvent, type Grant } from "@/lib/access-api";
+import { accessApi, describeRule, productName, RISKY, statusOf, type Approval, type AuditEvent, type Grant } from "@/lib/access-api";
 import { loadInventory, resourcesByProduct } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
@@ -14,9 +14,14 @@ import { usePoll } from "./use-access";
  * asked for, and its recent requests; edit, rotate and revoke at the top.
  */
 export function TokenPage({ id }: { id: string }) {
+  // Another token's page starts from nothing, not from the last one's answers.
+  return <Token key={id} id={id} />;
+}
+
+function Token({ id }: { id: string }) {
   const { data: g, error, refresh } = usePoll(() => accessApi.token(id), 10_000);
   const { data: events } = usePoll(() => accessApi.audit({ grant: id, limit: 30 }), 15_000);
-  const { data: approvals } = usePoll(() => accessApi.approvals().then((l) => l.filter((a) => a.grant_id === id)), 15_000);
+  const { data: approvals } = usePoll(() => accessApi.approvals(undefined, id), 15_000);
   const ws = useWorkspace();
   const [inventory, setInventory] = useState<Record<string, { id: string; name: string }[]>>({});
   useEffect(() => {
@@ -33,10 +38,16 @@ export function TokenPage({ id }: { id: string }) {
         <Link href="/dashboard/access" className="text-[12px] text-muted hover:text-fg">
           ← Tokens and connections
         </Link>
+        {g && error && <ErrorNote error={`Couldn't refresh this token (${error}): what's below may be out of date.`} />}
         {!g ? (
           error ? <ErrorNote error={error} /> : <Connecting />
         ) : (
           <>
+            {statusOf(g) !== "active" && (
+              <p className="rounded-lg border border-line px-4 py-3 text-[13px] text-muted">
+                This token is {statusOf(g)}: nothing below works any more.
+              </p>
+            )}
             <Panel title="Token">
               <ul>
                 <GrantRow g={g} refresh={refresh} linked={false} />
@@ -52,7 +63,7 @@ export function TokenPage({ id }: { id: string }) {
                 <p className="text-[12px] text-subtle">{g.ask_otherwise ? "Anything else waits for your approval." : "Anything else is refused."}</p>
               </div>
             </Panel>
-            <Temporary g={g} projectName={projectName} resourceName={resourceName} />
+            {statusOf(g) === "active" && <Temporary g={g} projectName={projectName} resourceName={resourceName} />}
             <Approvals list={approvals ?? []} />
             <Requests id={id} events={events} />
           </>
