@@ -1161,14 +1161,12 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Errors from in-process product calls carry the HTTP status.** rolld's `Api` (link providers,
-   syncs) reads a status, not "404" or "no " in an error's text.
-3. **One table of every secrets route and its action**, generated from the router and checked by a
+2. **One table of every secrets route and its action**, generated from the router and checked by a
    test against roll-access's `classify`, so a catch-all row can't hide a misclassified route.
-4. **Fly.io and Railway syncs**, checked against their own clients' sources. Fly is GraphQL
+3. **Fly.io and Railway syncs**, checked against their own clients' sources. Fly is GraphQL
    `setSecrets`/`unsetSecrets` `{appId, secrets: [{key, value}]}` / `{appId, keys}`.
-5. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-6. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+5. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-7. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
