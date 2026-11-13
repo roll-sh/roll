@@ -45,6 +45,8 @@ use tracing::warn;
 
 /// The tag of a service's registry build cache.
 pub const CACHE_TAG: &str = "buildcache";
+/// Builds' variables in Secrets Manager: `<prefix><service>-<deployment>-<random>`.
+const SECRET_PREFIX: &str = "roll-apps/builds/";
 /// Secrets Manager holds at most 64 KiB in a secret.
 const SECRET_MAX: usize = 64 << 10;
 
@@ -161,14 +163,45 @@ impl CodeBuild {
     pub async fn new(cfg: FleetConfig) -> anyhow::Result<Arc<CodeBuild>> {
         std::fs::create_dir_all(&cfg.scratch).with_context(|| format!("creating {}", cfg.scratch.display()))?;
         let sdk = cfg.sdk().await;
-        Ok(Arc::new(CodeBuild {
+        let cb = Arc::new(CodeBuild {
             codebuild: aws_sdk_codebuild::Client::new(&sdk),
             ecr: aws_sdk_ecr::Client::new(&sdk),
             secrets: aws_sdk_secretsmanager::Client::new(&sdk),
             logs: aws_sdk_cloudwatchlogs::Client::new(&sdk),
             bucket: cfg.bucket()?,
             cfg,
-        }))
+        });
+        let sweeper = cb.clone();
+        tokio::spawn(async move { sweeper.sweep_secrets().await });
+        Ok(cb)
+    }
+
+    /// Delete builds' variables a node that stopped mid-build left in Secrets Manager: a build
+    /// lasts at most 36 hours, so a secret two days old belongs to none. Any node may do it
+    /// (deleting is idempotent). The bucket's lifecycle rule does the same for `builds/` zips.
+    async fn sweep_secrets(&self) {
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
+        let filter = aws_sdk_secretsmanager::types::Filter::builder().key(aws_sdk_secretsmanager::types::FilterNameStringType::Name).values(SECRET_PREFIX).build();
+        let mut pages = self.secrets.list_secrets().filters(filter).into_paginator().send();
+        while let Some(page) = pages.next().await {
+            let page = match page {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %aws_sdk_secretsmanager::error::DisplayErrorContext(e), "apps: listing builds' secrets to sweep");
+                    return;
+                }
+            };
+            for s in page.secret_list() {
+                let (Some(name), Some(made)) = (s.name(), s.created_date()) else { continue };
+                if !name.starts_with(SECRET_PREFIX) || std::time::SystemTime::try_from(*made).map_or(true, |t| t > cutoff) {
+                    continue;
+                }
+                match self.secrets.delete_secret().secret_id(name).force_delete_without_recovery(true).send().await {
+                    Ok(_) => tracing::info!(secret = name, "apps: deleted a build's variables a stopped node left"),
+                    Err(e) => warn!(secret = name, error = %aws_sdk_secretsmanager::error::DisplayErrorContext(e), "apps: sweeping a build's variables"),
+                }
+            }
+        }
     }
 
     /// The service's repository's URI, made if it's missing.
@@ -329,7 +362,7 @@ impl Builder for CodeBuild {
         } else {
             let value = serde_json::Value::Object(vars.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect()).to_string();
             anyhow::ensure!(value.len() <= SECRET_MAX, "the build's variables are over 64 KiB, more than CodeBuild can take");
-            let name = format!("roll-apps/builds/{id}");
+            let name = format!("{SECRET_PREFIX}{id}");
             self.secrets
                 .create_secret()
                 .name(&name)

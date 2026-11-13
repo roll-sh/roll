@@ -281,7 +281,7 @@ export function SettingsTab({ service, projectName, runner, onDeleted }: { servi
           </Field>
           {web && (
             <>
-              <Field label="Health check path" hint="none: the port accepting">
+              <Field label="Health check path" hint="checked at each deploy and every 10 s while running; none: the port accepting">
                 {t("healthPath", "/healthz")}
               </Field>
               <Field label="Health timeout (s)">{t("healthTimeout", "60")}</Field>

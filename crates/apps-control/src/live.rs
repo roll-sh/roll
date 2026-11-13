@@ -49,6 +49,8 @@ pub struct Inst {
     cpu_seen: Mutex<Option<u64>>,
     /// Consecutive crashes (a worker's restart backoff).
     crashes: AtomicU32,
+    /// Failed health checks in a row while running.
+    health_fails: AtomicU32,
 }
 
 impl Inst {
@@ -62,6 +64,7 @@ impl Inst {
             started_at: Mutex::new(None),
             cpu_seen: Mutex::new(None),
             crashes: AtomicU32::new(0),
+            health_fails: AtomicU32::new(0),
         })
     }
 
@@ -146,6 +149,10 @@ pub struct LiveConfig {
     pub probe_every: Duration,
     /// Requests that may wait for one environment's wake; more get a 503 at once.
     pub max_waiters: u32,
+    /// Between two health checks of a running web instance (its `health_path`, when set).
+    pub health_every: Duration,
+    /// Failed health checks in a row that replace an instance.
+    pub health_failures: u32,
 }
 
 impl Default for LiveConfig {
@@ -157,6 +164,8 @@ impl Default for LiveConfig {
             scale_down_after: Duration::from_secs(60),
             probe_every: Duration::from_millis(10),
             max_waiters: 1000,
+            health_every: Duration::from_secs(10),
+            health_failures: 3,
         }
     }
 }
@@ -187,6 +196,7 @@ pub struct EnvLive {
     /// A tick is running (the reaper never runs two of one environment at once).
     pub ticking: std::sync::atomic::AtomicBool,
     last_tick: Mutex<Option<Instant>>,
+    last_health: Mutex<Option<Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
 }
 
@@ -214,6 +224,7 @@ impl EnvLive {
             over_since: Mutex::new(None),
             ticking: std::sync::atomic::AtomicBool::new(false),
             last_tick: Mutex::new(None),
+            last_health: Mutex::new(None),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
         })
     }
@@ -278,6 +289,7 @@ impl EnvLive {
             }
         };
         *inst.started_at.lock() = Some(now_ms());
+        inst.health_fails.store(0, Ordering::SeqCst);
         *inst.cpu_seen.lock() = None;
         match (run.kind, addr) {
             (RunType::Web, Some(a)) => loop {
@@ -722,6 +734,22 @@ impl EnvLive {
         if up > 0 || elapsed > 0.0 {
             self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
         }
+        if let Some(tpl) = self.template()
+            && tpl.run.kind == RunType::Web
+            && let Some(path) = tpl.run.health_path.as_deref()
+        {
+            let due = {
+                let mut last = self.last_health.lock();
+                let due = last.is_none_or(|t| now.duration_since(t) >= self.cfg.health_every);
+                if due {
+                    *last = Some(now);
+                }
+                due
+            };
+            if due {
+                self.check_health(&insts, path).await;
+            }
+        }
         let _g = self.wake.lock().await;
         // Read again under the lock: a teardown (`shutdown`) or a new deployment may have
         // happened while this tick waited, and the floor must not make instances for either.
@@ -730,6 +758,34 @@ impl EnvLive {
             RunType::Cron => {}
             RunType::Worker => self.keep_workers(&tpl).await,
             RunType::Web => self.reap_web(&tpl).await,
+        }
+    }
+
+    /// Health checks while running (Render's, Fly's `checks`): every running instance's
+    /// `health_path`, all at once. `health_failures` failures in a row (an app that hangs or
+    /// answers errors with its port still open) replace it: it's out of rotation and stopped
+    /// as a crash (counted toward a crash loop), and the next request or the floor starts a
+    /// fresh one.
+    async fn check_health(&self, insts: &[Arc<Inst>], path: &str) {
+        let running: Vec<(&Arc<Inst>, SocketAddr)> = insts
+            .iter()
+            .filter_map(|i| match i.phase() {
+                Phase::Running(Some(a)) => Some((i, a)),
+                _ => None,
+            })
+            .collect();
+        let probes = running.iter().map(|(i, a)| async move { (*i, *a, self.answers(*a, Some(path)).await) });
+        for (i, addr, ok) in futures::future::join_all(probes).await {
+            if ok {
+                i.health_fails.store(0, Ordering::SeqCst);
+                continue;
+            }
+            let n = i.health_fails.fetch_add(1, Ordering::SeqCst) + 1;
+            self.log.stream(Stream::System).line(format!("{}: health check {path} failed ({n} of {})", i.name, self.cfg.health_failures));
+            // Still the instance that was checked (not stopped or replaced meanwhile).
+            if n >= self.cfg.health_failures && i.phase() == Phase::Running(Some(addr)) {
+                self.crashed(i, &format!("its health check {path} failed {n} times in a row"));
+            }
         }
     }
 

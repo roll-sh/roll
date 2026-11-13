@@ -148,7 +148,8 @@ type Run = {
   concurrency: number;      // requests in flight per instance before scaling out (default 50)
   cpu: number;              // vCPU per instance, 0.25–8 (default 0.5)
   memory_mb: number;        // 256–16384 (default 512)
-  health_path?: string;     // web: GET it for a 2xx/3xx; none: the port accepting a connection
+  health_path?: string;     // web: GET it for a 2xx/3xx; none: the port accepting a connection.
+                            // Also checked every 10 s while running: 3 failures in a row replace the instance
   health_timeout_s: number; // default 60
   suspend_after_s: number;  // default 30; 0 never suspends
   sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min

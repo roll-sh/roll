@@ -51,6 +51,8 @@ pub struct Fake {
     pub counts: Counts,
     /// Who the last pull logged in as (a private registry).
     pub pulled_as: Mutex<Option<String>>,
+    /// Instances that answer 500 from now on (a running app that broke: [`Fake::sicken`]).
+    sick: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Fake {
@@ -67,6 +69,11 @@ impl Fake {
         let mut v: Vec<_> = self.instances.lock().values().filter(|i| i.spec.service == service).map(|i| (i.spec.name.clone(), i.spec.deployment.clone(), i.state)).collect();
         v.sort();
         v
+    }
+
+    /// The app breaks while it runs: every path answers 500 from now on, its port still open.
+    pub fn sicken(&self, name: &str) {
+        self.sick.lock().insert(name.to_string());
     }
 
     /// The process dies on its own (killed, out of memory): its port stops answering.
@@ -93,7 +100,7 @@ fn var<'a>(spec: &'a InstanceSpec, k: &str) -> Option<&'a str> {
     spec.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
 }
 
-async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSink) {
+async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSink, sick: Arc<Mutex<std::collections::HashSet<String>>>) {
     let unhealthy = var(&spec, "FAKE_UNHEALTHY") == Some("1");
     let boot = var(&spec, "FAKE_BOOT_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let echo: Vec<(String, String)> = var(&spec, "FAKE_ECHO")
@@ -105,9 +112,9 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
     let (name, dep) = (spec.name.clone(), spec.deployment.clone());
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo) = (name.clone(), dep.clone(), echo.clone());
+        let (name, dep, echo, sick) = (name.clone(), dep.clone(), echo.clone(), sick.clone());
         async move {
-            let status = if unhealthy { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK };
+            let status = if unhealthy || sick.lock().contains(&name) { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK };
             let vars: serde_json::Map<String, serde_json::Value> = echo.into_iter().map(|(k, v)| (k, v.into())).collect();
             let host = req.headers().get("x-forwarded-host").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let cookie = req.headers().get("cookie").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
@@ -163,7 +170,7 @@ impl Runtime for Fake {
             Some(_) => {
                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                 let addr = l.local_addr()?;
-                let server = tokio::spawn(serve(spec.clone(), l, log));
+                let server = tokio::spawn(serve(spec.clone(), l, log, self.sick.clone()));
                 let mut m = self.instances.lock();
                 let i = m.get_mut(name).expect("exists");
                 i.server = Some(server);

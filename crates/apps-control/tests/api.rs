@@ -488,6 +488,31 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
 }
 
+/// A running instance whose health check keeps failing (its port still open) is replaced, and
+/// the environment's log says why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_instance_that_fails_its_health_check_is_replaced() {
+    let w = world_with(|cfg| cfg.live.health_every = Duration::from_millis(10)).await;
+    let (svc, d) = image_service(&w, "api", json!({"port": 80, "health_path": "/healthz", "min_instances": 1})).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let running = |w: &World| w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).map(|(n, _, _)| n).collect::<Vec<_>>();
+    let first = running(&w).pop().expect("min_instances 1 keeps one up");
+    w.fake.sicken(&first);
+    let mut replaced = false;
+    for _ in 0..300 {
+        let now = running(&w);
+        if !now.contains(&first) && !now.is_empty() {
+            replaced = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(replaced, "{:?}", w.fake.instances(&id));
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await;
+    assert!(log.to_string().contains("health check /healthz failed"), "{log}");
+}
+
 /// Where every tenant's CNAME points at one target (Cloudflare for SaaS), a CNAME proves nothing:
 /// a hostname someone else already points there (or left pointing) needs its TXT challenge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

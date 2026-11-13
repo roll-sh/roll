@@ -164,6 +164,12 @@ every deployment is immutable with instant rollback.
   serving. A service scaled to zero rolls out without starting anything: the pointer moves, and
   the next request wakes the new deployment (a health check runs at the first wake instead, and
   failing it there rolls the pointer back automatically).
+- **Health checks while running** (Render's, Fly's `checks`): with a `health_path`, every
+  running web instance is checked every 10 s (`LiveConfig::health_every`); three failures in a
+  row (`health_failures`: an app that hangs or answers errors with its port still open) replace
+  it: out of rotation, stopped, counted as a crash (so a loop of them notifies), and the next
+  request or `min_instances` starts a fresh one. Each failure is a line in the environment's
+  log. Without a path, a port that stops answering is noticed by the proxy and the reaper.
 - **One-off jobs** (`POST …/jobs`, `roll apps run -- <cmd>`): a command in a fresh container of
   the active deployment, with its variables on the project network (no port, no volume: the
   service's instance may have it), as Render's one-off jobs and `heroku run` are. Its output is a
@@ -605,6 +611,13 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   them as unknown hosts. Domains' state comes from the minute loop (while `pending`) and Verify;
   Cloudflare's webhooks for custom hostnames aren't used, and a custom hostname whose validation
   timed out isn't re-validated (removing and adding the domain again starts over).
+- An instance's writable layer and volume have no disk quota (Docker's `--storage-opt size`
+  needs overlay2 on XFS with project quotas, which a node may not have), and from a container
+  `host.docker.internal` reaches every listener on the host, not just the linked resources'
+  ports; both are the host's set-up (the fleet runs tasks, not containers on a node). roll-fetch
+  writes a bundle's env file 0644 (what reads it in previews' containers decides whether it can
+  be 0600). Builds' secrets a stopped node left in Secrets Manager are swept at start (two days
+  old); the bucket's `builds/` and `env/` objects wait for the stack's lifecycle rule.
 - Links: Postgres and Redis are wired; buckets, streams, queues and NoSQL answer "not wired yet".
 - roll secrets isn't on main yet: `NoSecrets` stands in, and service variables are the env store.
 - Private networking is a Docker network per project and environment; it isn't reachable from
@@ -647,43 +660,30 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Security follow-ups** left from the 2026-11-13 review (done since: the idle reaper takes an
-   instance out of rotation before stopping it, the access cache keeps no stale read, cron's
-   overlap guard is one write and ignores rows a stopped node left, a reused Idempotency-Key
-   with another body is a 409, a landing whose deploys didn't queue is retried (its deploys keyed
-   by the landing), CodeBuild images are recorded by digest, `//host` can't leave the access
-   redirect, WebSocket shells count against the environment's 8 with a 1 MiB frame cap and a
-   10-minute idle close): sweeping build secrets and `<prefix>env/` objects a crash left;
-   roll-fetch's env file mode (0644; check what reads it in previews' containers first); a disk
-   quota on an instance's writable layer and volume; `host.docker.internal` reaching every host
-   listener (only the linked resources' ports).
-2. **Health checks while running** (Render probes every few seconds, Fly's `checks`): an instance
-   whose `health_path` stops answering is taken out of rotation, replaced, and counted as a crash
-   (crash-loop notifications follow).
-3. **Environments in the dashboard**: delete, change the branch, make private (token, bypass);
+1. **Environments in the dashboard**: delete, change the branch, make private (token, bypass);
    promote one environment's deployment to another (Railway's promotion: an image roll already
    has, no rebuild); clone an environment's settings and variables.
-4. **Who deployed**: `Deployment.actor` (the token's caller, the pusher, `roll`), in the
+2. **Who deployed**: `Deployment.actor` (the token's caller, the pusher, `roll`), in the
    dashboard, the CLI and notifications.
-5. **Spend limits**: a project's monthly alert threshold (a notification) and a hard limit that
+3. **Spend limits**: a project's monthly alert threshold (a notification) and a hard limit that
    puts its services to sleep, from the metering already kept.
-6. **CLI polish**: confirm `roll apps delete`/`env-delete` (`--yes`), `roll logs -f --grep`, the
+4. **CLI polish**: confirm `roll apps delete`/`env-delete` (`--yes`), `roll logs -f --grep`, the
    hints that name `roll apps set`/`roll deploy` wrongly, `roll apps vars --from-file .env`,
    `roll apps set` flags for timings, volume, type and watch paths.
-7. **Dashboard costs**: pause polling while the tab is hidden; the service page from the event
+5. **Dashboard costs**: pause polling while the tab is hidden; the service page from the event
    log instead of three requests every 15 s.
-8. **Config as code**: `[app]` in `roll.toml` covering run settings (type, size, instances,
+6. **Config as code**: `[app]` in `roll.toml` covering run settings (type, size, instances,
    schedule) and per-environment blocks, with an end-to-end test.
-9. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-11. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-13. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+11. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-14. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.

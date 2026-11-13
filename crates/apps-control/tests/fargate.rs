@@ -209,6 +209,11 @@ async fn aws(State(f): State<Fake>, method: Method, uri: axum::http::Uri, header
             f.aws.lock().secrets.insert(s("Name"), s("SecretString"));
             ok(json!({ "ARN": format!("arn:aws:secretsmanager:us-east-1:1:secret:{}-AbCdEf", s("Name")), "Name": s("Name") }))
         }
+        // One left by a node that stopped mid-build three days ago, one of a build going now.
+        "ListSecrets" => ok(json!({ "SecretList": [
+            { "Name": "roll-apps/builds/left-by-a-crash", "CreatedDate": 1_000_000_000.0 },
+            { "Name": "roll-apps/builds/going-now", "CreatedDate": (code_sql::now_ms() / 1000) as f64 },
+        ] })),
         "DeleteSecret" => {
             f.aws.lock().secrets.remove(&s("SecretId"));
             ok(json!({ "Name": s("SecretId"), "DeletionDate": 1.0 }))
@@ -512,6 +517,9 @@ async fn a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps() {
     // Under `ROLL_BV_` names: no variable steers the build's shell, the AWS CLI or docker.
     assert_eq!(seen.get("ROLL_BV_NPM_TOKEN").map(String::as_str), Some("npm-s3cr3t-token"), "the build sees its variables: {seen:?}");
     assert!(w.fake.aws.lock().secrets.is_empty(), "the build's secret is deleted");
+    // And at start, what a node that stopped mid-build left (never one of a build going now).
+    let swept: Vec<String> = w.fake.calls("DeleteSecret").iter().map(|c| c["SecretId"].as_str().unwrap_or_default().to_string()).collect();
+    assert!(swept.contains(&"roll-apps/builds/left-by-a-crash".to_string()) && !swept.contains(&"roll-apps/builds/going-now".to_string()), "{swept:?}");
     assert_eq!(w.fake.keys("apps/builds/"), Vec::<String>::new());
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{}/logs", d["id"].as_str().unwrap()), None).await;
     assert!(log.to_string().contains("pushing layers done"), "the build's CloudWatch log is in the deploy's: {log}");
