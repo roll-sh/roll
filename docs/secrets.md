@@ -229,6 +229,13 @@ new version of its secret, and a delete makes a tombstone version, so history is
   back.
 - **Snapshot.** `GET …/changes/{seq}` with `?state=1` lists every key as it was after that change
   (metadata and fingerprints).
+- **Values as they were.** `GET …/values?seq=` (or `?at=` a time) answers a folder's own values as
+  they were stored after that change, without rolling anything back: "what did production have
+  before the incident". They're as written then: a reference isn't resolved against the past, and
+  a live or dynamic link, which stores nothing, and a purged value come back as problems. It needs
+  `reveal`, is audited as an export ("as of change #N"), and takes `format=` like any export.
+  `roll secrets export --change N` (or `--at 2h`), and the history's "Values then" in the
+  dashboard.
 
 ### Purge and retention
 
@@ -333,11 +340,15 @@ it's **stale**: unchanged for longer than the environment's `max_age_days`
 log (reveal, export, resolve and sync pushes) over the last 90 days; nothing is decrypted. A stale
 key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 
-**Rotation reminders.** An environment with a `max_age_days` limit and a notify URL (its
-protection policy's `notify_url`) gets one notice a day while it has stale keys: their names (up to
-20, then a count), the limit and a link, through the same outbox and retries as approval notices.
-Live and dynamic links don't count (they change on their own); managed ones do. Two nodes never
-both remind: the day is claimed in the same write that queues the notice.
+**Daily notices.** An environment with a notify URL (its protection policy's `notify_url`) gets one
+notice a day with its health findings (see Health): expired, missing, exposed, expiring and stale
+keys, worst first, each with its detail (`findings`), up to 10 per kind in the text, and a link to
+the Health view. Weak values aren't in it (that says something about a value, and a channel's
+readers needn't be ones who may reveal it), nor unread ones. Stale needs a `max_age_days`; live
+and dynamic links never count as stale (they change on their own), managed ones do. The same
+outbox and retries as approval notices carry it; two nodes never both send it, since the day is
+claimed in the same write that queues the notice, and an environment with nothing to say is
+looked at once a day too.
 
 **Expiry dates.** Some values stop working on a date roll can't see: a vendor's API key, a TLS
 certificate, a trial token. A secret's optional `expires_at` (ms; set in any write's `set`
@@ -346,8 +357,8 @@ comment, so history, rollback, promote, change requests and backups carry it, an
 keeps the date until someone changes it, except a certificate: a new value holding PEM
 certificates is dated by the earliest `notAfter` among them, unless the write gives a date. Insights add `expires_at` and `expiring` (within 14 days,
 or past); the grid and the environment's list show a clock, with the days left inside two weeks
-and "expired" in red after. The daily reminder above also lists expiring and expired keys (soonest
-first, names and dates only), for any environment with a notify URL, limit or not. Like
+and "expired" in red after. The daily notice above lists expiring and expired keys too (names and
+dates only), for any environment with a notify URL, limit or not. Like
 staleness, it's only flagged: nothing stops working in roll. `roll secrets set KEY=v --expires
 2027-03-31`, `roll secrets expire KEY --on 90d` (or `never`) and the editor's date field set it.
 
@@ -371,6 +382,33 @@ activity: never a value. Each is also an audit row (`secrets.alert`, by `roll:al
 not: the environment's Activity has an Alerts filter, and audit sinks carry them to a SIEM. The sweep walks the audit log after a cursor; advancing the cursor,
 recording the addresses seen and queueing the notices are one write, so two nodes never both
 alert, and history from before the first sweep isn't alerted on.
+
+**Weak values** (1Password Watchtower). A key whose name says it's a credential (`PASSWORD`,
+`SECRET`, `TOKEN`, `API_KEY`, `PRIVATE_KEY`…, but not `…_URL`, `…_HOST`, `…_ID` and the like) is
+judged when it's written, from the plaintext then: a common password, its own key's name, under
+12 characters, too few different characters, or under 64 bits of randomness (as if each character
+were drawn from its classes). Only the reason is kept (`weak`, never anything of the value), on
+`Secret` and in insights, and only a caller who may reveal the value sees it: that it's weak says
+something about it. Values with references aren't judged; a value written before this is judged at
+its next write. The environment's list marks it "weak", and `roll secrets insights` prints `WEAK`. The add and edit forms' "Generate" fills in 48 random
+letters and digits made in the browser (rejection-sampled, like the CLI's `--generate`), so the fix
+is one click.
+
+### Health
+
+`GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
+every standard environment and folder at once, worst first, so none waits on someone opening the
+right folder: `expired`, `missing` (a required key an environment doesn't define, through its
+imports and base), `exposed` (a protected value also in an unprotected environment), `weak`,
+`expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
+and it's older than that). Each `Finding` names the environment, folder and key where it's set,
+with a detail (the other environments, the reason, the date): never a value, and nothing is
+decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
+
+Health, `POST …/leaks` and `GET /v1/secrets/search` filter each finding by the caller's own access,
+so roll-access lets a token limited to some environments or folders call them (they're marked
+`filters_itself` in its catalogue): its answer just leaves the rest out. Keep that filter in each:
+without it, the mark would let such a token see the whole project.
 
 ### Compare and promote
 
@@ -489,6 +527,8 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
+roll secrets health                                            # every finding, every environment, worst first
+roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
 roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
@@ -678,6 +718,14 @@ opened archive; admin, audited `project.restore`), on this server or another. Va
 before any environment is protected, so a restore isn't a change request; what can't be restored
 (a link to a resource that project doesn't have, an import of another project's folder) comes back
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
+
+### Checking against a template
+
+`roll secrets check .env.example` compares the keys a `.env`-style template names (`KEY=…`,
+`export KEY=…`, a bare `KEY`; not comments) with the keys the environment has, its imports and base
+included, by name only: it reads no value, so `read` is enough. It lists each `missing` key and each
+`extra` one, and fails when one is missing (with `--strict`, also when there's an extra), so a CI
+step catches a variable the code started reading before an environment has it.
 
 ### Templates
 
@@ -1111,7 +1159,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=` | | `Values`, or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=&seq=&at=` | | `Values` (with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
@@ -1155,6 +1203,7 @@ isn't in the workspace is 404.
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
+| `GET /health` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
@@ -1213,6 +1262,7 @@ type Grid = { path: string; environments: string[]; rows: { key: string; cells: 
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
@@ -1297,8 +1347,8 @@ Done and in PR #20:
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history, and `roll secrets
   scan [--staged]` before a commit;
-- required and typed keys; insights, rotation reminders and expiry dates for values that expire
-  outside roll; a protected environment's values that are also set in an unprotected one; read
+- required and typed keys; insights, a daily notice of each environment's health, and expiry dates for values that expire
+  outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
@@ -1313,6 +1363,7 @@ Done and in PR #20:
   "Find a key"), for rotating an organisation-wide key;
 - exports as a Docker `--env-file` and a Kubernetes Secret manifest, next to dotenv, shell, JSON and
   YAML; `roll secrets render [--watch --exec]` fills `${KEY}` in a config file and keeps it current;
+  `roll secrets check` compares an environment with a `.env.example`;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1324,16 +1375,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Weak values** (1Password Watchtower): a key whose name says it's a credential (`PASSWORD`,
-   `SECRET`, `TOKEN`, `API_KEY`…) and whose value is short, of one kind of character, a common
-   password or its own key's name is flagged `weak` when it's written (computed from the plaintext
-   then, kept as a flag), shown to whoever may reveal it, in insights, the list and `roll secrets
-   insights`.
-2. **Values as they were**: `GET …/values?seq=` resolves an environment as it was after a change
-   (reveal, audited), for "what did production have before the incident"; `roll secrets export
-   --at`.
-3. **`roll secrets check .env.example`**: the keys a template names that the environment lacks (and
-   the ones it has that the template doesn't), without reading a value, for CI and onboarding.
 
 Waiting on other pull requests:
 

@@ -37,6 +37,8 @@ pub(crate) struct Row {
     /// The references in the value, as written (`None`: a row from before they were kept).
     pub refs: Option<Vec<String>>,
     pub expires_at: Option<i64>,
+    /// Why its value is easy to guess (strength.rs), if it is.
+    pub weak: Option<String>,
 }
 
 impl Row {
@@ -50,7 +52,7 @@ impl Row {
     }
 }
 
-const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id, expires_at";
+const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id, expires_at, weak";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     Ok(Row {
@@ -70,6 +72,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         refs: r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()),
         project_id: r.get(14)?,
         expires_at: r.get(15)?,
+        weak: r.get(16)?,
     })
 }
 
@@ -118,6 +121,9 @@ pub struct Secret {
     pub overridden: bool,
     /// When the value stops working outside roll (ms), if someone said.
     pub expires_at: Option<i64>,
+    /// Why its value is easy to guess: only for a caller who may reveal it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weak: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -284,7 +290,8 @@ impl Secrets {
     /// `e` as the API shows it. Its fingerprint only to a caller who may reveal it: a writer
     /// could otherwise test guesses against values it can't read.
     fn secret_of(&self, dek: &Dek, project: &str, e: Entry, caller: &Caller) -> Secret {
-        let fp = if caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path)) { e.row.fp.clone() } else { String::new() };
+        let reveal = caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
+        let fp = if reveal { e.row.fp.clone() } else { String::new() };
         let references = e.row.references(dek, project);
         Secret {
             id: e.row.id,
@@ -302,6 +309,7 @@ impl Secrets {
             source: e.source,
             overridden: e.overridden,
             expires_at: e.row.expires_at,
+            weak: if reveal { e.row.weak } else { None },
         }
     }
 
@@ -383,6 +391,49 @@ impl Secrets {
         let dynamic = entries.iter().filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
         let linked = entries.iter().filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
         Ok(Values { values, problems, leases, dynamic, linked })
+    }
+
+    /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
+    /// then, as written. References aren't resolved against the past, and a live or dynamic link
+    /// had no stored value, so each is a problem; a purged value is one too. Needs `reveal`, and
+    /// is audited like an export.
+    pub fn values_at(&self, project: &str, slug: &str, path: &str, seq: Option<i64>, at: Option<i64>, caller: &Caller) -> Result<(i64, Values)> {
+        let path = names::path(path)?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        let dek = self.project(project)?;
+        let (seq, state) = self.db.read(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let seq = match (seq, at) {
+                (Some(s), None) => s,
+                (None, Some(at)) => c.query_row("SELECT COALESCE(MAX(seq), 0) FROM changes WHERE project_id = ? AND at <= ?", params![project, at], |r| r.get(0))?,
+                _ => return Err(Error::BadRequest("seq (a change) or at (a time), one of them".into())),
+            };
+            Ok::<_, Error>((seq, crate::write::state_at(c, &env.id, seq)?))
+        })?;
+        let mut values = BTreeMap::new();
+        let mut problems = vec![];
+        let mut linked = vec![];
+        for v in state.into_iter().filter(|v| v.owner.is_empty() && v.path == path) {
+            let link: Option<Link> = v.link.as_deref().and_then(|l| serde_json::from_str(l).ok());
+            if link.is_some() {
+                linked.push(v.key.clone());
+            }
+            match (&v.value, &link) {
+                (Some(ct), _) => {
+                    let value = dek.open(&value_aad(project, &v.secret_id, v.version), ct)?;
+                    if !refs::refs(value.expose()).is_empty() {
+                        problems.push(Problem { key: v.key.clone(), problem: "has references: shown as written then, not resolved".into() });
+                    }
+                    values.insert(v.key, value);
+                }
+                (None, _) if v.purged => problems.push(Problem { key: v.key, problem: "its value then was purged".into() }),
+                (None, Some(l)) => problems.push(Problem { key: v.key, problem: format!("a {} link: no stored value then", if l.mode == Mode::Dynamic { "dynamic" } else { "live" }) }),
+                (None, None) => problems.push(Problem { key: v.key, problem: "no stored value then".into() }),
+            }
+        }
+        let keys: Vec<String> = values.keys().cloned().collect();
+        self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked }))
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,

@@ -268,6 +268,9 @@ async fn every_write_is_a_version_and_an_environment_rolls_back_to_any_change() 
     assert_eq!(detail["message"], "launch");
     assert!(!detail.to_string().contains("\"10\""), "a change shows fingerprints, never values: {detail}");
 
+    // What production had then, without rolling back.
+    let then = api.ok(Method::GET, &format!("/environments/production/values?seq={seq}"), None).await;
+    assert_eq!((then["values"].clone(), then["seq"].as_i64()), (json!({ "A": "10", "B": "2" }), Some(seq)));
     let r = api.ok(Method::POST, "/environments/production/rollback", Some(json!({ "to": seq }))).await;
     assert_eq!(r["change"]["kind"], "rollback");
     assert_eq!(api.values("production", "/").await["values"], json!({ "A": "10", "B": "2" }));
@@ -802,10 +805,48 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     .unwrap();
     let sent = api.sent.0.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "one reminder a day");
-    assert_eq!((sent[0]["stale"].clone(), sent[0]["max_age_days"].as_i64()), (json!(["USED"]), Some(90)));
-    assert_eq!(sent[0]["expiring"], json!([{ "key": "CERT", "expires_at": soon }]));
-    assert!(sent[0]["text"].as_str().unwrap().contains("CERT in 3 days"), "{}", sent[0]["text"]);
+    let findings: Vec<(&str, &str)> = sent[0]["findings"].as_array().unwrap().iter().map(|f| (f["issue"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
+    // Every finding there, worst first: USED's value is in staging too.
+    assert_eq!(findings, [("exposed", "USED"), ("expiring", "CERT"), ("stale", "USED")]);
+    assert!(sent[0]["text"].as_str().unwrap().starts_with("roll secrets: production has 1 exposed: USED (also in staging); 1 expiring: CERT (expires "), "{}", sent[0]["text"]);
     assert!(!sent[0].to_string().contains("\"u\"") && !sent[0].to_string().contains("\"c2\""), "names, never values");
+
+    // A credential anyone could guess is flagged, to whoever may reveal it.
+    api.set("staging", "DB_PASSWORD", "Password1").await;
+    let weak = |v: &Value| v["keys"].as_array().unwrap().iter().find(|k| k["key"] == "DB_PASSWORD").map(|k| k["weak"].clone());
+    let i = api.ok(Method::GET, "/environments/staging/insights", None).await;
+    assert_eq!(weak(&i), Some(json!("a common password")));
+    let token = api.ok(Method::POST, "/tokens", Some(json!({ "name": "lint", "actions": ["read"] }))).await;
+    let (_, i) = api.req(Method::GET, "/environments/staging/insights", None, token["token"].as_str()).await;
+    assert_eq!(weak(&i), Some(Value::Null));
+}
+
+#[tokio::test]
+async fn health_lists_every_finding_in_every_environment_worst_first() {
+    let api = Api::new().await;
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "DB_PASSWORD", "value": "Password1" }, { "op": "set", "key": "CERT", "value": "c", "expires_at": 1000 }] }))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
+    api.set("staging", "DB_PASSWORD", "Password1").await;
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "CERT" }]))).await;
+    let found = api.ok(Method::GET, "/health", None).await;
+    let got: Vec<(&str, &str, &str)> = found.as_array().unwrap().iter().map(|f| (f["issue"].as_str().unwrap(), f["environment"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
+    assert_eq!(
+        got,
+        [
+            ("expired", "production", "CERT"),
+            ("missing", "development", "CERT"),
+            ("missing", "staging", "CERT"),
+            ("exposed", "production", "DB_PASSWORD"),
+            ("weak", "staging", "DB_PASSWORD"),
+            ("weak", "production", "DB_PASSWORD"),
+        ]
+    );
+    assert_eq!(found[3]["detail"], "also in staging");
+    // It filters itself (roll-access lets environment-limited tokens in on that): a token for
+    // staging hears only of staging.
+    let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
+    let (_, mine) = api.req(Method::GET, "/health", None, t["token"].as_str()).await;
+    assert!(mine.as_array().unwrap().iter().all(|f| f["environment"] == "staging") && !mine.as_array().unwrap().is_empty(), "{mine}");
 }
 
 #[tokio::test]

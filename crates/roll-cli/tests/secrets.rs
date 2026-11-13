@@ -100,6 +100,12 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--", "sh", "-c", "echo $HOST"], None).await;
     assert_eq!(here.trim(), "db.internal");
 
+    // A template's keys checked against the environment, by name only.
+    let tpl = dir.path().join(".env.example");
+    std::fs::write(&tpl, "# what the app reads\nHOST=\nexport PORT=5432\nNEW_FLAG\n").unwrap();
+    let checked = roll(&api, &[], &[&at[..], &["check", tpl.to_str().unwrap()]].concat(), None).await;
+    assert!(checked.code != Some(0) && checked.stdout.contains("missing  NEW_FLAG") && !checked.stdout.contains("missing  HOST"), "{}{}", checked.stdout, checked.stderr);
+
     // A pre-commit scan finds a stored value in a file, and says where (never the value).
     let repo = tempfile::tempdir().unwrap();
     std::fs::write(repo.path().join("config.yml"), "name: shop\ndb:\n  host: db.internal\n").unwrap();

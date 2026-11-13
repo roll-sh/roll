@@ -74,6 +74,8 @@ export type Secret = {
   overridden: boolean;
   /** When the value stops working outside roll (ms), if someone said. */
   expires_at: number | null;
+  /** Why a credential's value is easy to guess; only for a caller who may reveal it. */
+  weak?: string;
 };
 /** `expires_at`: null clears it; absent keeps it. */
 export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null };
@@ -115,6 +117,8 @@ export type RequestValue = { key: string; path: string; type: "shared" | "person
 export type KeyInsight = { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean; expires_at: number | null; expiring: boolean;
   /** In a protected environment: unprotected environments holding the very same value. */
   exposed_in: string[];
+  /** Why a credential's value is easy to guess; only for a caller who may reveal it. */
+  weak?: string;
 };
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
@@ -229,6 +233,8 @@ export type SyncKind = { kind: string; label: string; values: boolean; signed: b
 export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
+/** One thing to fix (`GET …/health`), worst first: where, never a value. */
+export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread"; environment: string; path: string; key: string; detail: string };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };

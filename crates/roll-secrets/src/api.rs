@@ -79,6 +79,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
+        .route(&format!("{P}/health"), get(project_health))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
         .route(&format!("{P}/required"), get(required).put(set_required))
@@ -436,8 +437,21 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     if format == Some(dotenv::Format::Kubernetes) && (!dotenv::k8s_name(&manifest.name, 253) || manifest.namespace.as_deref().is_some_and(|n| !dotenv::k8s_name(n, 63))) {
         return Err(Error::BadRequest("a Secret's name is lowercase letters, digits, '-' and '.' (253 at most), and a namespace lowercase letters, digits and '-' (63 at most)".into()));
     }
-    let v = blocking(s, move |s| s.values(&project, &env, &path_of(&q), resolve, None, &c)).await?;
+    // As it was after a change, or at a time: what was stored then.
+    let num = |k: &str| q.get(k).map(|v| v.parse::<i64>().map_err(|_| Error::BadRequest(format!("{k} is a number")))).transpose();
+    let (seq, at) = (num("seq")?, num("at")?);
+    let (v, as_of) = if seq.is_some() || at.is_some() {
+        let (n, v) = blocking(s, move |s| s.values_at(&project, &env, &path_of(&q), seq, at, &c)).await?;
+        (v, Some(n))
+    } else {
+        (blocking(s, move |s| s.values(&project, &env, &path_of(&q), resolve, None, &c)).await?, None)
+    };
     let r = match format {
+        None if as_of.is_some() => {
+            let mut j = serde_json::to_value(&v).expect("JSON");
+            j["seq"] = json!(as_of);
+            ok(j)
+        }
         None => ok(&v),
         Some(f) => {
             let text = dotenv::format(&v.values, f, &manifest).map_err(Error::BadRequest)?;
@@ -792,6 +806,10 @@ struct Scan {
 async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let Scan { candidates } = body(&b)?;
     Ok(ok(blocking(s, move |s| s.scan(&project, &candidates, &c)).await?))
+}
+
+async fn project_health(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.project_health(&project, &c)).await?))
 }
 
 async fn rotators(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

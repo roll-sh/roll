@@ -180,6 +180,18 @@ pub enum Secrets {
         #[arg(long, requires = "watch", value_name = "COMMAND")]
         exec: Option<String>,
     },
+    /// Every finding in every environment, worst first: expired, missing, exposed, weak,
+    /// expiring, stale, unread. Fails when there's an expired, missing or exposed one.
+    Health,
+    /// The keys a template (`.env.example`) names that the environment doesn't have, without
+    /// reading a value; fails when one is missing (`--strict`: also when it has keys the template
+    /// doesn't name).
+    Check {
+        #[arg(default_value = ".env.example")]
+        template: String,
+        #[arg(long)]
+        strict: bool,
+    },
     /// Look for this project's values in files (a directory is walked; `--staged`: what `git
     /// commit` would record, for a pre-commit hook). Says where, never the value; fails if found.
     Scan {
@@ -197,6 +209,12 @@ pub enum Secrets {
         /// kubernetes: its namespace.
         #[arg(long)]
         namespace: Option<String>,
+        /// The folder's own values as they were after this change (as written then).
+        #[arg(long, value_name = "SEQ", conflicts_with = "at")]
+        change: Option<i64>,
+        /// ...or at this time (RFC 3339, unix seconds, or how long ago: 2h).
+        #[arg(long, value_name = "TIME")]
+        at: Option<String>,
     },
     /// Environments: list, add, rename, delete, order, protect.
     #[command(subcommand, alias = "env")]
@@ -886,6 +904,48 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
             }
         }
+        Secrets::Health => {
+            let v = c.call(Method::GET, &format!("{}/health", c.base()), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            let found = v.as_array().cloned().unwrap_or_default();
+            for f in &found {
+                println!("{:<9} {:<14} {:<28} {}{}", s(&f["issue"]).to_uppercase(), s(&f["environment"]), s(&f["key"]), s(&f["detail"]), if f["path"] == "/" { String::new() } else { format!("  ({})", s(&f["path"])) });
+            }
+            let serious = found.iter().filter(|f| ["expired", "missing", "exposed"].contains(&f["issue"].as_str().unwrap_or_default())).count();
+            if found.is_empty() {
+                eprintln!("Nothing to fix");
+            }
+            if serious > 0 {
+                bail!("{serious} to fix now (expired, missing or exposed)");
+            }
+        }
+        Secrets::Check { template, strict } => {
+            let text = std::fs::read_to_string(&template).with_context(|| format!("reading {template}"))?;
+            let wanted: std::collections::BTreeSet<String> = template_keys(&text);
+            let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
+            let have: std::collections::BTreeSet<String> = list.as_array().into_iter().flatten().filter_map(|x| x["key"].as_str().map(String::from)).collect();
+            let missing: Vec<&String> = wanted.difference(&have).collect();
+            let extra: Vec<&String> = have.difference(&wanted).collect();
+            if json_out {
+                print(&json!({ "missing": missing, "extra": extra }))?;
+            } else {
+                let at = format!("{}:{}", c.at.env, c.at.path);
+                for k in &missing {
+                    println!("missing  {k}  ({template} names it; {at} doesn't set it)");
+                }
+                for k in &extra {
+                    println!("extra    {k}  ({at} sets it; {template} doesn't name it)");
+                }
+                if missing.is_empty() && (extra.is_empty() || !strict) {
+                    eprintln!("{at} has every key {template} names ({})", wanted.len());
+                }
+            }
+            if !missing.is_empty() || (strict && !extra.is_empty()) {
+                bail!("{} doesn't match {template}", c.at.env);
+            }
+        }
         Secrets::Scan { paths, staged } => {
             let files = if staged { staged_files()? } else { walk(if paths.is_empty() { vec![".".into()] } else { paths })? };
             let mut by: std::collections::BTreeMap<String, Vec<(String, usize)>> = Default::default();
@@ -924,9 +984,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             eprintln!("No values of this project in {} {}", files.len(), if files.len() == 1 { "file" } else { "files" });
         }
-        Secrets::Export { format, name, namespace } => {
+        Secrets::Export { format, name, namespace, change, at } => {
+            let at = at.as_deref().map(when).transpose()?;
             let mut url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
-            for (k, v) in [("name", name), ("namespace", namespace)] {
+            for (k, v) in [("name", name), ("namespace", namespace), ("seq", change.map(|c| c.to_string())), ("at", at.map(|t| t.to_string()))] {
                 if let Some(v) = v {
                     url.push_str(&format!("&{k}={}", enc(&v)));
                 }
@@ -1312,6 +1373,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 };
                 let exposed: Vec<String> = k["exposed_in"].as_array().into_iter().flatten().map(s).collect();
                 let exposed = if exposed.is_empty() { String::new() } else { format!("  ALSO IN {}", exposed.join(", ")) };
+                let exposed = match k["weak"].as_str() {
+                    Some(w) => format!("{exposed}  WEAK ({w})"),
+                    None => exposed,
+                };
                 println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}{expiry}{exposed}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
             }
         }
@@ -1896,6 +1961,18 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
             }
         }
     }
+}
+
+/// The keys a `.env`-style template names: `KEY=…`, `export KEY=…` and a bare `KEY`, not comments.
+fn template_keys(text: &str) -> std::collections::BTreeSet<String> {
+    text.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let l = l.strip_prefix("export ").unwrap_or(l).trim_start();
+            let key = l.split(['=', ' ', '\t']).next()?;
+            (!l.starts_with('#') && !key.is_empty() && key.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| key.to_string())
+        })
+        .collect()
 }
 
 /// A line's candidates, as roll code's scan takes them: runs of `[A-Za-z0-9_\-+/=.:@~]`, the whole

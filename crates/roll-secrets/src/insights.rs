@@ -32,6 +32,9 @@ pub struct KeyInsight {
     /// In a protected environment: the unprotected environments holding the very same value
     /// (those the caller may read), where more people and less vetted code can read it.
     pub exposed_in: Vec<String>,
+    /// Why its value is easy to guess (a credential's): only for a caller who may reveal it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weak: Option<String>,
 }
 
 /// How far ahead an expiry is flagged and announced.
@@ -107,6 +110,7 @@ impl Secrets {
                     stale: max_age_days.is_some_and(|d| now - e.row.updated_at > d * 86_400_000),
                     expires_at: e.row.expires_at,
                     expiring: e.row.expires_at.is_some_and(|t| t < now + EXPIRING_DAYS * 86_400_000),
+                    weak: e.row.weak.clone().filter(|_| caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path))),
                     exposed_in: if e.source == crate::read::Source::Own { exposed.get(&e.row.key).cloned().unwrap_or_default() } else { vec![] },
                     last_read_at: read.map(|r| r.0),
                     last_read_by: read.map(|r| r.1.clone()),
