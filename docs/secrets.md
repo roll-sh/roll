@@ -1497,6 +1497,10 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Fix every weak key at once**: Health's Weak section gets "New values for all" per environment,
+   one change (or one change request where protected) with a random value for each.
+2. **Key owners**: a key's optional owner (a person or team to ask), shown in health findings and
+   the daily notice, so whoever fixes it knows who decides.
 
 Waiting on other pull requests:
 
