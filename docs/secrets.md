@@ -1472,6 +1472,12 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Keys a change starts reading** (roll code): a change whose diff adds a read of an environment
+   variable (`process.env.X`, `os.environ["X"]`, `env::var("X")`, `os.Getenv("X")`, `ENV["X"]`) that a
+   standard environment of the repository's project doesn't define is told so before it lands
+   (names only, never a blocker: a key may come from elsewhere).
+2. **Sync preview**: before a sync is created, the names it would set and delete at the target
+   (from the environment and what the target already has, where the platform lists them).
 
 Waiting on other pull requests:
 
