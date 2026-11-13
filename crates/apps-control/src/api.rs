@@ -32,6 +32,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -75,6 +76,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
+        .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
         .route(&format!("{env}/promote"), post(promote))
@@ -703,8 +705,15 @@ async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
-    let d = apps.rollback(&id, &env, &dep, actor(&ext)).await?;
+async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
+    let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
+    Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
+    let d = apps.rollback_previous(&id, &env, actor(&ext), keep).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
@@ -726,11 +735,12 @@ async fn wake(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
 }
 
 async fn variables(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
-    ok(apps.variables(&id, &env, false).await?)
+    ok(apps.variables(&id, &env, None).await?)
 }
 
 async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
-    let v = apps.variables(&id, &env, true).await?;
+    let who = crate::integrations::Asker { operator: roll_auth::Operator::on(&ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(&ext) };
+    let v = apps.variables(&id, &env, Some(who)).await?;
     apps.audit("variables.revealed", &id, &env, actor(&ext), json!({})).await;
     ok(v)
 }

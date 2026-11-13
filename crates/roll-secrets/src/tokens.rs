@@ -147,34 +147,43 @@ impl Secrets {
     /// the gate let it through as the operator (or rolld has no operator token).
     pub fn caller(&self, parts: &axum::http::request::Parts) -> Result<Caller> {
         let ip = self.client_ip(parts);
-        // A roll-access grant first: its requests carry the operator marker too, narrowed by the
-        // gate, so the marker alone would read as everything.
-        if let Some(g) = roll_auth::Grant::on(&parts.extensions) {
-            let grant = crate::access::GrantGrants(g.clone());
-            // A person's grant acts as them (the evaluator puts their `SignedIn` beside it): never
-            // past their own projects, whatever its rules name.
-            let grants: Arc<dyn crate::access::Grants> = match parts.extensions.get::<roll_auth::SignedIn>().filter(|u| !u.admin) {
-                Some(u) => Arc::new(crate::access::Within(grant, self.own_projects(&u.user)?)),
-                None => Arc::new(grant),
-            };
-            return Ok(Caller { principal: format!("token:{}", g.id), grants, ip });
-        }
-        if let Some(t) = roll_auth::bearer(&parts.headers).filter(|t| t.starts_with(PREFIX)) {
+        let grant = roll_auth::Grant::on(&parts.extensions);
+        if grant.is_none()
+            && let Some(t) = roll_auth::bearer(&parts.headers).filter(|t| t.starts_with(PREFIX))
+        {
             let mut caller = self.token_caller(t, ip.as_deref())?;
             caller.ip = ip;
             return Ok(caller);
         }
+        let mut caller = self.caller_of(roll_auth::Operator::on(&parts.extensions), parts.extensions.get::<roll_auth::SignedIn>(), grant)?;
+        caller.ip = ip;
+        Ok(caller)
+    }
+
+    /// Who someone is from what rolld's gate put on their request: a roll-access grant (a person's
+    /// own acting as them), a signed-in person (an admin is the operator), or the operator (or
+    /// anyone when rolld has no operator token). Another product asking on someone's behalf (roll
+    /// apps' `may_reveal`) gets the same answer a request to secrets would.
+    pub fn caller_of(&self, operator: bool, user: Option<&roll_auth::SignedIn>, grant: Option<&roll_auth::Grant>) -> Result<Caller> {
+        // A roll-access grant first: the gate may put the operator marker beside it, narrowed by
+        // its rules, so the marker alone would read as everything.
+        if let Some(g) = grant {
+            let grant = crate::access::GrantGrants(g.clone());
+            // A person's grant acts as them (the evaluator puts their `SignedIn` beside it): never
+            // past their own projects, whatever its rules name.
+            let grants: Arc<dyn crate::access::Grants> = match user.filter(|u| !u.admin) {
+                Some(u) => Arc::new(crate::access::Within(grant, self.own_projects(&u.user)?)),
+                None => Arc::new(grant),
+            };
+            return Ok(Caller { principal: format!("token:{}", g.id), grants, ip: None });
+        }
         // A signed-in person (the gate resolved the session on this request): their own projects.
         // An admin's session is the operator, as their token would be.
-        if let Some(u) = parts.extensions.get::<roll_auth::SignedIn>().filter(|u| !u.admin) {
-            let mut caller = self.person_caller(&u.user, false)?;
-            caller.ip = ip;
-            return Ok(caller);
+        if let Some(u) = user.filter(|u| !u.admin) {
+            return self.person_caller(&u.user, false);
         }
-        if self.open || roll_auth::Operator::on(&parts.extensions) {
-            let mut c = Caller::operator();
-            c.ip = ip;
-            return Ok(c);
+        if self.open || operator || user.is_some() {
+            return Ok(Caller::operator());
         }
         Err(Error::Unauthorized("roll secrets needs the operator token or a secrets token (rlst_…)".into()))
     }

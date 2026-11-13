@@ -99,6 +99,8 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "stream" => ("streams", "stream"),
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
+        // Another service's URLs: no credential, but held to the same `reveal` as the rest.
+        "service" => ("apps", "service"),
         _ => return None,
     })
 }

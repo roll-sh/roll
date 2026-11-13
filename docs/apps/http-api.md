@@ -7,8 +7,9 @@ feature/roll-mcp. Change them together.
 - Bodies are JSON unless a route says otherwise. Every error is `{"error": string}` with the
   status below. Times are unix milliseconds. Ids: `svc_…`, `dep_…`, `run_…` (12 lowercase base32
   characters after the prefix).
-- The routes sit behind rolld's gate (the operator token today; scoped tokens from
-  feature/roll-mcp). roll apps checks nothing itself.
+- The routes sit behind rolld's gate (the operator token, or roll MCP's scoped tokens). roll
+  apps checks no token itself, except a deploy hook's own (`/v1/apps/hooks/…`, the secret in its
+  URL). A project at its spend limit answers 402 on what would run (deploys, jobs, wakes).
 - `{env}` is an environment name: 1–32 characters of `[a-z0-9-]`, not starting or ending with
   `-`. `production` is the one environment that `deploy` (not `write`) guards.
 - Live streams are server-sent events (`text/event-stream`): each event is `data: <json>`; the
@@ -32,8 +33,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `DELETE /v1/apps/services/{id}` | | 204 | delete |
 | `GET /v1/apps/services/{id}/activity` | | `Event[]` (`audit.*`, newest first, 200): who changed what, never a value | read |
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
-| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` | write |
-| `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 | write |
+| `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it) | write |
+| `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` | | 204 (revokes a credential the link made) | write |
 | `GET /v1/apps/projects/{project}/notifications` | | `NotifyTarget[]` (the URL never returned, only its host) | read |
 | `POST /v1/apps/projects/{project}/notifications` | `{ kind?: "webhook" \| "slack" \| "discord", url, events? }` | 201 `NotifyTarget` (+ `secret` once, for a webhook) | reveal for a webhook (its secret comes back), write for Slack and Discord |
 | `DELETE /v1/apps/projects/{project}/notifications/{nid}` | | 204 | write |
@@ -56,7 +57,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/deploys` | | `Deployment[]`, newest first | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE | read |
-| `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | | 202 `Deployment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | `{ keep_variables? }` (default false: the variables come back as they were when it was live) | 202 `Deployment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/rollback` | `{ keep_variables? }` | 202 `Deployment`: back to the deployment live before what runs, walking back through rollbacks (after B → A the next goes before A, never forward to B); 409 when there's none | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/redeploy` | `{ message? }` | 202 `Deployment` (trigger `settings`) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/promote` | `{ from, message? }` | 202 `Deployment` (trigger `promote`: `from`'s live image, no build, with `env`'s variables; `rollback_of` names the promoted deployment) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/hook` | | 201 `{ path }`: a new deploy hook, its path shown once (prefix the API's base URL; the token is `rlk_…` with a checksum, so secret scanning finds a leaked one); the old one stops working | admin (a standing credential that deploys) |
@@ -70,7 +72,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
-| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}` | reveal |
+| `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`; 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[]}` | `Variables` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&q=&http=&status=&min_ms=` | | `LogLine[]` or SSE; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`) and `min_ms` filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=` | | `Metrics` | read |
@@ -179,6 +181,17 @@ type Run = {
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;
+  /** A worker only: its instances follow `group`'s lag on `stream` (a roll stream on the
+   *  service's project; another's is never read), one per `per_instance` (default 1000) behind,
+   *  within min_instances–max_instances; read every 10 s on the owner, scaled in one at a time. */
+  scale?: { stream: string; group: string; per_instance?: number };
+  /** false: no public URL (its up.roll.site names, its deployments' and its custom domains are
+   *  404s like an unknown address, at once); the private `<svc>.<env>.internal` still answers.
+   *  Default true. Environment.url is null while it's false. */
+  public?: boolean;
+  /** A replaced or scaled-in instance's time to finish: its requests in flight, then SIGTERM,
+   *  SIGKILL when it's up (Render's maxShutdownDelaySeconds). 1–300; unset (or null) 30. */
+  drain_s?: number;
 };
 
 type Service = {
@@ -226,6 +239,15 @@ type EnvironmentPut = {
   /** An image service whose image has a tag: deploy when the tag points at a new digest
    *  (checked every 5 minutes on the owner; actor `tag watch`). 400 otherwise. */
   follow_tag?: boolean;
+  /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
+   *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
+   *  before `</body>`, served from the preview's host), sending notes to the preview in roll's
+   *  dashboard. 400 on another environment. */
+  feedback?: boolean;
+  /** Maintenance: `true` or `{message?}` (text, at most 500 characters) and its public names
+   *  answer roll's 503 page (Retry-After 30) with the message, waking nothing; a deployment's own
+   *  URL still answers. `false` or null serves again. */
+  maintenance?: boolean | { message?: string | null } | null;
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
    *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
    *  service's, null goes back to it; checked with the service's settings as one run. */
@@ -247,6 +269,9 @@ type Environment = EnvironmentSummary & {
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
+  feedback: boolean;          // a preview's pages carry roll previews' feedback button
+  maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
+  scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
   created_at: number;
@@ -304,7 +329,10 @@ type Plan = {
 };
 
 /** Wired on a node today: postgres (DATABASE_URL) and redis (REDIS_URL, REDIS_REST_URL/TOKEN). */
-type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql"; ref: string; prefix: string; vars: string[] };
+type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "service"; ref: string; prefix: string; vars: string[] };
+// `service`: `ref` is another web service of the project (its id); `URL` is
+// `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
+// when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.
 
 type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" }[] };
 
@@ -326,9 +354,9 @@ type Usage = {
   total_usd: number;
 };
 
-"/** In the event log, each written in the same transaction as the change it records. Sequence
+/** In the event log, each written in the same transaction as the change it records. Sequence
  *  numbers commit in order with no gaps, so a reader moving past `next` never misses one. Kept 7 days. */
-type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "cron.failed" | "job.failed"; service: string; environment: string; deployment: string | null; data: object };
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "cron.failed" | "job.failed" | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
 /** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
  *  signed as roll code's webhooks are: X-Roll-Signature-256: sha256=hex(HMAC-SHA256(secret,
  *  X-Roll-Timestamp + "." + body)), the timestamp the send time in Unix seconds (a retry is signed
@@ -365,7 +393,10 @@ type Domain = {
   /** What the DNS needs: a CNAME to `target` (a subdomain), or the TXT challenge (an apex). */
   record: "cname" | "txt" | "both" | "none"; // both: a shared CNAME target routes, the TXT proves ownership
   status: "pending" | "issuing" | "active" | "failed";
-  /** What the user puts in DNS: a CNAME to `target`, or (apex) a TXT `_roll-challenge.<host>` with `token`. */
+  /** What the user puts in DNS: a CNAME to `target`, or (apex) a TXT `_roll-challenge.<host>` with `token`.
+   * A wildcard (`*.example.com`: every name one label under it, after exact domains) has its
+   * CNAME on `*.example.com` and its TXT on `_roll-challenge.example.com`. It's refused (400)
+   * where custom domains' certificates can't be wildcards (no DNS-01). */
   target: string;
   token: string;
   error: string | null;

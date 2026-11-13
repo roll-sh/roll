@@ -144,6 +144,10 @@ CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_vars (
+    deployment TEXT PRIMARY KEY,
+    sealed TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS apps_sites (
     key TEXT PRIMARY KEY,
     size INTEGER NOT NULL
@@ -323,7 +327,15 @@ pub struct EnvRow {
     /// The digest the watched tag pointed at when it was last acted on (deployed, or found
     /// where the live deployment already is): only a move past it deploys.
     pub tag_seen: Option<String>,
+    /// A preview's pages carry roll previews' feedback button (roll previews asks for it).
+    pub feedback: bool,
+    /// In maintenance: its public names answer roll's page with this message (empty: the
+    /// default one) and nothing wakes.
+    pub maintenance: Option<String>,
 }
+
+/// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
+pub type LinkRow = (LinkKind, String, String, Option<crate::integrations::Minted>);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceRow {
@@ -393,6 +405,8 @@ pub struct Switch<'a> {
     pub ready_ms: Option<i64>,
     pub epoch: Option<i64>,
     pub vars_hash: Option<&'a str>,
+    /// [`Store::seal_snapshot`] of the variables it went live with.
+    pub snapshot: Option<&'a str>,
 }
 
 /// Custom domains a service may claim, and a project: one tenant never floods the shared
@@ -406,7 +420,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance";
 const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
@@ -459,6 +473,8 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         hook_hash: r.get(10)?,
         follow_tag: r.get::<_, i64>(11)? != 0,
         tag_seen: r.get(12)?,
+        feedback: r.get::<_, i64>(13)? != 0,
+        maintenance: r.get(14)?,
     })
 }
 
@@ -530,6 +546,9 @@ impl Store {
         db.add_column("environments", "hook_hash", "TEXT")?;
         db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "tag_seen", "TEXT")?;
+        db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("links", "minted", "TEXT")?;
+        db.add_column("environments", "maintenance", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -670,7 +689,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -704,7 +723,7 @@ impl Store {
     /// `epoch` (the service's lease epoch on the node switching), it's fenced too: a node whose
     /// lease is older than one that has already switched this service can't switch it.
     pub fn switch_active(&self, w: &Switch<'_>) -> Result<bool> {
-        let Switch { service, env, from, to, ready_ms, epoch, vars_hash } = *w;
+        let Switch { service, env, from, to, ready_ms, epoch, vars_hash, snapshot } = *w;
         let now = self.now()?;
         self.db.write(|c| {
             if let Some(ep) = epoch {
@@ -734,6 +753,10 @@ impl Store {
             // (it would read as "needs a deploy").
             if let Some(h) = vars_hash {
                 c.execute("UPDATE deployments SET vars_hash = ? WHERE id = ?", params![h, to])?;
+            }
+            // Its variables too: a change made the moment after can't land in its snapshot.
+            if let Some(sealed) = snapshot {
+                c.execute("INSERT INTO deploy_vars (deployment, sealed) VALUES (?, ?) ON CONFLICT (deployment) DO UPDATE SET sealed = excluded.sealed", params![to, sealed])?;
             }
             let revision: Option<String> = c.query_row("SELECT revision FROM deployments WHERE id = ?", [to], |r| r.get(0)).optional()?.flatten();
             insert_event(c, now, "deploy.active", service, env, Some(to), &serde_json::json!({ "revision": revision, "replaced": from }))?;
@@ -1110,6 +1133,17 @@ impl Store {
         format!("{service}/{env}/{name}")
     }
 
+    /// `env`'s own variables as `deployment` went live with them, sealed under it (what a
+    /// rollback to it restores; stored by [`Store::switch_active`]).
+    pub fn seal_snapshot(&self, deployment: &str, vars: &BTreeMap<String, String>) -> String {
+        self.sealer.seal(&format!("snapshot:{deployment}"), &serde_json::to_string(vars).expect("JSON"))
+    }
+
+    pub fn snapshot(&self, deployment: &str) -> Result<Option<BTreeMap<String, String>>> {
+        let row: Option<String> = self.db.query_row("SELECT sealed FROM deploy_vars WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?;
+        row.map(|s| Ok(serde_json::from_str(&self.sealer.open(&format!("snapshot:{deployment}"), &s)?).unwrap_or_default())).transpose()
+    }
+
     pub fn variables(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
         let rows: Vec<(String, String)> =
             self.db.query("SELECT name, sealed FROM variables WHERE service = ? AND env = ? ORDER BY name", [service, env], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1133,17 +1167,33 @@ impl Store {
     // ── links ──
 
     pub fn links(&self, service: &str) -> Result<Vec<(LinkKind, String, String)>> {
-        let rows: Vec<(String, String, String)> =
-            self.db.query("SELECT kind, ref, prefix FROM links WHERE service = ? ORDER BY kind, ref", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        rows.into_iter().map(|(k, r, p)| Ok((LinkKind::parse(&k)?, r, p))).collect()
+        Ok(self.links_minted(service)?.into_iter().map(|(k, r, p, _)| (k, r, p)).collect())
     }
 
-    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str) -> Result<()> {
+    /// A service's links, with the credentials each made for itself (opened), if any.
+    pub fn links_minted(&self, service: &str) -> Result<Vec<LinkRow>> {
+        let rows: Vec<(String, String, String, Option<String>)> =
+            self.db.query("SELECT kind, ref, prefix, minted FROM links WHERE service = ? ORDER BY kind, ref", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        rows.into_iter()
+            .map(|(k, r, p, m)| {
+                let minted = m.map(|m| self.sealer.open(&format!("link:{service}:{k}:{r}"), &m)).transpose()?.and_then(|j| serde_json::from_str(&j).ok());
+                Ok((LinkKind::parse(&k)?, r, p, minted))
+            })
+            .collect()
+    }
+
+    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>) -> Result<()> {
+        let sealed = minted.map(|m| self.sealer.seal(&format!("link:{service}:{}:{ref}", kind.as_str()), &serde_json::to_string(m).expect("JSON")));
         self.db.write(|c| {
             c.execute("DELETE FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref])?;
-            c.execute("INSERT INTO links (service, kind, ref, prefix) VALUES (?, ?, ?, ?)", [service, kind.as_str(), r#ref, prefix])?;
+            c.execute("INSERT INTO links (service, kind, ref, prefix, minted) VALUES (?, ?, ?, ?, ?)", params![service, kind.as_str(), r#ref, prefix, sealed])?;
             Ok(())
         })
+    }
+
+    /// Every link to a resource that's gone (a service being deleted): how many there were.
+    pub fn delete_links_to(&self, kind: LinkKind, r#ref: &str) -> Result<usize> {
+        Ok(self.db.execute("DELETE FROM links WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref])?)
     }
 
     pub fn delete_link(&self, service: &str, kind: LinkKind, r#ref: &str) -> Result<()> {
@@ -1488,6 +1538,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
+        self.db.execute("UPDATE environments SET maintenance = ? WHERE service = ? AND name = ?", params![message, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_feedback(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET feedback = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
     pub fn set_tag_seen(&self, service: &str, env: &str, digest: &str) -> Result<()> {
         self.db.execute("UPDATE environments SET tag_seen = ? WHERE service = ? AND name = ?", params![digest, service, env])?;
         Ok(())
@@ -1724,7 +1784,7 @@ mod tests {
         let db = Db::open_sqlite(&dir.path().join("apps.db"), Default::default()).unwrap();
         let s = Store::new(db, Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
         s.db.execute("INSERT INTO environments (service, name, branch, ephemeral, active, slug, port, created_at) VALUES ('svc_a', 'production', NULL, 0, NULL, 'a', NULL, 0)", params![]).unwrap();
-        let sw = |from, to, epoch| Switch { service: "svc_a", env: "production", from, to, ready_ms: None, epoch: Some(epoch), vars_hash: None };
+        let sw = |from, to, epoch| Switch { service: "svc_a", env: "production", from, to, ready_ms: None, epoch: Some(epoch), vars_hash: None, snapshot: None };
         // The new owner (epoch 2) switches; the old one (epoch 1), finishing its rollout late,
         // can't, even from the state it saw.
         assert!(s.switch_active(&sw(None, "dep_new", 2)).unwrap());

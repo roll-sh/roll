@@ -8,6 +8,8 @@ import { DrainsPanel } from "./drains";
 import { EnvironmentPanel } from "./environment";
 import { NotificationsPanel } from "./notifications";
 import { SpendPanel } from "./spend";
+import { resourceKey } from "@/lib/workspace-resources";
+import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
 
 
@@ -38,12 +40,18 @@ interface Form {
   memory: number;
   healthPath: string;
   healthTimeout: string;
+  drain: string;
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
   rolloutSteps: string;
   rolloutStep: string;
   rolloutErrors: string;
+  h2c: boolean;
+  public: boolean;
+  scaleStream: string;
+  scaleGroup: string;
+  scalePer: string;
   suspendAfter: string;
   sleepAfter: string;
   volumeMount: string;
@@ -78,12 +86,18 @@ export function formOf(s: Service): Form {
     memory: s.run.memory_mb,
     healthPath: str(s.run.health_path),
     healthTimeout: str(s.run.health_timeout_s),
+    drain: str(s.run.drain_s),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
+    h2c: !!s.run.h2c,
+    public: s.run.public !== false,
+    scaleStream: s.run.scale?.stream ?? "",
+    scaleGroup: s.run.scale?.group ?? "",
+    scalePer: str(s.run.scale?.per_instance),
     suspendAfter: str(s.run.suspend_after_s),
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
@@ -130,10 +144,15 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.memory !== before.memory) run.memory_mb = f.memory;
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
+  if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95)
     run.alerts = { memory_pct: Number(f.alertMemory) || 0, error_pct: Number(f.alertErrors) || 0, p95_ms: Number(f.alertP95) || 0 };
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors)
     run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
+  if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
+  if (f.public !== before.public) run.public = f.public ? null : false;
+  if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer)
+    run.scale = f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...(f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {}) } : null;
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
   if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize)
@@ -142,7 +161,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["port", "timeout", "min", "max", "concurrency", "healthTimeout", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -183,6 +202,11 @@ export function SettingsTab({
     <input value={form[k] as string} onChange={(e) => set(k, e.target.value)} placeholder={placeholder} className={`${input} w-full ${mono ? "font-mono text-[12px]" : ""}`} spellCheck={false} />
   );
   const web = form.type === "web";
+  // A worker can follow a stream of its own project.
+  const ws = useWorkspace();
+  const streams = (ws.projects.find((p) => p.id === service.project)?.resources ?? [])
+    .filter((r) => r.kind === "stream")
+    .map((r) => ({ ref: r.ref, name: ws.inventory.get(resourceKey(r))?.name ?? r.ref }));
 
   return (
     <div className="space-y-6">
@@ -328,6 +352,9 @@ export function SettingsTab({
                 {t("healthPath", "/healthz")}
               </Field>
               <Field label="Health timeout (s)">{t("healthTimeout", "60")}</Field>
+              <Field label="Drain (s)" hint="a replaced instance finishes its requests, then gets SIGTERM; killed when it's up">
+                {t("drain", "30")}
+              </Field>
               <Field label="Suspend after (s)" hint="idle; 0 never suspends">
                 {t("suspendAfter", "30")}
               </Field>
@@ -358,6 +385,44 @@ export function SettingsTab({
           <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
             {t("alertMemory", "90")}
           </Field>
+          {web && (
+            <Field label="Reachable" hint={form.public ? "its URL and custom domains answer anyone" : "no public URL: only this project's services reach it"}>
+              <select value={form.public ? "public" : "private"} onChange={(e) => set("public", e.target.value === "public")} className={`${input} w-full`}>
+                <option value="public">Public URL</option>
+                <option value="private">Private network only</option>
+              </select>
+            </Field>
+          )}
+          {web && (
+            <Field label="Protocol" hint="h2c: HTTP/2 without TLS, as a gRPC server speaks">
+              <select value={form.h2c ? "h2c" : "http1"} onChange={(e) => set("h2c", e.target.value === "h2c")} className={`${input} w-full`}>
+                <option value="http1">HTTP/1.1</option>
+                <option value="h2c">HTTP/2 (h2c)</option>
+              </select>
+            </Field>
+          )}
+          {form.type === "worker" && (
+            <>
+              <Field label="Follow a stream" hint={streams.length ? "instances follow a consumer group's lag" : "a stream on this project can drive it"}>
+                <select value={form.scaleStream} onChange={(e) => set("scaleStream", e.target.value)} className={`${input} w-full`} disabled={!streams.length && !form.scaleStream}>
+                  <option value="">No: run min instances</option>
+                  {streams.map((s) => (
+                    <option key={s.ref} value={s.ref}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {form.scaleStream && (
+                <>
+                  <Field label="Consumer group">{t("scaleGroup", "billing")}</Field>
+                  <Field label="Messages per instance" hint="behind, before another starts">
+                    {t("scalePer", "1000")}
+                  </Field>
+                </>
+              )}
+            </>
+          )}
           <Field label="Volume mount" hint="optional; one instance at most">
             {t("volumeMount", "/data")}
           </Field>

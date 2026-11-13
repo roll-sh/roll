@@ -3,7 +3,8 @@
 //! A fake instance answers every request with JSON naming its instance, deployment and the
 //! path, plus the variables listed in `FAKE_ECHO` (comma-separated). Settings through its
 //! variables: `FAKE_UNHEALTHY=1` answers 500 on every path, `FAKE_BOOT_MS` delays its first
-//! answer, `FAKE_SLOW_MS` delays every answer (requests pile up), `FAKE_MISSING=<prefix>` answers
+//! answer, `FAKE_SLOW_MS` delays every answer (requests pile up; one still waiting when the instance
+//! stops answers 502, as a killed process's would; `/sleep/<ms>` is one such request), `FAKE_MISSING=<prefix>` answers
 //! 404 for paths under it, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
@@ -33,6 +34,8 @@ struct FakeInstance {
     state: FakeState,
     server: Option<tokio::task::JoinHandle<()>>,
     exited: watch::Sender<Option<i32>>,
+    /// Stopped: its requests in flight fail, as a killed process's do.
+    killed: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Default)]
@@ -61,11 +64,18 @@ pub struct Fake {
     volumes: Mutex<HashMap<String, Vec<u8>>>,
     /// What a tag points at in its registry ([`Fake::move_tag`]); zeros when unset.
     tags: Mutex<HashMap<String, String>>,
+    /// Who's at an instance's port without rolld ([`Fake::set_callers`]).
+    callers: Mutex<HashMap<String, super::Callers>>,
 }
 
 impl Fake {
     pub fn new() -> Arc<Fake> {
         Arc::new(Fake::default())
+    }
+
+    /// The project's other services at `name`'s port (what Docker reads from its sandbox).
+    pub fn set_callers(&self, name: &str, c: super::Callers) {
+        self.callers.lock().insert(name.to_string(), c);
     }
 
     pub fn state(&self, name: &str) -> Option<FakeState> {
@@ -115,6 +125,7 @@ impl Fake {
             if let Some(s) = i.server.take() {
                 s.abort();
             }
+            i.killed.cancel();
             i.state = FakeState::Stopped;
             i.exited.send_replace(Some(137));
         }
@@ -133,7 +144,7 @@ fn var<'a>(spec: &'a InstanceSpec, k: &str) -> Option<&'a str> {
     spec.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
 }
 
-async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSink, sick: Arc<Mutex<std::collections::HashSet<String>>>) {
+async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSink, sick: Arc<Mutex<std::collections::HashSet<String>>>, killed: tokio_util::sync::CancellationToken) {
     let unhealthy = var(&spec, "FAKE_UNHEALTHY") == Some("1");
     let boot = var(&spec, "FAKE_BOOT_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let slow = var(&spec, "FAKE_SLOW_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
@@ -147,11 +158,14 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
     let (name, dep) = (spec.name.clone(), spec.deployment.clone());
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo, sick, missing) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone());
+        let (name, dep, echo, sick, missing, killed) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), killed.clone());
         async move {
             use axum::response::IntoResponse;
             if missing.as_deref().is_some_and(|m| req.uri().path().starts_with(m)) {
                 return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() }))).into_response();
+            }
+            if req.uri().path() == "/page" {
+                return ([(axum::http::header::CONTENT_TYPE, "text/html")], format!("<html><body><h1>{dep}</h1></body></html>")).into_response();
             }
             // As a gRPC server answers: data, then its status in a trailer.
             if req.uri().path() == "/trailers" {
@@ -160,8 +174,13 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
                 let frames = futures::stream::iter([Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(bytes::Bytes::from_static(b"ok"))), Ok(hyper::body::Frame::trailers(t))]);
                 return axum::response::Response::new(axum::body::Body::new(http_body_util::StreamBody::new(frames)));
             }
+            // `/sleep/<ms>`: one slow request (a long upload, a report) on a quick app.
+            let slow = req.uri().path().strip_prefix("/sleep/").and_then(|ms| ms.parse().ok()).map(Duration::from_millis).or(slow);
             if let Some(s) = slow {
-                tokio::time::sleep(s).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(s) => {}
+                    _ = killed.cancelled() => return (axum::http::StatusCode::BAD_GATEWAY, "killed mid-request").into_response(),
+                }
             }
             let status = if unhealthy || sick.lock().contains(&name) { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK };
             let vars: serde_json::Map<String, serde_json::Value> = echo.into_iter().map(|(k, v)| (k, v.into())).collect();
@@ -179,6 +198,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
 impl Runtime for Fake {
     fn name(&self) -> &'static str {
         "fake"
+    }
+
+    async fn callers(&self, name: &str) -> Option<super::Callers> {
+        self.callers.lock().get(name).copied()
     }
 
     fn can_suspend(&self) -> bool {
@@ -200,7 +223,7 @@ impl Runtime for Fake {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
-        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, exited: watch::channel(None).0 });
+        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, exited: watch::channel(None).0, killed: Default::default() });
         Ok(())
     }
 
@@ -225,10 +248,12 @@ impl Runtime for Fake {
             Some(_) => {
                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                 let addr = l.local_addr()?;
-                let server = tokio::spawn(serve(spec.clone(), l, log, self.sick.clone()));
+                let killed = tokio_util::sync::CancellationToken::new();
+                let server = tokio::spawn(serve(spec.clone(), l, log, self.sick.clone(), killed.clone()));
                 let mut m = self.instances.lock();
                 let i = m.get_mut(name).expect("exists");
                 i.server = Some(server);
+                i.killed = killed;
                 Some(addr)
             }
             None => None,
@@ -262,6 +287,7 @@ impl Runtime for Fake {
             if let Some(s) = i.server.take() {
                 s.abort();
             }
+            i.killed.cancel();
             i.state = FakeState::Stopped;
             i.exited.send_replace(Some(137));
         }
@@ -269,10 +295,11 @@ impl Runtime for Fake {
     }
 
     async fn remove(&self, name: &str) {
-        if let Some(mut i) = self.instances.lock().remove(name)
-            && let Some(s) = i.server.take()
-        {
-            s.abort();
+        if let Some(mut i) = self.instances.lock().remove(name) {
+            i.killed.cancel();
+            if let Some(s) = i.server.take() {
+                s.abort();
+            }
         }
     }
 

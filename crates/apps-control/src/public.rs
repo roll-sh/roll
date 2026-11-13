@@ -61,7 +61,12 @@ const HORIZON: &str = include_str!("../assets/horizon.svg");
 /// What a visitor sees when roll answers instead of the app: the mark, a title and a line, dark
 /// or light as their system is. A 503 (waking, restarting, busy) looks again by itself.
 fn page(status: StatusCode, title: &str, text: &str) -> Response {
-    let refresh = if status == StatusCode::SERVICE_UNAVAILABLE { "<meta http-equiv=refresh content=5>" } else { "" };
+    page_retrying(status, title, text, 5)
+}
+
+/// [`page`], a 503 looking again after `retry` seconds.
+fn page_retrying(status: StatusCode, title: &str, text: &str, retry: u32) -> Response {
+    let refresh = if status == StatusCode::SERVICE_UNAVAILABLE { format!("<meta http-equiv=refresh content={retry}>") } else { String::new() };
     let html = format!(
         "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\">{refresh}<title>{title}</title>\
          <style>:root{{color-scheme:dark light;--bg:#000;--fg:#ededed;--muted:#a1a1a1;--accent:#4c8dff}}\
@@ -72,10 +77,32 @@ fn page(status: StatusCode, title: &str, text: &str) -> Response {
          <main>{HORIZON}<h1>{title}</h1><p>{text}</p></main>"
     );
     let mut r = (status, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
-    if status == StatusCode::SERVICE_UNAVAILABLE {
-        r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+    if status == StatusCode::SERVICE_UNAVAILABLE
+        && let Ok(v) = HeaderValue::from_str(&retry.to_string())
+    {
+        r.headers_mut().insert(header::RETRY_AFTER, v);
     }
     r
+}
+
+/// An environment in maintenance: its message as text (never markup), looking again every
+/// half minute.
+fn maintenance_page(message: &str) -> Response {
+    let text = if message.is_empty() { "This service is down for maintenance. It'll be back soon.".to_string() } else { escape(message) };
+    page_retrying(StatusCode::SERVICE_UNAVAILABLE, "Down for maintenance", &text, 30)
+}
+
+fn escape(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&#39;".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// The stored form of an environment's access token: its SHA-256, hex. The token itself is only
@@ -343,14 +370,45 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 /// answer metered.
 async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
     let began = Instant::now();
+    // Came in through roll: the private environment's access cookie (checked just below).
+    let cookie = format!("roll_access_{env}=");
+    let via_link = env.starts_with("pv-") && req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).any(|v| v.split(';').any(|c| c.trim().starts_with(&cookie)));
     // A private environment answers only visitors with its token, before anything wakes.
     if let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         return turned_away;
+    }
+    // roll previews' feedback button: its script from the preview's own host, and a page load
+    // (a browser's document, else a GET asking for HTML) gets the tag.
+    let target = if via_link { apps.feedback_target(service, env).await } else { None };
+    if let Some(t) = &target
+        && req.uri().path() == crate::feedback::PATH
+    {
+        return crate::feedback::script(t);
+    }
+    if target.is_some() && req.uri().path() == crate::feedback::NOTES {
+        return crate::feedback::notes(apps.feedback_notes(), env, req.uri().query()).await;
+    }
+    let page_load = req.method() == axum::http::Method::GET
+        && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {
+            Some(dest) => dest.eq_ignore_ascii_case("document"),
+            None => req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html")),
+        };
+    let feedback = target.is_some() && page_load;
+    if feedback {
+        // The page as the app wrote it, so the tag can go in as it streams.
+        req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     }
     let live = match apps.load_live(service, env).await {
         Ok(l) => l,
         Err(e) => return page(StatusCode::NOT_FOUND, "Not deployed", &e.to_string()),
     };
+    // In maintenance: roll's page, nothing woken. A deployment's own URL still answers (a fix
+    // can be tried before maintenance ends).
+    if deployment.is_none()
+        && let Some(m) = apps.maintenance(&live).await
+    {
+        return maintenance_page(&m);
+    }
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
     // gave them (never passed to the app), or a new one while a canary runs.
     let mut bucket = take_bucket(&mut req);
@@ -363,14 +421,14 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     let acquired = match deployment {
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
-            Ok(t) if t.site.is_some() => return serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await,
+            Ok(t) if t.site.is_some() => return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await),
             Ok(t) => live.acquire_deployment(t).await,
             Err(e) => return page(StatusCode::NOT_FOUND, "No such deployment", &e.to_string()),
         },
         None => match live.may_wake().map(|_| live.route(bucket)) {
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
             Ok(Some(t)) if t.site.is_some() => {
-                let mut r = serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await;
+                let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
                 if let (true, Some(b)) = (fresh, bucket) {
                     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
                     if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
@@ -524,7 +582,11 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         }
         frame
     });
-    Response::from_parts(parts, Body::new(http_body_util::StreamBody::new(frames)))
+    with_feedback(feedback, Response::from_parts(parts, Body::new(http_body_util::StreamBody::new(frames))))
+}
+
+fn with_feedback(on: bool, r: Response) -> Response {
+    if on { crate::feedback::add(r) } else { r }
 }
 
 /// Meters a request when its body is sent (or the client went away).

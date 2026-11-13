@@ -184,6 +184,8 @@ pub struct LiveConfig {
     pub wake_timeout: Duration,
     /// How long a worker must keep running after a start to count as up.
     pub worker_grace: Duration,
+    /// A crashed worker's first restart wait, doubling with each crash in a row to 60 times it.
+    pub restart_backoff: Duration,
     /// How long old instances may finish their requests after a switch.
     pub drain: Duration,
     /// How long more instances than needed may stay up before one is stopped.
@@ -203,6 +205,7 @@ impl Default for LiveConfig {
         LiveConfig {
             wake_timeout: Duration::from_secs(60),
             worker_grace: Duration::from_secs(2),
+            restart_backoff: Duration::from_secs(1),
             drain: Duration::from_secs(30),
             scale_down_after: Duration::from_secs(60),
             probe_every: Duration::from_millis(10),
@@ -229,6 +232,14 @@ pub struct EnvLive {
     capped: AtomicBool,
     /// Its volume is being restored: nothing starts until it's done.
     held: AtomicBool,
+    /// A scaling worker's instances for its backlog ([`crate::model::Scale`]); 0: its floor.
+    wanted: AtomicU32,
+    /// The backlog it last read (`u64::MAX`: not read yet).
+    backlog: AtomicU64,
+    /// What scaling last said in the log (said again only when it changes).
+    scale_note: Mutex<String>,
+    /// Since when it has wanted fewer than run (a scale-in waits `scale_down_after`).
+    fewer_since: Mutex<Option<Instant>>,
     /// A gradual rollout's new deployment and the percent of requests it takes.
     canary: Mutex<Option<(Arc<Template>, u8)>>,
     /// Requests routed so far (the canary's share is taken by turns).
@@ -252,6 +263,10 @@ pub struct EnvLive {
     over_since: Mutex<Option<Instant>>,
     /// A tick is running (the reaper never runs two of one environment at once).
     pub ticking: std::sync::atomic::AtomicBool,
+    /// A private caller's wake is under way (the next look waits for it).
+    answering: std::sync::atomic::AtomicBool,
+    /// Its maintenance message as last read (outer None: not read yet).
+    maintenance: Mutex<Option<Option<String>>>,
     last_tick: Mutex<Option<Instant>>,
     last_health: Mutex<Option<Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -276,6 +291,10 @@ impl EnvLive {
             closed: AtomicBool::new(false),
             capped: AtomicBool::new(false),
             held: AtomicBool::new(false),
+            wanted: AtomicU32::new(0),
+            backlog: AtomicU64::new(u64::MAX),
+            scale_note: Mutex::new(String::new()),
+            fewer_since: Mutex::new(None),
             canary: Mutex::new(None),
             routed: AtomicU64::new(0),
             served: Mutex::new(HashMap::new()),
@@ -288,6 +307,8 @@ impl EnvLive {
             meter: Mutex::new(Meter::default()),
             over_since: Mutex::new(None),
             ticking: std::sync::atomic::AtomicBool::new(false),
+            answering: std::sync::atomic::AtomicBool::new(false),
+            maintenance: Mutex::new(None),
             last_tick: Mutex::new(None),
             last_health: Mutex::new(None),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
@@ -677,6 +698,78 @@ impl EnvLive {
         Ok(l)
     }
 
+    /// Its maintenance message, when known (`Some(None)`: serving).
+    pub fn maintenance(&self) -> Option<Option<String>> {
+        self.maintenance.lock().clone()
+    }
+
+    pub fn set_maintenance(&self, m: Option<String>) {
+        *self.maintenance.lock() = Some(m);
+    }
+
+    /// Private callers ([`crate::runtime::Callers`]), which rolld never sees: a sleeping instance
+    /// someone waits at wakes (a frozen one resumes; a stopped one starts, and its waker hands
+    /// it the caller), and with `running` a running one with connections from the project's
+    /// other services counts as in use (Railway's private network keeps a service awake too).
+    pub async fn answer_private(self: &Arc<Self>, running: bool) {
+        let Some(tpl) = self.template() else { return };
+        if tpl.run.kind != RunType::Web || self.answering.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut asked = Vec::new();
+        for i in self.instances().into_iter().filter(|i| i.deployment == tpl.deployment) {
+            let phase = i.phase();
+            let sleeping = matches!(phase, Phase::Suspended(_) | Phase::Created);
+            if !sleeping && !(running && matches!(phase, Phase::Running(_))) {
+                continue;
+            }
+            let Some(c) = self.runtime.callers(&i.name).await else { continue };
+            match phase {
+                Phase::Running(_) if c.private > 0 => *i.last_used.lock() = Instant::now(),
+                _ if sleeping && c.waiting => asked.push(i),
+                _ => {}
+            }
+        }
+        if asked.is_empty() || self.answering.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Its own task: a slow start here holds up no other environment's callers.
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.wake_for_callers(&tpl, asked).await;
+            this.answering.store(false, Ordering::SeqCst);
+        });
+    }
+
+    async fn wake_for_callers(self: &Arc<Self>, tpl: &Template, asked: Vec<Arc<Inst>>) {
+        let _g = self.wake.lock().await;
+        for i in asked {
+            let woke = Instant::now();
+            match i.phase() {
+                Phase::Suspended(addr) => match self.runtime.resume(&i.name).await {
+                    Ok(()) => {
+                        *i.phase.lock() = Phase::Running(addr);
+                        *i.last_used.lock() = Instant::now();
+                    }
+                    Err(_) => self.crashed(&i, "it couldn't be resumed"),
+                },
+                Phase::Created => {
+                    let deadline = Instant::now() + self.cfg.wake_timeout;
+                    match self.start(&i, &tpl.run, None, deadline).await {
+                        Ok(_) => {
+                            *i.last_used.lock() = Instant::now();
+                            let ms = woke.elapsed().as_secs_f64() * 1000.0;
+                            self.meter.lock().cold_start(now_ms(), ms);
+                            self.log.stream(Stream::System).line(format!("cold start: {} answered a private caller in {ms:.0} ms", i.name));
+                        }
+                        Err(e) => self.log.stream(Stream::System).line(format!("a private caller couldn't wake {}: {e}", i.name)),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The proxy couldn't connect to a running instance: it's gone (killed, out of memory), and
     /// the next request starts a fresh one instead of trying it again.
     pub fn connect_failed(&self, inst: &Inst) {
@@ -781,7 +874,8 @@ impl EnvLive {
         let was_awake = self.awake_count() as u32;
         let n = match run.kind {
             RunType::Cron => 0,
-            RunType::Worker => run.min_instances.max(1),
+            // A worker following a backlog starts at what it wants, not back at its floor.
+            RunType::Worker => run.min_instances.max(1).max(if run.scale.is_some() { self.wanted.load(Ordering::SeqCst) } else { 0 }),
             RunType::Web => was_awake.max(run.min_instances).max(1),
         }
         .min(run.max_instances);
@@ -885,23 +979,30 @@ impl EnvLive {
                 self.insts.lock().push(i);
             }
         }
-        self.drain(old);
+        self.drain(old, self.drain_of(&tpl.run));
     }
 
-    /// Instances out of rotation finish their requests (up to `drain`), then go.
-    fn drain(&self, old: Vec<Arc<Inst>>) {
-        let runtime = self.runtime.clone();
-        let drain = self.cfg.drain;
-        tokio::spawn(async move {
-            let until = Instant::now() + drain;
-            for i in old {
+    /// How long an instance being replaced gets: `run.drain_s`, else the node's default.
+    fn drain_of(&self, run: &Run) -> Duration {
+        run.drain_s.map_or(self.cfg.drain, |s| Duration::from_secs(s as u64))
+    }
+
+    /// Instances out of rotation finish their requests, then get SIGTERM, and SIGKILL once
+    /// `window` is up (a second after SIGTERM at least). Each on its own: one slow to finish
+    /// doesn't use up another's time.
+    fn drain(&self, old: Vec<Arc<Inst>>, window: Duration) {
+        for i in old {
+            let runtime = self.runtime.clone();
+            tokio::spawn(async move {
+                let until = Instant::now() + window;
                 while i.in_flight() > 0 && Instant::now() < until {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                let _ = runtime.stop(&i.name, Duration::from_secs(10)).await;
+                let grace = until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
+                let _ = runtime.stop(&i.name, grace).await;
                 runtime.remove(&i.name).await;
-            }
-        });
+            });
+        }
     }
 
     /// A gradual rollout begins: the new deployment's healthy instances join the active one's,
@@ -937,7 +1038,7 @@ impl EnvLive {
             old
         };
         self.served.lock().clear();
-        self.drain(old);
+        self.drain(old, self.drain_of(&tpl.run));
     }
 
     /// The canary is rolled back: every request goes to the active deployment again, and the
@@ -952,7 +1053,7 @@ impl EnvLive {
             gone
         };
         self.served.lock().clear();
-        self.drain(gone);
+        self.drain(gone, self.drain_of(&tpl.run));
     }
 
     /// Set the active deployment without starting anything (a new owner taking the service).
@@ -973,6 +1074,33 @@ impl EnvLive {
 
     pub fn set_capped(&self, on: bool) {
         self.capped.store(on, Ordering::SeqCst);
+    }
+
+    /// A scaling worker's instances for its backlog now.
+    pub fn set_wanted(&self, n: u32, backlog: Option<u64>) {
+        self.wanted.store(n, Ordering::SeqCst);
+        self.backlog.store(backlog.unwrap_or(u64::MAX), Ordering::SeqCst);
+    }
+
+    /// A line about scaling in the environment's log, once per change (every ten seconds would
+    /// be thousands a day); empty clears it.
+    pub fn note_scale(&self, line: &str) {
+        let mut n = self.scale_note.lock();
+        if *n != line {
+            *n = line.to_string();
+            if !line.is_empty() {
+                self.log.stream(Stream::System).line(line);
+            }
+        }
+    }
+
+    /// What a scaling worker follows now: its backlog as last read, and the instances it wants.
+    pub fn scaling(&self) -> Option<(Option<u64>, u32)> {
+        let tpl = self.template()?;
+        let run = &tpl.run;
+        run.scale.as_ref()?;
+        let b = self.backlog.load(Ordering::SeqCst);
+        Some(((b != u64::MAX).then_some(b), self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances))))
     }
 
     /// Hold it asleep (a restore of its volume) until the guard drops: what runs stops, and no
@@ -1262,6 +1390,11 @@ impl EnvLive {
 
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
         let run = &tpl.run;
+        // A worker that follows its work runs what its backlog wants; else its floor.
+        let target = match &run.scale {
+            Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),
+            None => run.min_instances,
+        };
         let insts = self.instances();
         let mut up = 0;
         for i in &insts {
@@ -1277,12 +1410,12 @@ impl EnvLive {
             }
         }
         for i in insts.iter().filter(|i| i.phase() == Phase::Crashed) {
-            if up >= run.min_instances {
+            if up >= target {
                 break;
             }
-            // Back off: 1 s doubling to 60 s since it last ran.
+            // Back off: `restart_backoff` (1 s) doubling to 60 times it since it last ran.
             let crashes = i.crashes.load(Ordering::SeqCst).min(6);
-            let wait = Duration::from_secs((1u64 << crashes).min(60));
+            let wait = (self.cfg.restart_backoff * (1u32 << crashes)).min(self.cfg.restart_backoff * 60);
             if i.last_used.lock().elapsed() < wait {
                 continue;
             }
@@ -1294,7 +1427,7 @@ impl EnvLive {
                 i.crashes.fetch_add(1, Ordering::SeqCst);
             }
         }
-        while up < run.min_instances {
+        while up < target {
             let Ok(inst) = self.make(tpl).await else { break };
             self.insts.lock().push(inst.clone());
             let deadline = Instant::now() + self.cfg.wake_timeout;
@@ -1302,6 +1435,39 @@ impl EnvLive {
                 break;
             }
             up += 1;
+            self.log.stream(Stream::System).line(format!("scaled out: {up} instances for the backlog"));
+        }
+        // Fewer wanted for `scale_down_after`: one goes (the newest), its work given the drain
+        // to finish; the rest follow on later ticks.
+        let fewer = up > target;
+        let scale_in = {
+            let mut s = self.fewer_since.lock();
+            match (fewer, *s) {
+                (false, _) => {
+                    *s = None;
+                    false
+                }
+                (true, None) => {
+                    *s = Some(Instant::now());
+                    false
+                }
+                (true, Some(t)) => t.elapsed() >= self.cfg.scale_down_after,
+            }
+        };
+        if scale_in
+            && let Some(i) = self.instances().into_iter().filter(|i| matches!(i.phase(), Phase::Running(_))).max_by_key(|i| i.started_at())
+        {
+            // Out of the set now; its stop (the drain to finish its work) runs off the wake lock,
+            // so a deploy's commit doesn't wait for it.
+            *i.phase.lock() = Phase::Stopping;
+            self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
+            *self.fewer_since.lock() = None;
+            self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
+            let (runtime, name, grace) = (self.runtime.clone(), i.name.clone(), self.drain_of(run));
+            tokio::spawn(async move {
+                let _ = runtime.stop(&name, grace).await;
+                runtime.remove(&name).await;
+            });
         }
     }
 

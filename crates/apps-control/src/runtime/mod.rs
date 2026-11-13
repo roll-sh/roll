@@ -13,6 +13,9 @@ pub mod docker;
 pub mod engine;
 pub mod fake;
 pub mod fargate;
+pub mod netns;
+
+pub use netns::Callers;
 
 use crate::logs::LogSink;
 use async_trait::async_trait;
@@ -110,6 +113,12 @@ pub struct Usage {
 pub trait Runtime: Send + Sync {
     /// `docker`, `fargate`, `fake`.
     fn name(&self) -> &'static str;
+    /// Who's at a web instance's port without rolld ([`Callers`]): the project's other services
+    /// over the private network. None where the runtime can't tell (then only rolld's own
+    /// requests wake and keep it awake).
+    async fn callers(&self, _name: &str) -> Option<Callers> {
+        None
+    }
     /// Whether [`Runtime::suspend`] freezes (Docker's pause) rather than stops.
     fn can_suspend(&self) -> bool;
     /// Pull an image (with `login` for a private registry) and answer it pinned by digest

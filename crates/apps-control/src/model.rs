@@ -378,6 +378,50 @@ pub struct Run {
     /// proxy and its health checks talk HTTP/2 to it (Cloud Run's `--use-http2`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub h2c: bool,
+    /// A worker's instances follow its work: a stream consumer group's lag (docs/apps/README.md,
+    /// "Workers that follow their work"). Between `min_instances` and `max_instances`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<Scale>,
+    /// A web service answers on its public URLs (its `up.roll.site` names, its deployments'
+    /// and its custom domains); false: only on the project's private network, as Render's
+    /// private services.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub public: bool,
+    /// How long an instance being replaced or scaled in gets: its requests in flight finish,
+    /// then SIGTERM, and SIGKILL when it's up (Render's `maxShutdownDelaySeconds`). 1–300;
+    /// unset, 30.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain_s: Option<u32>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// What a worker scales on: `group`'s lag on `stream` (a roll stream in the service's project),
+/// one instance per `per_instance` messages behind.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scale {
+    pub stream: String,
+    pub group: String,
+    #[serde(default = "Scale::default_per_instance")]
+    pub per_instance: u64,
+}
+
+impl Scale {
+    fn default_per_instance() -> u64 {
+        1000
+    }
+
+    /// Instances for a backlog of `lag`, within `min`–`max`.
+    pub fn instances(&self, lag: u64, min: u32, max: u32) -> u32 {
+        (lag.div_ceil(self.per_instance.max(1)).min(u32::MAX as u64) as u32).clamp(min, max.max(min))
+    }
 }
 
 /// The run settings an environment may set for itself (Railway's per-environment settings):
@@ -448,6 +492,9 @@ impl Default for Run {
             alerts: Alerts::default(),
             rollout: Rollout::default(),
             h2c: false,
+            scale: None,
+            public: true,
+            drain_s: None,
         }
     }
 }
@@ -470,6 +517,19 @@ impl Run {
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");
         }
+        if self.kind != RunType::Worker {
+            // A web service scales on its requests, a cron run is one: only a worker follows a
+            // backlog (dropped, so a worker can become a web service).
+            self.scale = None;
+        }
+        if let Some(sc) = &self.scale {
+            // A stream by its id (`st_…`), never a name; a group as Kafka names one.
+            let stream_ok = sc.stream.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+            let group_ok = !sc.group.is_empty() && sc.group.len() <= 249 && sc.group != "." && sc.group != ".." && sc.group.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+            if !stream_ok || !group_ok || !(1..=1_000_000_000).contains(&sc.per_instance) {
+                return bad("scale is { stream: a stream's id (st_…), group: a-z, A-Z, 0-9, . _ -, per_instance: 1–1e9 }");
+            }
+        }
         if !(0.25..=8.0).contains(&self.cpu) || !self.cpu.is_finite() {
             return bad("cpu is 0.25–8 vCPU");
         }
@@ -487,6 +547,9 @@ impl Run {
         }
         if !(1..=900).contains(&self.health_timeout_s) {
             return bad("health_timeout_s is 1–900");
+        }
+        if self.drain_s.is_some_and(|d| !(1..=300).contains(&d)) {
+            return bad("drain_s is 1–300");
         }
         if self.port == Some(0) {
             return bad("port is 1–65535");
@@ -562,6 +625,12 @@ pub fn merge<T: Serialize + serde::de::DeserializeOwned>(base: &T, patch: Option
         }
     }
     serde_json::from_value(v).map_err(|e| Error::BadRequest(format!("{what}: {e}")))
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Scaling {
+    pub backlog: Option<u64>,
+    pub wanted: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -653,11 +722,26 @@ pub struct Environment {
     /// An image service's tag is watched: a new digest behind it deploys (Railway's image auto
     /// updates).
     pub follow_tag: bool,
+    /// A preview's pages carry roll previews' feedback button for visitors who came in through
+    /// its access link.
+    pub feedback: bool,
+    /// In maintenance (Render's maintenance mode): its public names answer a 503 page with the
+    /// message, and nothing wakes. Null: serving.
+    pub maintenance: Option<Maintenance>,
+    /// A worker that follows its work: the backlog it last read (null before the first read)
+    /// and the instances that wants.
+    pub scaling: Option<Scaling>,
     /// A push deploys only once its commit's checks pass (Railway's "Wait for CI").
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.
     pub waiting_for_ci: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Maintenance {
+    /// What visitors read; null: roll's own words.
+    pub message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -911,9 +995,17 @@ pub struct Domain {
 }
 
 /// A hostname a user may add: lowercase labels of `[a-z0-9-]`, at least two, at most 253
-/// characters, not an IP address and not under roll's own domains.
+/// characters, not an IP address and not under roll's own domains; or `*.` and one (a wildcard:
+/// every name one label under it).
 pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
     let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
+    if let Some(base) = h.strip_prefix("*.") {
+        // One `*`, leftmost: what a wildcard certificate covers.
+        if base.contains('*') {
+            return Err(Error::BadRequest(format!("{h:?}: a wildcard is one `*.` in front of a hostname")));
+        }
+        return check_hostname(base, reserved).map(|b| format!("*.{b}"));
+    }
     let labels: Vec<&str> = h.split('.').collect();
     let ok = h.len() <= 253
         && labels.len() >= 2
@@ -928,6 +1020,18 @@ pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
     Ok(h)
 }
 
+/// Where a custom domain's TXT challenge goes: `_roll-challenge.<host>`, a wildcard's on the
+/// name under it (DNS providers rarely take a `*` mid-name; a TXT name holds several values).
+pub fn challenge_name(host: &str) -> String {
+    format!("_roll-challenge.{}", host.strip_prefix("*.").unwrap_or(host))
+}
+
+/// The wildcard that would cover `host` (`a.example.com` → `*.example.com`), if it has one.
+pub fn covering_wildcard(host: &str) -> Option<String> {
+    let (_, rest) = host.split_once('.')?;
+    rest.contains('.').then(|| format!("*.{rest}"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkKind {
@@ -937,10 +1041,13 @@ pub enum LinkKind {
     Stream,
     Queue,
     Nosql,
+    /// Another web service of the project: its private and public URLs (apps' own, not a
+    /// [`crate::integrations::Resources`] kind).
+    Service,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 6] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql];
+    pub const ALL: [LinkKind; 7] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Service];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -950,6 +1057,7 @@ impl LinkKind {
             LinkKind::Stream => "stream",
             LinkKind::Queue => "queue",
             LinkKind::Nosql => "nosql",
+            LinkKind::Service => "service",
         }
     }
 

@@ -657,7 +657,7 @@ impl apps_control::integrations::SecretSource for ForApps {
     /// that doesn't stand for the service (`Workspace::trusts`). An unresolved reference fails the
     /// deploy, and so does a dynamic credential: it ends with its lease, and a service that scales
     /// to zero can't renew it.
-    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: deploy again in a moment"))?;
         let (project, env, service) = (project.to_string(), env.to_string(), service.to_string());
         tokio::task::spawn_blocking(move || {
@@ -680,9 +680,21 @@ impl apps_control::integrations::SecretSource for ForApps {
             if let Some(k) = v.dynamic.first() {
                 anyhow::bail!("{k} in {env} is a dynamic credential, which ends with its lease: link it as managed or live for a service");
             }
-            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+            // Linked keys are addresses as rolld sees them: apps rewrites them for the container.
+            let linked: std::collections::HashSet<String> = v.linked.into_iter().collect();
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
+    }
+
+    /// apps' `…/variables/values` shows secrets' values: only to whoever may reveal `env` by roll
+    /// secrets' own rules (a token's scope, a person's own projects, protected environments).
+    async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
+        let Some((secrets, _)) = self.0.get().cloned() else { return false };
+        match secrets.caller_of(who.operator, who.user, who.grant) {
+            Ok(caller) => caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(project, env, "/")),
+            Err(_) => false,
+        }
     }
 }
 
@@ -823,9 +835,17 @@ mod tests {
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         let apps = super::ForApps::default();
         apps.set(secrets.clone(), ws);
-        assert_eq!(apps.resolve(&project, "production", "svc_web").await.unwrap(), [("DB_URL".to_string(), "postgres://db/shop".to_string())]);
-        assert_eq!(apps.resolve(&project, "pr-9", "svc_web").await.unwrap(), []);
-        assert_eq!(apps.resolve("prj_gone", "production", "svc_web").await.unwrap(), []);
+        let got = apps.resolve(&project, "production", "svc_web").await.unwrap();
+        assert_eq!(got.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.linked)).collect::<Vec<_>>(), [("DB_URL", "postgres://db/shop", false)]);
+        assert!(apps.resolve(&project, "pr-9", "svc_web").await.unwrap().is_empty());
+        assert!(apps.resolve("prj_gone", "production", "svc_web").await.unwrap().is_empty());
+        // Seeing them in the clear in apps is roll secrets' call: the operator may, a stranger's
+        // token for another project may not.
+        let operator = apps_control::integrations::Asker { operator: true, user: None, grant: None };
+        assert!(apps.may_reveal(operator, &project, "production").await);
+        let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
+        let grant = roll_auth::Grant { ask_otherwise: false, id: "tok_x".into(), name: "x".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
+        assert!(!apps.may_reveal(apps_control::integrations::Asker { operator: true, user: None, grant: Some(&grant) }, &project, "production").await);
         // The read is the service's in the audit log.
         let audit = secrets.audit(&project, roll_secrets::AuditFilter::default(), &roll_secrets::Caller::operator()).unwrap();
         assert!(audit.iter().any(|a| a.actor == "app:svc_web"), "{audit:?}");

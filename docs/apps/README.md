@@ -445,7 +445,11 @@ every deployment is immutable with instant rollback.
   `up.roll.site` name, and roll verifies it (the CNAME, or a `_roll-challenge.<host>` TXT with the
   domain's token for apex domains behind an ALIAS/flattening provider), checking pending ones
   every minute. Domain states: `pending` (waiting for DNS) → `active`, or `failed` with the
-  reason. A domain still unverified 7 days after it was added is removed (`PENDING_CLAIM_TTL`), so
+  reason. A wildcard, `*.example.com` (Railway's and Render's), serves every name one label
+  under it that no exact domain claims: a CNAME on `*.example.com`, and the TXT proof on
+  `_roll-challenge.example.com`. Its certificate needs DNS-01, so where custom domains get
+  certificates and they can't be wildcards (`DomainTls::wildcards`, the edge's HTTP-01 today)
+  it's refused at once rather than left pending; on a node serving plain HTTP it just works. A domain still unverified 7 days after it was added is removed (`PENDING_CLAIM_TTL`), so
   a squatted hostname comes free for its real owner; one verified once never expires. Removing an
   environment or a service removes its domains (rows and provider records alike). Where the CNAME
   target is shared by every tenant (`cloudflare` below: `up.roll.site`), a CNAME proves nothing
@@ -484,12 +488,51 @@ every deployment is immutable with instant rollback.
   environment has a Docker network `roll-apps-net-<project>-<env>` and each instance joins it
   with its service name as an alias. On the fleet, tasks of one project and environment share a
   security group that admits only itself, and names resolve through Cloud Map (in `## Next`).
+- **A private caller wakes a sleeping service** (Railway's private network, Fly's Flycast).
+  rolld never sees that traffic, so it reads the instance's own socket tables instead
+  (`runtime/netns.rs`: the sandbox's `/proc/<pid>/net/tcp` and `tcp6`, readable by anyone and
+  still readable while the app is frozen), five times a second for sleeping instances:
+  - Frozen (suspended): a connection in the app's backlog resumes it (about 100 ms more than
+    an awake call).
+  - Stopped: a waker in the sandbox (`<instance>-wake`, busybox `nc` with no capabilities, a
+    read-only root and 16 MiB) listens on the app's port. Accepting the first caller closes its
+    listener, so rolld sees a connection with nothing listening and starts the app, and the
+    waker joins the held caller to the app once it listens. The first call is answered, not
+    refused.
+  - Before any other start (a public request, a cron run) the waker lets go of the port: rolld
+    calls it once through the published port, which frees it in a millisecond (killing its
+    container took Docker 70), and the app's bind never races it.
+  - Running: connections from peers other than the host (rolld's own come through the
+    network's gateway) count as use, so a service in use only privately doesn't sleep.
+  - Measured on real Docker (`a_private_caller_wakes_a_sleeping_service`, a caller on the
+    project network with `docker exec … wget`, which is about 90 ms of the time): awake 86–115
+    ms, stopped 281–457 ms, frozen 185–214 ms. A public cold start with the waker armed was
+    167–210 ms, and five alternating pairs with and without the waker (sandbox medians 165 and
+    200 ms against 175 and 212) showed no cost.
+  - Not on the fleet yet (Cloud Map, in `## Next`). A second caller arriving while the app
+    starts from stopped is refused (the waker holds one); the app's port must listen on
+    loopback too (`0.0.0.0` or `::`, as every generated start command does).
 - **roll databases**: a service links to the project's Postgres, Redis, buckets, streams,
   queues and NoSQL. A link injects the resource's connection variables (`DATABASE_URL`,
   `REDIS_URL`, `S3_*`, `KAFKA_*`, `AMQP_URL`, `CASSANDRA_*`), named with the resource's prefix
   when a service links two of a kind (`ORDERS_DATABASE_URL`). Locally the URLs are rewritten for
   the container (`host.docker.internal`); on the fleet they're the public edge names over TLS,
   as previews use, so there's no path from a task into the fleet's network.
+- **Service links** (Render's `fromService`, Railway's reference variables): a `service` link
+  to another web service of the project gives `<NAME>_URL`, its private
+  `http://<name>.<env>.internal:<port>` in the linking environment, and `<NAME>_PUBLIC_URL`
+  when it's public there. They're read at each deploy (a renamed service's new name, a new
+  port), checked to be the same project each time, and the links to a deleted service go with
+  it. The canvas draws them like a database's. A scoped token needs `reveal` on the linked
+  service, as on any linked resource.
+- **Credentials per link**: a kind whose product can make a credential per consumer does so
+  once, when the link is made (`Resources::link`: a roll search API key, a native user for
+  OpenSearch), instead of the resource's own password. Its variables are kept sealed with the
+  link (AAD names the service, kind and resource) and are what deploys and listings read;
+  setting the link's prefix again keeps the same credential. Unlinking, or deleting the service,
+  revokes it (`Resources::unlink`; a revoke that fails is logged, and the link is gone either
+  way). A link that can't be stored revokes what it just made. Kinds that don't (Postgres and
+  Redis today) read the resource's variables fresh at each deploy.
 
 ### Secrets and environments
 
@@ -509,9 +552,14 @@ every deployment is immutable with instant rollback.
 - What a deploy injects, lowest to highest precedence: roll's own (`PORT`,
   `ROLL_SERVICE`, `ROLL_ENVIRONMENT`, `ROLL_DEPLOYMENT`, `ROLL_PUBLIC_URL`,
   `ROLL_PRIVATE_HOST`), links, the environment's project secrets, the service's variables.
-- A deployment records the variables' names and a hash of their values, never the values:
-  changing a variable marks the environment "needs deploy" (like Railway's staged changes), and
-  a rollback uses the current values.
+- A deployment records the variables' names and a hash of their values: changing a variable
+  marks the environment "needs deploy" (like Railway's staged changes). When a deployment goes
+  live, the environment's own variables are kept with it, sealed under the deployment
+  (`deploy_vars`), and a rollback to it brings them back as they were then (Heroku's and
+  Railway's rollbacks: a bad variable change is undone by rolling back), the change in the
+  activity as `variables.restored`; `keep_variables` (`roll apps rollback --keep-variables`) runs
+  its image with today's. Links' and roll's own variables are resolved again, as at any deploy;
+  a deployment that never went live (a no-traffic try-out) has none kept.
 
 ### Preview environments
 
@@ -526,6 +574,20 @@ public contract so they need no private hook:
   removed, domains released, variables deleted, deployments kept in history as `removed`.
 - Preview environments scale to zero like any other, so an open pull request costs nothing
   until someone opens its URL.
+
+roll previews' feedback button works on a preview environment of roll apps too, when roll
+previews turns it on for the project (`feedback` on the environment): a visitor who came in
+through the preview's access link (its cookie; an automation's bypass header doesn't count) gets
+`<script src="/__roll/feedback.js" defer>` before `</body>` of a page load (a browser's document,
+else a GET that asks for HTML), the page asked of the app uncompressed and sent `private,
+no-cache` with no length or ETag; the script itself comes from the preview's own host. It holds no
+credential: notes go to the preview in roll's dashboard. The button also lists what's been said
+about the page (Vercel's comment pins): `GET /__roll/feedback.json?path=<pathname>` on the same
+host and for the same visitors, answered from roll previews through a port
+(`integrations::FeedbackNotes`, `Apps::set_feedback_notes`) as previews' own proxy answers it:
+`no-store`, the latest 200, a 404 where previews isn't on the node and a 502 when it fails (the
+button then shows no list). The script and the tagger are roll previews', copied
+(`assets/feedback.js`, `feedback.rs`, equal to #28's) until one copy serves both.
 
 ### Permissions and MCP
 
@@ -636,7 +698,9 @@ panel in Settings read it, newest first; audit events are kept 90 days (the rest
 
 A crash loop's banner on the service page has the logs a click away and **Roll back** to the
 deployment that was live before (its image again, no build); `roll apps rollback` with no id
-does the same, as `heroku rollback`. A failed or timed-out cron run is a `cron.failed` event,
+does the same, as `heroku rollback`. The server picks the target (`POST …/rollback`): it follows
+the `rollback_of` chain, so after B → A the next goes before A, never forward to B. A failed or
+timed-out cron run is a `cron.failed` event,
 notified by default; a failed one-off job is `job.failed`, off by default (someone ran it and saw
 it). Both carry the exit code.
 
@@ -684,6 +748,14 @@ root = "apps/web"          # uploaded by roll up; its own roll.toml [app] still 
 links = ["db", "cache"]
 [apps.proxy]
 image = "nginx:1.27"
+port = 80                  # and [apps.<name>.variables]: both set when the service is made
+[apps.jobs]
+repo = "acme/shop"         # a roll code repo: deploys on each landing on `branch`
+root = "jobs"              # with repo: the directory in it that builds
+branch = "main"
+type = "worker"            # web, worker or cron (with `schedule`), `start` too
+[apps.jobs.run]
+min_instances = 2          # any run setting, checked as the API checks them
 [databases.db]
 kind = "postgres"
 [databases.cache]
@@ -697,11 +769,23 @@ one's), and a service the file names with another kind of source stops it (renam
 fix, never a quiet conversion). Then it makes the missing databases and places them on the project's canvas, makes the missing services with
 their links so the first deploy has the variables, links what an existing service lacks,
 uploads each `root`, and redeploys an image service whose image changed. Names are matched, so
-running it again only does what changed. Nothing is ever deleted: a service or database removed
+running it again only does what changed, including the run settings an entry names (`~
+settings`, only those that differ; the rest stay as they are). On a push there's nothing more
+to sync: a repo service's own `roll.toml` `[app]` (in its root) applies over its settings at
+every deploy, and every landing deploys, which is what Render's Blueprint sync does for an
+existing service. Making new services and databases needs a project and other products, so
+that stays `roll up --all`'s. Nothing is ever deleted: a service or database removed
 from the file stays until removed by hand. The file is checked before anything is made: one of
 `root` or `image`, a root inside the directory, links to declared databases, kinds `postgres`
-or `redis`. The plan and the checks are unit-tested in roll-cli. The calls are the API's routes
-as documented and haven't run against a live rolld yet: that needs Postgres and Redis up.
+or `redis`. `roll apps import-compose [file] [--write]` turns a Compose file into these entries
+(Railway's Compose import): image and build services become `[apps]` (the container's port,
+its environment as variables), Postgres and Redis containers become roll databases linked from
+what `depends_on` them, and what isn't carried over (volumes, networks, commands, health checks)
+is said. The plan, the checks and the import are unit-tested in roll-cli, and the whole run was
+checked against a live rolld (apps and Redis on Docker, 2026-11-13): the plan, a Redis database
+made and placed, the image service made with its link, port and variables and deployed, and a
+second run finding everything there. The calls are the API's routes
+as documented.
 
 ## A service and its database
 
@@ -753,6 +837,55 @@ A gradual rollout splits by bucket as usual, and a deployment's own URL serves i
 A start command set in the service, a site over 512 MiB or 100,000 files, or a runtime that
 can't export (the fleet's CodeBuild builder, until its first run) means a container serves it,
 as before. A service's sites are deleted with its images.
+
+## Maintenance and draining
+
+An environment in maintenance (Render's maintenance mode; Settings' "Maintenance", `roll apps
+env --maintenance [NOTE]`, `--serve` to end it) answers its public names with roll's 503 page,
+the note as text (never markup), `Retry-After: 30`, and wakes nothing, so a sleeping service
+costs nothing meanwhile. A deployment's own URL still answers, to try a fix first; the private
+network is untouched. The setting is kept with the environment's live state on its owner, read
+from the store once, so a request pays nothing for it.
+
+`run.drain_s` (1–300, Render's `maxShutdownDelaySeconds`; `roll apps set --drain`) is how long
+an instance being replaced (a deploy, a promoted or aborted canary) or scaled in gets: its
+requests in flight finish, then SIGTERM, and SIGKILL when the time is up (a second after SIGTERM
+at least). Unset, 30 s. Each instance has its own window, so a slow one doesn't use up
+another's.
+
+## Private services
+
+`run.public: false` (Settings' "Reachable", `roll apps set --public false`) takes a web service
+off the internet, as Render's private services: its `up.roll.site` names, its deployments' own
+hostnames and its custom domains are 404s like an address nobody has, and `Environment.url` is
+null. It's read from the service's settings on each request, so it takes effect at once, not
+with the next deploy. The project's services still reach it at `<svc>.<env>.internal` on their
+network, which wakes it ("A private caller wakes a sleeping service"). Its previews have no
+public URL either.
+
+## Workers that follow their work
+
+A worker with `run.scale` (`{ stream, group, per_instance }`) runs one instance per
+`per_instance` messages its roll stream consumer group is behind, between `min_instances` and
+`max_instances`, as no general platform can: roll owns the stream (Render scales workers on CPU
+and memory, KEDA on queue length outside the platform). Every ten seconds the service's owner
+reads the group's lag (its committed offset on each partition against the partition's high
+watermark, as the broker's `GET …/groups/{g}` adds it up). A stream is named by its id (`st_…`),
+never a name, and a group by Kafka's characters. It's read only for a stream on the service's
+own project, and only on a project the operator owns: anyone can put any reference on their own
+canvas and streams don't know their owners yet, so a person's project doesn't follow a stream
+(as roll secrets refuses links there), and roll MCP's gate wants read on the stream to set it.
+A deploy starts a scaled-out worker at the instances it wants, not back at its floor; a note
+about scaling is logged when it changes, not every ten seconds; and a web service's `scale` is
+dropped (it scales on its requests); the reaper starts instances at once and
+stops one (the newest, given the drain to finish its work) only after fewer were wanted for
+`scale_down_after`. rolld reads the lag from its own API (`GET /v1/streams/{s}/groups/{g}`, the
+operator's token), which on a fleet forwards to the stream's owner, the only node whose numbers
+are right (checked against a live rolld: 30 records, a group committed at 5, lag 25). Queues
+follow once a queue is a workspace resource (its project is what keeps it a tenant's). Settings
+picks the stream from the project's own, with the group and messages per instance (`roll apps
+set --scale <stream>:<group>[:<per instance>]`), and the environment shows the backlog last read
+and the instances it wants (`Environment.scaling`).
 
 ## HTTP/2 and gRPC
 
@@ -847,6 +980,20 @@ raising the limit lifts the cap within 30 s. Notification targets get both event
 Spend counts the services a project has now (a deleted service's month drops out).
 
 ## Measured
+
+- A web instance's network lives in a sandbox made with it (`Docker` with `netns`, the default;
+  `ROLL_APPS_NETNS=0` turns it off): busybox asleep, holding the network namespace, its aliases
+  on the project network and its published port, with no capabilities, 16 MiB, half a vCPU, 8
+  pids and a read-only root (at a twentieth of a vCPU, its own start was throttled to 800 ms
+  instead of 170, on the path of every new instance). The app joins that namespace (`NetworkMode: container:<sandbox>`), so
+  a wake starts only the app, with no network set up on its path (the same idea as Kubernetes'
+  pause container). Snapshot restore (CRIU) would go further, but this host has no CRIU and
+  Docker's checkpointing is experimental. Measured on real Docker
+  (`a_cold_start_skips_network_setup_with_a_sandbox`: the same image, five alternating pairs):
+  median 151 ms against 238 ms, and in a second run 171 against 375, faster in five of five each
+  time; the standard cold start went from 258 to 175 ms median and Node's from 313 to 199 ms.
+  The sandbox (and its waker) is removed with its instance, and a node taking a service over
+  keeps a known instance's sandbox and waker.
 
 On ai-server (36 cores, Docker 29, overlayfs, load around 25–30 from other work), 2026-11-12.
 `crates/apps-control/tests/docker.rs` (`pnpm test:apps --docker`) prints the first three; the Node
@@ -965,85 +1112,111 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 
 ## With the other platform branches
 
-Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/roll-secrets
-926e6bb83, feature/roll-previews 8890f61f4 and feature/roll-search a59b01088 (pairwise
+Reviewed on 2026-11-13 against main 13d4a1b7b (#18 accounts, #19 MCP), feature/roll-mcp-next
+b691d1029 (#24), feature/roll-secrets 55a618718, feature/roll-previews 8c7f6ecdf and
+feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pairwise
 `git merge-tree` too). Ours are done or in `## Next`; theirs have been told.
 
-- **roll-mcp**: every route in `api::router` resolves to a catalogue row, and http-api.md's
+- **roll-mcp** (#19 merged into main at 11:15; #24, feature/roll-mcp-next, follows): every route
+  in `api::router` resolves to a catalogue row, and http-api.md's
   classes follow the catalogue (restore is `delete`, a domain's PATCH `deploy*`, a job's logs
   `reveal`, hooks `admin`, wake `write`, all of a shell session `admin`). Ours on merge:
-  - `crates/rolld/tests/auth.rs`: add `("/v1/apps/hooks", "deploy hooks: the secret in the
-    URL")` to `UNSCOPED` (mcp's version fails any API route classed "none" not listed there).
-  - Leaked hook URLs: rolld registers `Access::on_leaked("rlk_", …)`, parsing the service and
-    environment from the URL around the secret, calling `Apps::delete_hook`. The prefix is
-    `rlk_` (`rlh_` is main's automations' webhook prefix); mcp's `SECRET_PREFIXES`, its product
-    mapping and the GitHub partner pattern `rlk_[a-z2-7]{40}` follow it.
-  - An environment resolver for `"apps"` in rolld/src/access.rs answering `Some("preview")` for
-    an ephemeral environment; `api::actor` reads `roll_auth::Grant::on(ext)`'s name before the
-    operator's; `put_link` (and create's `links`) checks `Grant::allows(<resource>, reveal)`.
+  - Done in the stacking merge (1f0caf874, with accounts #18): `/v1/apps/hooks` in rolld's
+    `UNSCOPED`; `rlk_` (not `rlh_`, main's automations' prefix) in `SECRET_PREFIXES` and the
+    product mapping, and `Access::on_leaked("rlk_")` revoking through
+    `Apps::revoke_leaked_hook`; the `"apps"` environment resolver (ephemeral is "preview");
+    `api::actor` naming the token's grant, then a signed-in admin, then the operator. The GitHub
+    partner pattern is `rlk_[a-z2-7]{40}`.
+  - Still open: `put_link` (and create's `links`) checking `Grant::allows(<resource>, reveal)`
+    itself (the catalogue's `.lends()` does it at the gate today).
   - `net.rs` and `model::private_ip` move onto mcp's `roll-net`.
-  - Theirs (MCP tools): `apps_deploy` could take `no_traffic`; a tool for `PUT
-    …/environments/{env}` (run, follow_tag, wait_for_ci); `apps_get_service` doesn't return
-    deploys (a Service has environment summaries).
+  - #24: `apps_deploy` takes `no_traffic`; `apps_set_environment` covers `PUT
+    …/environments/{env}` but `access` and `feedback`; `run.scale` needs read on its stream at
+    the gate (a row's lends name each resource's own action), and `apps_update_service` says
+    so.
 - **roll-previews** (`RollApps`): new Environment fields are ignored safely, `ready` falls into
   its success branch (it never sends `no_traffic`), and apps no longer runs canaries in
   ephemeral environments. Theirs: `unset` the variables it set before and no longer wants (an
   override removed today stays in the `pv-` environment); once secrets is wired, PATCH only the
   link redirects, not `t.vars` (a second copy of project secrets in apps); `catalog()`'s
   memory ignores `[app.previews.run]` and per-environment `run`; `--env K=V` on argv in
-  `code-preview/src/docker.rs`.
+  `code-preview/src/docker.rs` (#20's change). Previews sends `feedback: true` (its own rule:
+  the setting, a change, an access token) once apps' follow-up is in its tree: the held #21
+  answers 400 to an unknown field. One copy of `feedback.js` and its tagger after the merge.
+  Once #26 and #28 are both on main, rolld calls `apps.set_feedback_notes(…)` with an adapter
+  over previews' `Engine::notes_for(env, path)` (`p.engine` in `rolld/src/previews/mod.rs`),
+  mapping its `Note` onto apps' (`path, selector, note, by, at`, ms).
 - **roll-secrets** (see "Secrets and environments"). Ours on wiring:
-  - Skip `Secrets::ensure_environment` for ephemeral environments: previews ensures them with
-    their base and trust, and ensuring again with other values is a 409 `mismatch`.
-  - `GET …/variables/values` must not return values whose `source` is `secret` unless the caller
-    may reveal the secret itself (a second catalogue check, as `copies_from` does): today apps'
-    `reveal` alone would read a project's production secrets.
+  - apps never ensures a secrets environment: an apps environment roll secrets doesn't have
+    reads as no secrets (previews ensures its `pv-` ones with their base and trust; ensuring
+    again with other values would be a 409 `mismatch`), and a person adds one in roll secrets
+    when they want secrets there.
+  - Done on apps' side: `GET …/variables/values` asks `SecretSource::may_reveal(who, project,
+    env)` (false by default) when any value comes from roll secrets, and answers 403 naming them
+    if not; secrets' `ForApps` answers it by its own rules (`Caller::allows(Reveal, …)`, protected
+    environments, a token's scope).
   - Seal with secrets' `Keyring` (`ROLL_SECRET_KEY_PREVIOUS`, `ROLL_SECRET_KEY_KMS`), not
     `ROLL_SECRET_KEY` alone, so a key rotation by secrets' guide keeps apps' sealed variables,
     registry logins and target URLs readable, and KMS works on a fleet.
-  - `SecretSource` needs a digest (so `needs_deploy`'s cache isn't an audited resolve a minute).
-  - Theirs: `rolld/src/secrets/syncs.rs` uses `code_control::review::apps::PublicOnly`, which
-    mcp makes `pub(crate)`: secrets stops compiling after mcp unless it moves to `roll-net`.
-- **roll-search** touches nothing of apps; its conflicts with apps are additions side by side
-  (`Product`/`Kind` arrays grow).
-- **Conflicts with apps**: Cargo.toml/Cargo.lock everywhere (keep both); `rolld/src/main.rs`
-  with mcp, secrets and previews (open the workspace once; open secrets before `apps::start`;
-  merge every product's router, then take the copies secrets' `products_api` and mcp's
-  `auth.layer` keep); `rolld/src/cluster.rs` `DbBudget` with secrets (code 2, the rest 1, total
-  12); `project-page.tsx` with previews (keep `working` for the agent count, apps'
-  `live = useProjectServices`, and the Inspector open on `canvas && (!!current || !!newService)`);
-  roll-workspace's `Kind` array and the dashboard's kind maps with search and previews (keep
-  both).
+  - `SecretSource` gains `digest`, on `Secrets::digest(project, env, path, caller)` (what `roll
+    run --watch` polls: keys, versions, fingerprints and links; it decrypts nothing and isn't
+    audited), for `needs_deploy`'s minute-long cache. A live link's resource rotating on its own
+    doesn't move it, as with `roll run --watch`.
+  - A value whose source is a secret needs `Caller::allows(Reveal, Scope::at(project, env,
+    path))` on top of apps' `reveal` (secrets confirmed: otherwise apps' reveal gets around
+    protected environments). `Keyring::new(current, previous)`, the same key material.
+  - `rolld/src/secrets/syncs.rs`'s `PublicOnly`: #19 is on main, so #20 takes `roll_net`
+    (wip/secrets-on-mcp's resolution, which still needs main's #18).
+  - Once people manage secrets on their own projects, a canvas stops proving ownership: a
+    person-owned project counts only for services that person owns (apps' `SecretSource`, and
+    already scaling on a stream).
+- **roll-search** (#22 on main; #29 follows): its conflicts with apps are additions side by side
+  (`Product`/`Kind` arrays grow). A link to a search cluster gets its own API key through
+  apps' `Resources::link`/`unlink` (#26): whichever of #29 and #26 reaches main second
+  adds `LinkKind::Search` (`ALL`, `as_str`, `parse`) and, in rolld's `RollResources`, `link` as
+  `search_control::Control::mint_link(ref, service)` into `Minted { vars, kept }` and `unlink`
+  as `revoke_link(ref, kept)`. The key is data-only (no security privileges), its variables
+  `ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY` (kept `key:<id>`); an OpenSearch cluster's is an
+  internal user with a data-only role, `OPENSEARCH_URL` (kept `osuser:<name>`; revoking removes
+  the user and its role). The glue injects whatever variables `mint_link` returns.
+- **Conflicts with apps**: previews merges cleanly. With main (and #24), six files from apps
+  merging feature/accounts rather than main's squash of #18 (`AGENTS.md`, `rolld/src/{auth,
+  cluster,main}.rs`, `tests/auth.rs`, `docs/workspace.md`): take apps' side, keeping one early
+  `workspace::open`, and one `/v1/apps/hooks` row in `tests/auth.rs`; merging main into
+  feature/roll-apps clears them. With search: additions side by side (`[Product; 10]`,
+  `[Kind; 8]`, the dashboard's kind maps). With secrets: eleven files, all trivial but
+  roll-workspace's `delete` (keep main's `delete(scope, id)` with `on_delete`);
+  `routeTree.gen.ts` is regenerated, not merged.
 - **Every product sharing the system database** reserves its own share of
-  `ROLL_SYSTEM_DB_CONNECTIONS`: apps has `DbBudget::apps`; previews and mcp still borrow the
-  workspace's.
+  `ROLL_SYSTEM_DB_CONNECTIONS`: apps has `DbBudget::apps`, previews its own share; mcp still
+  borrows the workspace's. `DbBudget`'s test (`split(Some(12))`, at most 12) can't pass once
+  apps, search, secrets and previews are combined (seven weighted pools, four fixed and two
+  reserved make 13 at least): move it to 16 and count the fixed pools as reserved.
 - `scripts/test-apps.sh` runs its own `cargo test -p` calls, not `scripts/lib/gate.sh`'s shared
   package set (adding apps there would slow roll code's and agents' gates).
-- `crates/rolld/tests/auth.rs` fails on main too (`/v1/storage/` from `nest_service`); mcp and
-  search carry the one-line fix.
 - Merge order: mcp, secrets, search, apps (then the secrets wiring), previews.
 
 ## Next
 
-Ranked; the top item not marked *waiting* is what's being worked on. A bug review and an
-integration review on 2026-11-13 (after the product review against Railway, Render, Fly,
-Vercel, Cloud Run and Heroku) set this order; their findings are fixed or in "With the other
-platform branches".
+Ranked; the top item not marked *waiting* is what's being worked on. Three reviews on
+2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
+Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
-   its stream consumer group's lag, which only roll can do natively.
-2. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
-    (`/__roll/feedback.js` before `</body>` of HTML a visitor reached through roll; the rules in
-    `roll-previews/src/runtime.rs` `add_feedback`), in the proxy.
-3. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
-   next, importing a Compose file's image services (Railway's) and an end-to-end run against a
-   live rolld with Postgres and Redis.
+1. **An IP allow list** for a public service (Render's `ipAllowList`): CIDRs per environment,
+   checked on the proxy before anything wakes (the client address the edge vouches for), 403
+   otherwise; deployment URLs and the private network unaffected.
+2. **Autoscaling on CPU** for web services (Render's target CPU, Cloud Run's): `run.cpu_target`
+   adds an instance while the awake ones average over it for a minute, as concurrency does
+   now, and scales in the same way.
+3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+   follow a stream group's lag now (a queue's project is what keeps another tenant's depth
+   unread).
 4. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
 5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
-    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
-    user's first AWS run.*
+   Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
+   user's first AWS run.*
 6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
@@ -1053,12 +1226,16 @@ platform branches".
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
 8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
-    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
-    warm window or `min_instances` 1 by default there until a wake is fast), and
-    allocation-based metering for Fargate.
+   settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
+   warm window or `min_instances` 1 by default there until a wake is fast), and
+   allocation-based metering for Fargate.
 9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+10. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
+    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
+11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-11. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
-    snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+    restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
+    Firecracker microVM hosts on the fleet.
+13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

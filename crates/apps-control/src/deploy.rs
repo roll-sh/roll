@@ -12,7 +12,7 @@ use crate::runtime::{BuildJob, InstanceSpec};
 use crate::store::{EnvRow, NewDeployment, ServiceRow, Switch};
 use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -256,10 +256,26 @@ impl Apps {
 
     /// `POST …/deploys/{dep}/rollback`: deploy an earlier deployment's image and settings
     /// again, without a build.
-    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>) -> Result<Deployment> {
+    /// `keep_variables`: run its image with the variables as they are; else (the default) its
+    /// variables come back as they were when it was live (Heroku's and Railway's rollbacks), the
+    /// change in the audit trail. A deployment that never went live has none kept.
+    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
         self.refuse_capped(service)?;
         let old = self.deployment(service, env, dep).await?;
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
+        let did = old.id.clone();
+        if !keep_variables && let Some(then) = self.db(move |s| s.snapshot(&did)).await? {
+            let (sid, e) = (service.to_string(), env.to_string());
+            let now = self.db(move |s| s.variables(&sid, &e)).await?;
+            let set: std::collections::BTreeMap<String, String> = then.iter().filter(|(k, v)| now.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+            let unset: Vec<String> = now.keys().filter(|k| !then.contains_key(*k)).cloned().collect();
+            if !set.is_empty() || !unset.is_empty() {
+                let (sid, e, s2, u2) = (service.to_string(), env.to_string(), set.clone(), unset.clone());
+                self.db(move |s| s.change_variables(&sid, &e, &s2, &u2)).await?;
+                self.settings_changed();
+                self.audit("variables.restored", service, env, actor.clone(), json!({ "from": old.id, "set": set.keys().collect::<Vec<_>>(), "unset": unset })).await;
+            }
+        }
         let d = NewDeployment {
             trigger: Trigger::Rollback,
             revision: old.revision.clone(),
@@ -277,6 +293,27 @@ impl Apps {
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
         self.kick(service, env);
         Ok(dep)
+    }
+
+    /// `POST …/rollback` with no deployment: back to the one live before what runs, walking back
+    /// through rollbacks (after B → A, the next goes to what came before A, never forward to B).
+    pub async fn rollback_previous(self: &Arc<Self>, service: &str, env: &str, actor: Option<String>, keep_variables: bool) -> Result<Deployment> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (row, all) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.deployments(&sid, &e, 100)?))).await?;
+        let Some(active) = row.active.and_then(|a| all.iter().find(|d| d.id == a).cloned()) else {
+            return Err(Error::Conflict(format!("{env} has nothing live to roll back from")));
+        };
+        // What the live image is: a rollback's (or promotion's) original, else itself.
+        let base = active.rollback_of.as_ref().and_then(|o| all.iter().find(|d| &d.id == o)).unwrap_or(&active);
+        let target = all
+            .iter()
+            .filter(|d| d.id != active.id && d.id != base.id && d.image.is_some() && d.created_at < base.created_at)
+            // Live once, then replaced (a superseded deploy never ran).
+            .filter(|d| d.status == DeployStatus::Inactive)
+            .max_by_key(|d| d.created_at)
+            .ok_or_else(|| Error::Conflict(format!("{env} has no earlier deployment to roll back to")))?;
+        let id = target.id.clone();
+        self.rollback(service, env, &id, actor, keep_variables).await
     }
 
     pub async fn cancel(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
@@ -490,6 +527,10 @@ impl Apps {
             self.pre_deploy(&tpl, &cmd, log, &cancel).await?;
         }
         self.step(&d.service, &d.id, "rollout").await;
+        // The environment's own variables as this deployment reads them: what a rollback to it
+        // restores, kept with its switch to live.
+        let (sid, e, did) = (svc.id.clone(), env.name.clone(), d.id.clone());
+        let snapshot = self.db(move |s| Ok(s.seal_snapshot(&did, &s.variables(&sid, &e)?))).await?;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             fingerprint(&r.vars_for_hash(), &svc)
@@ -549,7 +590,7 @@ impl Apps {
             // visitor gets the old one (a failed switch takes the canary out again).
             None => live.set_share(100),
         }
-        let (sid, e, from, to, vh) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone());
+        let (sid, e, from, to, vh, snap) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone(), snapshot.clone());
         let switched: anyhow::Result<()> = async {
             // Epochs only grow on a backend that outlives the process; the in-memory one starts
             // again at 1, and a fence kept in the store would then refuse every later switch.
@@ -561,7 +602,7 @@ impl Apps {
             };
             let ready = (!made.is_empty()).then_some(took.as_millis() as i64);
             let ok = self
-                .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh) }))
+                .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
             Ok(())
@@ -916,6 +957,8 @@ impl Apps {
         let this = self.clone();
         tokio::spawn(async move { this.reaper().await });
         let this = self.clone();
+        tokio::spawn(async move { this.private_callers().await });
+        let this = self.clone();
         tokio::spawn(async move { this.keeper().await });
         let this = self.clone();
         tokio::spawn(async move { this.landings().await });
@@ -959,7 +1002,9 @@ impl Apps {
     pub async fn resume_service(self: &Arc<Self>, service: &str) {
         let known: Vec<String> = self.lives().iter().filter(|l| l.service == service).flat_map(|l| l.instances().into_iter().map(|i| i.name.clone())).collect();
         for name in self.deps.runtime.list(Some(service)).await {
-            if !known.contains(&name) {
+            // A known instance's network sandbox (`<instance>-net`) and waker (`-wake`) are its own.
+            let owner = name.strip_suffix("-net").or_else(|| name.strip_suffix("-wake")).unwrap_or(&name).to_string();
+            if !known.contains(&name) && !known.contains(&owner) {
                 self.deps.runtime.remove(&name).await;
             }
         }
@@ -1102,6 +1147,25 @@ impl Apps {
         }
     }
 
+    /// Private callers at owned web services, five times a second for sleeping instances (a
+    /// frozen one's wake is milliseconds) and once a second for running ones' activity: two
+    /// small reads of `/proc` per instance.
+    async fn private_callers(self: Arc<Self>) {
+        let mut every = tokio::time::interval(Duration::from_millis(200));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut n: u64 = 0;
+        loop {
+            tokio::select! {
+                _ = every.tick() => {}
+                _ = self.stop.cancelled() => return,
+            }
+            n += 1;
+            for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+                l.answer_private(n.is_multiple_of(5)).await;
+            }
+        }
+    }
+
     /// The reaper: every second, each owned environment's tick; every minute, the meters.
     async fn reaper(self: Arc<Self>) {
         let mut every = tokio::time::interval(Duration::from_secs(1));
@@ -1130,13 +1194,20 @@ impl Apps {
             }
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
-                self.cron_tick().await;
+                self.cron_pass(code_sql::now_ms()).await;
             }
             if n.is_multiple_of(60) {
                 self.sweep_uploads().await;
                 for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
                     self.judge_alerts(&l).await;
                 }
+            }
+            if n.is_multiple_of(10) && !self.scaling.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.scale_workers().await;
+                    this.scaling.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
             }
             if n.is_multiple_of(300) && !self.watching.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let this = self.clone();
@@ -1394,11 +1465,10 @@ impl Apps {
         failed.map_or(Ok(()), Err)
     }
 
-    /// Cron: start the runs that are due in owned cron services (a run still going when the
-    /// next is due is skipped).
-    async fn cron_tick(self: &Arc<Self>) {
+    /// Cron: start the runs that are due at `now` in owned cron services (a run still going
+    /// when the next is due is skipped). The reaper's pass, every few seconds.
+    pub async fn cron_pass(self: &Arc<Self>, now: i64) {
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
-        let now = code_sql::now_ms();
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {
             let Some(schedule) = svc.run.schedule.as_deref().and_then(|s| crate::cron::Schedule::parse(s).ok()) else { continue };
             let sid = svc.id.clone();

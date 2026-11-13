@@ -283,10 +283,29 @@ impl Sources for CodeSources {
 struct RollResources {
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
+    /// rolld's own API (its address and the operator's token): a stream's routes answer there
+    /// on any node, forwarded to the stream's owner on a fleet.
+    api: (String, Option<String>, reqwest::Client),
 }
 
 #[async_trait]
 impl Resources for RollResources {
+    /// A group's lag on a stream, as the broker's `GET /v1/streams/{s}/groups/{g}` adds it up
+    /// (committed offsets against high watermarks), asked of rolld's own API: on a fleet that
+    /// forwards to the stream's owner, the only node whose numbers are right.
+    async fn backlog(&self, stream: &str, group: &str) -> anyhow::Result<u64> {
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let mut req = http.get(format!("{base}/v1/streams/{}/groups/{}", enc(stream), enc(group)));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        let v: serde_json::Value = resp.json().await?;
+        Ok(v["lag"].as_i64().unwrap_or(0).max(0) as u64)
+    }
+
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
         match kind {
             LinkKind::Postgres => {
@@ -418,7 +437,15 @@ pub async fn start(
         sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         // The project's secrets, once roll secrets is open (main.rs sets it).
         secrets: Arc::new(secrets),
-        resources: Arc::new(RollResources { postgres, redis }),
+        resources: Arc::new(RollResources {
+            postgres,
+            redis,
+            api: {
+                let ip = if args.api.ip().is_unspecified() { std::net::IpAddr::from([127, 0, 0, 1]) } else { args.api.ip() };
+                let token = std::env::var("ROLL_ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty());
+                (format!("http://{}", std::net::SocketAddr::new(ip, args.api.port())), token, reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).no_proxy().build()?)
+            },
+        }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
         objects,

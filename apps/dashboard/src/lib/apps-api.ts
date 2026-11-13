@@ -58,6 +58,8 @@ export interface Run {
   memory_mb: number;
   health_path?: string;
   health_timeout_s: number;
+  /** A replaced instance's time to finish: its requests, then SIGTERM, SIGKILL when it's up (1–300; unset 30). */
+  drain_s?: number;
   suspend_after_s: number;
   sleep_after_s: number;
   volume?: { mount: string; size_gb: number };
@@ -66,6 +68,12 @@ export interface Run {
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number };
+  /** The app speaks HTTP/2 without TLS (a gRPC server). */
+  h2c?: boolean;
+  /** false: no public URL, only the project's private network (absent: public). */
+  public?: boolean;
+  /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
+  scale?: { stream: string; group: string; per_instance?: number };
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -159,6 +167,8 @@ export interface EnvironmentPut {
   wait_for_ci?: boolean;
   /** Deploy when the image's tag moves (an image service with a tag). */
   follow_tag?: boolean;
+  /** Maintenance: its public names answer roll's page with the message; false ends it. */
+  maintenance?: boolean | { message?: string | null };
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -214,12 +224,16 @@ export interface Environment extends EnvironmentSummary {
   run?: Partial<Record<EnvRunField, number>>;
   /** It has a deploy hook. */
   hook?: boolean;
+  /** A worker that follows its work: the backlog it last read and the instances that wants. */
+  scaling?: { backlog: number | null; wanted: number } | null;
   /** An image service's tag is watched: a new digest behind it deploys. */
   follow_tag?: boolean;
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
   waiting_for_ci?: string | null;
+  /** In maintenance: what visitors read (null: roll's words). Null: serving. */
+  maintenance?: { message: string | null } | null;
   created_at: number;
 }
 
@@ -271,7 +285,8 @@ export interface Deployment {
   steps?: { step: string; at: number }[];
 }
 
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql";
+/** `service`: another web service of the project, its `<NAME>_URL` (private) and `<NAME>_PUBLIC_URL`. */
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "service";
 
 export interface Link {
   kind: LinkKind;
@@ -459,6 +474,8 @@ export const appsApi = {
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   rollback: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`),
+  /** Back to the one live before what runs (the server walks back through rollbacks). */
+  rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
   promote: (id: string, e: string, from: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from }),
