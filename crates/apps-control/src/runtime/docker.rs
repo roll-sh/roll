@@ -69,12 +69,20 @@ struct Known {
 /// app's port, and the host's addresses on its network.
 #[derive(Clone)]
 struct Sandbox {
+    /// Its container's id: what its pid's cgroup names while it's still the sandbox.
+    id: String,
     pid: u32,
     port: u16,
     host: Vec<std::net::IpAddr>,
 }
 
 impl Sandbox {
+    /// Whether its pid is still the sandbox's (after a Docker restart it may be another
+    /// process's, and its numbers another network's): its cgroup names the container.
+    fn alive(&self) -> bool {
+        std::fs::read_to_string(format!("/proc/{}/cgroup", self.pid)).is_ok_and(|c| c.contains(&self.id))
+    }
+
     /// Its `tcp` and `tcp6` tables (empty when the sandbox is gone).
     fn tables(&self) -> (String, String) {
         let read = |f: &str| std::fs::read_to_string(format!("/proc/{}/net/{f}", self.pid)).unwrap_or_default();
@@ -155,11 +163,15 @@ impl Docker {
 
     /// `instance`'s sandbox, if it has one that runs (looked up once, then remembered).
     async fn sandbox(&self, instance: &str) -> Option<Sandbox> {
-        if let Some(s) = self.known.lock().sandboxes.get(instance).cloned() {
-            return Some(s);
+        let cached = self.known.lock().sandboxes.get(instance).cloned();
+        if let Some(s) = cached {
+            if s.alive() {
+                return Some(s);
+            }
+            self.known.lock().sandboxes.remove(instance);
         }
         let i = self.engine.as_ref()?.inspect(&sandbox_name(instance)).await.ok()?;
-        let s = Sandbox { pid: i.pid?, port: i.exposed?, host: i.gateways };
+        let s = Sandbox { id: i.id, pid: i.pid?, port: i.exposed?, host: i.gateways };
         self.known.lock().sandboxes.insert(instance.to_string(), s.clone());
         Some(s)
     }
