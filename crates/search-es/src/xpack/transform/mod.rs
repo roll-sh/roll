@@ -109,6 +109,8 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
         validate_against_cluster(ctx.cluster, &cfg, ctx.now_ms).await?;
     }
     let now = ctx.now_ms;
+    let mut cfg = cfg;
+    set_user(&mut cfg, ctx);
     ctx.cluster
         .update(move |st| {
             if st.metadata.xpack.get(TRANSFORMS, &id).is_some() {
@@ -118,6 +120,14 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
         })
         .await?;
     Reply::acknowledged()
+}
+
+/// Keeps the requesting user with a transform, to run it as ([`run::trigger`]); a superuser's
+/// runs with the cluster's authority.
+fn set_user(cfg: &mut Value, ctx: &Ctx) {
+    if let (Some(u), Value::Obj(m)) = (internal::stored_user(crate::xpack::security::principal(ctx)), cfg) {
+        m.insert("_roll".into(), obj! { "user" => u });
+    }
 }
 
 pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
@@ -193,13 +203,20 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
         }
     }
+    let user = internal::stored_user(crate::xpack::security::principal(ctx));
     let now = ctx.now_ms;
     let out = ctx
         .cluster
         .update(move |st| {
-            // Only the configuration changes: keep the run state stored meanwhile.
-            if let Some(r) = st.metadata.xpack.get(TRANSFORMS, &id).ok_or_else(|| not_found(&id))?.get("_roll") {
-                m.insert("_roll".into(), r.clone());
+            // Only the configuration changes: keep the run state stored meanwhile, with the
+            // updater as the user it runs as (Elasticsearch replaces the stored headers).
+            let mut roll = st.metadata.xpack.get(TRANSFORMS, &id).ok_or_else(|| not_found(&id))?.get("_roll").and_then(Value::as_object).cloned().unwrap_or_default();
+            roll.shift_remove("user");
+            if let Some(u) = user.clone() {
+                roll.insert("user".into(), u);
+            }
+            if !roll.is_empty() {
+                m.insert("_roll".into(), Value::Obj(roll));
             }
             let v = Value::Obj(reorder(m));
             store::put(st, TRANSFORMS, &id, v.clone(), now)?;

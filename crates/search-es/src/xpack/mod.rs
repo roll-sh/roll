@@ -116,8 +116,17 @@ pub fn unknown_field(ctx: &Ctx, parser: &str, key: &str) -> crate::error::EsErro
 
 macro_rules! handlers {
     ($ctx:ident; $( $($api:ident)|+ => $e:expr, )*) => {
-        /// Runs an x-pack API ([`implemented`] said it is one).
+        /// Runs an x-pack API ([`implemented`] said it is one). Its internal calls
+        /// ([`internal::call`]) are made as the client, so they read and write only what it may,
+        /// under its document and field level security; work that needs the cluster's own
+        /// authority (system indices) uses [`internal::call_system`].
         pub async fn dispatch($ctx: &Ctx<'_>) -> EsResult<Reply> {
+            // Boxed: the handlers' futures are large, and a second copy inline would double the
+            // dispatch's stack.
+            internal::as_caller(internal::Caller::of($ctx), Box::pin(dispatch_api($ctx))).await
+        }
+
+        async fn dispatch_api($ctx: &Ctx<'_>) -> EsResult<Reply> {
             match $ctx.api {
                 $( $(Api::$api)|+ => $e, )*
                 other => Err(crate::error::EsError::not_implemented(other.name())),

@@ -62,7 +62,13 @@ pub fn implemented(api: Api) -> bool {
         || crate::xpack::security::opensearch::api::implemented(api)
 }
 
+/// Runs an opensearch-dialect API; its internal calls are made as the client (see
+/// `xpack::dispatch`).
 pub async fn dispatch(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    crate::xpack::internal::as_caller(crate::xpack::internal::Caller::of(ctx), Box::pin(dispatch_api(ctx))).await
+}
+
+async fn dispatch_api(ctx: &Ctx<'_>) -> EsResult<Reply> {
     match ctx.api {
         Api::CreatePit => pit::create(ctx),
         Api::GetAllPits => pit::list(ctx),

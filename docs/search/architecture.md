@@ -160,6 +160,15 @@ cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
 request-rate and in-flight byte budgets so one tenant can't starve the node.
 
+APIs built on other APIs (EQL, ES|QL, SQL, PPL, graph, vector tiles, `terms_enum`, transforms'
+preview, rollup search, downsampling, search applications, …) make their inner requests as
+the client (`xpack::internal::as_caller`, set for every x-pack and opensearch-dialect API at
+dispatch): those requests are authorized, and read under document and field level security,
+as the client; only work on the cluster's own system indices uses `call_system`. Background
+work runs as the user who set it up (`as_principal`): a watch as its user, a rollup job as its
+creator, a transform as the user who put or last updated it. A superuser's requests and jobs
+run with the cluster's authority, as before.
+
 Secrets a cluster stores for later use are sealed in its state (`search-es` `seal.rs`): a
 watch's HTTP passwords and `Authorization` headers, connector secrets and Fleet secrets.
 AES-256-GCM under a key derived from the deployment's `ROLL_SECRET_KEY` (rolld; search-dev

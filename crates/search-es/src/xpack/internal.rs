@@ -32,12 +32,17 @@ pub struct Caller {
 tokio::task_local! {
     static CALLER: Caller;
     static ACTING: crate::xpack::security::Principal;
+    /// Set inside [`as_principal`]: a job's internal calls are its own, never the caller's.
+    static JOB: ();
 }
 
 /// Runs `f` with its internal calls that carry no credentials made as `principal` (when there
 /// is one): a watch runs as the user who stored it, as Elasticsearch runs it with the stored
 /// security headers. Only the user and roles are kept, never credentials.
 pub async fn as_principal<F: Future>(principal: Option<crate::xpack::security::Principal>, f: F) -> F::Output {
+    // The job's own identity, never that of the request that set it off (an `_execute`, a
+    // `_start`): there is no caller inside.
+    let f = JOB.scope((), f);
     match principal {
         Some(p) => ACTING.scope(p, f).await,
         None => f.await,
@@ -131,6 +136,9 @@ pub async fn as_caller<F: Future>(caller: Option<Caller>, f: F) -> F::Output {
 
 /// The client the running request's internal calls are made as ([`as_caller`]).
 pub fn caller() -> Option<Caller> {
+    if JOB.try_with(|_| ()).is_ok() {
+        return None;
+    }
     CALLER.try_with(Caller::clone).ok()
 }
 
@@ -143,7 +151,9 @@ pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Val
     }
     // The caller is read when the call runs, so `as_caller(c, call(…))` calls as `c` too.
     Box::pin(async move {
-        let _ = CALLER.try_with(|c| req.headers.extend(c.headers.iter().cloned()));
+        if let Some(c) = caller() {
+            req.headers.extend(c.headers);
+        }
         send(cluster, req).await
     })
 }
@@ -196,6 +206,10 @@ pub fn call_ndjson<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Stri
     req.body = bytes::Bytes::from(body);
     req.headers.push(("Content-Type".into(), "application/x-ndjson".into()));
     Box::pin(async move {
+        // As the caller too ([`call`]): a bulk write is authorized per item as the client.
+        if let Some(c) = caller() {
+            req.headers.extend(c.headers);
+        }
         let resp = crate::rest::handle(cluster, req).await;
         let v = crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null);
         if resp.status < 300 { Ok(v) } else { Err(error_from_body(resp.status, &v)) }

@@ -292,9 +292,11 @@ pub fn prefix_regex(prefix: &str, case_insensitive: bool) -> String {
     out
 }
 
-/// The number of shards of the indices `index` resolves to.
+/// The number of shards of the indices `index` resolves to (for `_shards`, of indices the
+/// request was authorized for: with the cluster's authority, not the client's settings
+/// privilege, which `terms_enum` doesn't need).
 async fn shard_count(ctx: &Ctx<'_>, index: &str) -> EsResult<i64> {
-    let settings = internal::call(ctx.cluster, "GET", &format!("/{}/_settings/index.number_of_shards?flat_settings=true", enc(index)), None).await?;
+    let settings = internal::call_system(ctx.cluster, "GET", &format!("/{}/_settings/index.number_of_shards?flat_settings=true", enc(index)), None).await?;
     Ok(settings
         .as_object()
         .into_iter()
