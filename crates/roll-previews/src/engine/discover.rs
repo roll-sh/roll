@@ -335,6 +335,11 @@ impl Engine {
             }
             return Ok(());
         }
+        // Only of a repo the project still stands for (`repos`): one taken off its canvas, or no
+        // longer trusted, doesn't keep running with the project's secrets.
+        for r in rows.iter().filter(|r| r.is_baseline() && !repos.contains(&r.repo)) {
+            self.mark_deleted(&r.id, "its repo is no longer in the project")?;
+        }
         let changed = |repo: &String| rows.iter().any(|r| r.change_id.is_some() && &r.repo == repo && r.state != State::AwaitingApproval);
         let Some(repo) = repos.iter().find(|repo| changed(repo)) else { return Ok(()) };
         let Some(default) = self.source.default_branch(repo).await? else { return Ok(()) };

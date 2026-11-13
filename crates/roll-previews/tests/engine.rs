@@ -168,6 +168,13 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     e.engine.store.update(&base.id, |r| r.last_active_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.row(&base.id).unwrap().desired, Desired::Active);
+    // A repo taken off the project's canvas takes its baseline with it.
+    e.ws.remove(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Repo, "acme/web").unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row(&base.id).map_or(true, |r| r.desired == Desired::Deleted), "no baseline of a repo the project left");
+    e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Repo, "acme/web", 0.0, 0.0).unwrap();
+    e.engine.pass().await.unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline() && r.desired == Desired::Active).expect("back with the repo");
     // On roll apps (whose pages can't be screenshotted yet) it goes too, rather than cost for nothing.
     *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), memory_mb: 512 }]);
     e.engine.pass().await.unwrap();
