@@ -1106,7 +1106,7 @@ impl Apps {
     /// alert is an event once, when it starts; it can start again once it has cleared.
     pub async fn judge_alerts(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let Some(tpl) = l.template() else { return };
-        let (a, limit_mb) = (tpl.run.alerts, tpl.run.memory_mb);
+        let (a, limit_mb) = (tpl.run.alerts.clone(), tpl.run.memory_mb);
         let now = code_sql::now_ms() / 60_000;
         let (sid, e) = (l.service.clone(), l.env.clone());
         let Ok(rows) = self.db(move |s| s.minutes(&sid, &e, now - 5)).await else { return };
@@ -1130,7 +1130,18 @@ impl Apps {
                 firing.push(("alert.latency", serde_json::json!({ "value": value, "threshold": a.p95_ms })));
             }
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency"] {
+        // Its output saying something often enough (system lines are roll's, and the alert's
+        // own line names the pattern: only stdout and stderr count).
+        if let Some(pat) = a.log_match.as_deref() {
+            let key = format!("env:{}/{}", l.service, l.env);
+            let since = code_sql::now_ms() - 5 * 60_000;
+            let (lines, _) = self.logs.search(&key, pat, Some(since), a.log_count as usize + 100).await;
+            let count = lines.iter().filter(|ln| ln.stream != Stream::System).count() as u32;
+            if count >= a.log_count {
+                firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
+            }
+        }
+        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.log"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -1148,8 +1159,8 @@ impl Apps {
     }
 
     /// Private callers at owned web services, five times a second for sleeping instances (a
-    /// frozen one's wake is milliseconds) and once a second for running ones' activity: two
-    /// small reads of `/proc` per instance.
+    /// frozen one's wake is milliseconds; one cheap read of `/proc/<pid>/net/snmp` each), and
+    /// once a second for running ones near their sleep (a dear read, at most every 5 s each).
     async fn private_callers(self: Arc<Self>) {
         let mut every = tokio::time::interval(Duration::from_millis(200));
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

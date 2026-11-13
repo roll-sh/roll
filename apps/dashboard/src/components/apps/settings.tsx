@@ -46,6 +46,8 @@ interface Form {
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
+  alertLog: string;
+  alertLogCount: string;
   rolloutSteps: string;
   rolloutStep: string;
   rolloutErrors: string;
@@ -98,6 +100,8 @@ export function formOf(s: Service): Form {
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
+    alertLog: s.run.alerts?.log_match ?? "",
+    alertLogCount: str(s.run.alerts?.log_count ?? 10),
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
@@ -159,8 +163,14 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95)
-    run.alerts = { memory_pct: Number(f.alertMemory) || 0, error_pct: Number(f.alertErrors) || 0, p95_ms: Number(f.alertP95) || 0 };
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
+    run.alerts = {
+      memory_pct: Number(f.alertMemory) || 0,
+      error_pct: Number(f.alertErrors) || 0,
+      p95_ms: Number(f.alertP95) || 0,
+      ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
+      log_count: Number(f.alertLogCount) || 10,
+    };
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors)
     run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
@@ -181,7 +191,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -426,6 +436,14 @@ export function SettingsTab({
           <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
             {t("alertMemory", "90")}
           </Field>
+          <Field label="Alert: its log says" hint="text in its output (any case); empty: off">
+            {t("alertLog", "panic")}
+          </Field>
+          {form.alertLog.trim() && (
+            <Field label="Times in five minutes" hint="how often before it's an alert">
+              {t("alertLogCount", "10")}
+            </Field>
+          )}
           {web && (
             <Field label="Reachable" hint={form.public ? "its URL and custom domains answer anyone" : "no public URL: only this project's services reach it"}>
               <select value={form.public ? "public" : "private"} onChange={(e) => set("public", e.target.value === "public")} className={`${input} w-full`}>

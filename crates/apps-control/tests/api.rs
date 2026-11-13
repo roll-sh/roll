@@ -1333,7 +1333,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "cron.failed"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
@@ -2413,4 +2413,27 @@ async fn pending_changes_say_what_the_next_deploy_does() {
     let (_, p) = call(&w.api, "GET", &format!("{base}/pending"), None).await;
     assert_eq!(p, json!({"variables": {"added": ["ADDED"], "removed": ["GONE"], "changed": ["MODE"]}, "run": ["memory_mb"]}));
     assert!(!p.to_string().contains("new-secret-value"), "names only");
+}
+
+/// A log alert: its output saying the pattern often enough in five minutes is one event (roll's
+/// own lines don't count), as metric alerts are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_log_alert_is_an_event_once() {
+    use apps_control::logs::Stream;
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "alerts": {"log_match": "panic", "log_count": 2}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let live = w.apps.live(&id, "production");
+    let key = format!("env:{id}/production");
+    let alerts = || async { call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.log").cloned().collect::<Vec<_>>() };
+    w.apps.logs.sink(key.clone(), Stream::Stdout).line("thread main PANICKED at boom");
+    w.apps.logs.sink(key.clone(), Stream::System).line("roll says panic too");
+    w.apps.judge_alerts(&live).await;
+    assert!(alerts().await.is_empty(), "one of its own lines, and roll's doesn't count");
+    w.apps.logs.sink(key.clone(), Stream::Stderr).line("panic again");
+    w.apps.judge_alerts(&live).await;
+    w.apps.judge_alerts(&live).await;
+    let fired = alerts().await;
+    assert_eq!(fired.len(), 1, "once while it lasts: {fired:?}");
+    assert_eq!((fired[0]["data"]["count"].as_u64(), fired[0]["data"]["pattern"].as_str()), (Some(2), Some("panic")));
 }

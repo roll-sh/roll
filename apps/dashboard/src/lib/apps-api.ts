@@ -68,7 +68,8 @@ export interface Run {
   sleep_after_s: number;
   volume?: { mount: string; size_gb: number };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number };
+  /** log_match: text its output holds log_count times in five minutes (alert.log). */
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; log_match?: string; log_count?: number };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number };
@@ -442,7 +443,7 @@ export interface NotifyTarget {
   secret?: string;
 }
 
-export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "cron.failed" | "job.failed";
+export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed";
 
 /** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
 export interface AppEvent {

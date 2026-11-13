@@ -499,8 +499,9 @@ impl Rollout {
     pub const MIN_REQUESTS: u64 = 20;
 }
 
-/// Metric alerts (Railway's monitors): each 0 is off. Judged every minute over the last five.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// Metric and log alerts (Railway's monitors): each 0 (or none) is off. Judged every minute
+/// over the last five.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Alerts {
     /// Memory at or above this share of the limit, per instance, every minute of the five.
@@ -509,11 +510,16 @@ pub struct Alerts {
     pub error_pct: u8,
     /// p95 latency at or above this in three of the five minutes.
     pub p95_ms: u32,
+    /// Text its output (stdout and stderr, any case) holds at least `log_count` times in the
+    /// five minutes: `alert.log` (the pattern and the count, never a line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_match: Option<String>,
+    pub log_count: u32,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0 }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, log_match: None, log_count: 10 }
     }
 }
 
@@ -558,6 +564,9 @@ impl Run {
     pub fn normalized(mut self) -> Result<Run> {
         if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 {
             return Err(Error::BadRequest("alerts.memory_pct and alerts.error_pct are 0–100 (0 is off)".into()));
+        }
+        if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
+            return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
         }
         let bad = |m: &str| Err(Error::BadRequest(format!("run.{m}")));
         let r = &self.rollout;
