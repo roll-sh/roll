@@ -197,13 +197,14 @@ struct SiteRequest {
     path: String,
     query: Option<String>,
     if_none_match: Option<String>,
+    accept_encoding: Option<String>,
     request_id: Option<String>,
 }
 
 impl SiteRequest {
     fn of(req: &Request) -> SiteRequest {
         let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), request_id: h("x-request-id") }
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), request_id: h("x-request-id") }
     }
 }
 
@@ -254,17 +255,48 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         done(404, 0);
         return not_found();
     };
-    let (offset, len) = site.files[name];
-    let etag = format!("\"{}-{offset}\"", &key[..key.len().min(16)]);
+    let ctype = crate::sites::content_type(name);
+    // Compressed as Render's and Vercel's static sites are: the build's own `.br` or `.gz` of the
+    // file, else gzipped here (once: a site never changes), for text-like files the client takes
+    // it for. Each encoding has its ETag.
+    let accepts = |enc: &str| {
+        req.accept_encoding.as_deref().unwrap_or("").split(',').any(|p| {
+            let mut it = p.split(';');
+            let name = it.next().unwrap_or("").trim();
+            let q0 = it.any(|a| a.trim().strip_prefix("q=").is_some_and(|q| q.trim().parse::<f32>().is_ok_and(|q| q <= 0.0)));
+            (name.eq_ignore_ascii_case(enc) || name == "*") && !q0
+        })
+    };
+    let compress = crate::sites::compressible(ctype);
+    let pre = |ext: &str| site.files.get_key_value(&format!("{name}.{ext}")).map(|(k, v)| (k.as_str(), *v));
+    let (encoding, file, gz): (Option<&'static str>, (u64, u64), Option<bytes::Bytes>) = match () {
+        _ if compress && accepts("br") && pre("br").is_some() => (Some("br"), pre("br").expect("there").1, None),
+        _ if compress && accepts("gzip") && pre("gz").is_some() => (Some("gzip"), pre("gz").expect("there").1, None),
+        _ if compress && accepts("gzip") && (crate::sites::GZIP_MIN..=crate::sites::GZIP_MAX).contains(&site.files[name].1) => match site.gzip(name).await {
+            Ok(b) => (Some("gzip"), site.files[name], Some(b)),
+            Err(_) => (None, site.files[name], None),
+        },
+        _ => (None, site.files[name], None),
+    };
+    let (offset, len) = match &gz {
+        Some(b) => (file.0, b.len() as u64),
+        None => file,
+    };
+    let etag = format!("\"{}-{}{}\"", &key[..key.len().min(16)], site.files[name].0, match encoding {
+        Some("br") => "-br",
+        Some(_) => "-gz",
+        None => "",
+    });
     if status == 200 && req.if_none_match.as_deref().is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
         done(304, 0);
         let mut r = StatusCode::NOT_MODIFIED.into_response();
         r.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
         return r;
     }
-    let ctype = crate::sites::content_type(name);
     let body = if head {
         Body::empty()
+    } else if let Some(b) = gz {
+        Body::from(b)
     } else {
         // The file's bytes, read from the tar as they're sent.
         let tar = site.tar.clone();
@@ -299,6 +331,12 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
     let h = r.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ctype));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    if let Some(e) = encoding {
+        h.insert(header::CONTENT_ENCODING, HeaderValue::from_static(e));
+    }
+    if compress {
+        h.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if ctype.starts_with("text/html") { "no-cache" } else { "public, max-age=300" }));
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));

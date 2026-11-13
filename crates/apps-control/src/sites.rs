@@ -27,6 +27,51 @@ pub struct Site {
     pub files: HashMap<String, (u64, u64)>,
     /// Its own `_redirects` and `_headers` ([`crate::site_rules`]).
     pub rules: crate::site_rules::SiteRules,
+    /// Its files gzipped once asked for (a site never changes), and how many bytes those hold.
+    pub gzipped: parking_lot::Mutex<(usize, HashMap<String, bytes::Bytes>)>,
+}
+
+/// The biggest file gzipped as it's asked for, and how much of a site's gzipped copies are kept.
+pub const GZIP_MAX: u64 = 8 << 20;
+const GZIP_KEPT: usize = 32 << 20;
+/// Files smaller than this aren't worth it.
+pub const GZIP_MIN: u64 = 1024;
+
+/// Whether a type shrinks when compressed (text, scripts, data, SVG, WebAssembly, older
+/// fonts); images, video, woff2 and archives already are.
+pub fn compressible(ctype: &str) -> bool {
+    ctype.starts_with("text/") || ["application/json", "application/xml", "image/svg+xml", "application/wasm", "font/ttf", "font/otf", "image/x-icon"].iter().any(|t| ctype.starts_with(t))
+}
+
+impl Site {
+    /// A file's bytes, gzipped (level 6), kept for the next asker while the site's copies stay
+    /// under [`GZIP_KEPT`].
+    pub async fn gzip(self: &std::sync::Arc<Self>, name: &str) -> std::io::Result<bytes::Bytes> {
+        if let Some(b) = self.gzipped.lock().1.get(name) {
+            return Ok(b.clone());
+        }
+        let &(off, len) = self.files.get(name).ok_or_else(|| std::io::Error::other("no such file"))?;
+        let tar = self.tar.clone();
+        let gz = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Seek, Write};
+            let mut f = std::fs::File::open(&tar)?;
+            f.seek(std::io::SeekFrom::Start(off))?;
+            let mut raw = Vec::with_capacity(len as usize);
+            f.take(len).read_to_end(&mut raw)?;
+            let mut e = flate2::write::GzEncoder::new(Vec::with_capacity(raw.len() / 3), flate2::Compression::new(6));
+            e.write_all(&raw)?;
+            e.finish()
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        let gz = bytes::Bytes::from(gz);
+        let mut c = self.gzipped.lock();
+        if c.0 + gz.len() <= GZIP_KEPT {
+            c.0 += gz.len();
+            c.1.insert(name.to_string(), gz.clone());
+        }
+        Ok(gz)
+    }
 }
 
 /// A site's rules files out of its tar (each at most [`crate::site_rules::MAX_FILE`]; a bigger
@@ -174,7 +219,7 @@ impl Apps {
         .await
         .map_err(|e| Error::Internal(e.to_string()))?
         .map_err(|e| Error::Internal(e.to_string()))?;
-        let site = Arc::new(Site { tar: path, files, rules });
+        let site = Arc::new(Site { tar: path, files, rules, gzipped: Default::default() });
         self.sites.lock().insert(key.to_string(), site.clone());
         Ok(site)
     }
@@ -267,7 +312,7 @@ mod tests {
         assert_eq!(names, ["assets/app.js", "index.html"]);
         let (off, len) = files["assets/app.js"];
         assert_eq!(&bytes[off as usize..(off + len) as usize], b"go()");
-        let site = Site { tar: PathBuf::new(), files, rules: Default::default() };
+        let site = Site { tar: PathBuf::new(), files, rules: Default::default(), gzipped: Default::default() };
         assert_eq!(resolve(&site, "/", false), Some(("index.html", 200)));
         assert_eq!(resolve(&site, "/settings/profile", true), Some(("index.html", 200)), "a page path in a single-page app");
         assert_eq!(resolve(&site, "/settings/profile", false), None);

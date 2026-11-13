@@ -1117,6 +1117,30 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!(r.headers()["cache-control"], "public, max-age=31536000, immutable");
     assert_eq!(site("/app/settings").await.unwrap().status(), StatusCode::OK, "a rewrite to its index");
     assert_eq!(site("/_redirects").await.unwrap().status(), StatusCode::NOT_FOUND);
+    // Compressed for a client that takes it: gzipped here, or the build's own `.br`.
+    let get = |path: &str, ae: Option<&str>| {
+        let mut b = Request::builder().uri(path).header("host", h.as_str());
+        if let Some(ae) = ae {
+            b = b.header("accept-encoding", ae);
+        }
+        let (public, req) = (w.public.clone(), b.body(Body::empty()).unwrap());
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let hd = r.headers().clone();
+            (hd, r.into_body().collect().await.unwrap().to_bytes())
+        }
+    };
+    let (hd, raw) = get("/assets/big.js", None).await;
+    assert!(hd.get("content-encoding").is_none() && hd["vary"] == "Accept-Encoding" && raw.len() == 21 * 200, "{hd:?}");
+    let (hz, gz) = get("/assets/big.js", Some("br;q=0, gzip, deflate")).await;
+    assert_eq!(hz["content-encoding"], "gzip");
+    assert!(gz.len() < raw.len() / 5 && hz["etag"] != hd["etag"], "{} bytes", gz.len());
+    let mut plain = Vec::new();
+    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&gz[..]), &mut plain).unwrap();
+    assert_eq!(plain, raw);
+    let (hb, br) = get("/assets/pre.css", Some("gzip, br")).await;
+    assert_eq!((hb["content-encoding"].to_str().unwrap(), &br[..]), ("br", &b"BROTLI-BYTES"[..]));
+    assert!(get("/index.html", Some("gzip")).await.0.get("content-encoding").is_none(), "too small to bother");
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;

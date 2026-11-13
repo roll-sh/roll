@@ -358,7 +358,11 @@ impl Runtime for Fake {
     /// A static site: an index, a script, and a symlink that must never be served.
     async fn export_files(&self, _image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
         let mut b = tar::Builder::new(Vec::new());
-        let files: [(&str, &[u8]); 5] = [
+        let big = "console.log('roll');\n".repeat(200);
+        let files: [(&str, &[u8]); 8] = [
+            ("./assets/big.js", big.as_bytes()),
+            ("./assets/pre.css", b"body{color:#000}"),
+            ("./assets/pre.css.br", b"BROTLI-BYTES"),
             ("./index.html", b"<!doctype html><title>fake site</title>"),
             ("./assets/app.js", b"start()"),
             ("./404.html", b"<h1>not here</h1>"),
