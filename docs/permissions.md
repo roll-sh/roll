@@ -141,8 +141,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   word (`code_git::Vouched`) and records the push as `token:<name>`. An `ask` push is bound to its
   ref updates; push again once it's approved (the same push finds its approval), or wait on it with
   `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
-- An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
-  with its variables: `admin` in every environment, as an agent's shell is.
+- An apps shell (its WebSocket, and all of a session: opening, keys, screen, resizing, closing) runs
+  any command where the service runs, with its variables: `admin` in every environment, as an
+  agent's shell is. Waking a sleeping environment starts compute someone pays for: `write`.
 - A route whose product filters its answer per environment and path itself, asking the caller's
   `Grant` for each finding, can be matched by rules limited to some environments or paths too
   (`Row::filters_itself`): a token for staging would get staging's findings, never production's,

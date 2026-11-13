@@ -1071,13 +1071,18 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     // A shell runs any command where the service runs, with its variables (`env` prints them all):
-    // admin in every environment, as an agent's shell is. Its WebSocket, sessions, keys and screen.
+    // admin in every environment, as an agent's shell is: its WebSocket, and all of a session
+    // (opening, keys, screen, resizing, closing: what may close an admin's shell is admin too).
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
-    // Waking a sleeping environment and checking a domain change nothing a person sees.
-    row("POST", "/v1/apps/services/{id}/environments/{env}/wake", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("*", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Waking starts compute someone pays for (and a private environment's, only its holders
+    // could start): write, as waking a queues vhost is.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/wake", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Checking a domain changes nothing a person sees.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
@@ -1326,7 +1331,12 @@ mod tests {
         assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
-        // An apps shell runs any command with the environment's variables: admin, outside production too.
+        // An apps shell runs any command with the environment's variables: admin, outside production
+        // too, all of a session (closing one included). Waking an environment starts compute: write.
+        for (m, p) in [("POST", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}/resize"), ("DELETE", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}")] {
+            assert_eq!(action(m, p, "x"), Some(Action::Admin), "{m} {p}");
+        }
+        assert_eq!(action("POST", "/v1/apps/services/{s}/environments/{e}/wake", "x"), Some(Action::Write));
         assert_eq!(action("POST", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}/keys", "/v1/apps/services/s/environments/staging/shell/sessions/x/keys"), Some(Action::Admin));
         // Secrets' identities mint tokens; renewing a lease extends a credential.
         assert_eq!(action("GET", "/v1/secrets/projects/{p}/identities", "x"), Some(Action::Admin));
