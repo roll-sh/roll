@@ -972,7 +972,8 @@ A service whose port isn't HTTP (a game server, MQTT, Redis of its own) sets `ru
 TCP proxy, Fly's raw TCP; Settings' "Protocol", `roll apps set --tcp true`). Each of its
 environments gets a port from the node's range (`ROLL_APPS_TCP_PORTS=20000-20999`, kept with the
 environment, `Environment.tcp` the `host:port` clients use at `ROLL_PUBLIC_HOST`). A connection
-there is let in by the environment's allow list (its peer) and refused in maintenance, wakes an
+there is let in by the environment's allow list (its peer) and its rate limit (connections per
+client), refused in maintenance, wakes an
 instance and holds it (a lease, as a request does, so it doesn't sleep while connected), and is
 spliced to the app's port, half-closes included. Ports go round the range (one just freed
 isn't handed straight to another environment, which old clients may still dial), closing a
@@ -1366,41 +1367,38 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **TCP connections under the rate limit**: an environment's `rate_limit` counting a TCP
-   service's new connections per client (its peer), as it counts HTTP requests, so a TCP port
-   can't be hammered from one address.
-2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+1. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-3. **Region**: the region shown on the overview and each environment, defaulting to the project's
+2. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+3. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+4. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-9. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+8. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-10. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+9. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+11. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-13. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

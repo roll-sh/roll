@@ -2349,6 +2349,19 @@ async fn a_tcp_service_answers_on_its_own_port() {
     conn.read_to_string(&mut got).await.unwrap();
     assert!(got.starts_with("HTTP/1.1 200") && got.contains(r#""path":"/raw""#), "spliced to the app: {got}");
     assert_eq!(visit(&w, &host(&svc["environments"][0]["url"]), "/").await.0, StatusCode::NOT_FOUND, "not over HTTP");
+    // Its rate limit counts connections per client: past the burst, closed at once.
+    call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"rate_limit": {"per_minute": 1, "burst": 1}}))).await;
+    let mut once = tokio::net::TcpStream::connect(("127.0.0.1", free)).await.unwrap();
+    once.write_all(b"GET /a HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut a = String::new();
+    once.read_to_string(&mut a).await.unwrap();
+    assert!(a.starts_with("HTTP/1.1 200"), "the first: {a}");
+    let mut twice = tokio::net::TcpStream::connect(("127.0.0.1", free)).await.unwrap();
+    let _ = twice.write_all(b"GET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let mut b = String::new();
+    let _ = twice.read_to_string(&mut b).await;
+    assert!(b.is_empty(), "the second is closed: {b}");
+    call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"rate_limit": null}))).await;
     // Private, it has no public port (TCP carries no token): the private network reaches it.
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"public": false}}))).await;
     assert!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["tcp"].is_null());

@@ -1,7 +1,7 @@
 //! TCP services (`run.tcp`, Railway's TCP proxy): a service whose port isn't HTTP (a game
 //! server, MQTT, a database of its own) answers each environment on a port of its own from the
 //! node's range (`ROLL_APPS_TCP_PORTS`, one node). A connection is let in by the environment's
-//! allow list (its peer), refused in maintenance, wakes an instance and holds it (a lease, as a
+//! allow list (its peer) and its rate limit (connections per client), refused in maintenance, wakes an instance and holds it (a lease, as a
 //! request does) while it's open, and is spliced to the app's port; half-closes pass. Every
 //! port is the owner's; a node binds only the services it owns.
 
@@ -48,6 +48,12 @@ impl Apps {
         let live = self.live(&service, &env);
         let Ok(gate) = self.gate(&live).await else { return };
         if !gate.admits(Some(&peer.ip().to_string())) || gate.maintenance.is_some() {
+            return;
+        }
+        // Its rate limit counts connections per client, as it counts requests over HTTP.
+        if let Some(limit) = &gate.rate
+            && live.take_token(crate::live::client_ip(Some(&peer.ip().to_string())), limit).is_err()
+        {
             return;
         }
         let Ok(live) = self.load_live(&service, &env).await else { return };
