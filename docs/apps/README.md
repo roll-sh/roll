@@ -731,6 +731,26 @@ find a leaked URL. Making or removing one is admin in roll MCP's catalogue: it's
 credential. rolld's gate lets `/v1/apps/hooks` through to the hook's own check (its `RULES`);
 access lines log the route pattern, never the token; it runs on the service's owner.
 
+## Static sites
+
+A build whose plan serves files (busybox httpd on `/site`: a plain `index.html`, Vite, CRA,
+Astro without an adapter…) runs no instance (Render's and Vercel's static sites). After the
+build, the runtime exports the image's `/site` as a tar (`Runtime::export_files`: a `docker run
+--network none --entrypoint tar`, its exit checked) once per image, kept on the node's disk
+under `sites/` and in object storage for the node that takes the service over, keyed by the
+image's digest (or a built image's tag hash), so a rollback or a promotion reuses it. The owner's
+proxy answers from the tar directly: an index of its regular files (name → offset and length)
+read once per node, byte ranges read per request. Nothing is extracted, so a tenant's archive
+can't place a symlink or a `..` path anywhere: anything that isn't a regular file with plain
+path components is left out of the index. GET and HEAD; a file, a directory's `index.html`, a
+single-page app's index for a page path, or the site's `404.html` with a 404; ETags (304s),
+`no-cache` on HTML and five minutes on the rest, `nosniff`. Requests and bytes are metered and
+access-logged as any (instance `site`), and nothing else is: no CPU or memory, no cold start.
+A gradual rollout splits by bucket as usual, and a deployment's own URL serves its files too.
+A start command set in the service, a site over 512 MiB or 100,000 files, or a runtime that
+can't export (the fleet's CodeBuild builder, until its first run) means a container serves it,
+as before. A service's sites are deleted with its images.
+
 ## HTTP/2 and gRPC
 
 `run.h2c` says the app speaks HTTP/2 without TLS, as gRPC servers do (Cloud Run's
@@ -850,6 +870,9 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   static site in the same conditions; now the two are the same within noise (360 and 364 ms,
   `generated_node_python_and_go_images_build_and_answer` and the static test, one run). That
   test also builds the generated Node, Python and Go Dockerfiles for real.
+- A static site from its files (`a_static_sites_files_answer_without_a_container`, real Docker):
+  the first request 2 ms (it reads the site's index), warm 0 ms, against a 258 ms median cold
+  start for the same site in a container; no container exists for it at all.
 - Idle cost: a service asleep (stopped) meters nothing: no CPU-seconds, no GB-seconds, $0.00.
   The only idle cost is the image on disk (roll's, not the user's). Suspended instances keep their
   memory on the host (roll's cost, not billed) for `sleep_after` (10 minutes by default).
@@ -979,39 +1002,35 @@ Ranked; the top item not marked *waiting* is what's being worked on. A product r
 2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
 earlier security, product and integration reviews).
 
-1. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
-   bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
-   (Render's and Vercel's static sites). Exporting the files needs the built image: easy on
-   Docker, through CodeBuild on the fleet, so it's tested with the first AWS run.
-2. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
+1. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
    next, importing a Compose file's image services (Railway's) and an end-to-end run against a
    live rolld with Postgres and Redis.
-3. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
+2. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-4. **Region**: the region shown on the overview and each environment, defaulting to the project's
+3. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-11. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+10. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-13. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
+11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+12. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
     (`/__roll/feedback.js` before `</body>` of HTML a visitor reached through roll; the rules in
     `roll-previews/src/runtime.rs` `add_feedback`), in the proxy.

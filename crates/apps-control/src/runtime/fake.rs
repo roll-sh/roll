@@ -289,6 +289,25 @@ impl Runtime for Fake {
         }
     }
 
+    /// A static site: an index, a script, and a symlink that must never be served.
+    async fn export_files(&self, _image: &str, _dir: &str) -> anyhow::Result<super::VolumeStream> {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, body) in [("./index.html", &b"<!doctype html><title>fake site</title>"[..]), ("./assets/app.js", b"start()"), ("./404.html", b"<h1>not here</h1>")] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            b.append_data(&mut h, name, body)?;
+        }
+        let mut l = tar::Header::new_gnu();
+        l.set_entry_type(tar::EntryType::Symlink);
+        l.set_size(0);
+        l.set_cksum();
+        b.append_link(&mut l, "./passwd", "/etc/passwd")?;
+        Ok(Box::new(std::io::Cursor::new(b.into_inner()?)))
+    }
+
     async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {
         let data = self.volumes.lock().get(name).cloned().unwrap_or_default();
         Ok(Box::new(std::io::Cursor::new(data)))

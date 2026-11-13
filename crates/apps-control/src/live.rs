@@ -30,6 +30,9 @@ pub struct Template {
     /// A single-page app (its plan says so): the proxy answers a page path the app has no file
     /// for with `/index.html`.
     pub spa: bool,
+    /// A static site whose files were exported (`sites.rs`): the proxy serves them by this key
+    /// (the image's digest) and no instance ever runs.
+    pub site: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,7 +307,7 @@ impl EnvLive {
     /// below the canary's share goes to the canary, so a visitor stays on one deployment through
     /// a step; without one, the canary's share of requests by turns (37 is coprime with 100, so
     /// each hundred requests sends exactly that many, spread out).
-    fn route(&self, bucket: Option<u8>) -> Option<Arc<Template>> {
+    pub fn route(&self, bucket: Option<u8>) -> Option<Arc<Template>> {
         if let Some((c, share)) = self.canary.lock().clone() {
             let b = bucket.map_or_else(|| (self.routed.fetch_add(1, Ordering::Relaxed) % 100 * 37) % 100, u64::from);
             if b < share as u64 {
@@ -365,8 +368,11 @@ impl EnvLive {
     pub fn state(&self) -> InstanceState {
         let insts = self.insts.lock();
         let states: Vec<InstanceState> = insts.iter().map(|i| i.state()).collect();
-        if self.template.lock().is_none() {
-            return InstanceState::None;
+        match self.template.lock().as_ref() {
+            None => return InstanceState::None,
+            // Its files answer: always up, nothing to wake.
+            Some(t) if t.site.is_some() => return InstanceState::Running,
+            _ => {}
         }
         for s in [InstanceState::Running, InstanceState::Waking, InstanceState::Suspended, InstanceState::Crashed] {
             if states.contains(&s) {
@@ -527,7 +533,7 @@ impl EnvLive {
         self.acquire_tpl(tpl).await
     }
 
-    fn may_wake(&self) -> Result<(), WakeError> {
+    pub fn may_wake(&self) -> Result<(), WakeError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(WakeError::NoDeployment);
         }
@@ -540,7 +546,7 @@ impl EnvLive {
         Ok(())
     }
 
-    async fn acquire_tpl(self: &Arc<Self>, tpl: Arc<Template>) -> Result<Lease, WakeError> {
+    pub async fn acquire_tpl(self: &Arc<Self>, tpl: Arc<Template>) -> Result<Lease, WakeError> {
         let h2c = tpl.run.h2c;
         self.acquire_inner(tpl).await.map(|mut l| {
             l.h2c = h2c;
@@ -764,8 +770,9 @@ impl EnvLive {
             RunType::Web => was_awake.max(run.min_instances).max(1),
         }
         .min(run.max_instances);
-        if run.kind == RunType::Cron {
-            // Nothing runs between runs; the next run uses the new template.
+        if run.kind == RunType::Cron || tpl.site.is_some() {
+            // Nothing runs between runs (the next run uses the new template), or ever (a static
+            // site's files answer).
             return Ok(Prepared { made: Vec::new(), took: Duration::ZERO, hold: None });
         }
         let mut hold = None;
@@ -857,7 +864,7 @@ impl EnvLive {
                 *i.phase.lock() = Phase::Created;
             }
         }
-        if made.is_empty() && tpl.run.kind == RunType::Web {
+        if made.is_empty() && tpl.run.kind == RunType::Web && tpl.site.is_none() {
             // Warm-create one so the first request is only a start.
             if let Ok(i) = self.make(&tpl).await {
                 self.insts.lock().push(i);
@@ -941,6 +948,7 @@ impl EnvLive {
         }
         *self.template.lock() = Some(tpl.clone());
         if tpl.run.kind == RunType::Web
+            && tpl.site.is_none()
             && self.insts.lock().is_empty()
             && let Ok(i) = self.make(&tpl).await
         {
@@ -1087,6 +1095,8 @@ impl EnvLive {
         let Some(tpl) = self.template() else { return };
         match tpl.run.kind {
             RunType::Cron => {}
+            // A static site's files answer: no floor, nothing to reap but what was left over.
+            RunType::Web if tpl.site.is_some() => {}
             RunType::Worker => self.keep_workers(&tpl).await,
             RunType::Web => self.reap_web(&tpl).await,
         }
@@ -1365,6 +1375,7 @@ mod tests {
             },
             run,
             spa: false,
+            site: None,
         })
     }
 

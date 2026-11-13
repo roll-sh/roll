@@ -643,9 +643,29 @@ async fn a_single_page_apps_deep_links_answer_its_index() {
     let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
     assert_eq!((d["status"].as_str(), d["plan"]["spa"].as_bool()), (Some("active"), Some(true)), "{d}");
     let host = host(&svc["environments"][0]["url"]);
-    let (st, body) = visit(&w, &host, "/dashboard/settings").await;
-    assert_eq!((st, body["path"].as_str()), (StatusCode::OK, Some("/index.html")), "a deep link is the app's index");
-    assert_eq!(visit(&w, &host, "/dashboard/logo.png").await.0, StatusCode::NOT_FOUND, "a missing file stays missing");
+    // Its files answer, exported from the image: no instance, no cold start.
+    let get = |path: &'static str, etag: Option<String>| {
+        let (public, host) = (w.public.clone(), host.clone());
+        async move {
+            let mut req = Request::builder().uri(path).header("host", &host);
+            if let Some(e) = etag {
+                req = req.header("if-none-match", e);
+            }
+            let resp = public.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            let (st, h) = (resp.status(), resp.headers().clone());
+            (st, h, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (st, h, body) = get("/dashboard/settings", None).await;
+    assert_eq!((st, body.as_str()), (StatusCode::OK, "<!doctype html><title>fake site</title>"), "a deep link is the app's index");
+    assert_eq!(get("/", Some(h["etag"].to_str().unwrap().to_string())).await.0, StatusCode::NOT_MODIFIED);
+    let (st, h, body) = get("/assets/app.js", None).await;
+    assert_eq!((st, h["content-type"].to_str().unwrap(), body.as_str()), (StatusCode::OK, "text/javascript; charset=utf-8", "start()"));
+    let (st, _, body) = get("/dashboard/logo.png", None).await;
+    assert_eq!((st, body.as_str()), (StatusCode::NOT_FOUND, "<h1>not here</h1>"), "a missing file stays missing (the site's 404.html)");
+    assert!(!get("/passwd", None).await.2.contains("root:"), "a symlink in the image is never followed");
+    assert!(w.fake.instances(&id).is_empty(), "nothing ran: {:?}", w.fake.instances(&id));
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["state"], "running");
 }
 
 /// A deploy reports on its commit; an environment that waits for CI deploys a push only once its
@@ -998,7 +1018,8 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!(r["image"], d["image"]);
     assert_eq!(Fake::count(&w.fake.counts.builds), builds, "no build");
     let (_, env) = call(&w.api, "GET", &base, None).await;
-    assert_eq!(visit(&w, &host(&env["url"]), "/").await.1["vars"]["GREETING"], "hej");
+    // A static upload: its files answer (no instance reads variables at run time).
+    assert_eq!(visit(&w, &host(&env["url"]), "/").await.0, StatusCode::OK);
 
     // A cron service: runs to its exit, recorded.
     let (_, cron) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox"}, "run": {"type": "cron", "schedule": "0 3 * * *"} }))).await;

@@ -471,6 +471,18 @@ impl Apps {
         if let Ok(stored) = self.db(move |s| s.deployment(&did)).await {
             dep.plan = stored.plan;
         }
+        // A static site: its files out of the image, so they're served without an instance.
+        if dep.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START)
+            && dep.run.kind == RunType::Web
+            && dep.run.volume.is_none()
+            && let Some(img) = dep.image.clone()
+        {
+            match self.export_site(&img).await {
+                Ok(Some(n)) => log.stream(Stream::System).line(format!("static site: {} KiB of files, served without an instance", n.div_ceil(1024))),
+                Ok(None) => {}
+                Err(e) => log.stream(Stream::System).line(format!("static site: its files couldn't be exported ({e:#}); a container serves it")),
+            }
+        }
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
         if let Some(cmd) = tpl.run.pre_deploy.clone() {
             self.step(&d.service, &d.id, "pre_deploy").await;
@@ -874,7 +886,15 @@ impl Apps {
             registry,
         };
         let spa = dep.plan.as_ref().is_some_and(|p| p["spa"] == true);
-        Ok(Template { deployment: dep.id.clone(), spec, run, spa })
+        // A static plan whose files were exported answers from them, with no instance.
+        let site = match (dep.plan.as_ref().is_some_and(|p| p["start"] == apps_build::STATIC_START), crate::sites::key(&spec.image)) {
+            (true, Some(k)) if run.kind == RunType::Web && run.volume.is_none() => {
+                let kk = k.clone();
+                self.db(move |s| s.site(&kk)).await?.map(|_| k)
+            }
+            _ => None,
+        };
+        Ok(Template { deployment: dep.id.clone(), spec, run, spa, site })
     }
 
     // ── the owner's background work ──

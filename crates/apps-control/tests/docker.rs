@@ -97,7 +97,7 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
         assert!(lines.iter().any(|l| l.text.contains("busybox:1.37") || l.text.contains("Image is up to date") || l.text.contains("Downloaded")), "{lines:?}");
     }
 
-    let (st, svc) = call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": "site", "source": {"kind": "upload"}, "build": {"build": "test \"$GREETING\" = hej"}, "run": {"memory_mb": 256, "cpu": 0.25, "pre_deploy": "test \"$GREETING\" = hej"} })), "application/json", None).await;
+    let (st, svc) = call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": "site", "source": {"kind": "upload"}, "build": {"build": "test \"$GREETING\" = hej", "start": "httpd -f -p $PORT -h /site"}, "run": {"memory_mb": 256, "cpu": 0.25, "pre_deploy": "test \"$GREETING\" = hej"} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     // The build step sees the environment's variables (a BuildKit secret): it fails without.
@@ -203,6 +203,28 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &net]).await;
     assert!(apps_control::runtime::docker::docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap().is_empty(), "nothing left");
     apps.shutdown().await;
+}
+
+/// A static site is served from its files, exported from its image once: no container runs, so
+/// there's no cold start; the first request reads the site's index, the rest are warm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_sites_files_answer_without_a_container() {
+    let Some(w) = docker_world().await else { return };
+    let (id, host) = deploy_tree(&w, "files", &[("index.html", "<!doctype html><h1>from files</h1>")]).await;
+    let (mut first, mut warm) = (Vec::new(), Vec::new());
+    for i in 0..6 {
+        let began = Instant::now();
+        let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..], b"<!doctype html><h1>from files</h1>");
+        if i == 0 { first.push(began.elapsed()) } else { warm.push(began.elapsed()) }
+    }
+    let running = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
+    assert!(running.is_empty(), "no container serves it: {running}");
+    eprintln!("MEASURED static site from its files: first request {} ms (reads its index), warm median {} ms", first[0].as_millis(), median(warm).as_millis());
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
 }
 
 /// A service from an upload of `files`, built from its generated Dockerfile and live: its id and host.

@@ -206,12 +206,12 @@ impl Apps {
                     n = out.read(&mut buf) => match n {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            {
-                                let mut sb = sess.scrollback.lock();
-                                sb.extend(&buf[..n]);
-                                let over = sb.len().saturating_sub(SCROLLBACK);
-                                sb.drain(..over);
-                            }
+                            // Kept and sent under one lock: a viewer that joins gets each chunk
+                            // once, in its scrollback or from the stream, never both.
+                            let mut sb = sess.scrollback.lock();
+                            sb.extend(&buf[..n]);
+                            let over = sb.len().saturating_sub(SCROLLBACK);
+                            sb.drain(..over);
                             let _ = sess.screen.send(bytes::Bytes::copy_from_slice(&buf[..n]));
                         }
                     },
@@ -245,8 +245,10 @@ impl Apps {
     pub fn session_screen(&self, service: &str, env: &str, id: &str) -> Result<(Vec<u8>, tokio::sync::broadcast::Receiver<bytes::Bytes>, tokio_util::sync::CancellationToken)> {
         let s = self.session(service, env, id)?;
         s.touch();
+        let sb = s.scrollback.lock();
         let rx = s.screen.subscribe();
-        let first = s.scrollback.lock().iter().copied().collect();
+        let first = sb.iter().copied().collect();
+        drop(sb);
         Ok((first, rx, s.closed.clone()))
     }
 

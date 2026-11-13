@@ -161,6 +161,103 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     None
 }
 
+/// A static site's request, answered from its files (`sites.rs`): no instance wakes. GET and
+/// HEAD; a file, a directory's `index.html`, a single-page app's index for a page path, or its
+/// `404.html`. Metered and logged as any request (instance `site`).
+/// What a static site's answer needs of the request (owned: the request isn't held across a wait).
+struct SiteRequest {
+    method: axum::http::Method,
+    path: String,
+    if_none_match: Option<String>,
+    request_id: Option<String>,
+}
+
+impl SiteRequest {
+    fn of(req: &Request) -> SiteRequest {
+        let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), if_none_match: h("if-none-match"), request_id: h("x-request-id") }
+    }
+}
+
+async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &crate::live::Template, req: SiteRequest, service: &str, env: &str, began: Instant) -> Response {
+    let key = tpl.site.clone().unwrap_or_default();
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), method: req.method.to_string(), path: req.path.chars().take(512).collect() };
+    let request_id = req.request_id.as_deref().map(|v| v.chars().take(64).collect()).unwrap_or_else(|| crate::model::random(16));
+    let done = |status: u16, bytes: u64| {
+        live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
+        access.write(status, began, bytes, "site", &request_id, false, 0);
+    };
+    let head = req.method == axum::http::Method::HEAD;
+    if req.method != axum::http::Method::GET && !head {
+        done(405, 0);
+        let mut r = StatusCode::METHOD_NOT_ALLOWED.into_response();
+        r.headers_mut().insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+        return r;
+    }
+    let site = match apps.site(&key).await {
+        Ok(s) => s,
+        Err(e) => {
+            live.log.stream(crate::logs::Stream::System).line(format!("the static site's files: {e}"));
+            done(503, 0);
+            return retry_soon(page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The site's files are on their way. Try again in a few seconds."));
+        }
+    };
+    let path = percent_encoding::percent_decode_str(&req.path).decode_utf8_lossy().into_owned();
+    let Some((name, status)) = crate::sites::resolve(&site, &path, tpl.spa) else {
+        done(404, 0);
+        return page(StatusCode::NOT_FOUND, "Not found", "There's no page at this address.");
+    };
+    let (offset, len) = site.files[name];
+    let etag = format!("\"{}-{offset}\"", &key[..key.len().min(16)]);
+    if status == 200 && req.if_none_match.as_deref().is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
+        done(304, 0);
+        let mut r = StatusCode::NOT_MODIFIED.into_response();
+        r.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
+        return r;
+    }
+    let ctype = crate::sites::content_type(name);
+    let body = if head {
+        Body::empty()
+    } else {
+        // The file's bytes, read from the tar as they're sent.
+        let tar = site.tar.clone();
+        let opened = async move {
+            let mut f = tokio::fs::File::open(&tar).await?;
+            tokio::io::AsyncSeekExt::seek(&mut f, std::io::SeekFrom::Start(offset)).await?;
+            Ok::<_, std::io::Error>(tokio::io::AsyncReadExt::take(f, len))
+        };
+        let stream = futures::stream::once(opened)
+            .map(|r| match r {
+                Ok(f) => futures::stream::unfold(Some(f), |f| async move {
+                    let mut f = f?;
+                    let mut buf = vec![0u8; 64 << 10];
+                    match tokio::io::AsyncReadExt::read(&mut f, &mut buf).await {
+                        Ok(0) => None,
+                        Ok(n) => {
+                            buf.truncate(n);
+                            Some((Ok::<_, std::io::Error>(bytes::Bytes::from(buf)), Some(f)))
+                        }
+                        Err(e) => Some((Err(e), None)),
+                    }
+                })
+                .boxed(),
+                Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
+            })
+            .flatten();
+        Body::from_stream(stream)
+    };
+    done(status, if head { 0 } else { len });
+    let mut r = Response::new(body);
+    *r.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ctype));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("ascii"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if ctype.starts_with("text/html") { "no-cache" } else { "public, max-age=300" }));
+    h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
+    r
+}
+
 /// A visitor's gradual-rollout bucket (docs/apps/README.md, "Gradual rollouts").
 const BUCKET: &str = "roll_bucket";
 
@@ -266,10 +363,26 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     let acquired = match deployment {
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
+            Ok(t) if t.site.is_some() => return serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await,
             Ok(t) => live.acquire_deployment(t).await,
             Err(e) => return page(StatusCode::NOT_FOUND, "No such deployment", &e.to_string()),
         },
-        None => live.acquire_for(bucket).await,
+        None => match live.may_wake().map(|_| live.route(bucket)) {
+            // A static site's files answer (a gradual rollout's bucket chose which deployment's).
+            Ok(Some(t)) if t.site.is_some() => {
+                let mut r = serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await;
+                if let (true, Some(b)) = (fresh, bucket) {
+                    let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+                    if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
+                        r.headers_mut().append(header::SET_COOKIE, c);
+                    }
+                }
+                return r;
+            }
+            Ok(Some(t)) => live.acquire_tpl(t).await,
+            Ok(None) => Err(WakeError::NoDeployment),
+            Err(e) => Err(e),
+        },
     };
     let lease = match acquired {
         Ok(l) => l,

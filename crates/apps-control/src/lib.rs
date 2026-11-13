@@ -16,6 +16,7 @@ pub mod api;
 pub mod backups;
 pub mod hooks;
 pub mod tags;
+pub mod sites;
 pub mod registry;
 pub mod config;
 pub mod cron;
@@ -182,6 +183,8 @@ pub struct Apps {
     backing_up: std::sync::atomic::AtomicBool,
     /// Watched tags are being checked (on their own task).
     watching: std::sync::atomic::AtomicBool,
+    /// Static sites' file indexes, by image digest, as this node read them.
+    sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
@@ -256,6 +259,7 @@ impl Apps {
             changes: tokio::sync::broadcast::channel(256).0,
             backing_up: std::sync::atomic::AtomicBool::new(false),
             watching: std::sync::atomic::AtomicBool::new(false),
+            sites: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
@@ -578,6 +582,9 @@ impl Apps {
         for d in deps {
             if let Some(img) = &d.image {
                 self.deps.builder.remove_image(img).await;
+                if let Some(k) = sites::key(img) {
+                    self.drop_site(&k).await;
+                }
             }
             let id = d.id.clone();
             if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {

@@ -400,6 +400,21 @@ impl Runtime for Docker {
         Ok(Box::new(ChildReader { child: Some(child), out, exited: None }))
     }
 
+    async fn export_files(&self, image: &str, dir: &str) -> anyhow::Result<super::VolumeStream> {
+        anyhow::ensure!(dir.starts_with('/') && !dir.contains(".."), "{dir} isn't an absolute path");
+        // The image's own tar (a static plan's is busybox), no network, its entrypoint replaced.
+        let mut child = Command::new("docker")
+            .args(["run", "--rm", "--network", "none", "--label", &format!("{LABEL}=export"), "--entrypoint", "tar", image, "c", "-C", dir, "."])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running docker to export files")?;
+        let out = child.stdout.take().context("no stdout")?;
+        Ok(Box::new(ChildReader { child: Some(child), out, exited: None }))
+    }
+
     async fn write_volume(&self, name: &str, mut tar: super::VolumeStream) -> anyhow::Result<()> {
         anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps volume");
         let mount = format!("{name}:/data");

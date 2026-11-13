@@ -150,6 +150,11 @@ pub trait Runtime: Send + Sync {
     async fn ensure_network(&self, name: &str, service: &str) -> anyhow::Result<()>;
     /// Remove a volume (an environment's teardown).
     async fn remove_volume(&self, name: &str);
+    /// The files under `dir` in `image`, as a tar stream (a static site's, to serve without an
+    /// instance).
+    async fn export_files(&self, _image: &str, _dir: &str) -> anyhow::Result<VolumeStream> {
+        anyhow::bail!("this runtime doesn't export files")
+    }
     /// A volume's files as a tar stream, read-only (a backup).
     async fn read_volume(&self, _name: &str) -> anyhow::Result<VolumeStream> {
         anyhow::bail!("this runtime has no volume backups")

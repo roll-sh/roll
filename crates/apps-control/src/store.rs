@@ -144,6 +144,10 @@ CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS apps_sites (
+    key TEXT PRIMARY KEY,
+    size INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_no_traffic (
     deployment TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -1032,6 +1036,21 @@ impl Store {
 
     /// Move a deployment from one of `from` to `to`, with an error when it failed. False when
     /// it wasn't in one of `from` (canceled meanwhile).
+    /// A static site's files were exported (`sites.rs`): its image digest and tar's size.
+    pub fn put_site(&self, key: &str, size: u64) -> Result<()> {
+        self.db.execute("INSERT INTO apps_sites (key, size) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", params![key, size as i64])?;
+        Ok(())
+    }
+
+    pub fn delete_site(&self, key: &str) -> Result<()> {
+        self.db.execute("DELETE FROM apps_sites WHERE key = ?", [key])?;
+        Ok(())
+    }
+
+    pub fn site(&self, key: &str) -> Result<Option<u64>> {
+        Ok(self.db.query_row("SELECT size FROM apps_sites WHERE key = ?", [key], |r| r.get::<_, i64>(0)).optional()?.map(|n| n as u64))
+    }
+
     /// A deployment that stops when it's healthy, never switched to (`no_traffic`).
     pub fn set_no_traffic(&self, id: &str) -> Result<()> {
         self.db.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?) ON CONFLICT (deployment) DO NOTHING", [id])?;
