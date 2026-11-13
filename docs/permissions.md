@@ -11,6 +11,9 @@ API, once, in front of every route, so no surface can do more than another.
   `crates/rolld/src/access.rs`. The MCP server is `crates/roll-mcp` ([mcp.md](mcp.md)).
 - Client: `apps/dashboard/src/lib/access-api.ts`. Change it and the [HTTP API](#http-api) together.
 - Dashboard: `/dashboard/access` ("MCP & access") and the consent screen at `/oauth/authorize`.
+  Each token has a page, `/dashboard/access/tokens/<id>`: what it may do in words (resources by
+  name), what approvals allow it for a while and until when, the approvals it asked for, its recent
+  requests, and edit, rotate and revoke.
 - CLI: `roll token …` and `roll mcp …`.
 - Tests: `crates/roll-access/tests/access.rs` (scoped tokens, ask, tokens making tokens, OAuth end
   to end), `crates/roll-mcp/tests/mcp.rs`, and `crates/rolld/tests/auth.rs` (every route a real
@@ -138,6 +141,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   ref updates; resend it with `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
+- Sending a project's data out of roll with a signing secret shown once is `reveal`: an apps
+  webhook notification target, and an apps log drain (every service's output, POSTed signed).
 - Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT
   …/environments/{env}` and its `variables_from`) also needs `reveal` on the same resource in the
   environment the body names, and the request gets the weaker of the two decisions. When the copy
