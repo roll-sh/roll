@@ -431,7 +431,14 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
     }
     if let Some(a) = &e.page_a11y {
         let n = a.issues.iter().map(|i| i.count as u64).sum::<u64>() + u64::from(!a.lang) + u64::from(!a.title);
-        summary.push(if n == 0 { "no accessibility problems".into() } else { plural(n, "accessibility problem", "accessibility problems") });
+        let mut part = if n == 0 { "no accessibility problems".to_string() } else { plural(n, "accessibility problem", "accessibility problems") };
+        // Against main: what this change added (main's own aren't its to answer for).
+        if n > 0
+            && let Some((branch, added)) = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.a11y_added?)))
+        {
+            part.push_str(&if added == 0 { format!(", none new against {branch}") } else { format!(", {added} new against {branch}") });
+        }
+        summary.push(part);
         details.push_str(&a11y_line(a));
     }
     if let Some(b) = &e.base_change {
@@ -693,7 +700,7 @@ mod preview_tests {
         let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
         assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
         assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None, a11y_added: None };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
@@ -718,8 +725,12 @@ mod preview_tests {
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         // Against main's load where it was compared: only a difference past the noise counts.
         timed.speed_budget = None;
-        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900) });
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), a11y_added: None });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
+        // Accessibility against main: what the change added.
+        timed.page_a11y = Some(crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img>")], lang: true, title: true });
+        timed.base_change.as_mut().unwrap().a11y_added = Some(1);
+        assert!(page_checks(&timed).unwrap().contains("3 accessibility problems, 1 new against main"), "{}", page_checks(&timed).unwrap());
         assert_eq!(than_main(1000, 950, "main"), None, "noise");
         assert_eq!(than_main(500, 900, "main").as_deref(), Some("400 ms faster than main"));
         let comment = page_checks(&e).unwrap();

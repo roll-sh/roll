@@ -1620,7 +1620,15 @@ impl Store {
         let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
         let pages = self.page_checks(&r.id)?;
         let baseline = r.is_baseline();
-        let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange { branch: b.branch, percent: b.change_bp as f64 / 100.0, phone_percent: b.phone_bp.map(|p| p as f64 / 100.0), head: b.head, load_ms: b.speed.map(|s| s.load_ms) });
+        let ours_a11y = self.page_a11y(&r.id)?;
+        let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange {
+            branch: b.branch,
+            percent: b.change_bp as f64 / 100.0,
+            phone_percent: b.phone_bp.map(|p| p as f64 / 100.0),
+            head: b.head,
+            load_ms: b.speed.map(|s| s.load_ms),
+            a11y_added: ours_a11y.as_ref().zip(b.a11y.as_ref()).map(|(ours, main)| ours.added_since(main)),
+        });
         let visual_review = self.visual_review(&r, base_change.as_ref(), &pages)?;
         let page_speed = self.page_speed(&r.id)?;
         let page_health = self.page_health(&r.id)?;

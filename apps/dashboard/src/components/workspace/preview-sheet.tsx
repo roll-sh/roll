@@ -269,6 +269,7 @@ export function PreviewSheet({
             {p.page_a11y && a11yWords(p.page_a11y).length > 0 && (
               <p className="mt-1.5 text-[11.5px] text-muted" title={p.page_a11y.issues.map((i) => i.first).filter(Boolean).join("\n")}>
                 Accessibility: {a11yWords(p.page_a11y).join(", ")}
+                {p.base_change?.a11y_added != null && ` (${p.base_change.a11y_added === 0 ? "none" : p.base_change.a11y_added} new against ${p.base_change.branch})`}
               </p>
             )}
             {p.page_speed && (

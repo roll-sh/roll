@@ -409,6 +409,9 @@ DIFF=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print('PNG' if b
 # Main's load where it was compared comes along (to say "300 ms slower than main").
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
+# Main's page misses a language and a title too: none of that is the change's.
+A11Y_NEW=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('a11y_added')")
+[ "$A11Y_NEW" = 0 ] || { echo "the change adds no accessibility problems main doesn't have: $A11Y_NEW"; exit 1; }
 # The other page, taken in the same session and compared with main's.
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
 case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac
@@ -492,7 +495,7 @@ cat <<EOF
 | The change's page against main's preview | $BASE (main loads in $MAIN_LOAD ms) |
 | Another page (\`github.pages\`) | $PAGES |
 | Visual review (required): the change's page against main's, then accepted | changed (blockers $BLOCKED), then $REVIEW |
-| Accessibility of the test page (it has no lang and no title) | $A11Y |
+| Accessibility of the test page (it has no lang and no title) | $A11Y; new against main: $A11Y_NEW |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 3 / $BRANCHES_LEFT |

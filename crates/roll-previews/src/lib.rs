@@ -316,6 +316,18 @@ pub struct A11yIssue {
 }
 
 impl PageA11y {
+    /// How many problems this page has: every issue, a missing language and a missing title.
+    pub fn problems(&self) -> u32 {
+        self.issues.iter().map(|i| i.count).sum::<u32>() + u32::from(!self.lang) + u32::from(!self.title)
+    }
+
+    /// How many more problems this page has than `main` (per kind; a language or title it lost),
+    /// so a change answers for what it added, not for what main already had (Netlify's checks).
+    pub fn added_since(&self, main: &PageA11y) -> u32 {
+        let had = |kind: &str| main.issues.iter().find(|i| i.kind == kind).map_or(0, |i| i.count);
+        self.issues.iter().map(|i| i.count.saturating_sub(had(&i.kind))).sum::<u32>() + u32::from(!self.lang && main.lang) + u32::from(!self.title && main.title)
+    }
+
     /// From what the browser wrote (its `a11y`), if it wrote that.
     pub fn parse(json: &str) -> Option<PageA11y> {
         #[derive(serde::Deserialize)]
@@ -444,6 +456,8 @@ pub struct BaseChange {
     pub head: Option<String>,
     /// How long the branch's first page took to load there (Vercel's against production).
     pub load_ms: Option<u32>,
+    /// How many accessibility problems the change's first page has that the branch's didn't.
+    pub a11y_added: Option<u32>,
 }
 
 /// An earlier push of a change's service, still reachable at a URL of its own (on the preview's
@@ -598,6 +612,10 @@ mod tests {
         assert_eq!(a.issues.iter().map(|i| (i.kind.as_str(), i.count)).collect::<Vec<_>>(), [("images", 3), ("buttons", 1)]);
         assert_eq!(a.issues[1].first.as_deref(), Some("<button> </button>"));
         assert!(!a.lang && a.title);
+        // Against main's page: only what this one added (more images, the language lost).
+        let main = PageA11y { issues: vec![A11yIssue { kind: "images".into(), count: 2, first: None }], lang: true, title: true };
+        assert_eq!((a.problems(), a.added_since(&main)), (5, 3));
+        assert_eq!(main.added_since(&a), 0);
         assert_eq!(PageSpeed::parse(""), None);
     }
 

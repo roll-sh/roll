@@ -364,6 +364,9 @@ pub struct PreviewBaseChange {
     /// How long the branch's first page took to load where it was compared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_ms: Option<u32>,
+    /// Accessibility problems its first page has that the branch's didn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a11y_added: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
