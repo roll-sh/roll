@@ -158,6 +158,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           page_a11y?: {issues: [{kind: "images" | "fields" | "buttons" | "links", count, first: string | null}], lang: bool, title: bool} /* what a screen reader can't name there; first is the page's markup, untrusted */,
                           base_change?: {branch, percent, phone_percent: number | null, head?: string | null} /* how much the page differs from the project's preview of the default branch */,
                           pages?: [{path, errors, percent: number | null, base_percent: number | null}] /* the project's other pages (github.pages): errors while each loaded, its change since the push before, against the default branch */,
+                          speed_budget?: {load_ms, bytes} /* the project's github.budget (0: no limit), for roll/speed */,
                           visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null, required} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",

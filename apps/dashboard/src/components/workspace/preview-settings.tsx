@@ -393,6 +393,19 @@ function Form({
           </Field>
         )}
         {s.github.screenshot && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Speed budget (ms)" note="Over it, roll/speed fails. 0 is no limit.">
+              <Num value={s.github.budget?.load_ms ?? 0} onChange={(v) => set("github", { ...s.github, budget: { load_ms: v, bytes: s.github.budget?.bytes ?? 0 } })} />
+            </Field>
+            <Field label="Size budget (KB)" note="The first page and what it loads.">
+              <Num
+                value={Math.round((s.github.budget?.bytes ?? 0) / 1024)}
+                onChange={(v) => set("github", { ...s.github, budget: { load_ms: s.github.budget?.load_ms ?? 0, bytes: v * 1024 } })}
+              />
+            </Field>
+          </div>
+        )}
+        {s.github.screenshot && (
           <Field label="Hidden in screenshots" note="CSS selectors blanked before each screenshot (a clock, an ad), one per line; animations always stop first.">
             <textarea value={hide} onChange={(e) => setHide(e.target.value)} rows={2} placeholder=".clock" className={`${field} w-full py-1.5 font-mono text-[12px]`} spellCheck={false} />
           </Field>

@@ -691,6 +691,7 @@ async fn connect_import_webhooks_and_mirror() {
             page_a11y: None,
             base_change: None,
             pages: Vec::new(),
+            speed_budget: None,
             visual_review: None,
         }),
     };

@@ -146,6 +146,17 @@ pub struct GithubRule {
     /// random avatar, so they don't count as a change. Their box stays.
     #[serde(default)]
     pub hide: Vec<String>,
+    /// How slow and heavy the first page may get (Lighthouse budgets): over it, the `roll/speed`
+    /// commit status fails. 0 is no limit.
+    #[serde(default)]
+    pub budget: Budget,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Budget {
+    pub load_ms: u32,
+    pub bytes: u64,
 }
 
 pub const MAX_HIDE: usize = 20;
@@ -206,7 +217,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default() }
     }
 }
 
@@ -335,6 +346,9 @@ impl Settings {
         }
         if self.github.hide.len() > MAX_HIDE || !self.github.hide.iter().all(|s| selector_ok(s)) {
             return bad(format!("github.hide: at most {MAX_HIDE} CSS selectors of up to 200 characters (no braces, semicolons or comments)"));
+        }
+        if self.github.budget.load_ms > 600_000 || self.github.budget.bytes > 10 << 30 {
+            return bad("github.budget: load_ms up to 600000, bytes up to 10 GiB".into());
         }
         let pages = &self.github.pages;
         if pages.len() > MAX_PAGES || pages.iter().any(|p| !page_path_ok(p) || p == "/") || pages.iter().enumerate().any(|(i, p)| pages[..i].contains(p)) {

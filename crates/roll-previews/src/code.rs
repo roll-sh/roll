@@ -116,6 +116,7 @@ impl CodeSource {
                 schema_changes: p.schema_changes.clone(),
                 expires_at: p.goes_at,
                 base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent }),
+                speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes }).filter(|b| b.load_ms > 0 || b.bytes > 0),
                 pages: p
                     .pages
                     .iter()

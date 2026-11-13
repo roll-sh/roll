@@ -723,7 +723,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[] };   // all true but screenshot; pages, hide: []
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number } };   // all true but screenshot; pages, hide: []; budget 0s (none)
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -794,6 +794,10 @@ type Settings = {
     start, and the project's `github.hide` selectors (up to 20; a clock, an ad, a random avatar)
     are blanked with their box kept, so the same page screenshots the same and only real changes
     count. Speed is timed before that, on the page as it loaded.
+    A project can give that page a budget (`github.budget`: a load time and bytes, as Lighthouse
+    budgets do on Netlify and Vercel): a `roll/speed` commit status fails while the page is over
+    it ("Loads in 2.4 s, 1.2 MB: over its budget (2.0 s load)") and passes within it, and the
+    comment's checks say "over its budget".
     Where a page changed is a picture too (Percy's and Chromatic's diff view): `?diff=base` or
     `?diff=previous` (with `view` and `page` as for the screenshot) fades what's the same and marks
     what differs, the area only one of them has included; the sheet's Diff shows it against main
@@ -936,6 +940,7 @@ Ranked by what a person notices first. Done so far:
 - comparisons with main at the change's merge base (the baseline's last 10 heads kept);
 - stable screenshots: animations stopped and `github.hide` selectors blanked before each capture;
 - where a page changed, as a diff image (`?diff=base|previous`, the sheet's Diff);
+- a speed budget per project (`github.budget`, the `roll/speed` status);
 - a look at the sheet and the change page from screenshots of a live preview (the screenshot's
   modes spaced apart, roll's baseline tagged in the list);
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
@@ -975,20 +980,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **Visual reviews in automations and chat ops**: the `preview` trigger's fields stop at its state
+   and URL; with `preview.environment.visual_review` in the catalogue, "post to Slack when a
+   visual change waits for a review" is a template.
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

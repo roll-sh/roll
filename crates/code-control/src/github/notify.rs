@@ -195,9 +195,10 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let log_url = env.and_then(|e| e.dashboard_url.clone());
     let (status, deploy, description) = preview_states(c.preview.as_ref());
     let visual = env.and_then(|e| e.visual_review.as_ref()).map(visual_status);
+    let speed = env.and_then(speed_status);
     // Statuses go out when they change for this head, not on every wake and sleep.
     let state_key = format!("pv-state:{}", c.id);
-    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}");
+    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}:{visual:?}:{speed:?}");
     if mark(code, &state_key)?.as_deref() == Some(state_now.as_str()) {
         return Ok(());
     }
@@ -227,6 +228,12 @@ pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
         && let Some((state, why)) = &visual
     {
         hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/visual", Some(why), log_url.as_deref()).await.map_err(gh)?;
+    }
+    // The speed budget (Lighthouse budgets): fails while the first page is over it.
+    if rules.status
+        && let Some((state, why)) = &speed
+    {
+        hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, state, "roll/speed", Some(why), log_url.as_deref()).await.map_err(gh)?;
     }
     // The deployment: one per head, its status following the preview; the last one goes
     // inactive when the preview is removed.
@@ -358,6 +365,35 @@ fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
     format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.\n\n", t(s.load_ms), t(s.ttfb_ms))
 }
 
+/// A load time and a size as the comment says them.
+fn ms_words(ms: u32) -> String {
+    if ms < 1000 { format!("{ms} ms") } else { format!("{:.1} s", ms as f64 / 1000.0) }
+}
+
+fn byte_words(b: u64) -> String {
+    if b >= 1 << 20 { format!("{:.1} MB", b as f64 / (1 << 20) as f64) } else { format!("{} KB", b.div_ceil(1024)) }
+}
+
+/// What of the speed budget the first page is over (empty: within it).
+fn over_budget(b: &crate::model::PreviewSpeedBudget, s: &crate::model::PreviewPageSpeed) -> Vec<String> {
+    let mut over = Vec::new();
+    if b.load_ms > 0 && s.load_ms > b.load_ms {
+        over.push(format!("{} load", ms_words(b.load_ms)));
+    }
+    if b.bytes > 0 && s.bytes > b.bytes {
+        over.push(byte_words(b.bytes));
+    }
+    over
+}
+
+/// The `roll/speed` status, once the first page was timed under a budget.
+fn speed_status(e: &crate::model::PreviewEnvironment) -> Option<(&'static str, String)> {
+    let (b, s) = (e.speed_budget.as_ref()?, e.page_speed.as_ref()?);
+    let took = format!("Loads in {}, {}", ms_words(s.load_ms), byte_words(s.bytes));
+    let over = over_budget(b, s);
+    Some(if over.is_empty() { ("success", format!("{took}: within its budget")) } else { ("failure", format!("{took}: over its budget ({})", over.join(", "))) })
+}
+
 /// The `roll/visual` status for a visual review: its state and description.
 fn visual_status(v: &crate::model::PreviewVisualReview) -> (&'static str, String) {
     let branch = branch_name(&v.branch);
@@ -434,8 +470,8 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         }
     }
     if let Some(s) = &e.page_speed {
-        let t = if s.load_ms < 1000 { format!("{} ms", s.load_ms) } else { format!("{:.1} s", s.load_ms as f64 / 1000.0) };
-        summary.push(format!("loads in {t}"));
+        let over = e.speed_budget.as_ref().map(|b| over_budget(b, s)).unwrap_or_default();
+        summary.push(if over.is_empty() { format!("loads in {}", ms_words(s.load_ms)) } else { format!("loads in {}, over its budget", ms_words(s.load_ms)) });
         details.push_str(&speed_line(s));
     }
     (!summary.is_empty()).then(|| format!("<details><summary>Page checks: {}</summary>\n\n{details}</details>\n\n", summary.join(" · ")))
@@ -609,6 +645,7 @@ mod preview_tests {
             page_a11y: None,
             base_change: None,
             pages: Vec::new(),
+            speed_budget: None,
             visual_review: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
@@ -657,6 +694,13 @@ mod preview_tests {
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
         assert_eq!(visual_status(&review("accepted", Some("ada"))), ("success", "Accepted by ada: differs from main by 8.0%".into()));
         assert_eq!(visual_status(&review("unchanged", None)).0, "success");
+        // A speed budget: within it, then over it (load and size).
+        let mut timed = p.environment.clone().unwrap();
+        (timed.page_speed, timed.speed_budget) = (Some(sp(1200, None)), Some(crate::model::PreviewSpeedBudget { load_ms: 2000, bytes: 0 }));
+        assert_eq!(speed_status(&timed), Some(("success", "Loads in 1.2 s, 305 KB: within its budget".into())));
+        timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 1000, bytes: 100_000 });
+        assert_eq!(speed_status(&timed), Some(("failure", "Loads in 1.2 s, 305 KB: over its budget (1.0 s load, 98 KB)".into())));
+        assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
         let comment = page_checks(&e).unwrap();
         assert!(comment.contains(" · 2 more pages, most changed /pricing by 40.0%, 1 error on them · "), "{comment}");
         assert!(comment.contains("`/pricing`: changed 40.0% since the push before, differs from `mainx` by 2.0%, 1 error while it loaded.\n\n`/about`: unchanged since the push before."), "{comment}");

@@ -321,9 +321,19 @@ pub struct PreviewEnvironment {
     /// against the default branch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pages: Vec<PreviewPageCheck>,
+    /// How slow and heavy its first page may get (`roll/speed`), when the project set a budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_budget: Option<PreviewSpeedBudget>,
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,
+}
+
+/// 0 is no limit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewSpeedBudget {
+    pub load_ms: u32,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
