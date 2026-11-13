@@ -48,6 +48,16 @@ describe("the builder", () => {
     expect(catalogFor(c, { kind: "operator", locked: true }).products).toEqual(c.products);
   });
 
+  it("keeps a product narrowed to some resources, next to the others' place", () => {
+    const d = { matrix: { postgres: { read: "allow" as const }, redis: { write: "allow" as const } }, project: "prj_a", environments: [], ids: { redis: ["db_1", "db_2"] } };
+    const rules = rulesOf(d);
+    expect(rules).toEqual([
+      { product: "postgres", resources: [{ project: "prj_a" }], actions: { read: "allow" } },
+      { product: "redis", resources: [{ id: "db_1" }, { id: "db_2" }], actions: { write: "allow" } },
+    ]);
+    expect(draftOf(rules)).toEqual(d);
+  });
+
   it("round-trips rules through its matrix, and leaves rules it can't show as they are", () => {
     const rules = [
       { product: "postgres", resources: [{ project: "prj_a" }], environments: ["development"], actions: { read: "allow", delete: "ask" } },
@@ -56,6 +66,7 @@ describe("the builder", () => {
     const d = draftOf(rules as never)!;
     expect(d.project).toBe("prj_a");
     expect(rulesOf(d)).toEqual(rules);
-    expect(draftOf([{ product: "*", resources: "*", actions: {} }, { product: "x", resources: [{ id: "a" }], actions: {} }])).toBeNull();
+    expect(draftOf([{ product: "*", resources: [{ id: "a" }], actions: {} }])).toBeNull();
+    expect(draftOf([{ product: "x", resources: [{ project: "p" }, { id: "a" }], actions: {} }, { product: "y", resources: "*", actions: {} }])).toBeNull();
   });
 });

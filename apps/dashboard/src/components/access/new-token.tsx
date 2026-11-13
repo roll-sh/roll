@@ -1,6 +1,6 @@
 import { HorizonMark } from "@roll/brand";
 import { useEffect, useState } from "react";
-import { accessApi, describeRule, EXPIRIES, catalogFor, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
+import { accessApi, catalogFor, EXPIRIES, ipProblems, parseRate, presetRules, type Catalog, type Grant, type Rule } from "@/lib/access-api";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
@@ -72,7 +72,7 @@ export function NewToken() {
           <>
             <Panel title="What it may do">
               <div className="p-5">
-                <Builder catalog={catalog} rules={rules} onChange={(r) => setRules(r)} />
+                <Builder catalog={catalog} rules={rules} onChange={(r) => setRules(r)} askOtherwise={askOtherwise} />
                 <label className="mt-4 flex items-start gap-2 text-[13px]">
                   <input type="checkbox" checked={askOtherwise} onChange={(e) => setAskOtherwise(e.target.checked)} className="mt-0.5" />
                   <span>
@@ -111,13 +111,6 @@ export function NewToken() {
                 </label>
               </div>
             </Panel>
-            <div className="space-y-2">
-              {rules.map((r, i) => (
-                <p key={i} className="text-[12px] text-muted">
-                  {describeRule(r)}
-                </p>
-              ))}
-            </div>
             <ErrorNote error={error} />
             <div className="flex items-center gap-3">
               <button onClick={create} disabled={busy || problems.length > 0} className={primary}>
