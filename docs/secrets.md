@@ -800,7 +800,7 @@ open it.
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
 they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
-Railway, Heroku, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
+Railway, Heroku, CircleCI, Bitbucket Pipelines, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -929,7 +929,7 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
   leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
 
-### `render`, `netlify`, `fly`, `railway` and `heroku`
+### `render`, `netlify`, `fly`, `railway`, `heroku`, `circleci` and `bitbucket`
 
 - **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
   environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
@@ -947,6 +947,13 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   variables in one environment (the environment's shared variables without `service`), through its
   public GraphQL API (`variableCollectionUpsert`, `variableDelete`). The token is a project token
   (`Project-Access-Token`) by default, or an account token with `token_kind: "account"`.
+- **`circleci`**, `{project: "gh/acme/web", token_key}`: a CircleCI project's environment variables
+  (`POST …/project/{slug}/envvar` per changed name, `DELETE` per removed one, `Circle-Token`).
+  CircleCI keeps no tag on a variable, so only names this sync pushed before are ever removed.
+- **`bitbucket`**, `{workspace, repo, environment?, token_key}`: a repository's Pipelines variables,
+  or one deployment environment's (its uuid), all secured. The sync lists them for their uuids
+  (following `next` only on Bitbucket's API host), then `PUT`s an existing one, `POST`s a new one and
+  `DELETE`s a removed one.
 - **`heroku`**, `{app, token_key}`: a Heroku app's config vars, in one `PATCH /apps/{app}/config-vars`
   per push (changed names with their values, removed ones as `null`). A failure names Heroku's error
   `id`, never the answer, which echoes the vars.
@@ -1429,7 +1436,8 @@ Done and in PR #20:
   outside roll; weak credentials; values as they were after any change; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
-- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Heroku, Cloudflare Workers, AWS
+- syncs: GitHub, GitLab CI, CircleCI, Bitbucket Pipelines, Vercel, Netlify, Render, Fly.io, Railway,
+  Heroku, Cloudflare Workers, AWS
   Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
   identities pinned to client addresses; encrypted project backup and restore;
@@ -1453,9 +1461,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **CircleCI sync**: a project's environment variables (`POST`/`DELETE …/project/{slug}/envvar`)
-   with a CircleCI token held as a roll secret.
-2. **Bitbucket Pipelines sync**: a repository's (or deployment environment's) secured variables.
 
 Waiting on other pull requests:
 
