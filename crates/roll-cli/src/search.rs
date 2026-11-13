@@ -26,6 +26,31 @@ pub enum Search {
     /// One document of an index: get, put, add, delete.
     #[command(subcommand, alias = "doc")]
     Docs(Docs),
+    /// API keys: a client's own credential instead of the cluster's password.
+    #[command(subcommand, alias = "key")]
+    Keys(Keys),
+}
+
+#[derive(Subcommand)]
+pub enum Keys {
+    /// The cluster's active keys (wakes it).
+    #[command(alias = "ls")]
+    List { cluster: String },
+    /// A new key, printed once, for `Authorization: ApiKey <key>`.
+    Create {
+        cluster: String,
+        name: String,
+        /// `data`: indices, templates, pipelines and lifecycle policies, no security (users,
+        /// roles, keys); `admin`: everything the cluster's own user may do.
+        #[arg(long, default_value = "data")]
+        access: String,
+        /// Stop working after this long (90s, 15m, 1h, 30d).
+        #[arg(long)]
+        expires_in: Option<String>,
+    },
+    /// Revoke a key: clients using it fail at once.
+    #[command(alias = "rm")]
+    Revoke { cluster: String, id: String },
 }
 
 /// Bodies are JSON (NDJSON for `bulk`), given inline, as `@file`, or `-` for stdin.
@@ -286,6 +311,11 @@ fn refresh(on: bool) -> Vec<(&'static str, String)> {
     if on { vec![("refresh", "wait_for".to_string())] } else { Vec::new() }
 }
 
+/// Unix ms as `YYYY-MM-DD HH:MM` (UTC).
+fn key_time(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map_or_else(|| ms.to_string(), |t| t.format("%Y-%m-%d %H:%M").to_string())
+}
+
 async fn find(api: &Api, key: &str) -> anyhow::Result<Value> {
     api.get(&format!("/v1/search/clusters/{}", urlencoding::encode(key))).await.with_context(|| format!("no search cluster {key}"))
 }
@@ -326,6 +356,57 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 Docs::Delete { cluster, index, id, refresh: r } => index_call(api, as_json, Method::DELETE, &cluster, &index, &doc(&id), (refresh(r), None)).await,
             };
         }
+        Search::Keys(cmd) => match cmd {
+            Keys::List { cluster } => {
+                let c = find(api, &cluster).await?;
+                let r = api.post(&format!("/v1/search/clusters/{}/request", s(&c["id"])), json!({ "method": "GET", "path": "/_security/api_key" })).await?;
+                let status = r["status"].as_u64().unwrap_or(0);
+                let body: Value = serde_json::from_str(r["body"].as_str().unwrap_or("null")).unwrap_or(Value::Null);
+                if status != 200 {
+                    bail!("listing the keys of {} failed (HTTP {status}): {}", s(&c["name"]), body.pointer("/error/reason").and_then(Value::as_str).unwrap_or_default());
+                }
+                let keys: Vec<Value> = body["api_keys"].as_array().into_iter().flatten().filter(|k| k["invalidated"] != true).cloned().collect();
+                if !as_json {
+                    if keys.is_empty() {
+                        println!("no keys");
+                    }
+                    for k in &keys {
+                        let roles: Vec<&str> = k["role_descriptors"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
+                        let access = if roles.contains(&"roll_link") { "data" } else if roles.is_empty() { "admin" } else { "limited" };
+                        let expires = k["expiration"].as_i64().map_or("never expires".to_string(), |ms| format!("expires {}", key_time(ms)));
+                        println!("{:<22}  {:<6}  created {}  {expires}  {}", s(&k["id"]), access, key_time(k["creation"].as_i64().unwrap_or(0)), s(&k["name"]));
+                    }
+                    return Ok(());
+                }
+                Value::Array(keys)
+            }
+            Keys::Create { cluster, name, access, expires_in } => {
+                let c = find(api, &cluster).await?;
+                let expires = expires_in.as_deref().map(crate::storage::duration).transpose()?;
+                let v = api.post(&format!("/v1/search/clusters/{}/keys", s(&c["id"])), json!({ "name": name, "access": access, "expires_in_s": expires })).await?;
+                if !as_json {
+                    println!("key {} ({}) of {}, {access} access", s(&v["id"]), s(&v["name"]), s(&c["name"]));
+                    println!("api_key   {}   (shown once)", s(&v["api_key"]));
+                    if let Some(at) = v["expires_at"].as_i64() {
+                        println!("expires   {}", key_time(at * 1000));
+                    }
+                    println!();
+                    println!("curl -H 'Authorization: ApiKey {}' {}", s(&v["api_key"]), s(&v["url"]));
+                    println!("ELASTICSEARCH_URL={} ELASTICSEARCH_API_KEY={}", s(&v["url"]), s(&v["api_key"]));
+                    return Ok(());
+                }
+                v
+            }
+            Keys::Revoke { cluster, id } => {
+                let c = find(api, &cluster).await?;
+                api.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{}/keys/{}", s(&c["id"]), urlencoding::encode(&id)), None).await?;
+                if !as_json {
+                    println!("revoked {id}");
+                    return Ok(());
+                }
+                json!({ "revoked": id })
+            }
+        },
         Search::Request { cluster, method, path, body } => {
             let c = find(api, &cluster).await?;
             // Sent as text, byte for byte (the control plane labels it JSON, or NDJSON for
@@ -550,6 +631,8 @@ mod tests {
         assert!(matches!(t.s, Search::Request { ref method, ref body, .. } if method == "GET" && body.is_none()));
         let t = T::try_parse_from(["t", "request", "app", "POST", "/_bulk", "@bulk.ndjson"]).unwrap();
         assert!(matches!(t.s, Search::Request { body: Some(ref b), .. } if b == "@bulk.ndjson"));
+        let t = T::try_parse_from(["t", "keys", "create", "app", "worker"]).unwrap();
+        assert!(matches!(t.s, Search::Keys(Keys::Create { ref access, .. }) if access == "data"), "keys default to data access");
         for sub in ["create", "list", "show", "delete", "branch", "password", "unload", "url", "indices", "usage"] {
             let e = T::try_parse_from(["t", "clusters", sub, "--help"]).err().unwrap();
             assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp, "{sub}");

@@ -312,7 +312,7 @@ fn bucket_path(bucket: &str, rest: &str) -> String {
 }
 
 /// `90s`, `15m`, `1h`, `7d` (or plain seconds) → seconds.
-fn duration(v: &str) -> anyhow::Result<i64> {
+pub(crate) fn duration(v: &str) -> anyhow::Result<i64> {
     let (n, unit) = v.split_at(v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len()));
     let n: i64 = n.parse().with_context(|| format!("bad duration {v:?}: e.g. 90s, 15m, 1h, 7d"))?;
     let unit = match unit {

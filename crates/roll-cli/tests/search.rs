@@ -247,3 +247,25 @@ async fn clusters_and_requests() {
     assert_eq!(names.len(), 2, "{names:?}");
     e.control.shutdown().await.unwrap();
 }
+
+/// `roll search keys`: a data key, printed once, works against the cluster, is listed, and
+/// stops working once revoked.
+#[tokio::test]
+async fn api_keys() {
+    let e = env().await;
+    e.roll(&["search", "clusters", "create", "keyed"]).await;
+    let out = e.roll(&["search", "keys", "create", "keyed", "ingest worker", "--expires-in", "1d"]).await;
+    assert!(out.contains("data access") && out.contains("(shown once)") && out.contains("expires"), "{out}");
+    let key = field(&out, "api_key");
+    let url = out.lines().find_map(|l| l.strip_prefix("ELASTICSEARCH_URL=")).and_then(|r| r.split_whitespace().next()).unwrap().to_string();
+    let http = reqwest::Client::new();
+    let put = |id: &str| http.put(format!("{url}/notes/_doc/{id}")).header("Authorization", format!("ApiKey {key}")).json(&serde_json::json!({"t": id})).send();
+    assert_eq!(put("1").await.unwrap().status().as_u16(), 201);
+    let out = e.roll(&["search", "keys", "list", "keyed"]).await;
+    assert!(out.contains("ingest worker") && out.contains("data") && !out.contains(&key), "{out}");
+    let listed = e.roll_json(&["search", "keys", "list", "keyed"]).await;
+    let id = listed[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(e.roll(&["search", "keys", "revoke", "keyed", &id]).await.trim(), format!("revoked {id}"));
+    assert_eq!(put("2").await.unwrap().status().as_u16(), 401);
+    assert_eq!(e.roll(&["search", "keys", "list", "keyed"]).await.trim(), "no keys");
+}

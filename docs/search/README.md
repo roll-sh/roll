@@ -60,6 +60,8 @@ roll search docs put app books 1 '{"title":"dune"}' --refresh
 roll search index bulk app books @books.ndjson --refresh
 roll search index search app books --q title:dune
 roll search docs get app books 1 | delete app books 1
+roll search keys create app worker --expires-in 30d   # a data-only API key, shown once (--access admin for all)
+roll search keys list app | revoke app <id>
 roll search index show app books | mapping … | delete-by-query … | delete app books
 ```
 
