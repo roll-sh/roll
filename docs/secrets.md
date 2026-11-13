@@ -99,6 +99,11 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   `reveal`), so a change made outside Terraform shows in the plan. A key that only shows through a
   base or an import isn't the resource's. In a protected environment a write opens a change
   request instead, which Terraform reports as an error.
+- **`roll_secrets_identity`** is a workload identity (CI's OIDC login) and **`roll_secrets_sync`** a
+  sync to a platform. roll changes neither in place, so every attribute replaces them. roll makes
+  identities for people and the operator only, never for a token. A sync's target is listed by host
+  only, so a target changed outside Terraform isn't seen; its signing secret (webhooks) is shown
+  once and kept, sensitive, in the state.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
 
 Values land in Terraform's state, as with every provider: keep the state as private as the values.

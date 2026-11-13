@@ -28,10 +28,28 @@ resource "roll_secret" "db" {
   link = { kind = "postgres", ref = "ep_…", field = "url", mode = "dynamic" }
 }
 
+# CI logs in with its own OIDC token: no stored token (needs the operator's or a person's token).
+resource "roll_secrets_identity" "ci" {
+  name         = "ci"
+  issuer       = "https://token.actions.githubusercontent.com"
+  audience     = "https://api.roll.example"
+  subject      = "repo:acme/web:ref:refs/heads/main"
+  environments = ["staging"]
+  actions      = ["read", "reveal"]
+}
+
+resource "roll_secrets_sync" "vercel" {
+  environment = "production"
+  kind        = "vercel"
+  target      = { project = "web", token_key = "VERCEL_TOKEN" }
+}
+
 data "roll_secrets_values" "production" {
   environment = "production"
 }
 ```
+
+- Identities and syncs don't change in place: every attribute replaces them.
 
 - A key's value is read back on refresh, references as written, so a change made outside
   Terraform shows in the plan (the token needs `reveal`).

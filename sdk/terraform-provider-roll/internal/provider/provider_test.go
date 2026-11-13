@@ -18,9 +18,49 @@ import (
 // rolld's secrets API in memory: environments, keys (a value or a link) and values, for one
 // project, with the operator's token.
 type fakeRolld struct {
-	mu   sync.Mutex
-	envs map[string]*environment
-	keys map[string]map[string]any // env:path/key → {value|link, comment, version}
+	mu         sync.Mutex
+	envs       map[string]*environment
+	keys       map[string]map[string]any // env:path/key → {value|link, comment, version}
+	identities map[string]map[string]any
+	syncs      map[string]map[string]any
+}
+
+// rest serves identities and syncs (create, list, delete), as roll keeps them.
+func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, items map[string]map[string]any, write func(int, any)) {
+	id := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/"+kind), "/")
+	switch {
+	case r.Method == http.MethodPost && id == "":
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		b["id"] = fmt.Sprintf("%s_%d", kind[:3], len(items)+1)
+		if kind == "identities" && b["ttl_minutes"] == nil {
+			b["ttl_minutes"] = 15
+		}
+		items[b["id"].(string)] = b
+		answer := map[string]any{}
+		for k, v := range b {
+			answer[k] = v
+		}
+		if kind == "syncs" && b["kind"] == "webhook" {
+			answer["signing_secret"] = "whsec_once"
+		}
+		write(201, answer)
+	case r.Method == http.MethodGet && id == "":
+		list := []map[string]any{}
+		for _, v := range items {
+			list = append(list, v)
+		}
+		if kind == "syncs" {
+			write(200, map[string]any{"syncs": list, "kinds": []any{}})
+		} else {
+			write(200, list)
+		}
+	case r.Method == http.MethodDelete && items[id] != nil:
+		delete(items, id)
+		write(204, nil)
+	default:
+		write(404, map[string]string{"error": "no " + kind + " " + id})
+	}
 }
 
 func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -36,6 +76,13 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "Bearer rlt_terraform" {
 		write(401, map[string]string{"error": "no token"})
 		return
+	}
+	for _, kind := range []string{"identities", "syncs"} {
+		if strings.HasPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/"+kind) {
+			items := map[string]map[string]map[string]any{"identities": f.identities, "syncs": f.syncs}[kind]
+			f.rest(w, r, kind, items, write)
+			return
+		}
 	}
 	rest, ok := strings.CutPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/environments/")
 	if !ok {
@@ -109,7 +156,7 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestEnvironmentsAndKeysAsCode(t *testing.T) {
-	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}}
+	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	config := fmt.Sprintf(`
@@ -132,7 +179,20 @@ resource "roll_secret" "db" {
 data "roll_secrets_values" "production" {
   environment = roll_secret.db.environment
 }
-`, srv.URL)
+resource "roll_secrets_identity" "ci" {
+  name         = "ci"
+  issuer       = "https://token.actions.githubusercontent.com"
+  audience     = %q
+  subject      = "repo:acme/web:ref:refs/heads/main"
+  environments = [roll_secrets_environment.production.slug]
+  actions      = ["read", "reveal"]
+}
+resource "roll_secrets_sync" "deploys" {
+  environment = roll_secrets_environment.production.slug
+  kind        = "webhook"
+  target      = { url = "https://hooks.example/roll" }
+}
+`, srv.URL, srv.URL)
 	set := func(id, value string) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -150,6 +210,8 @@ data "roll_secrets_values" "production" {
 					resource.TestCheckResourceAttr("roll_secret.db", "version", "1"),
 					resource.TestCheckResourceAttr("roll_secret.db", "path", "/"),
 					resource.TestCheckResourceAttr("data.roll_secrets_values.production", "values.DB_URL", "postgres://db/shop"),
+					resource.TestCheckResourceAttr("roll_secrets_identity.ci", "ttl_minutes", "15"),
+					resource.TestCheckResourceAttr("roll_secrets_sync.deploys", "signing_secret", "whsec_once"),
 				),
 			},
 			{
@@ -169,8 +231,8 @@ data "roll_secrets_values" "production" {
 		CheckDestroy: func(*terraform.State) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			if len(f.envs)+len(f.keys) != 0 {
-				return fmt.Errorf("left behind: %v %v", f.envs, f.keys)
+			if len(f.envs)+len(f.keys)+len(f.identities)+len(f.syncs) != 0 {
+				return fmt.Errorf("left behind: %v %v %v %v", f.envs, f.keys, f.identities, f.syncs)
 			}
 			return nil
 		},
