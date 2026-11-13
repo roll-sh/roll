@@ -1588,19 +1588,14 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **Dynamic AWS credentials**: a project registers a role in its own account (`…/aws-roles`), and a
-   `dynamic` link to it gets a short-lived `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
-   `AWS_SESSION_TOKEN` per lease (STS AssumeRole, as Vault's AWS engine and Infisical's dynamic
-   secrets). The ExternalId is the project, and registering a role proves its trust policy pins it
-   (a decoy project's ExternalId must be refused), so no tenant assumes another customer's role.
-2. **Built-in rotation for databases roll doesn't run** (Postgres and MySQL: a new password set by
+1. **Built-in rotation for databases roll doesn't run** (Postgres and MySQL: a new password set by
    `ALTER ROLE`/`ALTER USER` through roll's guarded connection, the old one retired after the grace
    period), as Infisical's secret rotation, without a webhook of your own.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams. Waits on products serving signed-in people.
-5. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
+4. **Access requests** (time-boxed `reveal` on a protected environment): once a project has members
    besides its owner.
 
 Open pull requests after this one:
@@ -1622,6 +1617,7 @@ Open pull requests after this one:
   and its Helm chart.
 - **#37, customer-managed keys** (after #20): a project's data key wrapped by the customer's KMS key,
   set from the project's settings.
+- **#38, dynamic AWS credentials** (after #20): a session per lease from a role the project registers.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
