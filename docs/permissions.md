@@ -54,9 +54,12 @@ A scoped token and an OAuth connection are both a **grant**: one row with the ru
 allowlist, name and who made it. An OAuth connection is a grant whose secrets are the rotating
 access and refresh tokens. Revoking the grant revokes them all at once.
 
-Until roll has customer accounts, grants are the operator's: the operator signs in to the dashboard,
-builds tokens and approves requests. When accounts arrive, a grant's issuer becomes the account and
-nothing else in this model changes.
+Grants are made by the operator: the operator's token, or a signed-in admin (docs/accounts.md:
+an admin's session acts as the operator). The grant records who made it (`created_by`: the admin's
+`usr_…`, "operator" for the token, or the grant that made it), and approvals record who decided
+them. A signed-in user who isn't an admin can't manage grants yet: making tokens for their own
+repos, agents and projects is the next step, with this same model (their rules can only cover what
+they can reach). A grant never uses a session cookie, and a cookie never carries a grant.
 
 Data planes keep their own credentials (Postgres passwords, Redis users, S3 keys, SASL). A scoped
 token never opens a data plane. It can be allowed to **reveal** those credentials, which is then
@@ -698,6 +701,7 @@ this list:
 | `/v1/code/agents/connect`, `/v1/code/agents/login` | machines' relay link and device login |
 | `/v1/code/agents/shares/{id}`, `/v1/code/names` | public pages |
 | `/v1/code/review-apps` | review apps' own tokens |
+| `/v1/accounts` | people's accounts (docs/accounts.md): sign-in, sessions and invites are a person's, never a token's |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
 | `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
 
