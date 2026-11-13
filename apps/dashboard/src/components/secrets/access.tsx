@@ -115,6 +115,7 @@ function Tokens() {
                   <span className="text-[11px] text-subtle">
                     {t.environments ? t.environments.join(", ") : "all environments"}
                     {t.paths ? ` · ${t.paths.join(", ")}` : ""}
+                    {t.allowed_ips ? ` · from ${t.allowed_ips.join(", ")}` : ""}
                   </span>
                   <span className="ml-auto text-right text-[11px] text-subtle">
                     {expired ? "expired" : t.expires_at ? `expires ${until(t.expires_at)}` : "no expiry"} · {t.last_used_at ? `used ${ago(t.last_used_at)}` : "never used"}
@@ -156,8 +157,10 @@ function NewTokenForm({ envs, onCreate, onCancel }: { envs: string[]; onCreate: 
   const [paths, setPaths] = useState("");
   const [actions, setActions] = useState<Set<Action>>(new Set(["read", "reveal"]));
   const [ttl, setTtl] = useState("90");
+  const [ips, setIps] = useState("");
   const [busy, setBusy] = useState(false);
   const pathList = paths.split(/[\s,]+/).filter(Boolean);
+  const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const ttlDays = ttl.trim() ? Number(ttl) : undefined;
   const ok = name.trim().length > 0 && actions.size > 0 && (allEnvs || picked.size > 0) && pathList.every((p) => p.startsWith("/")) && (ttlDays === undefined || (Number.isInteger(ttlDays) && ttlDays > 0));
   const toggle = <T,>(set: Set<T>, v: T) => {
@@ -179,6 +182,7 @@ function NewTokenForm({ envs, onCreate, onCancel }: { envs: string[]; onCreate: 
           ...(pathList.length && { paths: pathList }),
           actions: ACTIONS.filter((a) => actions.has(a)),
           ...(ttlDays !== undefined && { ttl_days: ttlDays }),
+          ...(ipList.length && { allowed_ips: ipList }),
         });
         setBusy(false);
       }}
@@ -221,6 +225,10 @@ function NewTokenForm({ envs, onCreate, onCancel }: { envs: string[]; onCreate: 
       <label className="block">
         <span className={label}>Folders (path prefixes; empty for all)</span>
         <input value={paths} onChange={(e) => setPaths(e.target.value)} placeholder="/api, /workers" className={`${field} font-mono`} />
+      </label>
+      <label className="block">
+        <span className={label}>Allowed addresses (CIDRs; empty for any)</span>
+        <input value={ips} onChange={(e) => setIps(e.target.value)} placeholder="203.0.113.0/24, 2001:db8::/32" className={`${field} font-mono`} />
       </label>
       <div className="flex justify-end gap-2">
         <button type="button" className={ghost} onClick={onCancel}>

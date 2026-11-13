@@ -24,6 +24,8 @@ pub struct Token {
     pub last_used_at: Option<i64>,
     /// The first characters of the token, to recognise it.
     pub prefix: String,
+    /// The client addresses (CIDRs) it works from; `None`: any.
+    pub allowed_ips: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +37,9 @@ pub struct NewToken {
     pub actions: Vec<Action>,
     pub expires_at: Option<i64>,
     pub ttl_days: Option<i64>,
+    /// Only from these client addresses (CIDRs or single addresses).
+    #[serde(default)]
+    pub allowed_ips: Option<Vec<String>>,
 }
 
 /// Environments, folders and actions.
@@ -69,10 +74,11 @@ pub(crate) fn scope(project: &str, environments: Option<Vec<String>>, paths: Opt
 }
 
 /// A token and its secret (shown once).
-pub(crate) fn new_token(name: String, environments: Option<Vec<String>>, paths: Option<Vec<String>>, actions: Vec<Action>, expires_at: Option<i64>, now: i64, by: &str) -> (Token, String) {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn new_token(name: String, environments: Option<Vec<String>>, paths: Option<Vec<String>>, actions: Vec<Action>, expires_at: Option<i64>, allowed_ips: Option<Vec<String>>, now: i64, by: &str) -> (Token, String) {
     let secret = names::new_id("rlst", 40);
     let prefix: String = secret.chars().take(10).collect();
-    (Token { id: names::new_id("tok", 12), name, environments, paths, actions, expires_at, created_at: now, created_by: by.to_string(), last_used_at: None, prefix }, secret)
+    (Token { id: names::new_id("tok", 12), name, environments, paths, actions, expires_at, created_at: now, created_by: by.to_string(), last_used_at: None, prefix, allowed_ips }, secret)
 }
 
 /// Store a token (inside a write); `identity` for one an identity's login made.
@@ -83,18 +89,39 @@ pub(crate) fn insert(c: &code_sql::Conn<'_>, project: &str, t: &Token, secret: &
         }
     }
     c.execute(
-        "INSERT INTO tokens (id, project_id, name, hash, prefix, environments, paths, actions, expires_at, created_at, created_by, last_used_at, revoked_at, identity)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
-        params![t.id, project, t.name, hash(secret), t.prefix, t.environments.as_ref().map(json), t.paths.as_ref().map(json), json(&t.actions), t.expires_at, t.created_at, t.created_by, identity],
+        "INSERT INTO tokens (id, project_id, name, hash, prefix, environments, paths, actions, expires_at, created_at, created_by, last_used_at, revoked_at, identity, allowed_ips)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+        params![t.id, project, t.name, hash(secret), t.prefix, t.environments.as_ref().map(json), t.paths.as_ref().map(json), json(&t.actions), t.expires_at, t.created_at, t.created_by, identity, t.allowed_ips.as_ref().map(json)],
     )?;
     Ok(())
+}
+
+/// Client addresses checked and written as CIDRs (an address alone is its /32 or /128); at most 20.
+pub(crate) fn allowed(list: Option<Vec<String>>) -> Result<Option<Vec<String>>> {
+    let Some(list) = list else { return Ok(None) };
+    if list.is_empty() || list.len() > 20 {
+        return Err(Error::BadRequest("allowed_ips lists 1–20 addresses or CIDRs (leave it out for any)".into()));
+    }
+    list.iter()
+        .map(|a| {
+            let a = a.trim();
+            a.parse::<ipnet::IpNet>().or_else(|_| a.parse::<std::net::IpAddr>().map(ipnet::IpNet::from)).map(|n| n.trunc().to_string()).map_err(|_| Error::BadRequest(format!("{a} isn't an address or a CIDR")))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+/// Whether `ip` is in `list` (no address known: not allowed).
+pub(crate) fn ip_allowed(list: &[String], ip: Option<&str>) -> bool {
+    let Some(ip) = ip.and_then(|i| i.parse::<std::net::IpAddr>().ok()) else { return false };
+    list.iter().filter_map(|n| n.parse::<ipnet::IpNet>().ok()).any(|n| n.contains(&ip))
 }
 
 fn hash(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-const COLUMNS: &str = "id, name, environments, paths, actions, expires_at, created_at, created_by, last_used_at, prefix, project_id";
+const COLUMNS: &str = "id, name, environments, paths, actions, expires_at, created_at, created_by, last_used_at, prefix, project_id, allowed_ips";
 
 fn token_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Token, String)> {
     Ok((
@@ -109,6 +136,7 @@ fn token_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Token, String)> {
             created_by: r.get(7)?,
             last_used_at: r.get(8)?,
             prefix: r.get(9)?,
+            allowed_ips: r.get::<_, Option<String>>(11)?.and_then(|s| serde_json::from_str(&s).ok()),
         },
         r.get(10)?,
     ))
@@ -120,7 +148,7 @@ impl Secrets {
     pub fn caller(&self, parts: &axum::http::request::Parts) -> Result<Caller> {
         let ip = self.client_ip(parts);
         if let Some(t) = roll_auth::bearer(&parts.headers).filter(|t| t.starts_with(PREFIX)) {
-            let mut caller = self.token_caller(t)?;
+            let mut caller = self.token_caller(t, ip.as_deref())?;
             caller.ip = ip;
             return Ok(caller);
         }
@@ -141,17 +169,22 @@ impl Secrets {
         if self.trust_forwarded_for { forwarded().or_else(peer) } else { peer() }
     }
 
-    fn token_caller(&self, token: &str) -> Result<Caller> {
+    fn token_caller(&self, token: &str, ip: Option<&str>) -> Result<Caller> {
         let h = hash(token);
         let now = self.db.now_ms()?;
         type Found = ((Token, String), Option<i64>, Option<String>);
-        let found: Option<Found> = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS}, revoked_at, identity FROM tokens WHERE hash = ?"), [&h], |r| Ok((token_row(r)?, r.get(11)?, r.get(12)?))).optional())?;
+        let found: Option<Found> = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS}, revoked_at, identity FROM tokens WHERE hash = ?"), [&h], |r| Ok((token_row(r)?, r.get(12)?, r.get(13)?))).optional())?;
         let ((t, project), revoked, identity) = found.ok_or_else(|| Error::Unauthorized("this secrets token doesn't exist".into()))?;
         if revoked.is_some() {
             return Err(Error::Unauthorized("this secrets token was revoked".into()));
         }
         if t.expires_at.is_some_and(|at| at <= now) {
             return Err(Error::Unauthorized("this secrets token expired".into()));
+        }
+        if let Some(list) = &t.allowed_ips
+            && !ip_allowed(list, ip)
+        {
+            return Err(Error::Forbidden("this secrets token isn't allowed from this address".into()));
         }
         // At most one write a minute per token for `last_used_at`.
         if t.last_used_at.is_none_or(|at| now - at > 60_000) {
@@ -195,7 +228,8 @@ impl Secrets {
             (None, Some(_)) => return Err(Error::BadRequest("ttl_days is positive".into())),
             (None, None) => None,
         };
-        let (token, secret) = new_token(name, environments, paths, actions, expires_at, now, &caller.principal);
+        let allowed_ips = allowed(n.allowed_ips)?;
+        let (token, secret) = new_token(name, environments, paths, actions, expires_at, allowed_ips, now, &caller.principal);
         self.db.write(|c| {
             insert(c, project, &token, &secret, None)?;
             audit::record(c, project, caller, "token.create", None, None, &[], &format!("created token {} ({})", token.name, token.actions.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", ")), now)
@@ -218,5 +252,19 @@ impl Secrets {
     /// Who the caller is, for `roll secrets` to find its project.
     pub fn whoami(&self, caller: &Caller) -> serde_json::Value {
         serde_json::json!({ "principal": caller.principal, "project": caller.grants.project() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allowed, ip_allowed};
+
+    #[test]
+    fn allowed_addresses_are_cidrs_and_match_by_containment() {
+        let list = allowed(Some(vec!["203.0.113.7".into(), "10.1.2.3/8".into(), "2001:db8::/32".into()])).unwrap().unwrap();
+        assert_eq!(list, ["203.0.113.7/32", "10.0.0.0/8", "2001:db8::/32"]);
+        assert!(ip_allowed(&list, Some("10.200.0.1")) && ip_allowed(&list, Some("2001:db8::1")) && ip_allowed(&list, Some("203.0.113.7")));
+        assert!(!ip_allowed(&list, Some("203.0.113.8")) && !ip_allowed(&list, None), "no address known: not allowed");
+        assert!(allowed(Some(vec!["not-an-ip".into()])).is_err() && allowed(Some(vec![])).is_err());
     }
 }

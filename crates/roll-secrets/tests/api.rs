@@ -476,6 +476,11 @@ async fn scoped_tokens_reach_only_their_environments_paths_and_actions() {
     let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "deploy", "environments": ["production"], "paths": ["/api"], "actions": ["read", "reveal"], "ttl_days": 30 }))).await;
     let token = t["token"].as_str().unwrap();
     assert!(token.starts_with("rlst_"));
+    // A token pinned to addresses works only from them (checked on every request).
+    let pinned = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "actions": ["read"], "allowed_ips": ["203.0.113.0/24"] }))).await;
+    assert_eq!(pinned["allowed_ips"], json!(["203.0.113.0/24"]));
+    let (s, _) = api.req(Method::GET, "/environments", None, pinned["token"].as_str()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "from an address outside its list");
     let (s, v) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(token)).await;
     assert_eq!((s, v["values"]["STRIPE"].as_str()), (StatusCode::OK, Some("sk_live")));
     for (method, path, body) in [

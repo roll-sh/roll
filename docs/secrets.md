@@ -830,6 +830,11 @@ pub trait Authority: Send + Sync {
 The built-in authority accepts the operator (`roll_auth::Operator`, or any request when rolld has no
 operator token) and **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
 environments (or all), a list of path prefixes (or all), the actions above and an optional expiry.
+A token can be pinned to client addresses (`allowed_ips`: up to 20 addresses or CIDRs, IPv4 or
+IPv6): from anywhere else it's refused (403), checked on every request against the connection's
+peer address (or `X-Forwarded-For` where rolld trusts it), as Infisical's trusted IPs and Doppler's
+IP restrictions do. An identity can be pinned the same way: a login from elsewhere is refused, and
+the token it gets carries the same list. `roll secrets tokens create … --allow-ip 203.0.113.0/24`.
 Tokens are stored as SHA-256 hashes, looked up on every request and never cached. When roll-access
 lands, its evaluator replaces the built-in authority, the `rlst_` tokens migrate to its scoped tokens,
 and the routes stay the same.
@@ -1073,10 +1078,10 @@ type Compare = { from: string; to: string; path: string; rows: { key: string; st
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
-type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null };
-type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number };
-type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string };
-type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
+type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null };
+type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[] };
+type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
+type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
 type Sync = {
   id: string; environment: string; path: string; kind: string; target: Record<string, unknown>;
@@ -1151,7 +1156,8 @@ Done and in PR #20:
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
   Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
-- audit sinks, purge and retention, workload identities (OIDC logins for CI);
+- audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
+  identities pinned to client addresses;
 - the dashboard's Secrets surface;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
