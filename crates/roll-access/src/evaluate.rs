@@ -286,11 +286,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Used: from an address it may be used from (a refused address neither keeps it from idling
     // nor becomes its last address).
     if !decided_before && access.store.touch_due(&crate::store::use_key(&ctx.grant.id, ip.map(|i| i.to_string()).as_deref())) {
-        let (a, id, name, ip) = (access.clone(), ctx.grant.id.clone(), ctx.grant.name.clone(), ip.map(|i| i.to_string()));
+        let (a, id, name, user, ip) = (access.clone(), ctx.grant.id.clone(), ctx.grant.name.clone(), ctx.grant.user.clone(), ip.map(|i| i.to_string()));
         tokio::spawn(async move {
             let a2 = a.clone();
             if let Ok(Some(new)) = tokio::task::spawn_blocking(move || a2.store.record_use(&id, ip.as_deref()).map(|n| (id, n))).await {
-                a.network_notice(&name, &new.0, &new.1);
+                a.network_notice(&name, &new.0, user.as_deref(), &new.1);
             }
         });
     }

@@ -427,7 +427,6 @@ impl Access {
 impl Access {
     /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
     /// secret scanning): each live grant they open is revoked at once, with why, and logged.
-    /// Returns the grants revoked.
     /// This node's share of a grant's `rate_per_minute`: the rate over the nodes serving requests,
     /// rounded up (at least one a minute). Counted in memory on each node, so the fleet as a whole
     /// allows about the rate, with no shared write per request; a client whose requests all reach
@@ -444,6 +443,8 @@ impl Access {
         self.revokers.write().unwrap_or_else(|e| e.into_inner()).push((prefix, Box::new(revoke)));
     }
 
+    /// Revoke the live grants among `secrets` found at `found_at`, and tell each one's person.
+    /// Returns the grants revoked.
     pub fn revoke_leaked(&self, secrets: &[String], found_at: &str) -> Result<Vec<store::Grant>> {
         let mut out = Vec::new();
         for s in secrets.iter().filter(|s| checksum_ok(s)) {
@@ -477,6 +478,16 @@ impl Access {
             }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
                 tracing::warn!(grant = %g.id, name = %g.name, at = %found_at, "a leaked token was revoked");
+                self.tell(
+                    g.user.as_deref(),
+                    format!("roll revoked your token \"{}\"", plain(&g.name)),
+                    format!(
+                        "roll revoked your token \"{}\": it was found in {}, where others could read it.\n\nMake a new one at {}/dashboard/access if you still need it, and keep it out of code and logs.\n",
+                        plain(&g.name),
+                        plain(found_at),
+                        self.web_url(),
+                    ),
+                );
                 self.store.audit(&store::AuditEvent {
                     id: new_id("aud"),
                     at: code_sql::now_ms(),
@@ -514,7 +525,10 @@ impl Access {
     /// week before a token expires). One node posts it (the day is claimed in the store). Whether
     /// it posted.
     pub async fn expiry_digest(self: &Arc<Self>) -> Result<bool> {
-        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return Ok(false) };
+        let chat = self.chat.get().cloned().zip(self.chat_target());
+        if chat.is_none() && self.people.get().is_none() {
+            return Ok(false);
+        }
         let now = code_sql::now_ms();
         let week = now + 7 * 86_400_000;
         let mut soon: Vec<store::Grant> = self.store.list()?.into_iter().filter(|g| g.live(now) && g.expires_at.is_some_and(|e| e <= week)).collect();
@@ -525,32 +539,64 @@ impl Access {
             return Ok(false);
         }
         soon.sort_by_key(|g| g.expires_at);
-        let names: Vec<String> = soon
-            .iter()
-            .take(20)
-            .map(|g| {
-                let days = (g.expires_at.unwrap_or(now) - now).max(0) / 86_400_000;
-                format!("{} ({})", plain(&g.name), if days == 0 { "today".to_string() } else if days == 1 { "tomorrow".to_string() } else { format!("in {days} days") })
-            })
-            .collect();
-        let count = if soon.len() == 1 { "One roll token expires".to_string() } else { format!("{} roll tokens expire", soon.len()) };
-        let text = format!("{count} within a week: {}. Give one longer at {}/dashboard/access, or let it go.", names.join(", "), self.config.web_url.trim_end_matches('/'));
-        chat.notice(install, channel, text).await.map_err(Error::Internal)?;
+        let digest = |grants: &[&store::Grant]| {
+            let names: Vec<String> = grants
+                .iter()
+                .take(20)
+                .map(|g| {
+                    let days = (g.expires_at.unwrap_or(now) - now).max(0) / 86_400_000;
+                    format!("{} ({})", plain(&g.name), if days == 0 { "today".to_string() } else if days == 1 { "tomorrow".to_string() } else { format!("in {days} days") })
+                })
+                .collect();
+            let count = if grants.len() == 1 { "One roll token expires".to_string() } else { format!("{} roll tokens expire", grants.len()) };
+            format!("{count} within a week: {}. Give one longer at {}/dashboard/access, or let it go.", names.join(", "), self.web_url())
+        };
+        // Each person hears of their own tokens only.
+        let mut people: std::collections::BTreeMap<&str, Vec<&store::Grant>> = Default::default();
+        for g in &soon {
+            if let Some(u) = g.user.as_deref() {
+                people.entry(u).or_default().push(g);
+            }
+        }
+        for (user, grants) in people {
+            let subject = if grants.len() == 1 { format!("Your roll token \"{}\" expires within a week", plain(&grants[0].name)) } else { format!("{} of your roll tokens expire within a week", grants.len()) };
+            self.tell(Some(user), subject, format!("{}\n", digest(&grants)));
+        }
+        if let Some((chat, (install, channel))) = chat {
+            chat.notice(install, channel, digest(&soon.iter().collect::<Vec<_>>())).await.map_err(Error::Internal)?;
+        }
         Ok(true)
+    }
+
+    fn web_url(&self) -> &str {
+        self.config.web_url.trim_end_matches('/')
+    }
+
+    /// Mail a grant's person (a user's own token; an operator's has none), off the caller's path.
+    /// Nothing without accounts or a runtime.
+    fn tell(&self, user: Option<&str>, subject: String, text: String) {
+        let (Some(user), Some(people), Ok(rt)) = (user, self.people.get().cloned(), tokio::runtime::Handle::try_current()) else { return };
+        let user = user.to_string();
+        rt.spawn(async move {
+            if let Err(e) = people.tell(&user, &subject, &text).await {
+                tracing::warn!(error = %e, "mailing a token's person");
+            }
+        });
     }
 
     /// A token used from a network it hasn't been before, told where approvals go (GitHub and
     /// Google mail a new sign-in's place): a leaked token is used from somewhere new.
-    pub fn network_notice(self: &Arc<Self>, name: &str, id: &str, new: &store::NewNetwork) {
+    pub fn network_notice(self: &Arc<Self>, name: &str, id: &str, user: Option<&str>, new: &store::NewNetwork) {
         let name = plain(name);
-        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
         let roams = if new.networks >= store::ROAMING { " It's used from many networks now, so this is the last message like this about it." } else { "" };
         let text = format!(
             "roll token \"{name}\" was used from a new network, {} (it's been used from {} now). Not you? Revoke it: {}/dashboard/access/tokens/{id}.{roams}",
             new.network,
             new.networks,
-            self.config.web_url.trim_end_matches('/'),
+            self.web_url(),
         );
+        self.tell(user, format!("Your roll token \"{name}\" was used from a new network"), format!("{text}\n"));
+        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
         tokio::spawn(async move {
             if let Err(e) = chat.notice(install, channel, text).await {
                 tracing::warn!(error = %e, "telling chat of a token's new network");

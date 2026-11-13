@@ -32,8 +32,9 @@ impl Resolver for DefaultBranch {
 }
 
 /// Signed-in people: a cookie `rls_<user>` is that user's session; a user taken out is disabled.
+/// The people accounts knows, and what they've been mailed (`user: subject`).
 #[derive(Default)]
-struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>);
+struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>);
 
 impl People {
     fn add(&self, user: &str, handle: &str) {
@@ -61,6 +62,10 @@ impl roll_auth::Sessions for People {
     fn person<'a>(&'a self, user: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
         let p = self.0.lock().unwrap().get(user).cloned();
         Box::pin(async move { Ok(p) })
+    }
+    fn tell<'a>(&'a self, user: &'a str, subject: &'a str, _text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {
+        self.1.lock().unwrap().push(format!("{user}: {subject}"));
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -1300,4 +1305,38 @@ async fn the_checkup_names_what_needs_attention() {
     assert_eq!(kinds(&root), ["everything", "never_expires"], "{list}");
     assert_eq!(kinds(&wide_id), ["narrower"], "{list}");
     assert!(kinds(&fit_id).is_empty(), "{list}");
+}
+
+/// A person hears of their own tokens by mail (GitHub mails a token's owner): when one is about to
+/// expire and when roll revokes one as leaked. Nobody else hears of them, and an operator's token
+/// mails no one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_is_told_of_their_tokens() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    d.people.add("usr_bob", "bob");
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let soon = code_sql::now_ms() + 2 * 86_400_000;
+    let (s, made) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "cursor", "rules": rules, "expires_at": soon }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    d.token(rules.clone(), json!({ "name": "ci", "expires_at": soon })).await;
+
+    let told = |want: Vec<&'static str>| {
+        let people = d.people.clone();
+        async move {
+            for _ in 0..100 {
+                if *people.1.lock().unwrap() == want {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            panic!("told {:?}, not {want:?}", people.1.lock().unwrap());
+        }
+    };
+    assert!(d.access.expiry_digest().await.unwrap());
+    told(vec!["usr_alice: Your roll token \"cursor\" expires within a week"]).await;
+
+    let token = made["token"].as_str().unwrap().to_string();
+    assert_eq!(d.access.revoke_leaked(&[token], "a public gist").unwrap().len(), 1);
+    told(vec!["usr_alice: Your roll token \"cursor\" expires within a week", "usr_alice: roll revoked your token \"cursor\""]).await;
 }

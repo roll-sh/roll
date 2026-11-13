@@ -839,6 +839,23 @@ impl roll_auth::Sessions for Resolver {
         let (accounts, user) = (self.0.clone(), user.to_string());
         Box::pin(async move { tokio::task::spawn_blocking(move || accounts.person(&user).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())? })
     }
+
+    fn tell<'a>(&'a self, user: &'a str, subject: &'a str, text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {
+        let (accounts, id) = (self.0.clone(), user.to_string());
+        Box::pin(async move {
+            if !accounts.mail_on() {
+                return Ok(());
+            }
+            let found = tokio::task::spawn_blocking({
+                let accounts = accounts.clone();
+                move || accounts.db.read(|c| load_user(c, &id)).map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            let Some(user) = found.filter(|u| !u.disabled) else { return Ok(()) };
+            accounts.mailer.send(&Mail { to: user.email, subject: subject.to_string(), text: text.to_string() }).await.map_err(|e| e.to_string())
+        })
+    }
 }
 
 fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>> {

@@ -227,6 +227,13 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = user;
         Box::pin(async { Ok(None) })
     }
+    /// Mail a person about something of theirs (a token of theirs used from a new network,
+    /// revoked as leaked, or about to expire). Nothing when they're disabled or gone, or mail is
+    /// off. `text` holds no secret.
+    fn tell<'a>(&'a self, user: &'a str, subject: &'a str, text: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        let _ = (user, subject, text);
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// In the request an [`Authorizer`] decides: who the gate's rules let call its route, so a user's

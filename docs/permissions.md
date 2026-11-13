@@ -536,6 +536,11 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   can fill everyone's room (10,000 live grants in all).
 - The builder and the consent screen offer only what they reach (`GET /v1/access` answers
   `{kind: "user", reach: ["code", "agents", "workspace"]}`).
+- **Their tokens' news is mailed to them** (GitHub mails a token's owner), as well as posted
+  where approvals go: a token of theirs used from a new network, one roll revoked as leaked, and,
+  once a day, the ones that expire within a week. Each person hears of their own tokens only, a
+  disabled person hears nothing, and a mail holds no secret: the token's name, the network or
+  where it was found, and a link (`roll_auth::Sessions::tell`, accounts' mailer).
 
 ## Managing grants
 
