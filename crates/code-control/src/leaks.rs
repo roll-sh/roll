@@ -177,22 +177,27 @@ impl Code {
         let secrets = self.secret_env.get().cloned().ok_or_else(|| crate::Error::Invalid("roll secrets isn't on this server".into()))?;
         let Some(head) = self.head(r)? else { return Ok(LeakScan::default()) };
         let mut scan = LeakScan { head: Some(head.to_string()), ..Default::default() };
-        let mut files = Vec::new();
-        let mut dirs = vec![String::new()];
-        'walk: while let Some(d) = dirs.pop() {
-            for e in self.store.list_tree(&r.id, &head, &d)?.unwrap_or_default() {
-                match e.kind {
-                    EntryKind::Dir => dirs.push(e.path),
-                    EntryKind::File if files.len() >= SCAN_FILES => {
-                        scan.truncated = true;
-                        break 'walk;
+        let _turn = SCANS.acquire().await.map_err(|e| crate::Error::Invalid(e.to_string()))?;
+        // The walk is the store's synchronous reads: off the async threads.
+        let (store, repo, cs) = (self.store.clone(), r.id.clone(), head);
+        let (files, truncated) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let mut files = Vec::new();
+            let mut dirs = vec![String::new()];
+            while let Some(d) = dirs.pop() {
+                for e in store.list_tree(&repo, &cs, &d)?.unwrap_or_default() {
+                    match e.kind {
+                        EntryKind::Dir => dirs.push(e.path),
+                        EntryKind::File if files.len() >= SCAN_FILES => return Ok((files, true)),
+                        EntryKind::File => files.push(e),
+                        _ => {}
                     }
-                    EntryKind::File => files.push(e),
-                    _ => {}
                 }
             }
-        }
-        let _turn = SCANS.acquire().await.map_err(|e| crate::Error::Invalid(e.to_string()))?;
+            Ok((files, false))
+        })
+        .await
+        .map_err(|e| crate::Error::Invalid(e.to_string()))??;
+        scan.truncated |= truncated;
         let mut acc: Candidates<(String, usize)> = Candidates::new();
         'files: for f in &files {
             if f.size.unwrap_or(u64::MAX) > MAX_FILE {
@@ -239,20 +244,29 @@ impl Code {
     /// What `n` first-parent commits from `head` added, each matched like a change's lines.
     async fn scan_history(&self, r: &RepoRow, head: &ChangesetId, n: usize, scan: &mut LeakScan) -> Result<()> {
         let secrets = self.secret_env.get().cloned().ok_or_else(|| crate::Error::Invalid("roll secrets isn't on this server".into()))?;
-        let mut commits = Vec::new();
-        let mut cursor = None;
-        while commits.len() < n {
-            let q = code_store::LogQuery { path: None, limit: (n - commits.len()).min(1000), cursor };
-            let page = self.store.log(&r.id, head, &q)?;
-            let Some(last) = page.last() else { break };
-            cursor = Some(last.id);
-            commits.extend(page.into_iter().map(|c| (c.id, c.short)));
-        }
+        // The log and each commit's file list are the store's synchronous reads: off the async threads.
+        let (store, repo, from) = (self.store.clone(), r.id.clone(), *head);
+        let commits = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, Vec<code_store::FileDiff>)>> {
+            let mut out = Vec::new();
+            let mut cursor = None;
+            while out.len() < n {
+                let q = code_store::LogQuery { path: None, limit: (n - out.len()).min(1000), cursor };
+                let page = store.log(&repo, &from, &q)?;
+                let Some(last) = page.last() else { break };
+                cursor = Some(last.id);
+                for c in page {
+                    out.push((c.short, store.diff(&repo, &c.id)?));
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| crate::Error::Invalid(e.to_string()))??;
         let mut acc: Candidates<(String, String)> = Candidates::new();
-        'commits: for (id, short) in &commits {
+        'commits: for (short, diffs) in &commits {
             scan.commits += 1;
-            for d in self.store.diff(&r.id, id)? {
-                let Some(patch) = self.added_patch(r, &d).await? else { continue };
+            for d in diffs {
+                let Some(patch) = self.added_patch(r, d).await? else { continue };
                 if !acc.read(patch.len()) {
                     scan.truncated = true;
                     break 'commits;
