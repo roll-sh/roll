@@ -83,6 +83,8 @@ export interface Tightened {
   days: number;
   used: { product: string; action: Action; resource: string | null; count: number; last_at: number }[];
   rules: Rule[];
+  /** The token's rules it was made from: applying checks they haven't changed since. */
+  from: Rule[];
   /** Whether `rules` is narrower than the token's. */
   narrower: boolean;
 }
@@ -262,6 +264,8 @@ export const accessApi = {
   forget: (id: string, approval: string) => call<Grant>("DELETE", `${token(id)}/temporary/${encodeURIComponent(approval)}`),
   /** Its rules narrowed to what its allowed requests used in the last `days` (never wider): a proposal. */
   tighten: (id: string, days?: number) => call<Tightened>("GET", `${token(id)}/tighten${query({ days })}`),
+  /** Apply it, made again now, if its rules are still `from` (else 409: look again). */
+  applyTighten: (id: string, from: Rule[], days?: number) => call<Grant>("POST", `${token(id)}/tighten`, { from, days }),
   /** A new secret, the same rules; the old one stops at once. Shown this once. */
   rotate: (id: string) => call<{ grant: Grant; token: string }>("POST", `${token(id)}/rotate`),
   /** What the evaluator would decide for a request, without running it (`token`: the operator asks for one). */

@@ -25,7 +25,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens", get(list).post(create))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
-        .route("/v1/access/tokens/{id}/tighten", get(tighten))
+        .route("/v1/access/tokens/{id}/tighten", get(tighten).post(apply_tighten))
         .route("/v1/access/tokens/{id}/temporary/{approval}", axum::routing::delete(forget))
         .route("/v1/access/approvals", get(approvals))
         .route("/v1/access/approvals/{id}", get(approval))
@@ -221,20 +221,23 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     {
         (outcome, action) = (copied, Action::Reveal);
     }
-    if let Some((lent, ..)) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope).await
+    let mut about: (&str, Option<String>) = (row.product, None);
+    if let Some((lent, product, id, _)) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope).await
         && crate::evaluate::rank(lent) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (lent, Action::Reveal);
+        about = (product, Some(id));
     }
     if outcome == Outcome::Deny && ask_otherwise && catalog::placement(row, &params).is_none() {
         outcome = Outcome::Ask;
     }
     // What a path resolves to (an endpoint's project, a replica's database) only for what the
     // token reaches.
-    let resource = if outcome == Outcome::Deny { None } else { crate::evaluate::describe(&target) };
+    // A link that decided is reported as itself: the linked resource's product and id.
+    let resource = if outcome == Outcome::Deny { None } else { about.1.or_else(|| crate::evaluate::describe(&target)) };
     Ok(Json(json!({
         "decision": outcome,
-        "product": row.product,
+        "product": about.0,
         "action": action,
         "resource": resource,
         "route": format!("{} {}", row.method, row.route),
@@ -270,17 +273,46 @@ struct TightenQuery {
     days: Option<i64>,
 }
 
-/// Its rules narrowed to what its allowed requests used ([`crate::tighten`]): a proposal, never
-/// wider; applying it is a `PATCH` of `rules`.
+/// Its rules narrowed to what its requests used ([`crate::tighten`]): a proposal, never wider,
+/// with the rules it was made `from` (what applying it checks).
 async fn tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Query(q): Query<TightenQuery>) -> crate::Result<Json<Value>> {
-    let days = q.days.unwrap_or(30).clamp(1, 90);
-    let since = code_sql::now_ms() - days * 86_400_000;
-    // A person sees only their own tokens' activity.
     let who = who(&a, &ext)?;
-    let grant = visible_grant(&a, &who, &id).await?;
-    let used = blocking(a, move |a| a.store.used(&id, since)).await?;
+    let (grant, days, since, used, rules) = proposal(&a, &who, id, q.days).await?;
+    Ok(Json(json!({ "since": since, "days": days, "used": used, "rules": rules, "from": grant.rules, "narrower": rules != grant.rules })))
+}
+
+/// A person sees only their own tokens' activity.
+async fn proposal(a: &Arc<Access>, who: &Who, id: String, days: Option<i64>) -> crate::Result<(crate::store::Grant, i64, i64, Vec<crate::tighten::Used>, roll_auth::scope::Scope)> {
+    let days = days.unwrap_or(30).clamp(1, 90);
+    let since = code_sql::now_ms() - days * 86_400_000;
+    let grant = visible_grant(a, who, &id).await?;
+    let used = blocking(a.clone(), move |a| a.store.used(&id, since)).await?;
     let rules = crate::tighten::tighten(&grant.rules, &used);
-    Ok(Json(json!({ "since": since, "days": days, "used": used, "rules": rules, "narrower": rules != grant.rules })))
+    // A proposal the rules' own checks would refuse (too many rules, too long) isn't one.
+    let rules = if rules.problems().is_empty() { rules } else { grant.rules.clone() };
+    Ok((grant, days, since, used, rules))
+}
+
+#[derive(Deserialize)]
+struct ApplyTighten {
+    days: Option<i64>,
+    /// The rules the proposal was made from: applied only if they're still the token's.
+    from: roll_auth::scope::Scope,
+}
+
+/// Apply the proposal, made again now, if the token's rules are still the ones it was shown from
+/// (another change in between: 409). The operator's, like editing rules.
+async fn apply_tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Json(b): Json<ApplyTighten>) -> crate::Result<Json<Value>> {
+    // The operator, or a person for their own token (narrowing never widens). A token never.
+    let who = who(&a, &ext)?;
+    if matches!(who, Who::Grant(_)) {
+        return Err(Error::Forbidden("a token doesn't tighten tokens: the operator or its owner does".into()));
+    }
+    let (grant, _, _, _, rules) = proposal(&a, &who, id.clone(), b.days).await?;
+    if rules == grant.rules {
+        return Ok(Json(json!(grant)));
+    }
+    Ok(Json(json!(blocking(a, move |a| a.store.swap_rules(&id, &b.from, &rules)).await?)))
 }
 
 async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {
@@ -398,6 +430,13 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
 async fn forget(State(a): S, ext: Extensions, Path((id, approval)): Path<(String, String)>) -> crate::Result<Json<Value>> {
     // Whoever may decide the approval takes it back: the operator, or a person for their own token.
     may_decide(&a, &ext, &approval).await?;
+    // The approval is this token's, and the token is one the caller sees.
+    let who = who(&a, &ext)?;
+    visible_grant(&a, &who, &id).await?;
+    let (a2, apr) = (a.clone(), approval.clone());
+    if blocking(a2, move |a| a.store.approval(&apr)).await?.grant_id != id {
+        return Err(Error::NotFound(format!("{approval} isn't this token's")));
+    }
     Ok(Json(json!(blocking(a, move |a| a.store.forget(&id, &approval)).await?)))
 }
 
@@ -530,9 +569,15 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     let Some(until) = until else { return Ok(None) };
     let id2 = id.to_string();
     let found = blocking(a.clone(), move |a| a.store.approval(&id2)).await?;
-    let Some(resource) = found.resource.clone().filter(|r| !r.starts_with("new in ")) else {
+    // About one resource, as a rule would name it: not something new, not several links at once.
+    let Some(resource) = found.resource.clone().filter(|r| !r.starts_with("new in ") && !r.contains(", ")) else {
         return Err(Error::BadRequest("this request isn't about one resource: approve it once".into()));
     };
+    // A route whose product filters per environment answers about no environment: a rule from it
+    // would drop the environments the token is limited to.
+    if catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.filters_itself) {
+        return Err(Error::BadRequest("this route spans every environment: approve it once".into()));
+    }
     // The indices it was about stay part of it (`cl_1/logs-a` is cluster `cl_1`, index `logs-a`).
     let selector = match found.scope_index.clone() {
         Some(ix) => roll_auth::scope::Selector::Id { id: resource.strip_suffix(&format!("/{ix}")).unwrap_or(&resource).to_string(), index: Some(ix) },
