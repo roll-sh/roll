@@ -3406,6 +3406,21 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     workers with its keys computed there (`compute_in_workers`, 204's path). q13 user
     instructions -1.6 to -3.0%, wall 1.200 -> 1.110 s (3 of 3 pairs), the executor thread's
     share of samples 11.4% -> 8.7%.
+  - **A parallel index scan's chunk reads dense keys' rows as a range** (`parscan::dense_rows`,
+    `IndexChunk`; after agent 226's round, on the coordinator's lead): q18's subquery reads
+    lineitem through lineitem_pkey in the workers, each chunk's rows fetched 256 at a time by
+    point lookups (`Store::get_versions`: 22% of q18's samples, each lookup through the hot
+    ranges' lock). When a batch's data keys are ascending integer keys close together
+    (`scan::dense_keys`, as the serial `fetch_dense` asks: a primary key's entries over a
+    bulk-loaded table), they are read as the range they span (`Store::scan`, a batch at a time
+    by reference) and matched to the keys. q18 user instructions -8.7 / -8.5 / -8.5%, own-run
+    wall 2.309 -> 2.156 s (3 of 3 pairs), CPU 7.48 -> 6.96 s; other queries within +-1.2% but
+    q09 +2.8% once, q03 -3.7% once; 22-query instructions -1.96 / -1.48 / -1.70%. Six
+    22-query rounds against its base (`5ae96d1e3`, host load 20-28): 14.37 against 13.62 s in
+    the first three (a busy stretch: PostgreSQL's own passes moved 7%), 12.55 against 13.47 s
+    in the next three; all hashes PostgreSQL's; peaks 1,693-1,712 against 1,690-1,710 MB.
+    Point, range and short-transaction smoke flat (45.7k / 45.4k, 341k / 345k instructions an
+    operation).
   - Dropped (`~/.cache/a227/patches/dropped-c002-kept-fetch-scan.*`): an index scan's row
     fetches through one store scan kept from call to call and sought on (`Scan::reseek`)
     instead of a new merging scan per call: q20 lost 1.7% of c001's gain, q02 / q11 flat
@@ -3432,7 +3447,12 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     crash rounds pass, the regression suite 51,148 / 51,150 units with none newly differing,
     isolation 1,647 / 1,648 permutations (intra-grant-inplace, as on the other trains), pg_dump
     TAP 14,609 passed (rerun alone: the first run's client container had made its mount
-    directory as root).
+    directory as root). Again on `da4c6aa34` (with the q18 change): the same, but the debug
+    crate tests stop at `crash_bulk::kill_during_compactions_after_deletes`, whose test thread
+    overflows its stack in the debug build every run; it does so on `e12edc326` too (this
+    round's head without the q18 change, built and run the same way), so it came with the
+    commits between the two trains (the test and compaction changes of `7c8da4c1b` /
+    `d23bfde2d`, bulk-write owners), not with this round's code.
   - Next steps (largest first): q02 (0.62 s against 0.25: the 158,720-row hash build of nested
     loop rows, concat and Value clones, 22% the partsupp fetches; its SubPlan's nested loops
     reopened per run: a nested loop and sequential scan rescan would keep them); q20 (0.35

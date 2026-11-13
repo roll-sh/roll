@@ -574,8 +574,13 @@ window) first.
 | `c001` SubPlan trees rescanned (against base) | q20 -8.1 / -8.1 / -8.1 | q20 0.404 -> 0.370 s (pairs 0.485/0.625, 0.404/0.349, 0.402/0.370; an earlier set 0.421 -> 0.394) | none over +2% twice (q14 +2.2 once, q03 +1.4 / +1.2) | -0.35 / +0.08 / +0.10% |
 | `c007` behaviour fixes (against `c001`) | q20 -6.1 / -6.1 / -6.1 (the Right Semi Join's sides read with the columns it reads) | q20 0.336 -> 0.318 s, 3 of 3 | none over +2% (q12 -34.9% once: a short window) | +0.17 / -2.33 / -0.29% |
 | `c008` Parallel Hash in the workers (against `c007`) | q13 -1.6 / -2.2 / -2.8 (against `c005`: -2.2 / -3.0 / -2.3); cycles -0.2..-6% | q13 1.200 -> 1.110 s, 3 of 3 (1.232/1.055, 1.153/1.110, 1.200/1.125), CPU 3.00 -> 2.88 s | one round of the other 21: none over +2% (q16 +1.6, q03 -5.2) | -0.22% (one round) |
+| `c009` a parallel index chunk's dense keys read as a range (against `5ae96d1e3`, agent 226's head) | q18 -8.7 / -8.5 / -8.5 | q18 2.309 -> 2.156 s, 3 of 3 (2.308/2.104, 2.309/2.157, 3.111/2.156), CPU 7.48 -> 6.96 s | q09 +2.8 once, q03 -3.7 once; the rest within +-1.2 | -1.96 / -1.48 / -1.70% |
 | `c002` kept store scan for index fetches (against base, dropped) | q20 -6.5 (c001 alone -8.1): the kept scan's reseek costs q20 1.7% | - | q02 / q11 flat | -0.24 / +0.08% |
 
+- `c009`'s 22-query passes against its base: three rounds at 14.37 against 13.62 s (CPU 37.80
+  against 36.06; PostgreSQL's own passes moved 7% between rounds), three more at 12.55 against
+  13.47 s (CPU 32.96 against 35.76, better in every round); peaks 1,693-1,712 against
+  1,690-1,710 MB; all hashes PostgreSQL's. It landed after the table above (`da4c6aa34`).
 - The parallelisation gate for `c008`: wall better in all three pairs of the last set; container
   CPU of the three sets -2.0%, +0.6%, +4.4% (the last at load 15-20), user instructions lower by
   2-3% and cycles not higher in every round: the work left the executor's thread (its share of
