@@ -214,7 +214,17 @@ impl Apps {
         let rev = e.data["revision"].as_str().map(|r| format!(" ({})", &r[..r.len().min(8)])).unwrap_or_default();
         // Who asked for the deploy, when someone did.
         let by = match e.deployment.clone() {
-            Some(d) => self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.actor).map(|a| format!(" by {a}")).unwrap_or_default(),
+            Some(d) => self
+                .db(move |s| s.deployment(&d))
+                .await
+                .ok()
+                .and_then(|d| d.actor)
+                .map(|a| match a.strip_prefix("git:") {
+                    // A commit's author is what the commit says, not who's proven.
+                    Some(name) => format!(" by {name} (commit author)"),
+                    None => format!(" by {a}"),
+                })
+                .unwrap_or_default(),
             None => String::new(),
         };
         let rev = format!("{rev}{by}");
@@ -241,7 +251,9 @@ impl Apps {
     async fn send(&self, t: &NotifyTarget, url: &str, secret: Option<&str>, delivery: &str, e: &Event, title: &str, text: &str) -> (Option<u16>, Option<String>) {
         let link = self.cfg.web_url.as_ref().filter(|_| !e.service.is_empty()).map(|w| format!("{w}/dashboard/apps/{}?env={}", e.service, e.environment));
         let body = match t.kind.as_str() {
-            "slack" => json!({ "text": format!("*{title}*\n{text}{}", link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) }),
+            // Slack reads `<…>` as links and mentions (`<!channel>`) and `&` as an entity start:
+            // a commit author or an error can't ping a channel or hide a link.
+            "slack" => json!({ "text": format!("*{}*\n{}{}", slack_escape(title), slack_escape(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) }),
             "discord" => json!({ "content": format!("**{title}**\n{text}{}", link.as_ref().map(|l| format!("\n{l}")).unwrap_or_default()), "allowed_mentions": { "parse": [] } }),
             _ => json!({ "type": e.kind, "at": e.at, "seq": e.seq, "service": e.service, "environment": e.environment, "deployment": e.deployment, "data": e.data, "title": title, "text": text, "url": link }),
         };
@@ -266,5 +278,19 @@ impl Apps {
             }
             Err(err) => (None, Some(err.without_url().to_string())),
         }
+    }
+}
+
+/// Text for Slack's `mrkdwn`: `&`, `<` and `>` as entities, so nothing in it is a link or a
+/// mention.
+fn slack_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn slack_text_can_not_mention_or_link() {
+        assert_eq!(super::slack_escape("<!channel> <https://evil|Approve> & co"), "&lt;!channel&gt; &lt;https://evil|Approve&gt; &amp; co");
     }
 }

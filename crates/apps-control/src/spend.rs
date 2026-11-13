@@ -75,6 +75,14 @@ impl Apps {
         self.capped.lock().contains(service)
     }
 
+    /// A 409 for anything that would spend more in a capped project (deploys of every kind).
+    pub(crate) fn refuse_capped(&self, service: &str) -> Result<()> {
+        if self.capped(service) {
+            return Err(Error::Conflict("this project reached its spending limit for the month: raise the limit to deploy".into()));
+        }
+        Ok(())
+    }
+
     /// Every node, every `spend_every`: the capped services from the store, onto the
     /// environments loaded here; and on the node holding `apps:spend`, each project's spend
     /// against its limits first.
@@ -128,6 +136,10 @@ impl Apps {
         let ids: HashSet<String> = ids.into_iter().collect();
         for l in self.lives() {
             l.set_capped(ids.contains(&l.service));
+        }
+        // Jobs already running (a job lasts up to a day) stop too.
+        for id in &ids {
+            self.cancel_service_jobs(id);
         }
         *self.capped.lock() = ids;
     }

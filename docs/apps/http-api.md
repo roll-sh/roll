@@ -66,10 +66,10 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
-| `GET /v1/apps/services/{id}/environments/{env}/shell?instance=&cols=&rows=` | WebSocket | a terminal: binary both ways, text `{"resize":[cols,rows]}` | deploy* |
-| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions` | `{ instance?, cols?, rows? }` | 201 `{ id }` (a shell over HTTP: the dashboard's terminal) | deploy* |
-| `GET /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen` | | SSE: base64 chunks (the scrollback first), then `event: closed` | deploy* |
-| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys` | `{ data }` (base64, at most 64 KiB) | 204 | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/shell?instance=&cols=&rows=` | WebSocket | a terminal: binary both ways, text `{"resize":[cols,rows]}` | admin (a shell runs anything with the environment's variables, as agents' shells) |
+| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions` | `{ instance?, cols?, rows? }` | 201 `{ id }` (a shell over HTTP: the dashboard's terminal) | admin (a shell runs anything with the environment's variables, as agents' shells) |
+| `GET /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen` | | SSE: base64 chunks (the scrollback first), then `event: closed` | admin (a shell runs anything with the environment's variables, as agents' shells) |
+| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys` | `{ data }` (base64, at most 64 KiB) | 204 | admin (a shell runs anything with the environment's variables, as agents' shells) |
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 | deploy* |
 | `DELETE /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}` | | 204 | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/jobs` | | `Job[]`, newest first | read |
@@ -225,7 +225,7 @@ type Deployment = {
   environment: string;
   status: DeployStatus;
   trigger: "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote"; // settings: a redeploy
-  actor: string | null;     // who asked: a push's commit author, the calling token or connection ("operator" for the operator's token); null when roll did it on its own
+  actor: string | null;     // who asked: "git:<name>" for a push (its commit's author, as the commit claims it), the calling token or connection ("operator" for the operator's token); null when roll did it on its own
   revision: string | null;   // git commit of a repo source
   message: string;
   image: string | null;      // the built or pinned image, by digest once known

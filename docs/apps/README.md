@@ -181,7 +181,7 @@ every deployment is immutable with instant rollback.
   promote --from staging`, Railway's) deploys the image `from` runs, with no build or pull, under
   the target's own variables and the service's current settings: staging's tested image goes to
   production as it was tested.
-- **Who deployed** (`Deployment.actor`): a push names its commit's author; the API, the CLI and
+- **Who deployed** (`Deployment.actor`): a push names its commit's author as `git:<name>` (what the commit claims, shown as such; it can't pass for a token or `operator`); the API, the CLI and
   the dashboard name the caller rolld's gate saw (`operator` for the operator's token; on
   roll-mcp a scoped token's or connection's name, from `roll_auth::Grant`), never anything a
   client says about itself; deploys roll makes on its own (cron, a settings redeploy it starts)

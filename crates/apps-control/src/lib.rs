@@ -299,6 +299,11 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("registry is {username, password, server?}".into())),
         };
         let (x, y) = (o.get("x").and_then(Value::as_f64), o.get("y").and_then(Value::as_f64));
+        // A paused project makes nothing new (its first deploy would be refused anyway).
+        let (p, month) = (project.clone(), crate::spend::month_of(code_sql::now_ms()).0);
+        if self.db(move |s| s.project_capped(&p, month)).await? {
+            return Err(Error::Conflict("this project reached its spending limit for the month: raise the limit to add services".into()));
+        }
         let this = self.clone();
         let pname = {
             let p = project.clone();

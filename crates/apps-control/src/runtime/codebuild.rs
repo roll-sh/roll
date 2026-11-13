@@ -398,12 +398,19 @@ impl Builder for CodeBuild {
     /// The deployment's tag goes; the image's layers go with ECR's own cleanup once no tag
     /// holds them.
     async fn remove_image(&self, image: &str) {
-        let Some((uri, digest)) = image.split_once('@').filter(|(u, d)| d.starts_with("sha256:") && u.contains('/')) else { return };
+        // `<repo>@sha256:…`, or `<repo>:<tag>` as deployments recorded it before digests.
+        let (uri, id) = match image.split_once('@') {
+            Some((u, d)) if d.starts_with("sha256:") => (u, aws_sdk_ecr::types::ImageIdentifier::builder().image_digest(d).build()),
+            _ => match image.rsplit_once(':').filter(|(u, t)| !t.contains('/') && u.contains('/') && *t != CACHE_TAG) {
+                Some((u, t)) => (u, aws_sdk_ecr::types::ImageIdentifier::builder().image_tag(t).build()),
+                None => return,
+            },
+        };
         let Some((_, repo)) = uri.split_once('/') else { return };
         if !repo.starts_with(&format!("{}/", self.cfg.ecr_repo)) {
             return;
         }
-        if let Err(e) = self.ecr.batch_delete_image().repository_name(repo).image_ids(aws_sdk_ecr::types::ImageIdentifier::builder().image_digest(digest).build()).send().await {
+        if let Err(e) = self.ecr.batch_delete_image().repository_name(repo).image_ids(id).send().await {
             warn!(image, error = %aws_sdk_ecr::error::DisplayErrorContext(e), "apps: BatchDeleteImage");
         }
     }

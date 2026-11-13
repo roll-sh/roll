@@ -112,8 +112,9 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         if !same(&token_hash(&t), &hash) {
             return Some(denied(apps, service, env).await);
         }
-        // One leading slash: `//host/x` would send the visitor to another site.
-        let path = format!("/{}", req.uri().path().trim_start_matches('/'));
+        // One leading slash, and no backslash (browsers read `/\host` as `//host`): the
+        // redirect never leaves the site.
+        let path = format!("/{}", req.uri().path().replace('\\', "%5C").trim_start_matches('/'));
         let location = if rest.is_empty() { path.to_string() } else { format!("{path}?{}", rest.join("&")) };
         let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
         let cookie = format!("{name}={t}; Path=/; HttpOnly; SameSite=Lax{secure}");

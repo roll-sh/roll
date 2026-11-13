@@ -298,7 +298,7 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     }
     assert_eq!(d2["status"], "active", "{d2}");
     assert_eq!(d2["trigger"], "push");
-    assert_eq!(d2["actor"], "Ada Lovelace", "a push names its commit's author");
+    assert_eq!(d2["actor"], "git:Ada Lovelace", "a push names its commit's author, as the commit claims it");
     assert_eq!(settled(&w, &id, "production", &first).await["status"], "inactive");
     // A rollback runs the old image again: no build.
     let builds = Fake::count(&w.fake.counts.builds);
@@ -638,6 +638,10 @@ async fn a_project_over_its_spend_limit_is_paused_until_the_limit_is_raised() {
     call(&w.api, "PUT", &limits, Some(json!({"hard_usd": 50}))).await;
     get_until(&w.api, &limits, |l| l["capped"] == false).await;
     assert_eq!(visit(&w, &host, "/").await.0, StatusCode::OK);
+    // Deleting the service doesn't take its spend off the month.
+    let before = call(&w.api, "GET", &limits, None).await.1["month_usd"].as_f64().unwrap();
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(call(&w.api, "GET", &limits, None).await.1["month_usd"].as_f64().unwrap() >= before);
 }
 
 /// A new environment starts with another's variables, and promoting deploys what another

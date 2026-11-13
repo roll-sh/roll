@@ -88,7 +88,7 @@ export function Deployments({
                       {active && <span className="rounded border border-accent/40 px-1.5 font-mono text-[10.5px] text-accent">live</span>}
                       <span className="text-[11.5px] text-subtle">
                         {TRIGGER_LABEL[d.trigger]}
-                        {d.actor && <> by {d.actor}</>}
+                        {d.actor && (d.actor.startsWith("git:") ? <span title="The commit's author, as the commit says"> by {d.actor.slice(4)}</span> : <> by {d.actor}</>)}
                       </span>
                       {d.revision && <span className="font-mono text-[11.5px] text-muted">{shortSha(d.revision)}</span>}
                     </div>

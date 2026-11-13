@@ -103,7 +103,18 @@ CREATE TABLE IF NOT EXISTS notify_deliveries (
     at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS notify_due ON notify_deliveries (status, next_at);
+DELETE FROM notify_deliveries WHERE id NOT IN (SELECT MIN(id) FROM notify_deliveries GROUP BY target, event);
 CREATE UNIQUE INDEX IF NOT EXISTS notify_once ON notify_deliveries (target, event);
+CREATE TABLE IF NOT EXISTS project_usage (
+    project TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    cpu_seconds REAL NOT NULL,
+    gb_seconds REAL NOT NULL,
+    requests INTEGER NOT NULL,
+    egress_bytes INTEGER NOT NULL,
+    build_seconds REAL NOT NULL,
+    PRIMARY KEY (project, hour)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS spend_limits (
     project TEXT PRIMARY KEY,
     alert_usd REAL,
@@ -501,6 +512,17 @@ impl Store {
     /// Remove a service and everything that belongs to it (deployments' history included).
     pub fn delete_service(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
+            // What it used stays its project's (spend limits, the month's bill): deleting a
+            // service and making another never brings the month's spend down.
+            c.execute(
+                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds) \
+                 SELECT s.project, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds) \
+                 FROM usage u JOIN services s ON s.id = u.service WHERE u.service = ? GROUP BY s.project, u.hour \
+                 ON CONFLICT (project, hour) DO UPDATE SET cpu_seconds = project_usage.cpu_seconds + excluded.cpu_seconds, \
+                 gb_seconds = project_usage.gb_seconds + excluded.gb_seconds, requests = project_usage.requests + excluded.requests, \
+                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds",
+                [id],
+            )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
@@ -1370,19 +1392,38 @@ impl Store {
         })
     }
 
+    /// Whether a project is capped in `month`.
+    pub fn project_capped(&self, project: &str, month: i64) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM spend_limits WHERE project = ? AND capped = ?", params![project, month], |_| Ok(())).optional()?.is_some())
+    }
+
     /// The services of every project capped in `month`.
     pub fn capped_services(&self, month: i64) -> Result<Vec<String>> {
         Ok(self.db.query("SELECT s.id FROM services s JOIN spend_limits l ON l.project = s.project WHERE l.capped = ?", [month], |r| r.get(0))?)
     }
 
-    /// A project's use since `since_hour`, over the services it has now.
+    /// A project's use since `since_hour`: its services', and what deleted ones used.
     pub fn project_usage(&self, project: &str, since_hour: i64) -> Result<UsageAdd> {
-        Ok(self.db.query_row(
+        let row = |r: &code_sql::Row<'_>| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? });
+        let live = self.db.query_row(
             "SELECT COALESCE(SUM(u.cpu_seconds), 0), COALESCE(SUM(u.gb_seconds), 0), COALESCE(SUM(u.requests), 0), COALESCE(SUM(u.egress_bytes), 0), COALESCE(SUM(u.build_seconds), 0) \
              FROM usage u JOIN services s ON s.id = u.service WHERE s.project = ? AND u.hour >= ?",
             params![project, since_hour],
-            |r| Ok(UsageAdd { cpu_seconds: r.get(0)?, gb_seconds: r.get(1)?, requests: r.get(2)?, egress_bytes: r.get(3)?, build_seconds: r.get(4)? }),
-        )?)
+            row,
+        )?;
+        let gone = self.db.query_row(
+            "SELECT COALESCE(SUM(cpu_seconds), 0), COALESCE(SUM(gb_seconds), 0), COALESCE(SUM(requests), 0), COALESCE(SUM(egress_bytes), 0), COALESCE(SUM(build_seconds), 0) \
+             FROM project_usage WHERE project = ? AND hour >= ?",
+            params![project, since_hour],
+            row,
+        )?;
+        Ok(UsageAdd {
+            cpu_seconds: live.cpu_seconds + gone.cpu_seconds,
+            gb_seconds: live.gb_seconds + gone.gb_seconds,
+            requests: live.requests + gone.requests,
+            egress_bytes: live.egress_bytes + gone.egress_bytes,
+            build_seconds: live.build_seconds + gone.build_seconds,
+        })
     }
 
     // ── state ──

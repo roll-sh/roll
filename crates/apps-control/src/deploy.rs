@@ -50,9 +50,7 @@ impl Apps {
     /// `image` to deploy another image), or of `upload` (a `roll up` tree).
     /// With `key` (an `Idempotency-Key`), a retry answers the deployment the first call queued.
     pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, by: By, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
-        if self.capped(service) {
-            return Err(Error::Conflict("this project reached its spending limit for the month: raise the limit to deploy".into()));
-        }
+        self.refuse_capped(service)?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
             if !["revision", "image", "message"].contains(&k.as_str()) {
@@ -75,7 +73,12 @@ impl Apps {
             if let Some(d) = self.db(move |s| s.keyed_deployment(&sid, &e, &kk)).await? {
                 // A retry repeats its request; the same key on another one is a client's bug,
                 // never silently the first request's deployment.
-                let differs = revision.as_ref().is_some_and(|r| d.revision.as_ref() != Some(r)) || message.as_ref().is_some_and(|m| *m != d.message);
+                // What was stored is resolved (a branch or short sha becomes the full sha) and cut
+                // to 500 characters: compare like with like, and never call a branch a change.
+                let full_sha = |r: &str| r.len() >= 7 && r.bytes().all(|b| b.is_ascii_hexdigit());
+                let rev_differs = revision.as_ref().is_some_and(|r| full_sha(r) && !d.revision.as_deref().is_some_and(|have| have.starts_with(r.as_str())));
+                let msg_differs = message.as_ref().is_some_and(|m| m.chars().take(500).collect::<String>() != d.message);
+                let differs = rev_differs || msg_differs;
                 if differs {
                     return Err(Error::Conflict(format!("Idempotency-Key {k} was used for another deploy ({})", d.id)));
                 }
@@ -158,6 +161,7 @@ impl Apps {
     /// and without moving to another revision. What a change of variables or settings needs,
     /// for every source (an upload service has no source to deploy again).
     pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
+        self.refuse_capped(service)?;
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| k.as_str() != "message") {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -199,6 +203,7 @@ impl Apps {
     /// revision it was built from) to `env`, without a build, with `env`'s own variables and the
     /// service's current settings (Railway's promotion: staging's tested image to production).
     pub async fn promote(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
+        self.refuse_capped(service)?;
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| !["from", "message"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -239,6 +244,7 @@ impl Apps {
     /// `POST …/deploys/{dep}/rollback`: deploy an earlier deployment's image and settings
     /// again, without a build.
     pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>) -> Result<Deployment> {
+        self.refuse_capped(service)?;
         let old = self.deployment(service, env, dep).await?;
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
         let d = NewDeployment {
@@ -358,6 +364,8 @@ impl Apps {
     }
 
     async fn run_inner(self: &Arc<Self>, d: &Deployment, log: &LogSink, cancel: CancellationToken) -> anyhow::Result<()> {
+        // Queued before its project reached its spend limit: it doesn't build or start now.
+        anyhow::ensure!(!self.capped(&d.service), "the project reached its spending limit for the month");
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let (svc, env) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
         let id = d.id.clone();
@@ -504,9 +512,11 @@ impl Apps {
         }
         let name = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
         let name = name.trim_start_matches('[').trim_end_matches(']');
-        if let Ok(addrs) = tokio::net::lookup_host((name, 443)).await
-            && addrs.into_iter().any(|a| private_ip(a.ip()))
-        {
+        // A name that doesn't resolve now isn't pulled either (dockerd would resolve it again).
+        // A name that changes its answer between here and dockerd's lookup isn't caught: the
+        // fleet pulls through CodeBuild and Fargate, outside the node's network.
+        let addrs: Vec<_> = tokio::net::lookup_host((name, 443)).await.map_err(|e| anyhow::anyhow!("{host} doesn't resolve: {e}"))?.collect();
+        if addrs.is_empty() || addrs.iter().any(|a| private_ip(a.ip())) {
             anyhow::bail!("{host} resolves to a private address, which isn't a registry roll pulls from");
         }
         Ok(())
@@ -994,10 +1004,19 @@ impl Apps {
         sources.touches(repo, &from, revision, patterns).await.unwrap_or(true)
     }
 
+    /// Queue the deploys a landing makes. One service failing (or capped) doesn't hold up the
+    /// others: they're all tried, and the first error comes back for the landing to be retried
+    /// (its deploys are keyed by the landing, so those that queued aren't queued twice).
     async fn on_landing(self: &Arc<Self>, l: &crate::integrations::Landing) -> Result<()> {
         let all = self.db(|s| Ok((s.services(None)?, s.all_environments()?))).await?;
         let (services, envs) = all;
+        let mut failed = None;
         for svc in services.iter().filter(|s| matches!(&s.source, Source::Repo { repo, .. } if *repo == l.repo)) {
+            if self.capped(&svc.id) {
+                // Paused by its project's spend limit: not a failure to retry.
+                self.logs.sink(format!("env:{}/production", svc.id), Stream::System).line(format!("push {} not deployed: the project reached its spending limit", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                continue;
+            }
             // The paths a push must touch: roll.toml's at the pushed revision (the environment's
             // block first), else the service's setting; none: every push counts.
             let file = self.app_config_at(svc, &l.revision.sha).await;
@@ -1013,11 +1032,16 @@ impl Apps {
                 let body = serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") });
                 // The owner queues it (it may be another node: the queue is in the store).
                 let key = format!("landing:{}", l.seq);
-                self.deploy(&svc.id, &e.name, body, By { trigger: Trigger::Push, actor: l.author.clone() }, None, Some(&key)).await?;
-                info!(service = %svc.id, env = %e.name, revision = %l.revision.sha, "apps: deploying a push");
+                match self.deploy(&svc.id, &e.name, body, By { trigger: Trigger::Push, actor: l.author.as_ref().map(|a| format!("git:{a}")) }, None, Some(&key)).await {
+                    Ok(_) => info!(service = %svc.id, env = %e.name, revision = %l.revision.sha, "apps: deploying a push"),
+                    Err(err) => {
+                        warn!(service = %svc.id, env = %e.name, error = %err, "apps: a push's deploy didn't queue");
+                        failed.get_or_insert(err);
+                    }
+                }
             }
         }
-        Ok(())
+        failed.map_or(Ok(()), Err)
     }
 
     /// Cron: start the runs that are due in owned cron services (a run still going when the

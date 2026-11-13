@@ -172,7 +172,7 @@ impl std::fmt::Debug for BuildJob {
 /// Every value still reaches the build as a BuildKit secret, which isn't an environment.
 pub fn steers_a_process(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
-    const PREFIXES: [&str; 11] = ["DOCKER_", "BUILDKIT_", "BUILDX_", "COMPOSE_", "LD_", "DYLD_", "GCONV_", "MALLOC_", "SSL_", "XDG_", "BASH_FUNC_"];
+    const PREFIXES: [&str; 16] = ["DOCKER_", "BUILDKIT_", "BUILDX_", "COMPOSE_", "LD_", "DYLD_", "GCONV_", "MALLOC_", "SSL_", "XDG_", "BASH_FUNC_", "AWS_", "OTEL_", "GRPC_", "SSH_", "GIT_"];
     const NAMES: [&str; 30] = [
         "PATH", "HOME", "USER", "SHELL", "TMPDIR", "ENV", "BASH_ENV", "IFS", "CDPATH", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
         "HOSTALIASES", "LOCPATH", "LOCALDOMAIN", "NLSPATH", "RES_OPTIONS", "TZDIR", "GODEBUG", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK", "GORACE", "GOFLAGS",

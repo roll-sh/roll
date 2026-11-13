@@ -38,16 +38,26 @@ impl Apps {
         }
         let live = self.load_live(service, env).await?;
         let Some(tpl) = live.template() else { return Err(Error::Conflict(format!("nothing is deployed in {env} yet"))) };
+        // The slot is taken under the lock that counts them (a placeholder until the job has an
+        // id), so requests at once can't all pass the count.
         let key = crate::env_key(service, env);
+        let hold = format!("pending:{}", crate::model::random(12));
         {
-            let running = self.running_jobs.lock();
+            let mut running = self.running_jobs.lock();
             if running.values().filter(|k| **k == key).count() >= MAX_PER_ENV || running.len() >= MAX_PER_NODE {
                 return Err(Error::Conflict(format!("at most {MAX_PER_ENV} jobs run at once in an environment; wait for one to end or cancel it")));
             }
+            running.insert(hold.clone(), key.clone());
         }
         let (sid, e, dep, cmd) = (service.to_string(), env.to_string(), tpl.deployment.clone(), command.to_string());
-        let job = self.db(move |s| s.add_job(&sid, &e, &dep, &cmd)).await?;
-        self.running_jobs.lock().insert(job.id.clone(), key);
+        let made = self.db(move |s| s.add_job(&sid, &e, &dep, &cmd)).await;
+        let job = {
+            let mut running = self.running_jobs.lock();
+            running.remove(&hold);
+            let job = made?;
+            running.insert(job.id.clone(), key);
+            job
+        };
         let log = self.logs.sink(format!("job:{}", job.id), Stream::Stdout);
         log.stream(Stream::System).line(format!("$ {command}"));
         let cancel = CancellationToken::new();
@@ -81,6 +91,18 @@ impl Apps {
     pub(crate) fn cancel_jobs(&self, service: &str, env: &str) {
         let key = crate::env_key(service, env);
         let ids: Vec<String> = self.running_jobs.lock().iter().filter(|(_, k)| **k == key).map(|(id, _)| id.clone()).collect();
+        let cancels = self.cancels.lock();
+        for id in ids {
+            if let Some(t) = cancels.get(&id) {
+                t.cancel();
+            }
+        }
+    }
+
+    /// Cancel every job of a service running on this node (its project reached its spend limit).
+    pub(crate) fn cancel_service_jobs(&self, service: &str) {
+        let prefix = format!("{service}/");
+        let ids: Vec<String> = self.running_jobs.lock().iter().filter(|(_, k)| k.starts_with(&prefix)).map(|(id, _)| id.clone()).collect();
         let cancels = self.cancels.lock();
         for id in ids {
             if let Some(t) = cancels.get(&id) {

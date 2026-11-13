@@ -51,6 +51,9 @@ pub struct Inst {
     crashes: AtomicU32,
     /// Failed health checks in a row while running.
     health_fails: AtomicU32,
+    /// The stop a crash started: a start of the same instance waits for it, so it never stops
+    /// the restarted process.
+    stopping: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Inst {
@@ -65,6 +68,7 @@ impl Inst {
             cpu_seen: Mutex::new(None),
             crashes: AtomicU32::new(0),
             health_fails: AtomicU32::new(0),
+            stopping: Mutex::new(None),
         })
     }
 
@@ -284,6 +288,10 @@ impl EnvLive {
 
     /// Start `inst` and wait until it answers (web) or has kept running (worker).
     async fn start(&self, inst: &Arc<Inst>, run: &Run, health: Option<&str>, deadline: Instant) -> Result<Option<SocketAddr>, WakeError> {
+        let crash_stop = inst.stopping.lock().take();
+        if let Some(stop) = crash_stop {
+            let _ = stop.await;
+        }
         *inst.phase.lock() = Phase::Starting;
         let log = self.log.instance(&inst.name, &inst.deployment);
         let addr = match self.runtime.start(&inst.name, log).await {
@@ -477,11 +485,16 @@ impl EnvLive {
     /// start's boosted CPU), and the crash is counted. Three in ten minutes is a crash loop, said
     /// once in the environment's log.
     fn crashed(&self, inst: &Inst, why: &str) {
+        self.crashed_with(inst, why, Duration::from_secs(2));
+    }
+
+    /// [`Self::crashed`], the stop giving requests in flight `grace` to finish.
+    fn crashed_with(&self, inst: &Inst, why: &str, grace: Duration) {
         *inst.phase.lock() = Phase::Crashed;
         let (runtime, name) = (self.runtime.clone(), inst.name.clone());
-        tokio::spawn(async move {
-            let _ = runtime.stop(&name, Duration::from_secs(2)).await;
-        });
+        *inst.stopping.lock() = Some(tokio::spawn(async move {
+            let _ = runtime.stop(&name, grace).await;
+        }));
         let entered = {
             let mut c = self.crashes.lock();
             let was = Self::looping(&c);
@@ -759,7 +772,7 @@ impl EnvLive {
                 due
             };
             if due {
-                self.check_health(&insts, path).await;
+                self.check_health(&insts, path, tpl.run.concurrency).await;
             }
         }
         if self.capped.load(Ordering::SeqCst) {
@@ -786,9 +799,12 @@ impl EnvLive {
     /// answers errors with its port still open) replace it: it's out of rotation and stopped
     /// as a crash (counted toward a crash loop), and the next request or the floor starts a
     /// fresh one.
-    async fn check_health(&self, insts: &[Arc<Inst>], path: &str) {
+    async fn check_health(&self, insts: &[Arc<Inst>], path: &str, concurrency: u32) {
+        // An instance with as many requests as it takes is busy, not broken: a probe that queues
+        // behind them proves nothing, so it isn't checked until it has room.
         let running: Vec<(&Arc<Inst>, SocketAddr)> = insts
             .iter()
+            .filter(|i| i.in_flight() < concurrency.max(1))
             .filter_map(|i| match i.phase() {
                 Phase::Running(Some(a)) => Some((i, a)),
                 _ => None,
@@ -804,7 +820,8 @@ impl EnvLive {
             self.log.stream(Stream::System).line(format!("{}: health check {path} failed ({n} of {})", i.name, self.cfg.health_failures));
             // Still the instance that was checked (not stopped or replaced meanwhile).
             if n >= self.cfg.health_failures && i.phase() == Phase::Running(Some(addr)) {
-                self.crashed(i, &format!("its health check {path} failed {n} times in a row"));
+                // Out of rotation now; what it's serving gets the drain to finish.
+                self.crashed_with(i, &format!("its health check {path} failed {n} times in a row"), self.cfg.drain);
             }
         }
     }
