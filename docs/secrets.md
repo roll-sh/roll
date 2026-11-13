@@ -386,6 +386,14 @@ A link is `{kind, ref, field, mode, options}`:
   (a service that scales to zero refuses them). Only
   the lease's metadata is stored, never the credential.
 
+**Suggested links.** `GET …/suggestions` lists each resource on the project's canvas with the
+standard environments that neither link it nor have its usual keys at `/`, and those keys: the
+provider's usual fields (a credential of the app's own, managed, wherever the product issues one:
+a Postgres role, a bucket key, a Kafka user; never the shared password) under their usual names
+(`DATABASE_URL`, `AWS_*`, `KAFKA_*`), prefixed with the resource's name when the canvas has two of a
+kind. The overview offers each as one click to link it in all of them (a protected environment gets
+a change request). Only roll can: it knows the canvas.
+
 Which fields and modes each kind offers is in `GET …/links` (the catalogue of the project's
 resources and their fields). The providers rolld registers are listed in `crates/rolld/src/secrets.rs`
 and in the table below.
@@ -985,6 +993,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
 | `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin) |
 | `POST /restore` | `Archive` (an opened backup) | `{environments, secrets, warnings}` (admin; an empty project) |
+| `GET /suggestions` | | `Suggestion[]`: canvas resources linked nowhere yet, with their usual keys and where they'd go |
 | `GET /shared` | | `Import[]`: the folders other projects share with this one |
 | `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
@@ -1179,7 +1188,8 @@ Done and in PR #20:
   Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
   identities pinned to client addresses; encrypted project backup and restore;
-- the dashboard's Secrets surface, with the deployment key's source and a rotation's progress;
+- the dashboard's Secrets surface, with the deployment key's source and a rotation's progress,
+  and suggested links for the canvas's resources;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1200,14 +1210,10 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Suggested links**: a resource on the project's canvas that no environment links yet (a
-   Postgres database, a Redis, a bucket, a stream) is offered under its usual key names
-   (`DATABASE_URL`, `REDIS_URL`, `AWS_*`, `KAFKA_*`) for every standard environment, one click to
-   link them all (`GET …/suggestions`). Something only roll can do, since it knows the canvas.
-3. **Edit one key across environments** from the overview grid: a row's editor sets the key in
+2. **Edit one key across environments** from the overview grid: a row's editor sets the key in
    every environment it's chosen for, as one change each, with protected ones opening requests.
-4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-5. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+4. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

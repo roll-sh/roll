@@ -1,4 +1,5 @@
 import { Folder, Search } from "lucide-react";
+import { Suggestions } from "./suggestions";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import type { Cell, GridRow } from "@/lib/secrets-api";
@@ -60,6 +61,7 @@ export function OverviewGrid() {
       </div>
 
       <ErrorNote error={grid.error} className="m-3" />
+      {path === "/" && <Suggestions onLinked={grid.reload} />}
 
       {grid.data && rows.length === 0 ? (
         <Teach

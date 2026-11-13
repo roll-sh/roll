@@ -32,6 +32,7 @@ mod requests;
 mod required;
 mod shares;
 pub mod sinks;
+pub mod suggestions;
 mod sweep;
 pub mod syncs;
 mod tokens;

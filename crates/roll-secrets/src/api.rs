@@ -40,6 +40,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{E}/imports"), get(imports).put(set_imports))
         .route(&format!("{E}/exports"), get(exports).put(set_exports))
         .route(&format!("{P}/shared"), get(shared_with))
+        .route(&format!("{P}/suggestions"), get(suggestions))
         .route(&format!("{P}/backup"), post(backup))
         .route(&format!("{P}/restore"), post(restore))
         .route(&format!("{E}/secrets"), get(secrets))
@@ -324,6 +325,10 @@ async fn backup(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes)
 async fn restore(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let archive: crate::backup::Archive = body(&b)?;
     Ok(ok(blocking(s, move |s| s.restore(&project, archive, &c)).await?))
+}
+
+async fn suggestions(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.suggestions(&project, &c)).await?))
 }
 
 async fn shared_with(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

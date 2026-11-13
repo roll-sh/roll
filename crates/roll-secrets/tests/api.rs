@@ -33,6 +33,9 @@ impl LinkProvider for Fake {
         ];
         F
     }
+    fn suggested(&self) -> &[(&'static str, Mode)] {
+        &[("url", Mode::Live), ("access_key_id", Mode::Managed), ("secret_access_key", Mode::Managed)]
+    }
     fn read(&self, r#ref: &str, _: &str, _: &Link) -> roll_secrets::Result<Secret> {
         Ok(Secret::new(format!("s3://{ref}?pw={}", self.password.lock().unwrap())))
     }
@@ -506,6 +509,10 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("bucket assets isn't in this project")));
     let place = format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project);
     api.ok(Method::PUT, &place, Some(json!({ "x": 0, "y": 0 }))).await;
+    // On the canvas and linked nowhere: offered for every environment, under its usual keys.
+    let offered = api.ok(Method::GET, "/suggestions", None).await;
+    assert_eq!((offered[0]["ref"].as_str(), offered[0]["environments"].clone()), (Some("assets"), json!(["development", "staging", "production"])));
+    assert_eq!(offered[0]["links"][1], json!({ "key": "AWS_ACCESS_KEY_ID", "field": "access_key_id", "mode": "managed" }));
     let link = |field: &str, mode: &str| json!({ "kind": "bucket", "ref": "assets", "field": field, "mode": mode });
     api.ok(
         Method::POST,
@@ -517,6 +524,7 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
         ] })),
     )
     .await;
+    assert_eq!(api.ok(Method::GET, "/suggestions", None).await[0]["environments"], json!(["development", "staging"]), "linked in production now");
     // One credential for the pair; the live URL follows the resource.
     let v = api.values("production", "/").await["values"].clone();
     assert_eq!((v["AWS_ACCESS_KEY_ID"].as_str(), v["AWS_SECRET_ACCESS_KEY"].as_str(), v["BUCKET_URL"].as_str()), (Some("AK1"), Some("sk-1"), Some("s3://assets?pw=0")));
