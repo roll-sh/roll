@@ -73,6 +73,10 @@ function targetSummary(s: Sync): string {
   const t = s.target;
   const str = (k: string) => (typeof t[k] === "string" ? (t[k] as string) : "");
   if (str("repo")) return str("environment") ? `${str("repo")} · ${str("environment")}` : str("repo");
+  if (s.kind === "kubernetes") return `${str("namespace")}/${str("secret")}`;
+  if (s.kind === "gitlab") return `${str("project")} · ${str("environment_scope") || "*"}`;
+  if (s.kind === "render") return str("service");
+  if (s.kind === "netlify") return `${str("site")} · ${str("context") || "all"}`;
   if (str("url")) {
     try {
       return new URL(str("url")).host;

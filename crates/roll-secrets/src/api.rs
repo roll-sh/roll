@@ -34,7 +34,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/compare"), get(compare))
         .route(&format!("{P}/environments"), get(environments).post(create_environment).delete(delete_by_label))
         .route(&format!("{P}/environments/order"), put(order))
-        .route(E, get(environment).patch(update_environment).delete(delete_environment))
+        .route(E, get(environment).put(ensure_environment).patch(update_environment).delete(delete_environment))
         .route(&format!("{E}/policy"), put(policy))
         .route(&format!("{E}/folders"), get(folders).post(create_folder).delete(delete_folder))
         .route(&format!("{E}/imports"), get(imports).put(set_imports))
@@ -307,6 +307,13 @@ async fn shared_with(State(s): S, Who(c): Who, Path(project): Path<String>) -> c
     Ok(ok(blocking(s, move |s| s.shared_with(&project, &c)).await?))
 }
 
+/// Create or bring up to date in one call (previews, apps): 201 when it was created.
+async fn ensure_environment(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let e: crate::envs::Ensure = body(&b)?;
+    let out = blocking(s, move |s| s.ensure_environment(&project, &env, e, &c)).await?;
+    Ok(if out.created { created(out) } else { ok(out) })
+}
+
 async fn exports(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.exports(&project, &env, &path_of(&q), &c)).await?))
 }
@@ -441,7 +448,7 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
             let plain = zeroize::Zeroizing::new(serde_json::to_vec(&v.values).expect("JSON"));
             let context = format!("roll-secrets:{project}:{env}:{consumer}");
             let sealed = crate::crypto::seal_to(&to, &context, &plain).map_err(|e| Error::BadRequest(e.to_string()))?;
-            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases }))
+            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases, "dynamic": v.dynamic, "linked": v.linked }))
         }
     };
     Ok(secret_response(out))

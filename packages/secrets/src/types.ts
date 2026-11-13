@@ -26,12 +26,19 @@ export type Environment = {
   max_age_days: number | null;
   /** The host opened change requests are announced to (the URL itself stays sealed). */
   notify: string | null;
+  /** An ephemeral environment that may read a protected base (else it never does). */
+  trusted: boolean;
 };
+/** `PUT …/environments/{env}`: what it should be; `replace` also deletes its other own keys at `path`. */
+export type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean };
+export type Ensured = { environment: Environment; created: boolean; change: Change | null };
 export type NewEnvironment = {
   slug: string;
   name?: string;
   kind?: "standard" | "ephemeral";
   base?: string;
+  /** Ephemeral only: it may read a protected base (needs admin on it). */
+  trusted?: boolean;
   labels?: Record<string, string>;
   expires_at?: number;
   ttl_minutes?: number;
@@ -84,7 +91,8 @@ export type Version = { version: number; seq: number; op: "set" | "delete"; what
 export type Problem = { key: string; problem: string };
 /** `leases`: ids of dynamic credentials issued. */
 /** `dynamic`: the keys holding a dynamic link's short-lived credential. */
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[] };
+/** `dynamic`: keys holding a dynamic link's short-lived credential; `linked`: keys whose value comes from any link. */
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[] };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string };
@@ -205,10 +213,10 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 /** A kind the server registered: its target's fields, whether pushes carry values, whether it has a signing secret. */
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
-export type Health = { ok: boolean; key: "env" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
+export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */
 export type Sealed = { v: number; epk: string; nonce: string; ct: string };
 /** A resolve sealed to the caller's key: `sealed` opens to the JSON of `Values.values`, with `context` as the associated data. */
-export type SealedValues = { sealed: Sealed; context: string; problems: Problem[]; leases: string[] };
+export type SealedValues = { sealed: Sealed; context: string; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[] };

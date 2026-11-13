@@ -113,6 +113,15 @@ data key encrypts every value                     (aad "roll-secrets:v1:<project
   `<home>/secrets.key` (mode 0600) and logs that it did. A node using the system database refuses to
   serve secrets without `ROLL_SECRET_KEY` (every route answers 503 and says why), because nodes must
   share the key.
+- **The deployment key from AWS KMS.** Instead of the key itself, a node can hold it encrypted:
+  `ROLL_SECRET_KEY_KMS` is the base64 `CiphertextBlob` of
+  `aws kms encrypt --key-id <key> --plaintext fileb://key --encryption-context roll=secrets`.
+  rolld decrypts it once at startup with the standard AWS credentials (an instance or task role on
+  roll cloud), so the plaintext key is never in the environment or on disk, a stolen environment
+  is useless without KMS access, and every startup is a CloudTrail event. The encryption context
+  binds the ciphertext to roll secrets. Rotation works the same with `ROLL_SECRET_KEY_KMS_PREVIOUS`.
+  If KMS can't decrypt it, every route answers 503 with KMS's error code (never key material), and
+  health reports `"key": "kms"`.
 - **Key rotation.** Set the new key as `ROLL_SECRET_KEY` and the old one as
   `ROLL_SECRET_KEY_PREVIOUS`. A data key that opens only with the previous key is resealed with the
   new key on first use, so the previous key can be dropped once `GET /v1/secrets/health` reports
@@ -172,6 +181,18 @@ environment is a first-class kind, built to be cheap:
   the preview's branched resources: the preview's Postgres branch, its Redis branch.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
+- **Ensuring one** is a single idempotent call, `PUT …/environments/{env}` with what it should be
+  (`{base?, kind?, name?, labels?, expires_at? | ttl_minutes?, trusted?, path?, secrets?: Op[],
+  replace?}`). If the environment is missing, it's created (201). Otherwise its labels, expiry and
+  name are brought to what's given, and `secrets` are applied to its own keys at `path` as one
+  change, with `replace` also deleting the folder's other own keys (never a linked or personal
+  one). An unchanged value is no change, so ensuring what's there records nothing (`change: null`).
+  Its kind, base and trust aren't changed in place: 409 `mismatch`, delete it and ensure it again.
+  previews' reconcile loop and apps' environments are each one call.
+- It is **untrusted** unless made with `"trusted": true` (which needs `admin` on its base): it
+  runs a change's code, so reading it never reaches a protected environment (its base, an import, a
+  reference), whoever reads it. A preview of a same-repo change in a project that allows it is made
+  trusted; a fork's never is. `Environment.trusted` says which.
 
 ### Folders
 
@@ -311,6 +332,12 @@ it's **stale**: unchanged for longer than the environment's `max_age_days`
 log (reveal, export, resolve and sync pushes) over the last 90 days; nothing is decrypted. A stale
 key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 
+**Rotation reminders.** An environment with a `max_age_days` limit and a notify URL (its
+protection policy's `notify_url`) gets one notice a day while it has stale keys: their names (up to
+20, then a count), the limit and a link, through the same outbox and retries as approval notices.
+Live and dynamic links don't count (they change on their own); managed ones do. Two nodes never
+both remind: the day is claimed in the same write that queues the notice.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -436,9 +463,18 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
 roll apps (docs/apps/) deploys a service into an environment and injects that environment's
 secrets when the service starts. It uses one call:
 
-- **In process** (`Secrets::resolve`): `resolve(project, env, path, &Consumer::App { service })`
-  returns an `Env` map of `Value`s (redacted in `Debug`, zeroized on drop). Dynamic links issue
-  leases owned by the consumer, and the call is audited as `resolve` by `app:<service>`.
+- **In process**: `Secrets::values(project, env, path, true, Some("app:<service>"), &caller)`
+  returns `Values`: a map of `Value`s (redacted in `Debug`, zeroized on drop), `problems` (fail a
+  deploy on any), `dynamic` (keys holding a short-lived credential: refuse them for a service that
+  scales to zero) and `linked` (keys from links, whose addresses a container network may need
+  rewritten). The caller is `Caller::consumer("app:<service>")`, or `Secrets::untrusted(project,
+  &caller)` for code nobody vetted. Dynamic links issue leases owned by the consumer, and the call
+  is audited as `resolve` by `app:<service>`. `Secrets::digest(project, env, path, &caller)` (no
+  decryption, unaudited) moves whenever the values would: compare it to decide a redeploy.
+- **Preview environments are untrusted themselves.** An ephemeral environment that wasn't made
+  `trusted` never reads a protected environment, whoever resolves it: an app deployed into a
+  preview's environment as `app:<service>` gets its overrides and the unprotected rest, never
+  production's values. Its digest leaves the protected base out the same way.
 - **Over HTTP** (another node or process): `POST …/environments/{env}/resolve`
   `{"path": "/", "consumer": "app:<service>", "seal_to": "<X25519 public key>"}`. With `seal_to`
   the answer is one `roll-seal-v1` box (the same box as docs/code/agents.md, "Endpoints"; associated
@@ -559,7 +595,8 @@ open it.
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
-they change: GitHub Actions secrets, Vercel, Cloudflare Workers, AWS Parameter Store, an endpoint
+they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Cloudflare
+Workers, AWS Parameter Store, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -664,6 +701,39 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
   it.
 
+### `render` and `netlify`
+
+- **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
+  environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
+  deleted; the key holding an API key is a secret of this environment and folder.
+- **`netlify`**, `{account, site, context?, token_key}`: a Netlify site's variables, one deploy
+  context's values (`all` by default; `production`, `deploy-preview`, `branch-deploy`, `dev`). A
+  changed key sets that context's value (or creates the variable with it), a removed key deletes
+  the variable.
+
+Like Vercel's, they use the platforms' fixed API hosts.
+
+### `gitlab`
+
+A GitLab project's CI/CD variables in one environment scope, `{project, environment_scope?,
+token_key, base_url?}`: the project's id or `group/project`, the scope (`*` by default), the key of
+this environment and folder holding an access token with the `api` scope, and a self-managed
+instance's public URL (gitlab.com by default; fetched like a webhook, `PublicOnly`). A changed key
+is updated in that scope, or created; a removed one is deleted. Values are raw (no `$` expansion),
+and masked when GitLab can mask them (8 characters or more, no spaces), so they stay out of job logs.
+
+### `kubernetes`
+
+One Secret in a cluster, `{server, namespace, secret, token_key, ca_key?}`: the API server's
+public `https://` URL (fetched like a webhook: `PublicOnly`, no redirects), the namespace and the
+Secret's name, and the keys of this environment and folder holding a service account token (with
+`create`, `get` and `update` on that Secret) and, optionally, the cluster's CA in PEM. Each push
+writes the Secret's `data` as exactly the synced keys (removed ones are gone), labelled
+`app.kubernetes.io/managed-by=roll-secrets` and annotated with the project, environment and
+folder. roll never replaces a Secret without that label, so it can't clobber one of the team's own.
+The synced values must fit a Secret's 1 MiB. Pods read it as usual (`envFrom.secretRef`); a pod
+restart or a reloader picks up a change.
+
 ### `webhook` and `notify`
 
 Both POST JSON to a public HTTPS `url` the creator chose: fetched through the `PublicOnly` resolver,
@@ -700,11 +770,14 @@ action:
 
 | Action | Routes |
 | --- | --- |
-| `read` | names, metadata, versions, history, compare, folders, imports, requests, links, leases, audit, required keys, listing syncs |
-| `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/requests/{id}/values`, `…/resolve` |
-| `write` | set, batch changes, rotate, rollback, promote, folders, imports, create an environment, open or apply a request |
+| `read` | names, metadata, versions, history, compare, folders, imports, exports (listing), what's shared with the project, requests, links, leases, required keys, listing syncs, insights, the audit log |
+| `reveal` | `…/values`, `…/secrets/{key}/value`, `…/versions/{v}/value`, `…/requests/{id}/values`, `…/resolve`, renewing a lease (whoever could read the credential), creating a one-time share (how a value leaves roll) |
+| `write` | set, batch changes, rotate, rollback, promote, folders, imports (a project's own), create an environment, open or apply a request |
 | `delete` | a secret, an environment, ephemeral environments by label, a lease |
-| `admin` | rename or reorder environments, protection and approval policy, reviewing a request, syncs (create, delete, run) |
+| `admin` | rename or reorder environments, protection and approval policy, reviewing a request, syncs (create, delete, run), tokens and identities (listing too), audit sinks, revoking another's one-time share, exports (sharing a folder with another project), imports from another project, purge and retention, required keys (setting), making a trusted preview |
+
+`POST /v1/secrets/login` (workload identities) and the one-time share links (`/v1/secrets/shares/…`)
+are public: the OIDC token, or the key in the link, is the credential.
 
 Values are returned only by the `reveal` routes, so the gate can classify a request without reading
 its body. A route that touches a second resource (the source of a promote, a reference into another
@@ -852,7 +925,7 @@ isn't in the workspace is 404.
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/secrets/health` | | `{ok, key: "env"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
+| `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"missing", resealed: "all"\|number\|null, links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered) |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null}` |
 | `PATCH` | `{history_days}` | `{history_days}` (`admin`) |
 | `GET /grid?path=` | | `Grid` |
@@ -861,6 +934,7 @@ isn't in the workspace is 404.
 | `DELETE /environments?label=k=v` | | `{deleted: string[]}` (ephemeral only) |
 | `PUT /environments/order` | `{order: slug[]}` | `Environment[]` |
 | `GET /environments/{env}` | | `Environment` |
+| `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
@@ -884,7 +958,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases}` |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
@@ -942,10 +1016,13 @@ type Environment = {
   id: string; slug: string; name: string; position: number; kind: "standard" | "ephemeral";
   base: string | null; labels: Record<string, string>; expires_at: number | null;
   protected: boolean; approvals: number; approvers: string[]; created_at: number; secrets: number;
+  max_age_days: number | null; notify: string | null; trusted: boolean; // trusted: an ephemeral one that may read a protected base
 };
+type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}
 type NewEnvironment = {
   slug: string; name?: string; kind?: "standard" | "ephemeral"; base?: string; labels?: Record<string, string>;
   expires_at?: number; ttl_minutes?: number; secrets?: Op[]; // ephemeral: created in one call with its overrides
+  trusted?: boolean; // ephemeral: may read a protected base (admin on it)
 };
 type Folder = { path: string; name: string; secrets: number; folders: number };
 type Import = { project?: string; environment: string; path: string }; // project: another project's shared folder
@@ -970,7 +1047,7 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
@@ -1049,32 +1126,44 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 
 ## Next
 
-Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
-streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
-checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
-sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), audit
-sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
-previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
-for stored values, typed keys, sharing across projects, and the fixes from a third security review (of identities, sharing,
-typed keys and scans) and a phone-width pass from two security reviews.
-Reviewed on 2026-11-13 against Infisical, Doppler, Vault, Vercel and 1Password Developer, and
-against the apps, previews, MCP and search branches (previews resolves untrusted; apps refuses
-dynamic links for services and uses the digest for `needs_deploy`). Ranked:
+Done and in PR #20:
+- the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
+- rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search);
+- `roll secrets`, `roll secrets setup` and `roll run [--watch]`;
+- checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
+- leaked secrets don't land, plus scans of a repo's default branch and history;
+- required and typed keys; insights and rotation reminders;
+- one-time sharing, and sharing across projects;
+- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Cloudflare Workers, AWS Parameter Store,
+  Kubernetes, sealed webhooks and deploy notifications;
+- audit sinks, purge and retention, workload identities (OIDC logins for CI);
+- the dashboard's Secrets surface;
+- the fixes from three security reviews and a phone-width pass.
 
-1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands: done and
-   tested on `wip/secrets-on-mcp` (kept merged with both branches): `Secrets::caller` reads
-   `roll_auth::Grant` before the operator marker, `GrantGrants` answers second resources through
-   `Grant::allows`, whoami's project comes from the grant's rules, a sync made by a grant re-checks
-   it through `roll_auth::Grants`. Merge it in when #19 is on main; then `rlst_` tokens, and the
-   tokens identities mint, become roll-access's. Also roll apps' `SecretSource` wired to
-   `Secrets::values` as `app:<svc>` (whichever of #20 and #21 merges second).
-2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
-   against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
-3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
-   approver grants it for minutes (Infisical's access requests), audited; built on the change
-   request approvals.
-4. **Kubernetes as a sync target**: push an environment into a cluster's Secret (its API server and
-   a service account token kept sealed, like the other platforms' credentials), so workloads that
-   don't run `roll run` read roll secrets without an operator to install.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
-   so the roll-access swap is ready the day #19 lands.
+Reviewed again on 2026-11-13:
+- against Infisical, Doppler, Vault, Vercel and 1Password Developer;
+- across the apps, previews, MCP and search branches (findings sent to each thread; this branch's
+  part is done: untrusted preview environments, `linked` keys, the Access table).
+
+Ranked:
+
+1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
+   prepared on `wip/secrets-on-mcp`. Also, on that branch:
+   - list `secrets` among MCP's products, so its tools aren't filtered out;
+   - map ephemeral environments to roll-access's `preview` environment class;
+   - get the catalogue rows reported to the MCP thread (identities, lease renew, exports, admin
+     listings) into place.
+   Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
+   `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
+   second.
+2. **Errors from in-process product calls carry the HTTP status.** rolld's `Api` (link providers,
+   syncs) reads a status, not "404" or "no " in an error's text.
+3. **One table of every secrets route and its action**, generated from the router and checked by a
+   test against roll-access's `classify`, so a catch-all row can't hide a misclassified route.
+4. **Fly.io and Railway syncs**, checked against their own clients' sources. Fly is GraphQL
+   `setSecrets`/`unsetSecrets` `{appId, secrets: [{key, value}]}` / `{appId, keys}`.
+5. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+   real cluster.
+6. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+   `reveal` on a protected environment, and an approver grants it for minutes.
+7. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

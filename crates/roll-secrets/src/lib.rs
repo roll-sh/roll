@@ -40,7 +40,7 @@ pub use access::{Action, Caller, Scope};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
-pub use envs::{EnvChange, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
+pub use envs::{EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
 pub use read::{Grid, Problem, Secret, Source, Values, Version};
@@ -268,6 +268,8 @@ impl From<crypto::CryptoError> for Error {
 #[serde(rename_all = "lowercase")]
 pub enum KeySource {
     Env,
+    /// `ROLL_SECRET_KEY_KMS`: decrypted by AWS KMS at startup.
+    Kms,
     File,
     Missing,
 }
@@ -351,6 +353,10 @@ impl Secrets {
         // Typed keys (required.rs).
         db.add_column("required", "type", "TEXT")?;
         db.add_column("required", "pattern", "TEXT")?;
+        // Rotation reminders (notices.rs): when an environment was last reminded.
+        db.add_column("environments", "reminded_at", "INTEGER")?;
+        // An ephemeral environment running vetted code may read a protected base (envs.rs).
+        db.add_column("environments", "trusted", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
     }

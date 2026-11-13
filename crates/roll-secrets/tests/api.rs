@@ -352,6 +352,24 @@ async fn ephemeral_environments_inherit_their_base_and_go_by_label_or_expiry() {
     api.ok(Method::PATCH, "/environments/pr-118", Some(json!({ "expires_at": 1 }))).await;
     assert_eq!(api.secrets.sweep().unwrap().expired, 1);
     assert_eq!(slugs(&api.ok(Method::GET, "/environments", None).await), ["development", "staging", "production"]);
+
+    // Ensuring one: created, then unchanged, then brought up to date in one change.
+    let want = |db: &str, extra: bool| {
+        let mut ops = vec![json!({ "op": "set", "key": "DATABASE_URL", "value": db })];
+        if extra {
+            ops.push(json!({ "op": "set", "key": "EXTRA", "value": "x" }));
+        }
+        json!({ "base": "staging", "labels": { "preview": "pv-1" }, "ttl_minutes": 60, "secrets": ops, "replace": true })
+    };
+    let (s, first) = api.call(Method::PUT, "/environments/pv-1", Some(want("postgres://pv-1", true))).await;
+    assert_eq!((s, first["created"].as_bool()), (StatusCode::CREATED, Some(true)));
+    let again = api.ok(Method::PUT, "/environments/pv-1", Some(want("postgres://pv-1", true))).await;
+    assert_eq!((again["created"].as_bool(), again["change"].clone()), (Some(false), Value::Null), "ensuring what's there is no change");
+    let moved = api.ok(Method::PUT, "/environments/pv-1", Some(want("postgres://pv-1b", false))).await;
+    assert_eq!(moved["change"]["keys"], 2, "one change: the new value, and EXTRA gone");
+    assert_eq!(api.values("pv-1", "/").await["values"], json!({ "API": "https://staging-2", "DATABASE_URL": "postgres://pv-1b" }));
+    let (s, e) = api.call(Method::PUT, "/environments/pv-1", Some(json!({ "base": "production" }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("mismatch")));
 }
 
 #[tokio::test]
@@ -583,6 +601,11 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     assert!(staging["values"].get("DB_PASSWORD").is_none() && preview["values"].get("DB_PASSWORD").is_none());
     let (s, _) = api.call(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "check:x", "untrusted": true }))).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+    // A preview's environment is untrusted itself: whoever reads it (an app's deploy as the
+    // operator here) gets nothing from a protected base, unless it was made trusted.
+    assert!(api.values("pr-1", "/").await["values"].get("DB_PASSWORD").is_none());
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-2", "base": "production", "trusted": true }))).await;
+    assert_eq!(api.values("pr-2", "/").await["values"]["DB_PASSWORD"], "prod-pw");
 
     // A token for development can't make development an overlay of production, nor link a
     // resource (that's an admin's), nor see the fingerprint of what it can't reveal.
@@ -734,6 +757,21 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     assert_eq!((used["key"].as_str(), used["reads_30d"].as_i64(), used["last_read_by"].as_str(), used["stale"].as_bool()), (Some("USED"), Some(1), Some("operator"), Some(false)));
     let idle = api.ok(Method::GET, "/environments/production/insights?path=/old", None).await;
     assert_eq!((idle["keys"][0]["key"].as_str(), idle["keys"][0]["last_read_at"].clone()), (Some("IDLE"), Value::Null));
+
+    // An environment with a limit and somewhere to say so is reminded of its stale keys, once a day.
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    api.db.write(|c| c.execute("UPDATE secrets SET updated_at = updated_at - 8640000000 WHERE key = 'USED'", ())).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || {
+        s.sweep().unwrap();
+        s.sweep().unwrap();
+    })
+    .await
+    .unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one reminder a day");
+    assert_eq!((sent[0]["stale"].clone(), sent[0]["max_age_days"].as_i64()), (json!(["USED"]), Some(90)));
+    assert!(!sent[0].to_string().contains("\"u\""), "names, never values");
 }
 
 #[tokio::test]

@@ -5,6 +5,9 @@
 //! sweeper (never inline from a request), with retries. Its body works as a Slack or Discord
 //! incoming webhook (`text`, `content`) and carries the request's fields for anything else: key
 //! names, never values.
+//!
+//! Rotation reminders use the same outbox: once a day, an environment with a `max_age_days` limit
+//! and a notify URL hears which of its keys are older than that (names only).
 
 use crate::{Result, Secrets, Value, names};
 use code_sql::{Conn, params};
@@ -50,7 +53,56 @@ pub(crate) fn queue(c: &Conn<'_>, project: &str, env_id: &str, env: &str, reques
     Ok(())
 }
 
+/// A day: how often an environment is reminded of its stale keys.
+const REMIND_EVERY_MS: i64 = 86_400_000;
+
 impl Secrets {
+    /// The sweeper: queue each due environment's rotation reminder (one write each: the day is
+    /// claimed and the notice queued together, so two nodes never both remind). Returns how many.
+    pub(crate) fn sweep_reminders(&self) -> Result<usize> {
+        let now = self.db.now_ms()?;
+        type Due = (String, String, String, i64, Option<i64>);
+        let due: Vec<Due> = self.db.read(|c| {
+            c.query(
+                "SELECT id, project_id, slug, max_age_days, reminded_at FROM environments
+                 WHERE max_age_days IS NOT NULL AND notify_url IS NOT NULL AND COALESCE(reminded_at, 0) <= ? LIMIT 100",
+                params![now - REMIND_EVERY_MS],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+        })?;
+        let mut queued = 0;
+        for (env_id, project, slug, days, at) in due {
+            let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}", w.trim_end_matches('/')));
+            queued += self.db.write(|c| {
+                if c.execute("UPDATE environments SET reminded_at = ? WHERE id = ? AND COALESCE(reminded_at, 0) = ?", params![now, env_id, at.unwrap_or(0)])? != 1 {
+                    return Ok::<_, crate::Error>(0);
+                }
+                // Values that only change when someone changes them: not live or dynamic links.
+                let stale: Vec<String> = c.query(
+                    "SELECT key FROM secrets WHERE env_id = ? AND owner = '' AND updated_at < ? AND (link IS NULL OR link LIKE '%\"mode\":\"managed\"%') ORDER BY key",
+                    params![env_id, now - days * 86_400_000],
+                    |r| r.get(0),
+                )?;
+                if stale.is_empty() {
+                    return Ok(0);
+                }
+                let shown = stale.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+                let more = if stale.len() > 20 { format!(" and {} more", stale.len() - 20) } else { String::new() };
+                let mut text = format!("roll secrets: {} in {slug} unchanged for over {days} days ({shown}{more}). Rotate them, or raise the limit.", crate::write::plural(stale.len(), "key"));
+                if let Some(l) = &link {
+                    text.push_str(&format!(" {l}"));
+                }
+                let body = json!({ "text": text, "content": text, "allowed_mentions": { "parse": [] }, "project": project, "environment": slug, "stale": stale, "max_age_days": days, "link": link });
+                c.execute(
+                    "INSERT INTO notices (id, project_id, env_id, body, attempts, next_at, sent_at, created_at) VALUES (?, ?, ?, ?, 0, ?, NULL, ?)",
+                    params![names::new_id("ntc", 16), project, env_id, body.to_string(), now, now],
+                )?;
+                Ok(1)
+            })?;
+        }
+        Ok(queued)
+    }
+
     /// The sweeper: deliver due notices. Returns (sent, failed).
     pub(crate) fn sweep_notices(&self) -> Result<(usize, usize)> {
         let Some(deliver) = self.deliver.clone() else { return Ok((0, 0)) };
