@@ -322,7 +322,8 @@ previews are listed once those products are on.
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
-| `apps_rollback` | Roll an environment back to an earlier deploy. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
+| `apps_rollback` | Roll an environment back to an earlier deploy, with the variables it went live with. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
+| `apps_rollback_previous` | Put back the deploy that was live before this one. | `POST /v1/apps/services/{service}/environments/{env}/rollback` |
 | `apps_logs` | Recent logs of a service's environment, or with `http` its requests (filter by `status`, `min_ms`). | `GET /v1/apps/services/{service}/environments/{env}/logs` |
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
@@ -362,7 +363,7 @@ waits on a sibling PR reaching main is last.
 4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: every open sibling's routes classified, built with #25 (apps-next #26, previews-next
+Done lately: apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
 #28 and search #29 pass rolld's route test); a preview's share link is reveal (`previews_share`);
 search's index mapping, settings, refresh and analyze as MCP tools; the ninth review's findings
 (apps settings that change what production runs, its source, build, start and pre-deploy commands,
