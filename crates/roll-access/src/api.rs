@@ -269,7 +269,10 @@ async fn get_one(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate:
 }
 
 /// The networks a token has been used from (its /24 or /48), with when first and last.
-async fn networks(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+async fn networks(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    // A person sees only their own tokens'.
+    let who = who(&a, &ext)?;
+    visible_grant(&a, &who, &id).await?;
     let list = blocking(a, move |a| a.store.networks(&id)).await?;
     Ok(Json(json!(list.into_iter().map(|(network, first_at, last_at)| json!({ "network": network, "first_at": first_at, "last_at": last_at })).collect::<Vec<_>>())))
 }
