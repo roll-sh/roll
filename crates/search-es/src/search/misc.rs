@@ -202,6 +202,7 @@ pub fn render_template_api(ctx: &Ctx) -> EsResult<Reply> {
 pub async fn search_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body_map()?.ok_or_else(|| EsError::action_request_validation(&["template is missing".into()]))?;
     let rendered = render_template(ctx, &body, None)?;
+    crate::xpack::security::check_lookups(ctx, Some(&rendered))?;
     let explain = body.get("explain").and_then(Value::as_bool);
     let profile = body.get("profile").and_then(Value::as_bool);
     let mut req = super::parse_request(ctx, Some(&rendered), None)?;
@@ -235,6 +236,7 @@ pub async fn msearch_template(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 _ => Map::new(),
             };
             let rendered = render_template(ctx, &body, None)?;
+            crate::xpack::security::check_lookups(ctx, Some(&rendered))?;
             let mut req: SearchRequest = super::parse_request(ctx, Some(&rendered), None)?;
             req.indices = match header.get("index") {
                 Some(Value::Str(s)) => crate::meta::resolve::split_expressions(s),

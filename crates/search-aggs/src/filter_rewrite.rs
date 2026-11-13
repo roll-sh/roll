@@ -131,12 +131,16 @@ impl DateBuckets {
     /// `buildRanges(bounds)`: `None` when OpenSearch gives up (bounds outside the hard
     /// bounds, too many buckets).
     fn ranges(&self, mut low: i64, mut high: i64) -> Option<Vec<(i64, i64)>> {
-        if let Some(min) = self.hard.0
+        // `low` and `high` are in the field's units (nanoseconds for `date_nanos`); hard bounds
+        // and rounding are in milliseconds.
+        let ms = |v: i64| if self.nanos { v.div_euclid(1_000_000) } else { v };
+        let ns = |v: i64| if self.nanos { v.saturating_mul(1_000_000) } else { v };
+        if let Some(min) = self.hard.0.map(ns)
             && min > low
         {
             low = min;
         }
-        if let Some(max) = self.hard.1
+        if let Some(max) = self.hard.1.map(ns)
             && max - 1 < high
         {
             high = max - 1;
@@ -144,8 +148,6 @@ impl DateBuckets {
         if low > high {
             return None;
         }
-        let ms = |v: i64| if self.nanos { v.div_euclid(1_000_000) } else { v };
-        let ns = |v: i64| if self.nanos { v.saturating_mul(1_000_000) } else { v };
         let r = self.rounding_for(ms(low), ms(high));
         let interval = Self::interval(r);
         if let Some(a) = self.after {

@@ -551,6 +551,13 @@ async fn per_index_routes() {
     assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "{v}");
     let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/search"), Some(lookup("books"))).await;
     assert_eq!(s, 200, "a lookup in the route's own index: {v}");
+    // However the body comes: pretty-printed, or in `?source=`.
+    let pretty = serde_json::to_string_pretty(&lookup("secrets")).unwrap();
+    let r = e.http.post(format!("{}{base}/books/search", e.api)).header("content-type", "application/json").body(pretty).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    let source = urlencoding::encode(&lookup("secrets").to_string()).into_owned();
+    let r = e.http.post(format!("{}{base}/books/search?source={source}&source_content_type=application/json", e.api)).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 403);
     let (s, v) = e.call(reqwest::Method::GET, &format!("{base}/books/docs/1"), None).await;
     assert_eq!((s, v["_source"]["year"].as_i64()), (200, Some(2018)), "{v}");
     let (s, v) = e.call(reqwest::Method::POST, &format!("{base}/books/search"), Some(json!({"query": {"term": {"year": 2021}}}))).await;

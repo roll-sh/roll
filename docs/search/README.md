@@ -213,14 +213,24 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    geonames `decay_geo_gauss_script_score` (78 against ES 71). Then: `so`, a full rerun of every
    track with variance, and one allocator policy (rolld's against search-dev's purge governor,
    by a matched benchmark).
-2. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
+2. **Writes moved by an ingest pipeline are authorized again.** A narrowed principal's write
+   is checked against its target and the body's `_index` before ingest runs; a pipeline that
+   sets `_index` or uses `reroute` can move the document to an index the principal may not
+   write. Elasticsearch authorizes each bulk item at its final index: do the same once pipelines
+   have run (only matters where the owner already has such a pipeline).
+3. **Background jobs on a sleeping cluster.** Transforms (and ISM, watcher) run on the cluster's
+   job scheduler, which only runs while the cluster is loaded: a continuous transform's due
+   checkpoint waits for the next request to wake it. Decide and build the wake: a per-node
+   timer over the catalog's next-due times (written as a job's schedule changes) that loads a
+   cluster when a job is due and lets it sleep again, billed as loaded time.
+4. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
    leases, MinIO) and roll cloud's fleet test (`rolld/tests/fleet_e2e.rs`, `pnpm test:fleet`:
    three nodes from the fleet image behind HAProxy, DynamoDB leases, every product under load)
    both pass with search: through the edge's `<cluster>.search.…` hostname, 7,116 documents
    written, acknowledged and verified across a SIGKILL, a rolling restart and a scale-out (4 ×
    502, 3 × 503, the longest stall 11.1 s at the SIGKILL). Next there: shorten that stall (the
    lease takeover after a SIGKILL).
-3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`,
+5. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`,
    ES|QL, watcher, downsampling. `logsdb`'s last 9 are decisions:
    `_ignored_source` returned as Elasticsearch's binary entries (7 tests; it needs a stored field
    per document on the synthetic-source indexing path, so measure it first), `@timestamp`
@@ -231,17 +241,18 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    (`search-index`'s highlighter). KQL is done (34 of 34); check its parse-error wording against the
    reference. In the opensearch dialect, count `auto_date_histogram` from the points tree as
    OpenSearch does (`filter_rewrite`'s replay already picks OpenSearch's rounding).
-4. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
+6. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
    checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
-5. **Metering on the fleet**: a cluster that moves mid-interval is metered once (lists already
+7. **Metering on the fleet**: a cluster that moves mid-interval is metered once (lists already
    read where a cluster is loaded from the catalog). `own_bytes` (what a branch adds over its
    parent) is on `GET /v1/search/clusters/{id}` for previews.
-6. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset);
+8. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset);
    private networking for apps; wire `resolve_id` into roll-access once #19 lands. roll secrets'
    search link provider is built on feature/roll-secrets (`crates/rolld/src/secrets.rs`): it
    issues the cluster's own API keys (`POST /v1/search/clusters/{id}/keys`, dynamic with an
    expiry or managed), never the cluster password, and works once `Kind::Search` is on main.
-7. **CI**: measure on GitHub whether a search crate's lib tests fit the one-minute gate; the
-   extended workflow (`search.yml`) runs on demand. `search-store`'s
+9. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`: 1m24s on a cold
+   cache with `search-analysis` too, so that one was dropped; measure it again once main's
+   cache exists). The extended workflow (`search.yml`) runs on demand. `search-store`'s
    `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once` failed once on the loaded
    host while four crates' tests ran together (it passes alone): find what it races on.
