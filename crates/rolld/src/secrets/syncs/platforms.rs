@@ -38,6 +38,10 @@ pub(super) struct Http {
     /// `https://login.microsoftonline.com`; the vault's own host when `None`.
     azure_login: String,
     azure_vault: Option<String>,
+    /// `https://circleci.com/api/v2`.
+    circleci: String,
+    /// `https://api.bitbucket.org/2.0`.
+    bitbucket: String,
 }
 
 impl Http {
@@ -50,6 +54,8 @@ impl Http {
         h.google_token = "https://oauth2.googleapis.com/token".into();
         h.azure_login = "https://login.microsoftonline.com".into();
         h.azure_vault = None;
+        h.circleci = "https://circleci.com/api/v2".into();
+        h.bitbucket = "https://api.bitbucket.org/2.0".into();
         h
     }
 
@@ -61,7 +67,7 @@ impl Http {
             .user_agent("roll-secrets-sync")
             .build()
             .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()) }
+        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()), circleci: vercel.into(), bitbucket: format!("{vercel}/2.0") }
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -373,7 +379,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new() };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -779,6 +785,168 @@ impl SyncTarget for AzureKeyVault {
     }
 }
 
+// ── circleci ──
+
+/// A CircleCI project's environment variables. CircleCI keeps no tag on them: the sync sets what
+/// changed and deletes only the names it synced before (`Push::removed`).
+pub(super) struct CircleCi(pub(super) Http);
+
+impl CircleCi {
+    /// (project slug, token_key)
+    fn target(&self, t: &Json) -> Result<(String, String)> {
+        let [slug, token_key] = target("circleci", t, [("project", true), ("token_key", true)])?;
+        let slug = slug.unwrap_or_default();
+        let parts: Vec<&str> = slug.split('/').collect();
+        if parts.len() != 3 || parts.iter().any(|p| !ident(p, 100, "-_.")) {
+            return Err(bad("project is a CircleCI project slug: gh/acme/web, bb/acme/web or circleci/<org id>/<project id>"));
+        }
+        Ok((slug, key_field("circleci", "token_key", token_key)?))
+    }
+}
+
+impl SyncTarget for CircleCi {
+    fn kind(&self) -> &str {
+        "circleci"
+    }
+    fn label(&self) -> &str {
+        "CircleCI project variables"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "project", label: "Project slug", required: true, placeholder: "gh/acme/web" },
+            SyncField { name: "token_key", label: "Key holding a CircleCI API token", required: true, placeholder: "CIRCLECI_TOKEN" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (slug, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        let what = format!("circleci {slug}");
+        let base = format!("{}/project/{slug}/envvar", self.0.circleci);
+        block_on(async {
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                let req = self.0.client.post(&base).header("circle-token", token).json(&json!({ "name": name, "value": v.expose() }));
+                let (status, _) = self.0.send(req, &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {name}: {status}")));
+                }
+            }
+            for name in p.removed {
+                let (status, _) = self.0.send(self.0.client.delete(format!("{base}/{}", urlencoding::encode(name))).header("circle-token", token), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {name}: {status}")));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── bitbucket ──
+
+/// A Bitbucket repository's Pipelines variables (or one deployment environment's), all secured.
+pub(super) struct Bitbucket(pub(super) Http);
+
+struct BbTarget {
+    workspace: String,
+    repo: String,
+    environment: Option<String>,
+    token_key: String,
+}
+
+impl Bitbucket {
+    fn target(&self, t: &Json) -> Result<BbTarget> {
+        let [workspace, repo, environment, token_key] = target("bitbucket", t, [("workspace", true), ("repo", true), ("environment", false), ("token_key", true)])?;
+        let (workspace, repo) = (workspace.unwrap_or_default(), repo.unwrap_or_default());
+        if !ident(&workspace, 100, "-_.") || !ident(&repo, 100, "-_.") {
+            return Err(bad("workspace and repo are a Bitbucket repository's (acme, web)"));
+        }
+        if environment.as_ref().is_some_and(|e| !ident(e.trim_matches(['{', '}']), 64, "-")) {
+            return Err(bad("environment is a deployment environment's uuid ({…})"));
+        }
+        Ok(BbTarget { workspace, repo, environment, token_key: key_field("bitbucket", "token_key", token_key)? })
+    }
+}
+
+impl SyncTarget for Bitbucket {
+    fn kind(&self) -> &str {
+        "bitbucket"
+    }
+    fn label(&self) -> &str {
+        "Bitbucket Pipelines variables"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "workspace", label: "Workspace", required: true, placeholder: "acme" },
+            SyncField { name: "repo", label: "Repository", required: true, placeholder: "web" },
+            SyncField { name: "environment", label: "Deployment environment uuid (optional)", required: false, placeholder: "{7a6b…}" },
+            SyncField { name: "token_key", label: "Key holding an access token", required: true, placeholder: "BITBUCKET_TOKEN" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let t = self.target(t)?;
+        let token = credential(p, &t.token_key)?;
+        let what = format!("bitbucket {}/{}", t.workspace, t.repo);
+        let repo = format!("{}/repositories/{}/{}", self.0.bitbucket, t.workspace, t.repo);
+        let base = match &t.environment {
+            Some(e) => format!("{repo}/deployments_config/environments/{}/variables", urlencoding::encode(e)),
+            None => format!("{repo}/pipelines_config/variables"),
+        };
+        block_on(async {
+            // Every variable's uuid by name: its pages, following `next` only on Bitbucket's host.
+            let mut uuid: std::collections::BTreeMap<String, String> = Default::default();
+            let mut page = Some(format!("{base}?pagelen=100"));
+            for _ in 0..50 {
+                let Some(url) = page.take() else { break };
+                let (status, v) = self.0.send(self.0.client.get(&url).bearer_auth(token), &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: listing variables: {status}")));
+                }
+                for x in v["values"].as_array().into_iter().flatten() {
+                    if let (Some(k), Some(u)) = (x["key"].as_str(), x["uuid"].as_str()) {
+                        uuid.insert(k.to_string(), u.to_string());
+                    }
+                }
+                page = v["next"].as_str().filter(|n| n.starts_with(&self.0.bitbucket)).map(String::from);
+            }
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                let body = json!({ "key": name, "value": v.expose(), "secured": true });
+                let req = match uuid.get(name) {
+                    Some(u) => self.0.client.put(format!("{base}/{}", urlencoding::encode(u))),
+                    None => self.0.client.post(&base),
+                };
+                let (status, _) = self.0.send(req.bearer_auth(token).json(&body), &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {name}: {status}")));
+                }
+            }
+            for name in p.removed {
+                let Some(u) = uuid.get(name) else { continue };
+                let (status, _) = self.0.send(self.0.client.delete(format!("{base}/{}", urlencoding::encode(u))).bearer_auth(token), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {name}: {status}")));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 // ── fly ──
 
 /// A Fly.io app's secrets, through Fly's GraphQL API (as flyctl's `fly-go` sends them).
@@ -1072,7 +1240,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new() };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -1387,6 +1555,10 @@ mod tests {
             // A form (Google's token request) is kept as its text.
             seen.lock().unwrap().push((method.to_string(), pq.clone(), serde_json::from_slice(&body).unwrap_or_else(|_| Json::String(String::from_utf8_lossy(&body).into()))));
             // Google: the token endpoint, then Secret Manager (OLD is roll's, NEW doesn't exist yet).
+            // Bitbucket: OLD exists (by uuid), NEW doesn't.
+            if pq.starts_with("/2.0/repositories/acme/web/pipelines_config/variables") && method == Method::GET {
+                return (StatusCode::OK, axum::Json(json!({ "values": [{ "uuid": "{old-1}", "key": "OLD", "secured": true }] })));
+            }
             // Azure: sign-in, then Key Vault (OLD is roll's, NEW doesn't exist yet).
             if pq == "/contoso.onmicrosoft.com/oauth2/v2.0/token" {
                 return (StatusCode::OK, axum::Json(json!({ "access_token": "akv.test", "token_type": "Bearer" })));
@@ -1537,6 +1709,27 @@ mod tests {
         );
         assert!(calls[0].2.as_str().unwrap().contains("client_secret=s3cret%26%3D&scope=https%3A%2F%2Fvault.azure.net%2F.default"), "{}", calls[0].2);
         assert_eq!((calls[2].2["value"].as_str(), calls[2].2["tags"].clone()), (Some("v-123"), json!({ "managed-by": "roll-secrets" })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn circleci_posts_changed_variables_and_deletes_removed_ones() {
+        let (base, seen) = mock().await;
+        push(Arc::new(CircleCi(http(&base))), json!({ "project": "gh/acme/web", "token_key": "CIRCLECI_TOKEN" }), &[("CIRCLECI_TOKEN", "cc")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        assert_eq!(route, [("POST", "/project/gh/acme/web/envvar"), ("DELETE", "/project/gh/acme/web/envvar/OLD")]);
+        assert_eq!(calls[0].2, json!({ "name": "NEW", "value": "v-123" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bitbucket_lists_by_uuid_creates_secured_variables_and_deletes_removed_ones() {
+        let (base, seen) = mock().await;
+        push(Arc::new(Bitbucket(http(&base))), json!({ "workspace": "acme", "repo": "web", "token_key": "BB" }), &[("BB", "bb")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        let vars = "/2.0/repositories/acme/web/pipelines_config/variables";
+        assert_eq!(route, [("GET", format!("{vars}?pagelen=100").as_str()), ("POST", vars), ("DELETE", format!("{vars}/%7Bold-1%7D").as_str())]);
+        assert_eq!(calls[1].2, json!({ "key": "NEW", "value": "v-123", "secured": true }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
