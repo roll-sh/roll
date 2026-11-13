@@ -106,6 +106,7 @@ pub fn xpack_usage(ctx: &Ctx) -> EsResult<Reply> {
         if let Some(Value::Obj(e)) = m.get_mut("esql") {
             ctx.cluster.xpack.esql_telemetry.fill(e);
         }
+        m.insert("inference".into(), crate::xpack::inference::usage(ctx.cluster, &st));
         if let Some(Value::Obj(r)) = m.get_mut("rollup") {
             r.insert("number_of_rollup_jobs".into(), x.len(crate::xpack::rollup::JOBS).into());
         }

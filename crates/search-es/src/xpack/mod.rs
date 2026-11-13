@@ -25,6 +25,7 @@ pub mod fleet;
 pub mod esql;
 pub mod graph;
 pub mod ilm;
+pub mod inference;
 pub mod internal;
 pub mod logstash;
 pub mod migration;
@@ -258,6 +259,17 @@ handlers! { ctx;
     MlStopTrainedModelDeployment => ml::models::stop_deployment(ctx),
     MlClearTrainedModelDeploymentCache => ml::models::clear_cache(ctx),
     MlInferTrainedModel => ml::models::infer(ctx),
+
+    InferencePut | InferencePutAi21 | InferencePutAlibabacloud | InferencePutAmazonbedrock | InferencePutAmazonsagemaker | InferencePutAnthropic
+        | InferencePutAzureaistudio | InferencePutAzureopenai | InferencePutCohere | InferencePutContextualai | InferencePutCustom
+        | InferencePutDeepseek | InferencePutElasticsearch | InferencePutElser | InferencePutFireworksai | InferencePutGoogleaistudio
+        | InferencePutGooglevertexai | InferencePutGroq | InferencePutHuggingFace | InferencePutJinaai | InferencePutLlama | InferencePutMistral
+        | InferencePutNvidia | InferencePutOpenai | InferencePutOpenshiftAi | InferencePutVoyageai | InferencePutWatsonx => inference::put(ctx).await,
+    InferenceGet => inference::get(ctx),
+    InferenceDelete => inference::delete(ctx).await,
+    InferenceUpdate => inference::update(ctx).await,
+    InferenceInference | InferenceTextEmbedding | InferenceSparseEmbedding | InferenceRerank | InferenceCompletion | InferenceEmbedding => inference::infer(ctx).await,
+    InferenceStreamCompletion | InferenceChatCompletionUnified => inference::stream_route(ctx).await,
     MlPutDataFrameAnalytics => ml::dfa::put(ctx).await,
     MlGetDataFrameAnalytics => ml::dfa::get(ctx),
     MlGetDataFrameAnalyticsStats => ml::dfa::stats(ctx),

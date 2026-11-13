@@ -58,6 +58,8 @@ const HOMES: &[Home] = &[
     Home { prefix: "transform", index: ".transform-internal-007", alias: Some(".transform-internal-007-alias") },
     Home { prefix: "watcher.watch", index: ".watches", alias: None },
     Home { prefix: "logstash.", index: ".logstash", alias: None },
+    Home { prefix: "inference_secret", index: ".secrets-inference", alias: None },
+    Home { prefix: "inference", index: ".inference", alias: Some(".inference-alias") },
 ];
 
 fn home(family: &str) -> Option<&'static Home> {
