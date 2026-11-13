@@ -4458,6 +4458,68 @@ fn protocol_cases() {
         c("ps_set_config", |a| session(a, &[], &[query("select set_config('application_name', 'cfg', false)")])),
         c("ps_set_role", |a| session(a, &["create role ps_r"], &[query("set role ps_r"), query("reset role"), query("drop role ps_r")])),
         c("ps_discard_all", |a| session(a, &["set application_name = 'x'"], &[query("discard all")])),
+        // A multi-statement query's implicit transaction block (and the extended protocol's
+        // transaction, Execute to Sync): its first statement opens it, a later error undoes
+        // what came before (SETs too), a BEGIN in it turns it into the block with its options
+        // checked as SET TRANSACTION's, an error in a block undoes its level's settings then.
+        c("ib_set_fail", |a| session(a, &[], &[query("set application_name = 'f'; select * from nope_t"), query("show application_name")])),
+        c("ib_set_set_fail", |a| session(a, &[], &[query("set application_name = 'f'; set work_mem = '7MB'; select 1/0"), query("show application_name; show work_mem")])),
+        c("ib_set_begin_deferrable", |a| session(a, &[], &[query(
+            "set work_mem = '5MB'; begin isolation level serializable read only deferrable; show transaction_isolation; show transaction_read_only; show transaction_deferrable; commit",
+        )])),
+        c("ib_select_begin_iso", |a| session(a, &[], &[query("select 1; begin isolation level serializable; select 2"), query("show transaction_isolation")])),
+        c("ib_select_begin_ro", |a| session(a, &[], &[query("select 1; begin read only; show transaction_read_only; commit")])),
+        c("ib_select_begin_not_deferrable", |a| session(a, &[], &[query("select 1; begin isolation level read committed read write not deferrable; commit")])),
+        c("ib_settxn_begin", |a| session(a, &[], &[query("set transaction read only; begin isolation level repeatable read; show transaction_read_only; show transaction_isolation; commit")])),
+        c("ib_set_begin_rollback", |a| session(a, &[], &[query("set application_name = 'a'; begin; rollback"), query("show application_name")])),
+        c("ib_set_begin_open", |a| session(a, &[], &[query("set application_name = 'a'; begin"), query("rollback"), query("show application_name")])),
+        c("ib_set_local", |a| session(a, &[], &[query("set local work_mem = '5MB'; begin isolation level serializable; show transaction_isolation; show work_mem; commit"), query("show work_mem")])),
+        c("ib_set_commit_fail", |a| session(a, &[], &[query("set application_name = 'a'; commit; select 1/0"), query("show application_name")])),
+        c("ib_set_savepoint", |a| session(a, &[], &[query("set application_name = 'a'; savepoint s"), query("show application_name")])),
+        c("ib_set_txn", |a| session(a, &[], &[query("set transaction isolation level serializable; show transaction_isolation"), query("show transaction_isolation")])),
+        c("ib_set_vacuum", |a| session(a, &[], &[query("set application_name = 'a'; vacuum"), query("show application_name")])),
+        c("ib_others_fail", |a| session(a, &["prepare q2 as select 2"], &[
+            query("set client_encoding = 'LATIN1'; set session characteristics as transaction isolation level serializable; reset all; listen ch; prepare q1 as select 1; deallocate q2; select 1/0"),
+            query("show client_encoding; show default_transaction_isolation; select pg_listening_channels(); execute q1"),
+            query("execute q2"),
+        ])),
+        c("ib_lock", |a| session(a, &["create temp table lt(a int)"], &[query("lock table lt; begin isolation level serializable; show transaction_isolation; commit")])),
+        c("ib_ps_reported", |a| session(a, &[], &[query("set application_name = 'r'"), query("set application_name = 'f'; select 1/0"), query("show application_name")])),
+        c("ib_ext_set_fail", |a| session(a, &[], &[
+            [parse("", "set application_name = 'e'", &[]), bind("", "", &[], NONE, &[]), execute("", 0), parse("", "select * from nope_t", &[]), sync()].concat(),
+            query("show application_name"),
+        ])),
+        c("ib_ext_select_begin_iso", |a| session(a, &[], &[
+            [parse("", "select 1", &[]), bind("", "", &[], NONE, &[]), execute("", 0), parse("", "begin isolation level serializable", &[]), bind("", "", &[], NONE, &[]), execute("", 0), sync()].concat(),
+            query("rollback"),
+        ])),
+        c("ib_settxn_after_query", |a| session(a, &[], &[query("begin; select 1; set transaction deferrable"), query("rollback"), query("begin; savepoint s; set transaction isolation level serializable"), query("rollback")])),
+        c("ib_block_fail", |a| session(a, &[], &[
+            query("begin; set application_name = 'outer'; savepoint s; set application_name = 'inner'"),
+            query("select 1/0"),
+            query("rollback to s; show application_name"),
+            query("select 1/0"),
+            query("rollback"),
+        ])),
+        c("ib_chain_after_error", |a| session(a, &[], &[
+            query("begin isolation level serializable read only deferrable; select 1/0"),
+            query("rollback and chain"),
+            query("show transaction_isolation; show transaction_read_only; show transaction_deferrable"),
+            query("rollback"),
+        ])),
+        // The startup packet's role; SET SESSION AUTHORIZATION's ParameterStatus order.
+        c("role_setup", |a| session(a, &["create role pc_r1 login", "create role pc_su superuser login"], &[])),
+        c("startup_role", |a| startup(a, &startup_packet(P30, &[("role", "pc_r1")], b"\0"))),
+        c("startup_role_missing", |a| startup(a, &startup_packet(P30, &[("role", "pc_nosuch")], b"\0"))),
+        c("startup_role_reset", |a| session_params(a, &[("role", "pc_r1")], &[
+            query("select current_user, session_user, current_setting('is_superuser')"),
+            query("set role none"),
+            query("reset role"),
+            query("select current_user"),
+        ])),
+        c("sessauth_ps", |a| session(a, &[], &[query("set session authorization pc_r1"), query("reset session authorization"), query("set session authorization pc_su")])),
+        c("sessauth_rollback", |a| session(a, &[], &[query("begin; set session authorization pc_r1; rollback"), query("begin; set local session authorization pc_r1"), query("commit")])),
+        c("sessauth_fail", |a| session(a, &[], &[query("set role pc_r1; select 1/0"), query("set session authorization pc_r1; select 1/0"), query("select current_user, current_setting('is_superuser')")])),
     ];
     let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/protocol_cases.out");
     if let Ok(addr) = std::env::var("PROTOCOL_RECORD") {
@@ -4465,7 +4527,11 @@ fn protocol_cases() {
         std::fs::write(file, out).unwrap();
         return;
     }
-    let s = server(AuthMethod::Trust);
+    // (PROTOCOL_SERVER=host:port: the cases against a running server that trusts the
+    // connection, a build without a change say, instead of this one's.)
+    let external = std::env::var("PROTOCOL_SERVER").ok();
+    let s = external.is_none().then(|| server(AuthMethod::Trust));
+    let addr = external.unwrap_or_else(|| s.as_ref().unwrap().addr.clone());
     let expected: std::collections::HashMap<String, String> = std::fs::read_to_string(file)
         .unwrap()
         .lines()
@@ -4474,12 +4540,14 @@ fn protocol_cases() {
         .collect();
     let mut differ = Vec::new();
     for (name, f) in &cases {
-        let got = f(&s.addr);
+        let got = f(&addr);
         let want = expected.get(*name).map(String::as_str).unwrap_or("(not recorded)");
         if got != want {
             differ.push(format!("{name}\n  pg:   {want}\n  roll: {got}"));
         }
     }
-    s.engine.shutdown();
+    if let Some(s) = s {
+        s.engine.shutdown();
+    }
     assert!(differ.is_empty(), "{} of {} cases differ:\n{}", differ.len(), cases.len(), differ.join("\n"));
 }

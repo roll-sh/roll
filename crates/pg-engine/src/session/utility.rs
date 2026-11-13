@@ -93,23 +93,28 @@ impl Session {
     pub(super) fn set_stmt(&mut self, s: &pb::VariableSetStmt) -> Result<QueryResult> {
         use pb::VariableSetKind as K;
         let kind = K::try_from(s.kind).unwrap_or(K::VarSetValue);
-        // An implicit transaction (a multi-statement query, a pipeline) counts: a SET in it
-        // is undone if it rolls back.
-        let mut in_txn = self.status != TxnStatus::Idle || self.txn.is_some();
+        // An implicit transaction (a multi-statement query, the extended protocol's) counts:
+        // a SET in it is undone if it rolls back.
+        let mut in_txn = self.guc_in_txn();
         let tag = if matches!(kind, K::VarReset | K::VarResetAll) {
             "RESET"
         } else {
             "SET"
         };
+        // Outside any transaction block (an implicit one of several statements counts).
+        if s.is_local
+            && self.status == TxnStatus::Idle
+            && self.txn.is_none()
+            && !self.multi_stmt
+            && !self.pipelining
+        {
+            self.raise_notice(warning(
+                code::NO_ACTIVE_SQL_TRANSACTION,
+                "SET LOCAL can only be used in transaction blocks",
+            ));
+        }
         if s.is_local && !in_txn {
-            // Outside any transaction block (an implicit one of several statements counts).
-            if !self.multi_stmt && !self.pipelining {
-                self.raise_notice(warning(
-                    code::NO_ACTIVE_SQL_TRANSACTION,
-                    "SET LOCAL can only be used in transaction blocks",
-                ));
-            }
-            // It still holds until the implicit transaction ends.
+            // It still holds until the statement's transaction ends.
             self.ensure_txn();
             in_txn = true;
         }
@@ -377,12 +382,12 @@ impl Session {
                 }
             }
             let v = target.map(|r| cat.roles[&r].name.clone());
-            self.state.settings.borrow_mut().set(
-                "role",
-                Some(v.as_deref().unwrap_or("none")),
-                local,
-                in_txn,
-            )?;
+            // (RESET ROLE: back to the session's own value, the startup packet's say.)
+            let v = match (&value, v) {
+                (None, _) => None,
+                (_, v) => Some(v.unwrap_or_else(|| "none".into())),
+            };
+            self.state.settings.borrow_mut().set("role", v.as_deref(), local, in_txn)?;
         } else {
             // Only a superuser login may become someone else.
             if let Some(r) = target
@@ -401,14 +406,55 @@ impl Session {
             st.set("session_authorization", Some(&v), local, in_txn)?;
             st.set("role", Some("none"), local, in_txn)?;
         }
-        let me = self.state.current_role(&cat);
+        self.refresh_superuser(&cat, local, in_txn, name == "session_authorization");
+        Ok(QueryResult::command(tag))
+    }
+
+    /// The startup packet's `role` (PGC_S_CLIENT, the session's reset value): check_role's
+    /// checks, then is_superuser as that role has it (assign_role).
+    pub fn apply_startup_role(&self) -> Result<()> {
+        let role = self.state.settings.borrow().role().to_string();
+        if role.is_empty() || role == "none" {
+            return Ok(());
+        }
+        let cat = self.state.db.catalog();
+        let Some(r) = cat.role_by_name(&role) else {
+            return Err(Error::new(code::INVALID_PARAMETER_VALUE, format!("role \"{role}\" does not exist")));
+        };
+        if !cat.can_set_role(self.state.session_role(&cat), r.oid) {
+            return Err(Error::new(code::INSUFFICIENT_PRIVILEGE, format!("permission denied to set role \"{role}\""))
+                .routine("call_string_check_hook"));
+        }
+        self.refresh_superuser(&cat, false, false, false);
+        Ok(())
+    }
+
+    /// is_superuser as the current role has it, set (in the transaction, as `local`) by
+    /// role's or session_authorization's assign hook (SetConfigOption): stacked after the
+    /// parameter, and marked for its report before session_authorization (whose assignment
+    /// marks it last), so the client hears session_authorization first.
+    pub(crate) fn refresh_superuser(
+        &self,
+        cat: &crate::catalog::Catalog,
+        local: bool,
+        in_txn: bool,
+        before_session_authorization: bool,
+    ) {
+        let me = self.state.current_role(cat);
         let su = if cat.is_superuser(me) { "on" } else { "off" };
         let mut st = self.state.settings.borrow_mut();
-        if st.get_raw("is_superuser").as_deref() != Some(su) {
-            st.set_internal("is_superuser", su);
-            st.changed.push("is_superuser".into());
+        if st.get_raw("is_superuser").as_deref() == Some(su) {
+            return;
         }
-        Ok(QueryResult::command(tag))
+        st.set_internal_in("is_superuser", su, local, in_txn);
+        let at = match before_session_authorization {
+            true => st.changed.iter().rposition(|n| n == "session_authorization"),
+            false => None,
+        };
+        match at {
+            Some(i) => st.changed.insert(i, "is_superuser".into()),
+            None => st.changed.push("is_superuser".into()),
+        }
     }
 
     fn set_transaction(&mut self, opts: &[pb::Node]) -> Result<()> {
@@ -419,42 +465,70 @@ impl Session {
             ));
             return Ok(());
         }
-        super::set_deferrable(&self.state, opts);
-        if let Some(t) = &self.txn {
-            let (iso, _) = (t.borrow().isolation, ());
-            let was_ro = t.borrow().read_only;
-            let (mut niso, mut ro) = (iso, was_ro);
-            super::apply_txn_options(opts, &mut niso, &mut ro)?;
-            if niso != iso {
-                return Err(Error::new(
-                    code::ACTIVE_SQL_TRANSACTION,
-                    "SET TRANSACTION ISOLATION LEVEL must be called before any query",
-                ));
-            }
-            // check_transaction_read_only: no going read-write inside a read-only
-            // transaction once it has a snapshot (or from a subtransaction).
-            if was_ro && !ro {
-                return Err(Error::new(
-                    code::ACTIVE_SQL_TRANSACTION,
-                    if t.borrow().in_savepoint() {
-                        "cannot set transaction read-write mode inside a read-only transaction"
-                    } else {
-                        "transaction read-write mode must be set before any query"
-                    },
-                ));
-            }
-            t.borrow_mut().read_only = ro;
-            let _ = self.state.settings.borrow_mut().set(
-                "transaction_read_only",
-                Some(if ro { "on" } else { "off" }),
-                true,
-                true,
-            );
-            return Ok(());
+        if self.txn.is_some() {
+            return self.set_txn_options(opts);
         }
+        super::set_deferrable(&self.state, opts);
         let (mut iso, mut ro) = self.txn_opts.unwrap_or_else(|| self.default_txn_opts());
         super::apply_txn_options(opts, &mut iso, &mut ro)?;
         self.txn_opts = Some((iso, ro));
+        Ok(())
+    }
+
+    /// Transaction options on the open transaction (SET TRANSACTION, or a BEGIN that turns an
+    /// implicit block into an explicit one), each through its parameter's check hook in the
+    /// order given: check_transaction_isolation, check_transaction_read_only,
+    /// check_transaction_deferrable refuse a change once a statement took a snapshot
+    /// (FirstSnapshotSet) or in a subtransaction.
+    pub(super) fn set_txn_options(&mut self, opts: &[pb::Node]) -> Result<()> {
+        let t = self.txn.as_ref().expect("an open transaction");
+        let (cur_iso, cur_ro, snap, sub) = {
+            let t = t.borrow();
+            (t.isolation, t.read_only, t.first_snapshot, t.in_savepoint())
+        };
+        let refuse = |m: &str| Err(Error::new(code::ACTIVE_SQL_TRANSACTION, m.to_string()));
+        let (mut iso, mut ro) = (cur_iso, cur_ro);
+        for o in opts {
+            let Some(pg_query::NodeEnum::DefElem(d)) = inner(o) else { continue };
+            match d.defname.as_str() {
+                "transaction_isolation" => {
+                    super::apply_txn_options(std::slice::from_ref(o), &mut iso, &mut ro)?;
+                    if iso != cur_iso && snap {
+                        return refuse("SET TRANSACTION ISOLATION LEVEL must be called before any query");
+                    }
+                    if iso != cur_iso && sub {
+                        return refuse("SET TRANSACTION ISOLATION LEVEL must not be called in a subtransaction");
+                    }
+                }
+                "transaction_read_only" => {
+                    super::apply_txn_options(std::slice::from_ref(o), &mut iso, &mut ro)?;
+                    if !ro && cur_ro && sub {
+                        return refuse("cannot set transaction read-write mode inside a read-only transaction");
+                    }
+                    if !ro && cur_ro && snap {
+                        return refuse("transaction read-write mode must be set before any query");
+                    }
+                }
+                "transaction_deferrable" if sub => {
+                    return refuse("SET TRANSACTION [NOT] DEFERRABLE cannot be called within a subtransaction");
+                }
+                "transaction_deferrable" if snap => {
+                    return refuse("SET TRANSACTION [NOT] DEFERRABLE must be called before any query");
+                }
+                _ => {}
+            }
+        }
+        super::set_deferrable(&self.state, opts);
+        {
+            let mut t = t.borrow_mut();
+            t.isolation = iso;
+            t.read_only = ro;
+        }
+        let mut st = self.state.settings.borrow_mut();
+        if iso != cur_iso {
+            let _ = st.set("transaction_isolation", Some(iso.name()), true, true);
+        }
+        let _ = st.set("transaction_read_only", Some(if ro { "on" } else { "off" }), true, true);
         Ok(())
     }
 

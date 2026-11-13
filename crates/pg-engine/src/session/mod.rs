@@ -365,6 +365,9 @@ pub struct Session {
     /// An Execute completed since the last Sync (XACT_FLAGS_PIPELINING): what follows in
     /// the pipeline is in an implicit transaction block.
     pipelining: bool,
+    /// An Execute ran since the last Sync: the extended protocol's transaction is open
+    /// (start_xact_command) until the Sync ends it, or an error aborts it.
+    extended: bool,
     /// The query string of the statements being run (pg_cursors / pg_prepared_statements
     /// show it whole).
     source: String,
@@ -530,6 +533,7 @@ impl Session {
             infer_params: false,
             multi_stmt: false,
             pipelining: false,
+            extended: false,
             ro_stack: Vec::new(),
             source: String::new(),
             txn_cmds: Vec::new(),
@@ -667,6 +671,18 @@ impl Session {
             || self.multi_stmt
             || self.pipelining
             || self.implicit && self.txn.as_ref().is_some_and(|t| t.borrow().has_writes())
+    }
+
+    /// Whether a transaction is open around the running statement, whose abort undoes what
+    /// it SETs: an explicit block, an implicit transaction already begun, the implicit block
+    /// of a multi-statement query (which PostgreSQL's first statement opens, however little
+    /// it needs one), or the extended protocol's (Execute to Sync).
+    pub(crate) fn guc_in_txn(&self) -> bool {
+        self.status != TxnStatus::Idle
+            || self.txn.is_some()
+            || self.multi_stmt
+            || self.pipelining
+            || self.extended
     }
 
     /// An Execute message completed (exec_execute_message's XACT_FLAGS_PIPELINING).
@@ -1000,6 +1016,11 @@ impl Session {
         }
         let keep = self.state.commit_on_error.replace(false);
         if self.status == TxnStatus::InBlock || self.status == TxnStatus::Failed {
+            // AbortTransaction / AbortSubTransaction: the failing level's settings go back
+            // now, not at the ROLLBACK (their ParameterStatus goes with the error).
+            if self.status == TxnStatus::InBlock {
+                self.state.settings.borrow_mut().abort_level();
+            }
             self.status = TxnStatus::Failed;
             if let Some(t) = &self.txn
                 && let Ok(mut t) = t.try_borrow_mut()
@@ -1035,6 +1056,13 @@ impl Session {
         } else if self.status == TxnStatus::Idle {
             // Utility-only transactions (such as SET) need statistics cleanup too.
             crate::exec::pgstat::clear_snapshot(&self.state);
+            // An implicit block that never needed a transaction of the engine's (SETs, SHOWs)
+            // commits what it set; SET TRANSACTION's options were its transaction's.
+            self.txn_opts = None;
+            let mut st = self.state.settings.borrow_mut();
+            if st.in_transaction() {
+                st.end_transaction(true);
+            }
         }
         Ok(())
     }
@@ -1648,7 +1676,8 @@ impl Session {
                 crate::exec::pgstat::report_checkpoint(&db, log, || db.store.flush_all())?;
                 done(QueryResult::command("CHECKPOINT"))
             }
-            NodeEnum::LockStmt(_) if self.status == TxnStatus::Idle && !self.implicit => {
+            // (A multi-statement query's implicit block is a transaction block.)
+            NodeEnum::LockStmt(_) if self.status == TxnStatus::Idle && !self.implicit && !self.multi_stmt => {
                 Err(Error::new(
                     code::NO_ACTIVE_SQL_TRANSACTION,
                     "LOCK TABLE can only be used in transaction blocks",
@@ -2996,6 +3025,7 @@ impl Session {
     /// Execute message. Returns the outcome and whether the portal was suspended (more rows).
     pub fn execute_portal(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
         self.waits_armed = false;
+        self.extended = true;
         crate::stack::grow(|| self.execute_portal_here(portal, max_rows))
     }
 
@@ -3280,6 +3310,7 @@ impl Session {
     /// with a suspended unnamed portal.
     pub fn sync(&mut self) -> Result<()> {
         self.pipelining = false;
+        self.extended = false;
         if !matches!(self.status, TxnStatus::InBlock | TxnStatus::Failed)
             && let Err(e) = self.close_portal("")
         {
@@ -3312,14 +3343,20 @@ impl Session {
                     ));
                     return Ok(QueryResult::command(tag));
                 }
-                let (mut iso, mut ro) = self.default_txn_opts();
-                apply_txn_options(&t.options, &mut iso, &mut ro)?;
-                default_deferrable(&self.state);
-                set_deferrable(&self.state, &t.options);
-                if self.implicit {
-                    // Earlier statements of this batch join the block.
+                if self.txn.is_some() {
+                    // The implicit block's transaction (a multi-statement query's, a
+                    // pipeline's) becomes the block: the statements before join it, and the
+                    // options are SET LOCALs in it, checked as SET TRANSACTION's are
+                    // (BeginTransactionBlock in TBLOCK_IMPLICIT_INPROGRESS).
+                    self.set_txn_options(&t.options)?;
                     self.implicit = false;
                 } else {
+                    // (Over what SET TRANSACTION gave the implicit block before it.)
+                    let (mut iso, mut ro) =
+                        self.txn_opts.unwrap_or_else(|| self.default_txn_opts());
+                    apply_txn_options(&t.options, &mut iso, &mut ro)?;
+                    default_deferrable(&self.state);
+                    set_deferrable(&self.state, &t.options);
                     self.txn_time = Self::now();
                     self.txn_opts = Some((iso, ro));
                 }
@@ -3350,10 +3387,10 @@ impl Session {
                     return self.chain(false);
                 }
                 if self.status == TxnStatus::Idle {
-                    self.raise_notice(warning(
-                        code::NO_ACTIVE_SQL_TRANSACTION,
-                        "there is no transaction in progress",
-                    ));
+                    self.raise_notice(
+                        warning(code::NO_ACTIVE_SQL_TRANSACTION, "there is no transaction in progress")
+                            .routine("UserAbortTransactionBlock"),
+                    );
                 }
                 self.finish_txn_untimed(false)?;
                 Ok(QueryResult::command("ROLLBACK"))
@@ -3460,16 +3497,20 @@ impl Session {
                 format!("{what} can only be used in transaction blocks"),
             ));
         }
-        let opts = self.txn.as_ref().map(|t| {
+        let failed = self.status == TxnStatus::Failed;
+        // (A failed block's abort already put its characteristics back to the defaults, which
+        // the chained transaction then takes: SaveTransactionCharacteristics after it.)
+        let opts = self.txn.as_ref().filter(|_| !failed).map(|t| {
             let t = t.borrow();
             (t.isolation, t.read_only)
         });
-        let failed = self.status == TxnStatus::Failed;
         let deferrable = self.state.settings.borrow().get_raw("transaction_deferrable");
         self.finish_txn(commit && !failed)?;
         self.status = TxnStatus::InBlock;
         self.txn_opts = opts;
-        if let Some(d) = deferrable {
+        if failed {
+            default_deferrable(&self.state);
+        } else if let Some(d) = deferrable {
             let mut st = self.state.settings.borrow_mut();
             let _ = st.set("transaction_deferrable", Some(&d), true, true);
             st.changed.retain(|n| n != "transaction_deferrable");
