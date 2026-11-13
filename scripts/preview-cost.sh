@@ -401,6 +401,11 @@ done
 # At the change's merge base: main's head, which the baseline runs.
 [ "$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('head')")" = "$(api GET "/v1/previews/$MAINPV" | jq_ "d['head']")" ] || { echo "the change should be compared with main where it left it: $(api GET "/v1/previews/$PV" | jq_ "d.get('base_change')")"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?base=1")" = image/png ] || { echo "main's screenshot should be there to compare"; exit 1; }
+# Where it differs, as a picture: against main's, and against the push before.
+curl -sS -o "$HOME_DIR/diff.png" "http://$API/v1/previews/$PV/screenshot?diff=base"
+DIFF=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print('PNG' if b[:4]==b'\x89PNG' else 'not a PNG: ' + b[:200].decode('utf-8','replace'))" "$HOME_DIR/diff.png")
+[ "$DIFF" = PNG ] || { echo "the diff against main should be a PNG: $DIFF"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?diff=previous")" = image/png ] || { echo "the diff against the push before should be a PNG"; exit 1; }
 # The other page, taken in the same session and compared with main's.
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
 case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac

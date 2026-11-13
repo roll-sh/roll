@@ -294,19 +294,35 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
     {
         return Err(Error::BadRequest("page: a path from github.pages (desktop only)".into()));
     }
+    // `diff=base|previous`: where this one differs from the baseline's or the one before (the
+    // same view and page), as a picture.
+    let diff = match q.get("diff").map(String::as_str) {
+        None => None,
+        Some(d @ ("base" | "previous")) => Some(d == "base"),
+        Some(v) => return Err(Error::BadRequest(format!("diff: base or previous, not {v:?}"))),
+    };
     let png = blocking(e, move |e| {
-        // `base=1`: the default branch's preview's, the one this was compared with (at the
-        // change's merge base when that was kept).
-        if base {
-            return e.store.base_screenshot(&id, phone, page.as_deref());
-        }
-        if let Some(path) = &page {
-            return e.store.page_screenshot(&id, path, previous);
-        }
-        match (phone, previous) {
-            (true, p) => e.store.phone_screenshot(&id, p),
-            (false, true) => e.store.previous_screenshot(&id),
-            (false, false) => Ok(e.store.screenshot(&id)?.map(|(_, png)| png)),
+        let shot = |base: bool, previous: bool| -> crate::Result<Option<Vec<u8>>> {
+            // `base=1`: the default branch's preview's, the one this was compared with (at the
+            // change's merge base when that was kept).
+            if base {
+                return e.store.base_screenshot(&id, phone, page.as_deref());
+            }
+            if let Some(path) = &page {
+                return e.store.page_screenshot(&id, path, previous);
+            }
+            match (phone, previous) {
+                (true, p) => e.store.phone_screenshot(&id, p),
+                (false, true) => e.store.previous_screenshot(&id),
+                (false, false) => Ok(e.store.screenshot(&id)?.map(|(_, png)| png)),
+            }
+        };
+        match diff {
+            Some(against_base) => {
+                let (Some(before), Some(after)) = (shot(against_base, !against_base)?, shot(false, false)?) else { return Ok(None) };
+                Ok(crate::visual::diff(&before, &after))
+            }
+            None => shot(base, previous),
         }
     })
     .await?;

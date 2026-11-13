@@ -655,7 +655,7 @@ and admins see every project.
 | `POST /v1/previews/{id}/sleep` | | `Preview`: stop its services now |
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
-| `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages` |
+| `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
@@ -793,6 +793,10 @@ type Settings = {
     start, and the project's `github.hide` selectors (up to 20; a clock, an ad, a random avatar)
     are blanked with their box kept, so the same page screenshots the same and only real changes
     count. Speed is timed before that, on the page as it loaded.
+    Where a page changed is a picture too (Percy's and Chromatic's diff view): `?diff=base` or
+    `?diff=previous` (with `view` and `page` as for the screenshot) fades what's the same and marks
+    what differs, the area only one of them has included; the sheet's Diff shows it against main
+    (else the push before), so whoever accepts a visual change sees what they accept.
     With `visual_review` (`off` by default, `check` or `required`) a change's pages are reviewed as
     Chromatic's UI Review does: once compared with the baseline, the change has `visual_review`
     (the most any page differs, at either width), and a `roll/visual` commit status that's
@@ -928,6 +932,7 @@ Ranked by what a person notices first. Done so far:
   `required` keeping the change from landing in roll);
 - comparisons with main at the change's merge base (the baseline's last 10 heads kept);
 - stable screenshots: animations stopped and `github.hide` selectors blanked before each capture;
+- where a page changed, as a diff image (`?diff=base|previous`, the sheet's Diff);
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
   public or private restarting nothing on roll's runtime;
 - what went wrong while the page loaded (exceptions, console errors, failed requests);
@@ -965,30 +970,27 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Where it changed** (Percy's and Chromatic's diff view): a percentage says how much, not
-   where. A diff image (`GET …/screenshot?diff=base|previous`: the page dimmed, changed pixels
-   marked), the sheet's Diff mode, so a reviewer accepting a visual change sees what they accept.
-2. **A required review isn't the author's to give**: with `visual_review = "required"` the
+1. **A required review isn't the author's to give**: with `visual_review = "required"` the
    change's own author (or an agent working on it) can accept it and land, so the gate only
    asks for a click. Required acceptances from someone else, as reviews' approvals are
    (`Code::blockers` already knows the change's author).
-3. **A look at the new UI from screenshots of the real thing**: the sheet's page switcher,
+2. **A look at the new UI from screenshots of the real thing**: the sheet's page switcher,
    Accept and diff, the change page's review line, and the settings' new fields, against a live
    preview at desktop and phone widths.
-4. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+3. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-5. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

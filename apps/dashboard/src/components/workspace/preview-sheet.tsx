@@ -592,6 +592,8 @@ function Screenshot({
   const page = other?.path;
   // Main: the default branch's preview's screenshot, the one this differs from.
   const [main, setMain] = useState(false);
+  // Diff: where it differs from main's (else the push before's), marked.
+  const [diff, setDiff] = useState(false);
   const [src, setSrc] = useState<string | null>(null);
   // Before: the screenshot at the head before, to compare; phone: at a phone's width.
   const [before, setBefore] = useState(false);
@@ -599,7 +601,7 @@ function Screenshot({
   useEffect(() => {
     let url: string | null = null;
     let live = true;
-    screenshotUrl(id, before && !main, phone, main, page).then(
+    screenshotUrl(id, before && !main && !diff, phone, main && !diff, page, diff ? (baseChange ? "base" : "previous") : undefined).then(
       (u) => {
         url = u;
         if (live) setSrc(u);
@@ -611,7 +613,7 @@ function Screenshot({
       live = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [id, at, before, phone, main, page]);
+  }, [id, at, before, phone, main, page, diff, !!baseChange]);
   if (!src && path === "/") return null;
   const since = change?.since.replace(/^cs_/, "").slice(0, 10);
   return (
@@ -628,6 +630,17 @@ function Screenshot({
             {main ? "This change" : baseChange.branch}
           </button>
         )}
+        {(baseChange || change) && (
+          <button
+            type="button"
+            onClick={() => setDiff((d) => !d)}
+            aria-pressed={diff}
+            className="text-muted hover:text-fg"
+            title={baseChange ? `What differs from ${baseChange.branch}, marked` : "What changed since the push before, marked"}
+          >
+            {diff ? "Page" : "Diff"}
+          </button>
+        )}
         {change && (
           <button type="button" onClick={() => setBefore((b) => !b)} aria-pressed={before} className="text-muted hover:text-fg" title={`The page at ${since}, the head before`}>
             {before ? "After" : "Before"}
@@ -642,6 +655,7 @@ function Screenshot({
               type="button"
               onClick={() => {
                 setPath(x);
+                setDiff(false);
                 setPhone(false);
                 setBefore(false);
                 setMain(false);
@@ -654,6 +668,7 @@ function Screenshot({
           ))}
         </div>
       )}
+      {diff && <p className="mb-1 text-[11.5px] text-subtle">Marked: what differs from {baseChange ? baseChange.branch : "the push before"}.</p>}
       {other && other.errors > 0 && (
         <p className="mb-1 text-[11.5px] text-danger">
           {other.errors} {other.errors === 1 ? "error" : "errors"} while it loaded.
