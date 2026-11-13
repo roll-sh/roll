@@ -77,6 +77,21 @@ export interface NewGrant {
   ask_otherwise?: boolean;
 }
 
+/** A token that needs attention (`GET /v1/access/checkup`). */
+export interface Checkup {
+  grant: { id: string; name: string; kind: Grant["kind"]; last_used_at: number | null; expires_at: number | null; created_at: number };
+  /** Most serious first. */
+  findings: { kind: "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "tighten" | "expire" | "revoke" | "limit_addresses" }[];
+}
+
+/** What a checkup fix is called on its button. */
+export const FIX_LABEL: Record<Checkup["findings"][number]["fix"], string> = {
+  tighten: "Tighten",
+  expire: "Give it an expiry",
+  revoke: "Revoke",
+  limit_addresses: "Limit addresses",
+};
+
 /** A token's rules narrowed to what it used (`GET /v1/access/tokens/{id}/tighten`). */
 export interface Tightened {
   since: number;
@@ -271,6 +286,8 @@ export const accessApi = {
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
   update: (id: string, patch: Partial<NewGrant>) => call<Grant>("PATCH", token(id), patch),
   revoke: (id: string) => call<Grant>("DELETE", token(id)),
+  /** The live tokens that need attention, each with its findings and their fixes. */
+  checkup: () => call<Checkup[]>("GET", "/v1/access/checkup"),
   /** The networks it's been used from (/24s and /48s), newest first. */
   networks: (id: string) => call<{ network: string; first_at: number; last_at: number }[]>("GET", `${token(id)}/networks`),
   /** Take back what an approval allowed it for a while (and the approval, if unused). */

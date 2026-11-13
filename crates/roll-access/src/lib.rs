@@ -12,6 +12,7 @@
 
 pub mod api;
 pub mod catalog;
+pub mod checkup;
 pub mod evaluate;
 pub mod leaks;
 pub mod oauth;
