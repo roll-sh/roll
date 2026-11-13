@@ -288,6 +288,22 @@ fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static
     }
 }
 
+/// The comment's line on how fast the first page loaded, and how that moved since the push before.
+fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
+    let t = |ms: u32| if ms < 1000 { format!("{ms} ms") } else { format!("{:.1} s", ms as f64 / 1000.0) };
+    let kb = if s.bytes >= 1 << 20 { format!("{:.1} MB", s.bytes as f64 / (1 << 20) as f64) } else { format!("{} KB", s.bytes.div_ceil(1024)) };
+    let moved = match s.before_load_ms {
+        Some(b) if b != s.load_ms => {
+            let d = s.load_ms as i64 - b as i64;
+            format!(" ({}{} since the push before)", if d > 0 { "+" } else { "−" }, t(d.unsigned_abs() as u32))
+        }
+        Some(_) => " (as before)".into(),
+        None => String::new(),
+    };
+    let paint = s.fcp_ms.map(|f| format!(", first paint {}", t(f))).unwrap_or_default();
+    format!("Its first page loads in {}{moved}{paint}, {kb}, first byte {}.\n\n", t(s.load_ms), t(s.ttfb_ms))
+}
+
 /// The comment's line on how much the page changed since the screenshot at an earlier head.
 fn visual_line(v: &crate::model::PreviewVisualChange) -> String {
     let since: String = v.since.strip_prefix("cs_").unwrap_or(&v.since).chars().filter(|c| c.is_ascii_alphanumeric()).take(10).collect();
@@ -363,6 +379,9 @@ fn preview_comment(c: &Change) -> String {
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
             ));
+            if let Some(line) = e.page_speed.as_ref().map(speed_line) {
+                out.push_str(&line);
+            }
             if let Some(line) = e.visual_change.as_ref().map(visual_line) {
                 out.push_str(&line);
             }
@@ -424,6 +443,7 @@ mod preview_tests {
             expires_at: None,
             earlier: Vec::new(),
             visual_change: None,
+            page_speed: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -443,5 +463,8 @@ mod preview_tests {
         let v = |percent: f64| crate::model::PreviewVisualChange { since: "cs_1a2b3c4d5e6f".into(), percent };
         assert_eq!(visual_line(&v(12.34)), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels).\n\n");
         assert_eq!(visual_line(&v(0.0)), "The page looks the same as at `1a2b3c4d5e`.\n\n");
+        let sp = |load_ms, before| crate::model::PreviewPageSpeed { ttfb_ms: 40, fcp_ms: Some(380), load_ms, bytes: 312_000, before_load_ms: before };
+        assert_eq!(speed_line(&sp(1200, Some(900))), "Its first page loads in 1.2 s (+300 ms since the push before), first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
+        assert_eq!(speed_line(&sp(800, None)), "Its first page loads in 800 ms, first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
     }
 }

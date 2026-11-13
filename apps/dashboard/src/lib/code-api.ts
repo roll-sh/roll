@@ -352,6 +352,8 @@ export interface PreviewEnvironment {
   earlier?: { service: string; head: string; url: string }[];
   /** How much the first service's page changed since the screenshot at an earlier head. */
   visual_change?: { since: string; percent: number };
+  /** How fast that page loaded (timed with its screenshot), and its load at the head before. */
+  page_speed?: { ttfb_ms: number; fcp_ms: number | null; load_ms: number; bytes: number; before_load_ms: number | null };
 }
 
 export interface Change {

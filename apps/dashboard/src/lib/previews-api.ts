@@ -79,6 +79,8 @@ export interface Preview {
   goes_at?: number | null;
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number } | null;
+  /** How fast its first page loaded at this head (timed with the screenshot), and at the one before. */
+  page_speed?: { now: PageSpeed; before: PageSpeed | null } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */
@@ -105,6 +107,17 @@ export interface PreviewJob {
   timeout_s?: number;
   memory_mb?: number;
 }
+
+/** A page's load, as the browser that took its screenshot timed it. */
+export interface PageSpeed {
+  ttfb_ms: number;
+  fcp_ms: number | null;
+  load_ms: number;
+  bytes: number;
+}
+
+/** "1.2 s" or "380 ms". */
+export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
 
 export interface PreviewSettings {
   enabled: boolean;

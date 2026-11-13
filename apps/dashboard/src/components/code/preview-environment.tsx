@@ -48,6 +48,14 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       <p className="font-mono text-[11px] text-subtle tabular-nums">
         {money(env.sleeping_usd_month)}/mo asleep · {money(env.active_usd_hour)}/h active
       </p>
+      {env.page_speed && (
+        <p className="font-mono text-[11px] text-subtle tabular-nums">
+          load {env.page_speed.load_ms < 1000 ? `${env.page_speed.load_ms} ms` : `${(env.page_speed.load_ms / 1000).toFixed(1)} s`}
+          {env.page_speed.before_load_ms != null && env.page_speed.before_load_ms !== env.page_speed.load_ms
+            ? ` (${env.page_speed.load_ms > env.page_speed.before_load_ms ? "+" : "−"}${Math.abs(env.page_speed.load_ms - env.page_speed.before_load_ms)} ms since the push before)`
+            : ""}
+        </p>
+      )}
       {env.visual_change && (
         <p className="text-[12px] text-muted">
           {env.visual_change.percent > 0

@@ -507,8 +507,8 @@ impl Engine {
     pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
         let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
         match self.apps.screenshot(&r.id, &first.name).await {
-            Ok(Some(png)) => {
-                let kept = self.store.set_screenshot(&r.id, r.build(), &png).is_ok();
+            Ok(Some(shot)) => {
+                let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref()).is_ok();
                 if kept {
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
                 }

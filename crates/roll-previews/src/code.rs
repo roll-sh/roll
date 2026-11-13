@@ -115,6 +115,13 @@ impl CodeSource {
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
                 expires_at: p.goes_at,
+                page_speed: p.page_speed.as_ref().map(|v| code_control::model::PreviewPageSpeed {
+                    ttfb_ms: v.now.ttfb_ms,
+                    fcp_ms: v.now.fcp_ms,
+                    load_ms: v.now.load_ms,
+                    bytes: v.now.bytes,
+                    before_load_ms: v.before.as_ref().map(|b| b.load_ms),
+                }),
                 visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent }),
                 earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone() }).collect(),
                 // Only a public preview's: the comment is readable by whoever reads the pull request.

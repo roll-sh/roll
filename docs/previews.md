@@ -746,6 +746,12 @@ type Settings = {
     a little (anti-aliasing isn't a change), the page's added height counting as changed
     (`visual_change` on the preview and the change; "The page changed 12.3% since `abc123`" in the
     pull request comment), as Percy and Chromatic show visual changes for review.
+    The same load times the page (Vercel's Speed Insights, Netlify's Lighthouse plugin):
+    `shot.js` drives the headless shell over the DevTools protocol on a pipe and reads the
+    navigation timing, the first contentful paint and the bytes fetched (`page_speed`, with the
+    head before's to compare; "Its first page loads in 1.2 s (+300 ms since the push before)" in
+    the comment). The page reports this about itself, so it's bounded (10 minutes, 10 GiB) and
+    only ever shown. An operator's own screenshot command only has to write the PNG.
     For a `public` preview the pull request comment shows it through a signed link
     (`/v1/previews/{id}/screenshot.png?exp=…&sig=…`: HMAC-SHA256 of the preview and the expiry,
     30 days after the screenshot, under a key the previews store makes once; a public route,
@@ -848,7 +854,9 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
-- the page's feedback listed by its button (who, what, its element outlined);
+- page speed per push (timed with the screenshot, compared with the push before);
+- the page's feedback listed by its button (who, what, its element outlined; roll apps' proxy
+  can ask `Engine::notes_for` by environment name);
 - a visual change per push (the screenshot against the one before, Before/After on the sheet,
   the share of pixels changed in the pull request comment);
 - per-branch project variables (`env_for`);
@@ -879,16 +887,21 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **Expiring share links** (Vercel's shareable links): a link to hand someone outside the team
+   that opens the preview until a time (`POST …/share {hours}`), on its own signed token, while
+   the preview's own link stays as it is; listed and revocable on the sheet.
+2. **A phone-width screenshot** beside the desktop one (Percy's and Chromatic's widths), with
+   its own visual change.
+3. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

@@ -294,7 +294,7 @@ impl roll_previews::ports::Apps for Services {
         }
     }
 
-    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         match self.apps.find(preview, service).await? {
             Some(_) => Ok(None),
             None => self.runtime.screenshot(preview, service).await,

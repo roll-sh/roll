@@ -20,6 +20,8 @@ pub struct FakeCode {
     pub paths: Mutex<HashMap<String, Vec<String>>>,
     /// The paths between two heads, by `"<from>..<to>"` (unlisted: not known).
     pub between: Mutex<HashMap<String, Vec<String>>>,
+    /// The feedback left on changes' preview pages, by change.
+    pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     pub reports: Mutex<Vec<Preview>>,
@@ -55,6 +57,9 @@ impl Source for FakeCode {
     }
     async fn paths(&self, _repo: &str, head: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.paths.lock().get(head).cloned())
+    }
+    async fn feedback(&self, change: &str) -> anyhow::Result<Vec<roll_previews::notes::Note>> {
+        Ok(self.feedback.lock().get(change).cloned().unwrap_or_default())
     }
     async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())

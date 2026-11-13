@@ -78,7 +78,10 @@ pub struct RuntimeConfig {
 
 /// Playwright's image has a headless Chromium shell (its path names its version).
 pub const SCREENSHOT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.64.1-noble";
-pub const SCREENSHOT_COMMAND: &str = r#""$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" --no-sandbox --hide-scrollbars --window-size=1280,800 --screenshot="$OUT" "$URL""#;
+/// One load of the page that writes the PNG to `$OUT` and its timings to `$OUT.json`
+/// (`shot.js`, in `$ROLL_SHOT_JS`). A command of an operator's own only needs to write `$OUT`.
+pub const SCREENSHOT_COMMAND: &str = r#"CHROME="$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" node -e "$ROLL_SHOT_JS""#;
+const SHOT_JS: &str = include_str!("shot.js");
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -374,16 +377,10 @@ impl Runtime {
     /// The notes left on `path` of the preview's pages, as JSON (the latest 50; for whoever has
     /// the button: link access, through roll).
     async fn feedback_notes(&self, preview: &str, path: &str) -> Response {
-        let notes = match (self.engine(), self.store.row(preview)) {
-            (Ok(e), Ok(row)) => match &row.change_id {
-                Some(change) => e.notes(change).await.unwrap_or_default(),
-                None => Vec::new(),
-            },
-            _ => Vec::new(),
+        let here = match self.engine() {
+            Ok(e) => e.notes_of(preview, path).await.unwrap_or_default(),
+            Err(_) => Vec::new(),
         };
-        let mut here: Vec<_> = notes.into_iter().filter(|n| n.path == path).collect();
-        let skip = here.len().saturating_sub(50);
-        here.drain(..skip);
         ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-store")], axum::Json(here)).into_response()
     }
 
@@ -810,7 +807,7 @@ impl Apps for Runtime {
         Ok(Some((status, first)))
     }
 
-    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<crate::ports::Shot>> {
         use base64::Engine as _;
         if self.iso.name() != "docker" {
             return Ok(None);
@@ -842,7 +839,9 @@ impl Apps for Runtime {
         args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
-        args.extend([self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), format!("{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png", self.cfg.screenshot_command)]);
+        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
+        // The PNG on the first line, the timings (if the command wrote them) on the second.
+        args.extend([self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), format!("{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true)", self.cfg.screenshot_command)]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = match tokio::time::timeout(Duration::from_secs(90), code_preview::docker::docker(&argv)).await {
             Ok(r) => r?,
@@ -851,9 +850,10 @@ impl Apps for Runtime {
                 anyhow::bail!("the screenshot took over 90 s");
             }
         };
-        let png = base64::engine::general_purpose::STANDARD.decode(out.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
+        let (b64, speed) = out.split_once('\n').unwrap_or((out.as_str(), ""));
+        let png = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
-        Ok(Some(png))
+        Ok(Some(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed) }))
     }
 
     async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {

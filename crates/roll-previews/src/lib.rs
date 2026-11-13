@@ -212,6 +212,8 @@ pub struct Preview {
     /// How much the page changed since the screenshot at an earlier head (`GET
     /// …/screenshot?previous=1` is that one).
     pub visual_change: Option<VisualChange>,
+    /// How fast the first service's page loaded at this head, and at the head before.
+    pub page_speed: Option<PageSpeedView>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -247,6 +249,36 @@ pub struct Service {
     pub memory_mb: i64,
     /// `url` with the access token, when one is needed.
     pub share_url: Option<String>,
+}
+
+/// The page's speed at the latest screenshot's head, and at the one before (to compare).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PageSpeedView {
+    pub now: PageSpeed,
+    pub before: Option<PageSpeed>,
+}
+
+/// How fast a preview's first page loaded, timed by the browser that took its screenshot. The
+/// page reports this about itself, so it's bounded and only ever shown.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct PageSpeed {
+    /// Time to its first byte.
+    pub ttfb_ms: u32,
+    /// Its first contentful paint, when it painted.
+    pub fcp_ms: Option<u32>,
+    /// Until its load event.
+    pub load_ms: u32,
+    /// What it fetched (the page and what it loaded).
+    pub bytes: u64,
+}
+
+impl PageSpeed {
+    /// From what the browser wrote, if it's that and within reason (10 minutes, 10 GiB).
+    pub fn parse(json: &str) -> Option<PageSpeed> {
+        let s: PageSpeed = serde_json::from_str(json.trim()).ok()?;
+        let ms = 600_000;
+        (s.ttfb_ms <= ms && s.load_ms <= ms && s.fcp_ms.is_none_or(|f| f <= ms) && s.bytes <= 10 << 30).then_some(s)
+    }
 }
 
 /// How much a preview's page changed between the screenshots of two heads.
@@ -392,6 +424,17 @@ pub fn label_part(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the browser writes reads back; numbers past reason, or anything else, don't.
+    #[test]
+    fn page_speed_reads_what_the_browser_wrote() {
+        let s = PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":1200,"bytes":312000}"#).unwrap();
+        assert_eq!((s.ttfb_ms, s.fcp_ms, s.load_ms, s.bytes), (40, Some(380), 1200, 312000));
+        assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":null,"load_ms":1200,"bytes":0}"#).unwrap().fcp_ms, None);
+        assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":99999999,"bytes":0}"#), None, "a page that lies past 10 minutes");
+        assert_eq!(PageSpeed::parse("<html>"), None);
+        assert_eq!(PageSpeed::parse(""), None);
+    }
 
     #[test]
     fn labels_are_dns_safe() {

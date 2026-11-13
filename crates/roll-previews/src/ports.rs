@@ -132,6 +132,13 @@ pub struct ServiceSpec {
     pub health: Option<String>,
 }
 
+/// A screenshot of a service's page, and how fast it loaded when the backend could time it.
+#[derive(Clone, Debug)]
+pub struct Shot {
+    pub png: Vec<u8>,
+    pub speed: Option<crate::PageSpeed>,
+}
+
 /// roll code, as previews read it and report to it.
 #[async_trait]
 pub trait Source: Send + Sync {
@@ -305,7 +312,7 @@ pub trait Apps: Send + Sync {
     async fn probe(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         Ok(None)
     }
-    async fn screenshot(&self, _preview: &str, _service: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn screenshot(&self, _preview: &str, _service: &str) -> anyhow::Result<Option<Shot>> {
         Ok(None)
     }
     /// What it's doing on this node (`None`: never started here).

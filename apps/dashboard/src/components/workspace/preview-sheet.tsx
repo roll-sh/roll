@@ -1,7 +1,7 @@
 import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
+import { duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -230,6 +230,16 @@ export function PreviewSheet({
             )}
 
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} /> : null}
+            {p.page_speed && (
+              <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="Timed by the browser that took the screenshot">
+                load {duration(p.page_speed.now.load_ms)}
+                {p.page_speed.before && p.page_speed.before.load_ms !== p.page_speed.now.load_ms
+                  ? ` (${p.page_speed.now.load_ms > p.page_speed.before.load_ms ? "+" : "−"}${duration(Math.abs(p.page_speed.now.load_ms - p.page_speed.before.load_ms))})`
+                  : ""}
+                {p.page_speed.now.fcp_ms != null ? ` · first paint ${duration(p.page_speed.now.fcp_ms)}` : ""} · {formatBytes(p.page_speed.now.bytes)} · first byte{" "}
+                {duration(p.page_speed.now.ttfb_ms)}
+              </p>
+            )}
 
             <Label>Cost</Label>
             <div className="grid grid-cols-3 gap-2">

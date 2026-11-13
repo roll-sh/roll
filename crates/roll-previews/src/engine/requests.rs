@@ -5,9 +5,24 @@ use super::*;
 impl Engine {
     // ── what the API asks for ──
 
-    /// The feedback left on a change's preview pages.
-    pub async fn notes(&self, change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
-        self.source.feedback(change).await
+    /// The feedback left on `path` of a preview's pages (the latest 50, oldest first), for the
+    /// button that lists it: roll previews' own proxy, and roll apps' for its `pv-` environments.
+    /// Nothing for a branch's preview (no change to read from) or one that doesn't exist.
+    pub async fn notes_of(&self, preview: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        let Ok(row) = self.store.row(preview) else { return Ok(Vec::new()) };
+        let Some(change) = &row.change_id else { return Ok(Vec::new()) };
+        let mut here: Vec<crate::notes::Note> = self.source.feedback(change).await?.into_iter().filter(|n| n.path == path).collect();
+        let skip = here.len().saturating_sub(50);
+        here.drain(..skip);
+        Ok(here)
+    }
+
+    /// [`Engine::notes_of`] by the preview's environment name (`pv-<id>`, as roll apps knows it).
+    pub async fn notes_for(&self, env: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        match env.strip_prefix("pv-") {
+            Some(id) if !id.is_empty() => self.notes_of(&format!("pv_{id}"), path).await,
+            _ => Ok(Vec::new()),
+        }
     }
 
     /// The ids of `owner`'s workspace projects (a signed-in person's).

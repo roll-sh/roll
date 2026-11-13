@@ -305,6 +305,19 @@ pub struct PreviewEnvironment {
     /// How much the first service's page changed since the screenshot at an earlier head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_change: Option<PreviewVisualChange>,
+    /// How fast the first service's page loaded at this head (and its load at the head before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_speed: Option<PreviewPageSpeed>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageSpeed {
+    pub ttfb_ms: u32,
+    pub fcp_ms: Option<u32>,
+    pub load_ms: u32,
+    pub bytes: u64,
+    /// The load at the head before, to compare.
+    pub before_load_ms: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

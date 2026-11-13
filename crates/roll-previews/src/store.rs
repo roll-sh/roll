@@ -368,7 +368,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -932,31 +932,41 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT tried FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
-    pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8]) -> Result<()> {
+    pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8], speed: Option<&crate::PageSpeed>) -> Result<()> {
         use base64::Engine as _;
         let b64e = base64::engine::general_purpose::STANDARD;
         let (b64, now) = (b64e.encode(png), self.now_ms()?);
+        let speed = speed.and_then(|s| serde_json::to_string(s).ok());
         // The one it replaces, at another head, is kept as "before", with how much changed.
-        let before: Option<(String, String)> = self.db.read(|c| c.query_row("SELECT head, png FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
-        let before = before.filter(|(h, p)| h != head && !p.is_empty());
-        let change_bp = before.as_ref().and_then(|(_, p)| b64e.decode(p).ok()).and_then(|old| crate::visual::changed(&old, png)).map(|f| (f * 10_000.0).round() as i64);
+        let before: Option<(String, String, Option<String>)> =
+            self.db.read(|c| c.query_row("SELECT head, png, speed FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
+        let before = before.filter(|(h, p, _)| h != head && !p.is_empty());
+        let change_bp = before.as_ref().and_then(|(_, p, _)| b64e.decode(p).ok()).and_then(|old| crate::visual::changed(&old, png)).map(|f| (f * 10_000.0).round() as i64);
         self.db.write(|c| {
             match &before {
-                Some((prev_head, prev_png)) => c.execute(
-                    "INSERT INTO screenshots (preview_id, head, png, at, tried, prev_head, prev_png, change_bp) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                Some((prev_head, prev_png, prev_speed)) => c.execute(
+                    "INSERT INTO screenshots (preview_id, head, png, at, tried, prev_head, prev_png, change_bp, speed, prev_speed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, \
-                     prev_head = excluded.prev_head, prev_png = excluded.prev_png, change_bp = excluded.change_bp",
-                    params![id, head, b64, now, head, prev_head, prev_png, change_bp],
+                     prev_head = excluded.prev_head, prev_png = excluded.prev_png, change_bp = excluded.change_bp, speed = excluded.speed, prev_speed = excluded.prev_speed",
+                    params![id, head, b64, now, head, prev_head, prev_png, change_bp, speed, prev_speed],
                 )?,
                 // A first one, or the same head again: what came before stays.
                 None => c.execute(
-                    "INSERT INTO screenshots (preview_id, head, png, at, tried) VALUES (?, ?, ?, ?, ?) \
-                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried",
-                    params![id, head, b64, now, head],
+                    "INSERT INTO screenshots (preview_id, head, png, at, tried, speed) VALUES (?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, speed = excluded.speed",
+                    params![id, head, b64, now, head, speed],
                 )?,
             };
             Ok::<_, Error>(())
         })
+    }
+
+    /// How fast the page loaded at the latest screenshot, and at the one before.
+    pub fn page_speed(&self, id: &str) -> Result<Option<crate::PageSpeedView>> {
+        let row: Option<(Option<String>, Option<String>)> = self.db.read(|c| c.query_row("SELECT speed, prev_speed FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        let Some((now, before)) = row else { return Ok(None) };
+        let parse = |s: Option<String>| s.and_then(|s| serde_json::from_str::<crate::PageSpeed>(&s).ok());
+        Ok(parse(now).map(|now| crate::PageSpeedView { now, before: parse(before) }))
     }
 
     /// How much the page changed since the screenshot before (its head, in basis points).
@@ -1210,6 +1220,7 @@ impl Store {
         let goes_at = self.goes_at(&r.id)?;
         let screenshot_at = self.screenshot_at(&r.id)?;
         let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0 });
+        let page_speed = self.page_speed(&r.id)?;
         let screenshot_link = self.screenshot_link(&r.id)?;
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
@@ -1252,6 +1263,7 @@ impl Store {
             earlier,
             screenshot_at,
             visual_change,
+            page_speed,
             screenshot_link,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
@@ -1320,14 +1332,18 @@ mod tests {
         let (_dir, store) = store();
         let (row, _) = store.create(&new("chg_visual")).unwrap();
         let id = row.id.as_str();
-        store.set_screenshot(id, "cs_1", &png(0)).unwrap();
+        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000 };
+        store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
-        store.set_screenshot(id, "cs_2", &png(3)).unwrap();
+        assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(900), before: None }));
+        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1200))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)), "30% of pixels");
         assert_eq!(store.previous_screenshot(id).unwrap(), Some(png(0)));
+        assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(1200), before: Some(speed(900)) }));
         // Taken again at the same head: what came before stays.
-        store.set_screenshot(id, "cs_2", &png(3)).unwrap();
+        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
+        assert_eq!(store.page_speed(id).unwrap().unwrap().before, Some(speed(900)));
     }
 
     #[test]
@@ -1337,7 +1353,7 @@ mod tests {
         let (row, _) = store.create(&new("chg_shot")).unwrap();
         let id = row.id.as_str();
         assert_eq!(store.screenshot_link(id).unwrap(), None, "no screenshot, no link");
-        store.set_screenshot(id, "cs_1", b"\x89PNG...").unwrap();
+        store.set_screenshot(id, "cs_1", b"\x89PNG...", None).unwrap();
         let (exp, sig) = store.screenshot_link(id).unwrap().unwrap();
         assert!(store.screenshot_link_ok(id, exp, &sig).unwrap());
         assert!(!store.screenshot_link_ok("pv_other", exp, &sig).unwrap(), "another preview");
