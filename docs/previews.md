@@ -956,6 +956,7 @@ Ranked by what a person notices first. Done so far:
 - stable screenshots: animations stopped and `github.hide` selectors blanked before each capture;
 - where a page changed, as a diff image (`?diff=base|previous`, the sheet's Diff);
 - a speed budget per project (`github.budget`, the `roll/speed` status);
+- screenshot comparisons off the async runtime, and a test for reading a run's pages;
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;
@@ -998,30 +999,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Screenshot comparisons off the async runtime**: a screenshot's comparisons (with the push
-   before, the baseline, every page, the carried acceptance) decode PNGs inside the screenshot
-   task, on a runtime worker, which can hold other requests for hundreds of milliseconds. Run
-   them in `spawn_blocking`, as the API's diffs already are.
-2. **A test for reading a screenshot run's pages**: `runtime::page_shots` keeps only the paths
-   asked for, each once, and only PNGs, from what the browser container printed. It's the
-   boundary with that output, and nothing tests it but the live run.
-3. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+1. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
-4. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-5. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

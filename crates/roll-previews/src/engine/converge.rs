@@ -529,9 +529,16 @@ impl Engine {
                     pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors });
                 }
                 pages.extend(self.other_services_pages(r, &first.name, &entries, &hide).await);
-                let kept = self.store.set_screenshot(&r.id, r.build(), &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
-                    && self.store.set_page_report(&r.id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok()
-                    && self.store.set_page_shots(&r.id, r.build(), &pages, &entries).is_ok();
+                // Keeping it compares PNGs (with the push before, every page): CPU work, off the
+                // runtime's workers.
+                let (store, id, head, wanted) = (self.store.clone(), r.id.clone(), r.build().to_string(), entries.clone());
+                let kept = tokio::task::spawn_blocking(move || {
+                    store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
+                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref()).is_ok()
+                        && store.set_page_shots(&id, &head, &pages, &wanted).is_ok()
+                })
+                .await
+                .unwrap_or(false);
                 if kept && r.change_id.is_some() {
                     self.compare_with_default_branch(r).await;
                     if self.store.carry_acceptance(&r.id).unwrap_or(false) {
@@ -614,8 +621,12 @@ impl Engine {
         let Some(branch) = base.branch.as_deref() else { return };
         // Where the change left the branch (Chromatic's ancestor build), when roll code knows.
         let at = self.source.merge_base(&r.repo, r.build()).await.ok().flatten();
-        if let Err(e) = self.store.compare_with_base(&r.id, &base.id, branch, at.as_deref()) {
-            warn!(preview = %r.id, error = %e, "previews: comparing with the default branch's");
+        // Decoding and comparing PNGs: off the runtime's workers.
+        let (store, id, base_id, branch) = (self.store.clone(), r.id.clone(), base.id.clone(), branch.to_string());
+        match tokio::task::spawn_blocking(move || store.compare_with_base(&id, &base_id, &branch, at.as_deref())).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!(preview = %r.id, error = %e, "previews: comparing with the default branch's"),
+            Err(e) => warn!(preview = %r.id, error = %e, "previews: comparing with the default branch's"),
         }
     }
 

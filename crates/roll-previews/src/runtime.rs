@@ -1169,6 +1169,22 @@ mod tests {
     /// The tag goes in as the page streams: before `</body>` even when a chunk splits it, at the
     /// end of a page without one, and once.
     #[test]
+    fn a_screenshot_run_s_pages_are_only_those_asked_for_each_once() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let (png, junk) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"));
+        let asked = [&"/pricing".to_string(), &"/about".to_string()];
+        // What the browser container printed: what it said of each page, then their PNGs in order.
+        let run = |said: &str, pngs: &[&String]| page_shots(&asked, said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect::<Vec<_>>();
+        let pricing = || ("/pricing".to_string(), 2);
+        assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/about"}]"#, &[&png, &junk]), [pricing()], "not a PNG");
+        assert_eq!(run(r#"[{"path":"/admin"},{"path":"/pricing","errors":2}]"#, &[&png, &png]), [pricing()], "not asked for");
+        assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/pricing"}]"#, &[&png, &png]), [pricing()], "once");
+        assert_eq!(run(r#"[{"path":"/pricing","errors":99999}]"#, &[&png]), [("/pricing".to_string(), 10_000)], "bounded");
+        assert_eq!(run("not json", &[&png]), []);
+    }
+
+    #[test]
     fn the_feedback_tag_goes_in_as_the_page_streams() {
         let run = |chunks: &[&str]| {
             let mut t = Tagger::new();
