@@ -386,6 +386,7 @@ impl Store {
         db.add_column("domains", "tls", "TEXT NOT NULL DEFAULT 'pending'")?;
         db.add_column("domains", "tls_error", "TEXT")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
+        db.add_column("env_access", "bypass_hash", "TEXT")?;
         Ok(Store { db, sealer })
     }
 
@@ -936,15 +937,18 @@ impl Store {
     // ── private environments ──
 
     /// The SHA-256 (hex) of the token an environment's visitors need, if it's private.
-    pub fn access_hash(&self, service: &str, env: &str) -> Result<Option<String>> {
-        Ok(self.db.query_row("SELECT token_hash FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| r.get(0)).optional()?)
+    pub fn access(&self, service: &str, env: &str) -> Result<Option<Access>> {
+        Ok(self
+            .db
+            .query_row("SELECT token_hash, bypass_hash FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| Ok(Access { token_hash: r.get(0)?, bypass_hash: r.get(1)? }))
+            .optional()?)
     }
 
-    pub fn set_access(&self, service: &str, env: &str, token_hash: Option<&str>) -> Result<()> {
-        match token_hash {
-            Some(h) => self.db.execute(
-                "INSERT INTO env_access (service, env, token_hash) VALUES (?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash",
-                params![service, env, h],
+    pub fn set_access(&self, service: &str, env: &str, access: Option<&Access>) -> Result<()> {
+        match access {
+            Some(a) => self.db.execute(
+                "INSERT INTO env_access (service, env, token_hash, bypass_hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash",
+                params![service, env, a.token_hash, a.bypass_hash],
             )?,
             None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
         };

@@ -99,6 +99,14 @@ pub(crate) fn private_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// A private environment's gate: the visitors' token and an automation bypass (CI), as SHA-256
+/// hex digests; neither secret is kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Access {
+    pub token_hash: String,
+    pub bypass_hash: Option<String>,
+}
+
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
 /// and never returned.
 #[derive(Clone, Debug, PartialEq, Serialize)]

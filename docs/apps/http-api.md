@@ -182,7 +182,9 @@ type EnvironmentPut = {
    *  `roll_access_<env>`, then a 302 to the URL without it), else a 401, before anything wakes.
    *  The token is 20–200 of [A-Za-z0-9_-]; only its SHA-256 is stored, and the app never sees
    *  the cookie. null: public again. */
-  access?: { token: string } | null;
+  /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
+   *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
+  access?: { token: string; bypass_sha256?: string } | null;
 };
 
 type Environment = EnvironmentSummary & {

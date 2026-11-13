@@ -75,11 +75,19 @@ fn same(a: &str, b: &str) -> bool {
 /// matching cookie goes on, the cookie taken out so the app never sees the token; anything else
 /// is a 401. `None` lets the request through.
 async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Request) -> Option<Response> {
-    let hash = match apps.access_hash(service, env).await {
-        Ok(Some(h)) => h,
+    let access = match apps.access(service, env).await {
+        Ok(Some(a)) => a,
         Ok(None) => return None,
         Err(_) => return Some(page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's access couldn't be checked. Try again in a few seconds.")),
     };
+    let hash = access.token_hash;
+    // An automation (CI's end-to-end tests) with the project's bypass secret: no cookie, no
+    // redirect. The header is roll's, so it never reaches the app (`x-roll-*` is stripped).
+    if let (Some(bypass), Some(given)) = (&access.bypass_hash, req.headers().get("x-roll-preview-bypass").and_then(|v| v.to_str().ok()))
+        && same(&token_hash(given), bypass)
+    {
+        return None;
+    }
     let name = format!("roll_access_{env}");
     let query = req.uri().query().unwrap_or("").to_string();
     let mut token = None;

@@ -142,7 +142,7 @@ pub struct Apps {
     queues: Mutex<HashMap<String, Arc<Notify>>>,
     cancels: Mutex<HashMap<String, CancellationToken>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
-    access: Mutex<HashMap<String, Option<String>>>,
+    access: Mutex<HashMap<String, Option<Access>>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
     sessions: Mutex<HashMap<String, Arc<shell::Session>>>,
     pub(crate) client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -528,7 +528,7 @@ impl Apps {
             }
             None => false,
         };
-        let private = self.access_hash(&r.service, &r.name).await?.is_some();
+        let private = self.access(&r.service, &r.name).await?.is_some();
         Ok(Environment { summary, service: r.service.clone(), branch: r.branch.clone(), ephemeral: r.ephemeral, instances, domains, port: r.port, needs_deploy, private, next_run_at, crash_loop, created_at: r.created_at })
     }
 
@@ -553,14 +553,24 @@ impl Apps {
             Some(_) => return Err(Error::BadRequest("ephemeral is a boolean".into())),
         };
         // A private environment (a preview): its hostname answers only visitors with the token.
-        let access: Option<Option<String>> = match o.get("access") {
+        // `bypass_sha256`: an automation's secret (a CI run's end-to-end tests), only its SHA-256.
+        let access: Option<Option<Access>> = match o.get("access") {
             None => None,
             Some(Value::Null) => Some(None),
-            Some(Value::Object(a)) => match a.get("token").and_then(Value::as_str) {
-                Some(t) if a.len() == 1 && (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(Some(crate::public::token_hash(t))),
-                _ => return Err(Error::BadRequest("access is {token} (20–200 of A-Z, a-z, 0-9, - and _) or null".into())),
-            },
-            Some(_) => return Err(Error::BadRequest("access is {token} or null".into())),
+            Some(Value::Object(a)) => {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256"].contains(&k.as_str())) {
+                    return Err(Error::BadRequest(format!("access.{k} isn't a field")));
+                }
+                let token = a.get("token").and_then(Value::as_str).filter(|t| (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)));
+                let Some(token) = token else { return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _".into())) };
+                let bypass = match a.get("bypass_sha256") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
+                    Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
+                };
+                Some(Some(Access { token_hash: crate::public::token_hash(token), bypass_hash: bypass }))
+            }
+            Some(_) => return Err(Error::BadRequest("access is {token, bypass_sha256?} or null".into())),
         };
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
@@ -570,10 +580,10 @@ impl Apps {
             tokio::task::spawn_blocking(move || this.project_name(&p)).await.map_err(|e| Error::Internal(e.to_string()))??
         };
         self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
-        if let Some(hash) = access {
-            let (sid, e, h) = (service.to_string(), env.to_string(), hash.clone());
-            self.db(move |s| s.set_access(&sid, &e, h.as_deref())).await?;
-            self.access.lock().insert(env_key(service, env), hash);
+        if let Some(access) = access {
+            let (sid, e, a) = (service.to_string(), env.to_string(), access.clone());
+            self.db(move |s| s.set_access(&sid, &e, a.as_ref())).await?;
+            self.access.lock().insert(env_key(service, env), access);
         }
         self.environment(service, env).await
     }
@@ -600,15 +610,15 @@ impl Apps {
         Ok(())
     }
 
-    /// A private environment's token hash (none: public), cached on its owner.
-    pub async fn access_hash(self: &Arc<Self>, service: &str, env: &str) -> Result<Option<String>> {
-        if let Some(h) = self.access.lock().get(&env_key(service, env)) {
-            return Ok(h.clone());
+    /// A private environment's gate (none: public), cached on its owner.
+    pub async fn access(self: &Arc<Self>, service: &str, env: &str) -> Result<Option<Access>> {
+        if let Some(a) = self.access.lock().get(&env_key(service, env)) {
+            return Ok(a.clone());
         }
         let (sid, e) = (service.to_string(), env.to_string());
-        let h = self.db(move |s| s.access_hash(&sid, &e)).await?;
-        self.access.lock().insert(env_key(service, env), h.clone());
-        Ok(h)
+        let a = self.db(move |s| s.access(&sid, &e)).await?;
+        self.access.lock().insert(env_key(service, env), a.clone());
+        Ok(a)
     }
 
     async fn teardown_live(&self, service: &str, env: &str) {

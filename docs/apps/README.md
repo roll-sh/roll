@@ -344,7 +344,10 @@ every deployment is immutable with instant rollback.
   visitors who bring it: `?roll_access=<token>` once sets a host-only `HttpOnly; SameSite=Lax`
   cookie and redirects to the URL without the token; a request without it is a 401 that wakes
   nothing. Only the token's SHA-256 is stored, compared in constant time, and the cookie is taken
-  out of what the app receives. roll previews sets it on every `pv-…` environment.
+  out of what the app receives. roll previews sets it on every `pv-…` environment. An automation
+  (a CI run's end-to-end tests) can be let in with the project's bypass secret, as Vercel's
+  protection bypass does: `X-Roll-Preview-Bypass: <secret>` on the request, only its SHA-256
+  stored (`bypass_sha256`), the header never reaching the app.
 - **Custom domains**: the user adds `www.example.com`, points a CNAME at the service's
   `up.roll.site` name, and roll verifies it (the CNAME, or a `_roll-challenge.<host>` TXT with the
   domain's token for apex domains behind an ALIAS/flattening provider), checking pending ones

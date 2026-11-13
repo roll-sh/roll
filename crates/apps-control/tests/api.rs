@@ -416,6 +416,20 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
     assert_eq!(r.status(), StatusCode::OK);
     let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["cookie"], "theme=dark", "the app never sees the token");
+    // An automation's bypass (CI's end-to-end tests): its header lets a request in, no cookie.
+    let bypass = "ci-bypass-secret-0123456789";
+    let sha = { use sha2::Digest; sha2::Sha256::digest(bypass.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>() };
+    let (st, _) = call(&w.api, "PUT", &base, Some(json!({"access": {"token": token, "bypass_sha256": sha}}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let with = |v: &str| {
+        let r = Request::builder().uri("/").header("host", host(&env["url"])).header("x-roll-preview-bypass", v).body(Body::empty()).unwrap();
+        w.public.clone().oneshot(r)
+    };
+    let r = with(bypass).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(!body.to_string().contains(bypass), "the app never sees the bypass");
+    assert_eq!(with("not-the-secret").await.unwrap().status(), StatusCode::UNAUTHORIZED);
     let (st, _) = call(&w.api, "DELETE", &base, None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(!w.fake.instances(&id).iter().any(|(_, dep, _)| *dep == d["id"]), "its instances are gone");
