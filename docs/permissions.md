@@ -164,6 +164,10 @@ and **environment** where the product says (a secrets environment, an app enviro
 - `environments` narrows a rule to resources whose environment the product knows and is in the
   list. A resource without a known environment never matches such a rule. Secrets and apps carry
   the environment in their paths (`…/environments/{env}/…`); previews' resources are in `preview`.
+  An entry ending in `*` is a prefix (`staging-*` covers `staging-eu`); `*` alone isn't one (leave
+  `environments` out for all of them). A product can say what an environment named in a path is
+  (`Resolver::environment`, registered per product in `Resolvers::environments`): a preview's own
+  environment (`pv-12`) is `preview`, so "Previews only" reaches it.
 - `paths` narrows a rule to resources with a path under one of these (`/api` covers `/api/db`, not
   `/apix`). Secrets' folders come from `?path=` (`/` without it).
 - Ids are canonical: a Redis database, NoSQL database or stream named by its name is checked under
@@ -382,9 +386,10 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 
 - A sink is a public HTTPS URL (roll-net's guard, no redirects, 10 s, the answer read to 64 KiB).
   It gets new rows in order, in batches of up to 200: `{sink, source: "access", events:
-  AuditEvent[]}`, signed as roll secrets' sinks and roll's webhooks are, so one receiver takes all
-  of them: `X-Roll-Sink: <id>`, `X-Roll-Timestamp: <unix seconds>`, `X-Roll-Signature:
-  sha256=<hex HMAC-SHA256 of "{timestamp}.{body}">`.
+  AuditEvent[]}`, signed as every roll webhook is (roll code's), so one receiver takes all of
+  them: `X-Roll-Signature-256: sha256=<hex HMAC-SHA256 of "{timestamp}.{body}">`,
+  `X-Roll-Timestamp: <unix seconds>`, `X-Roll-Delivery` (the same when a batch is sent again, so a
+  receiver drops what it has) and `X-Roll-Sink: <id>`.
 - The signing secret (`whsec_…`) is shown once and kept sealed with `ROLL_SECRET_KEY`, bound to
   its sink; without the key, streaming is off. `ROLL_ACCESS_SINK_ALLOW_PRIVATE` allows plain http
   on a private address (local development only).
