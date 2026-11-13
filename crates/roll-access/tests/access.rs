@@ -124,6 +124,7 @@ impl Daemon {
             roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") },
             roll_auth::Rule { route: "/v1/workspace", access: roll_auth::Access::User("a user's own projects") },
             roll_auth::Rule { route: "/v1/access", access: roll_auth::Access::User("a user's own tokens") },
+            roll_auth::Rule { route: "/internal", access: roll_auth::Access::Product("signed hops") },
         ];
         let people = Arc::new(People::default());
         let _ = access.people.set(people.clone());
@@ -768,6 +769,14 @@ async fn a_users_token_acts_as_them() {
     assert_eq!(d.as_user("usr_bob", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
     assert!(d.send(&token, Method::DELETE, &path, None, &[("x-roll-approval", &apr)]).await.0.is_success());
+
+    // On a signed hop, the request it carries is judged as hers too.
+    let hop = |carried: &'static str| {
+        let (d, t) = (&d, token.clone());
+        async move { d.send(&t, Method::GET, "/internal/tasks", None, &[("x-roll-tasks-uri", carried)]).await }
+    };
+    assert_eq!(hop("/v1/projects").await.1["code"], "operator_only");
+    assert_eq!(hop("/v1/workspace/projects").await.0, StatusCode::OK);
 
     // Her account turned off: the token stops on its next request.
     d.people.remove("usr_alice");

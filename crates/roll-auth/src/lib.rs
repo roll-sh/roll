@@ -232,6 +232,17 @@ pub trait Sessions: Send + Sync + 'static {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RouteAccess(pub Access);
 
+/// The gate's rules, for an [`Authorizer`] to class a route other than the one matched (the request
+/// a signed hop carries).
+#[derive(Clone)]
+pub struct RouteRules(pub Arc<Gate>);
+
+impl RouteRules {
+    pub fn access(&self, route: &str) -> Access {
+        self.0.access(route)
+    }
+}
+
 /// The CSRF header a write with a session cookie carries (docs/accounts.md, "CSRF").
 pub const CSRF_HEADER: &str = "x-roll-csrf";
 
@@ -349,6 +360,7 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
     {
         let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
         req.extensions_mut().insert(RouteAccess(access));
+        req.extensions_mut().insert(RouteRules(gate.clone()));
         return a.handle(req, next).await;
     }
     // A request with an `Authorization` header is judged by it alone: the cookie is ignored.
