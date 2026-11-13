@@ -1003,10 +1003,13 @@ pub enum LinkKind {
     Stream,
     Queue,
     Nosql,
+    /// Another web service of the project: its private and public URLs (apps' own, not a
+    /// [`crate::integrations::Resources`] kind).
+    Service,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 6] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql];
+    pub const ALL: [LinkKind; 7] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Service];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1016,6 +1019,7 @@ impl LinkKind {
             LinkKind::Stream => "stream",
             LinkKind::Queue => "queue",
             LinkKind::Nosql => "nosql",
+            LinkKind::Service => "service",
         }
     }
 

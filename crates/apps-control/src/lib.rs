@@ -591,6 +591,11 @@ impl Apps {
         for name in self.deps.runtime.list(Some(id)).await {
             self.deps.runtime.remove(&name).await;
         }
+        // Links to it from the project's other services go (their next deploy drops the URLs).
+        let sid = id.to_string();
+        if self.db(move |s| s.delete_links_to(LinkKind::Service, &sid)).await? > 0 {
+            self.settings_changed();
+        }
         // Its links' own credentials are revoked with it.
         let sid = id.to_string();
         for (kind, r, _, minted) in self.db(move |s| s.links_minted(&sid)).await? {
@@ -1026,12 +1031,14 @@ impl Apps {
             // A link's own credentials as made, else the resource's variables now.
             let read = match minted {
                 Some(m) => Ok(m.vars),
-                None => self.deps.resources.link_vars(kind, &r).await,
+                None => self.link_vars(svc, kind, &r, &env.name).await,
             };
             match read {
                 Ok(vs) => {
                     for (k, v) in vs {
-                        vars.insert(format!("{prefix}{k}"), (self.deps.runtime.reach(&v), "link"));
+                        // Another service's names are the project network's: nothing to rewrite.
+                        let v = if kind == LinkKind::Service { v } else { self.deps.runtime.reach(&v) };
+                        vars.insert(format!("{prefix}{k}"), (v, "link"));
                     }
                 }
                 Err(e) => tracing::warn!(service = %svc.id, kind = kind.as_str(), r#ref = %r, error = %e, "apps: a link's variables couldn't be read"),
@@ -1110,14 +1117,14 @@ impl Apps {
 
     pub async fn links(self: &Arc<Self>, service: &str) -> Result<Vec<Link>> {
         let sid = service.to_string();
-        self.db(move |s| s.service(&sid)).await?;
+        let svc = self.db(move |s| s.service(&sid)).await?;
         let sid = service.to_string();
         let rows = self.db(move |s| s.links_minted(&sid)).await?;
         let mut out = Vec::new();
         for (kind, r, prefix, minted) in rows {
             let names = match minted {
                 Some(m) => Ok(m.vars),
-                None => self.deps.resources.link_vars(kind, &r).await,
+                None => self.link_vars(&svc, kind, &r, "production").await,
             };
             let vars = names.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
             out.push(Link { kind, r#ref: r, prefix, vars });
@@ -1128,8 +1135,24 @@ impl Apps {
     pub async fn put_link(self: &Arc<Self>, service: &str, kind: &str, r#ref: &str, body: Value) -> Result<Link> {
         let kind = LinkKind::parse(kind)?;
         let sid = service.to_string();
-        self.db(move |s| s.service(&sid)).await?;
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        // A service's URLs are named for it unless asked otherwise (`API_URL`): a bare `URL`
+        // says nothing.
+        let named = || {
+            let rr = r#ref.to_string();
+            async move {
+                let missing = format!("no service {rr} in this project");
+                let target = self.db(move |s| s.service(&rr)).await.map_err(|_| Error::BadRequest(missing))?;
+                let mut p: String = target.name.to_ascii_uppercase().replace('-', "_");
+                if p.starts_with(|c: char| c.is_ascii_digit()) {
+                    p.insert_str(0, "SERVICE_");
+                }
+                Ok::<String, Error>(format!("{p}_"))
+            }
+        };
         let prefix = match body.get("prefix") {
+            None | Some(Value::Null) if kind == LinkKind::Service => named().await?,
+            Some(Value::String(p)) if p.is_empty() && kind == LinkKind::Service => named().await?,
             None | Some(Value::Null) => String::new(),
             Some(Value::String(p)) if p.is_empty() => String::new(),
             Some(Value::String(p)) => {
@@ -1148,7 +1171,7 @@ impl Apps {
         };
         let vars = match &minted {
             Some(m) => m.vars.clone(),
-            None => self.deps.resources.link_vars(kind, r#ref).await.map_err(|e| Error::BadRequest(e.to_string()))?,
+            None => self.link_vars(&svc, kind, r#ref, "production").await.map_err(|e| Error::BadRequest(e.to_string()))?,
         };
         let (sid, r, p, m) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone());
         if let Err(e) = self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref())).await {
@@ -1159,6 +1182,24 @@ impl Apps {
             return Err(e);
         }
         Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix })
+    }
+
+    /// A link's variables now, as `service` gets them in `env`: another service's URLs (apps'
+    /// own), else the resource's through [`crate::integrations::Resources`].
+    async fn link_vars(self: &Arc<Self>, service: &ServiceRow, kind: LinkKind, r#ref: &str, env: &str) -> anyhow::Result<Vec<(String, String)>> {
+        if kind != LinkKind::Service {
+            return self.deps.resources.link_vars(kind, r#ref).await;
+        }
+        let (rr, e) = (r#ref.to_string(), env.to_string());
+        let (target, row) = self.db(move |s| Ok((s.service(&rr)?, s.environment(&rr, &e).ok()))).await.map_err(|_| anyhow::anyhow!("no service {ref} in this project"))?;
+        // Checked at each read: a service moved to another project stops being reachable.
+        anyhow::ensure!(target.project == service.project && target.id != service.id, "no service {ref} in this project");
+        anyhow::ensure!(target.run.kind == RunType::Web, "{} isn't a web service: only a web service has URLs", target.name);
+        let mut v = vec![("URL".to_string(), format!("http://{}.{env}.internal:{}", target.name, target.run.port.unwrap_or(8080)))];
+        if let Some(row) = row.filter(|_| target.run.public) {
+            v.push(("PUBLIC_URL".to_string(), self.url(&row.slug)));
+        }
+        Ok(v)
     }
 
     pub async fn delete_link(self: &Arc<Self>, service: &str, kind: &str, r#ref: &str) -> Result<()> {

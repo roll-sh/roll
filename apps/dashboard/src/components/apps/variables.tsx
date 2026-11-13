@@ -16,7 +16,7 @@ const SOURCE_TONE: Record<VariableSource, string> = {
 
 /** Workspace kinds a service can link to, by their link kind. */
 /** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis" };
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", service: "service" };
 
 type Edit = { name: string; value: string };
 
@@ -286,14 +286,14 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     void load();
   }, [load]);
 
-  // The project's databases and storage, by `kind:ref`.
+  // The project's databases and its other services, by `kind:ref`.
   const candidates = useMemo(() => {
     const p = ws.projects.find((x) => x.id === project);
     return (p?.resources ?? [])
-      .filter((r) => LINKABLE[r.kind])
+      .filter((r) => LINKABLE[r.kind] && !(r.kind === "service" && r.ref === service))
       .map((r) => ws.inventory.get(resourceKey(r)))
       .filter((v): v is ResourceView => !!v && v.state !== "missing");
-  }, [ws.projects, ws.inventory, project]);
+  }, [ws.projects, ws.inventory, project, service]);
   const linked = new Set((links ?? []).map((l) => `${l.kind}:${l.ref}`));
   const nameOf = (l: Link) => ws.inventory.get(`${l.kind}:${l.ref}`)?.name ?? l.ref;
 
@@ -314,7 +314,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     <section className={panel}>
       <div className="flex min-h-14 items-center justify-between gap-3 border-b border-line px-5 py-3">
         <h2 className="text-[15px] font-medium">Links</h2>
-        <span className="text-[12px] text-subtle">A link adds the resource's connection variables.</span>
+        <span className="text-[12px] text-subtle">A link adds a database's connection variables, or another service's URLs.</span>
       </div>
       <ul className="divide-y divide-line">
         {links?.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">Nothing linked.</li>}
@@ -345,7 +345,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
       </ul>
       <div className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-3">
         <select value={pick} onChange={(e) => setPick(e.target.value)} className={`${input} min-w-0 flex-1`} aria-label="Resource to link">
-          <option value="">{candidates.length ? "Link a resource in this project…" : "No databases or storage in this project yet"}</option>
+          <option value="">{candidates.length ? "Link a resource in this project…" : "Nothing else in this project to link yet"}</option>
           {candidates.map((c) => (
             <option key={resourceKey(c)} value={resourceKey(c)} disabled={linked.has(resourceKey(c))}>
               {KIND_LABEL[c.kind]} · {c.name}

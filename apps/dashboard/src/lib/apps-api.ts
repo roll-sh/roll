@@ -279,7 +279,8 @@ export interface Deployment {
   steps?: { step: string; at: number }[];
 }
 
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql";
+/** `service`: another web service of the project, its `<NAME>_URL` (private) and `<NAME>_PUBLIC_URL`. */
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "service";
 
 export interface Link {
   kind: LinkKind;

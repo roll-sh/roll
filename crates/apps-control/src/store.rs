@@ -1186,6 +1186,11 @@ impl Store {
         })
     }
 
+    /// Every link to a resource that's gone (a service being deleted): how many there were.
+    pub fn delete_links_to(&self, kind: LinkKind, r#ref: &str) -> Result<usize> {
+        Ok(self.db.execute("DELETE FROM links WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref])?)
+    }
+
     pub fn delete_link(&self, service: &str, kind: LinkKind, r#ref: &str) -> Result<()> {
         match self.db.execute("DELETE FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref])? {
             0 => Err(Error::NotFound(format!("service {service} has no {} link {ref:?}", kind.as_str()))),

@@ -1859,3 +1859,33 @@ async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
     until("running").await;
     assert_eq!(Fake::count(&w.fake.counts.resumes), resumes + 1, "resumed, not started again");
 }
+
+/// A service link gives another web service's URLs, named for it: private on the project
+/// network, public when it's public. Only another web service of the project links, and its
+/// links go with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_service_link_gives_another_services_urls() {
+    let w = world().await;
+    let (api, _) = image_service(&w, "api", json!({"port": 3000})).await;
+    let (web, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let (worker, _) = image_service(&w, "jobs", json!({"type": "worker"})).await;
+    let (aid, wid) = (api["id"].as_str().unwrap().to_string(), web["id"].as_str().unwrap().to_string());
+    let links = format!("/v1/apps/services/{wid}/links");
+    let (st, l) = call(&w.api, "PUT", &format!("{links}/service/{aid}"), Some(json!({}))).await;
+    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["API_URL", "API_PUBLIC_URL"])), "{l}");
+    assert_eq!(call(&w.api, "PUT", &format!("{links}/service/{wid}"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "not itself");
+    assert_eq!(call(&w.api, "PUT", &format!("{links}/service/{}", worker["id"].as_str().unwrap()), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "a worker has no URL");
+    let base = format!("/v1/apps/services/{wid}/environments/production");
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "API_URL,API_PUBLIC_URL"}}))).await;
+    let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    settled(&w, &wid, "production", r["id"].as_str().unwrap()).await;
+    let (_, body) = visit(&w, &host(&web["environments"][0]["url"]), "/").await;
+    assert_eq!(body["vars"]["API_URL"], "http://api.production.internal:3000", "{body}");
+    assert_eq!(body["vars"]["API_PUBLIC_URL"], api["environments"][0]["url"], "{body}");
+    // Private, it has no public URL to give.
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{aid}"), Some(json!({"run": {"public": false}}))).await;
+    assert_eq!(call(&w.api, "GET", &links, None).await.1[0]["vars"], json!(["API_URL"]));
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{aid}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "GET", &links, None).await.1, json!([]), "gone with the service");
+}
+

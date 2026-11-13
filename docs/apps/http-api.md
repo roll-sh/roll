@@ -321,7 +321,10 @@ type Plan = {
 };
 
 /** Wired on a node today: postgres (DATABASE_URL) and redis (REDIS_URL, REDIS_REST_URL/TOKEN). */
-type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql"; ref: string; prefix: string; vars: string[] };
+type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "service"; ref: string; prefix: string; vars: string[] };
+// `service`: `ref` is another web service of the project (its id); `URL` is
+// `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
+// when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.
 
 type Variables = { vars: { name: string; masked: string; source: "service" | "secret" | "link" | "roll" }[] };
 

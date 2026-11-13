@@ -514,6 +514,13 @@ every deployment is immutable with instant rollback.
   when a service links two of a kind (`ORDERS_DATABASE_URL`). Locally the URLs are rewritten for
   the container (`host.docker.internal`); on the fleet they're the public edge names over TLS,
   as previews use, so there's no path from a task into the fleet's network.
+- **Service links** (Render's `fromService`, Railway's reference variables): a `service` link
+  to another web service of the project gives `<NAME>_URL`, its private
+  `http://<name>.<env>.internal:<port>` in the linking environment, and `<NAME>_PUBLIC_URL`
+  when it's public there. They're read at each deploy (a renamed service's new name, a new
+  port), checked to be the same project each time, and the links to a deleted service go with
+  it. The canvas draws them like a database's. A scoped token needs `reveal` on the linked
+  service, as on any linked resource.
 - **Credentials per link**: a kind whose product can make a credential per consumer does so
   once, when the link is made (`Resources::link`: a roll search API key, a native user for
   OpenSearch), instead of the resource's own password. Its variables are kept sealed with the
@@ -1164,38 +1171,36 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Links between services**: a `service` link kind giving `<NAME>_URL` (private) and
-   `<NAME>_PUBLIC_URL`, as Render's `fromService`.
-2. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
+1. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
    DNS-01 on a delegated `_acme-challenge` (Railway's and Render's).
-3. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
+2. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
    page (Render's `maxShutdownDelaySeconds` and `maintenanceMode`).
-4. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-5. **Region**: the region shown on the overview and each environment, defaulting to the project's
+4. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-6. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-7. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-8. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-9. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-10. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+11. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-14. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+13. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).
