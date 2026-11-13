@@ -736,6 +736,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
 | `GET /v1/access/checkup` | access read | the live tokens that need attention: `[{grant, findings: [{kind, why, fix}]}]` ("Checkup") |
 | `GET /v1/access/tokens/{id}/networks` | access read | the networks it's been used from: `[{network, first_at, last_at}]`, newest first ("New networks") |
+| `GET /v1/access/tokens/{id}/tools` | access read | what an agent connected with it is offered over MCP: `{tools: [{name, title, product, read_only, destructive}], prompts, context_tokens}` (served by roll-mcp, which reads the token as the caller first); the token page shows it |
 | `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
