@@ -221,30 +221,45 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         Preview::Refresh { preview } => api.post(&format!("/v1/previews/{preview}/refresh"), json!({})).await?,
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
         Preview::Logs { preview, service, lines, follow } => {
-            let mut path = format!("/v1/previews/{preview}/logs?lines={lines}");
-            if let Some(svc) = service {
-                path.push_str(&format!("&service={svc}"));
-            }
+            let path_base = match &service {
+                Some(svc) => format!("/v1/previews/{preview}/logs?service={svc}"),
+                None => format!("/v1/previews/{preview}/logs?"),
+            };
+            let path = format!("{path_base}&lines={lines}");
             if follow {
-                // Server-sent events: `event: service` first, then a `data:` line per log line.
-                let mut res = api.open_stream(&format!("{path}&follow=1")).await?;
-                let (mut buf, mut event) = (Vec::<u8>::new(), String::new());
-                while let Some(chunk) = res.chunk().await? {
-                    buf.extend_from_slice(&chunk);
-                    while let Some(i) = buf.iter().position(|&b| b == b'\n') {
-                        let line = String::from_utf8_lossy(&buf[..i]).trim_end_matches('\r').to_string();
-                        buf.drain(..=i);
-                        if let Some(name) = line.strip_prefix("event:") {
-                            event = name.trim().to_string();
-                        } else if let Some(data) = line.strip_prefix("data:") {
-                            let data = data.strip_prefix(' ').unwrap_or(data);
-                            if event == "service" { eprintln!("following {data} (ctrl-c to stop)") } else { println!("{data}") }
-                        } else if line.is_empty() {
-                            event.clear();
+                // Server-sent events: `event: service` first, then a `data:` line per log line. A
+                // stream that ends (the service slept, its container went) is opened again two
+                // seconds later, from its last line (not printed twice).
+                let mut last: Option<String> = None;
+                loop {
+                    let tail = if last.is_some() { 1 } else { lines };
+                    let mut res = api.open_stream(&format!("{path_base}&lines={tail}&follow=1")).await?;
+                    let (mut buf, mut event, mut fresh) = (Vec::<u8>::new(), String::new(), true);
+                    while let Some(chunk) = res.chunk().await? {
+                        buf.extend_from_slice(&chunk);
+                        while let Some(i) = buf.iter().position(|&b| b == b'\n') {
+                            let line = String::from_utf8_lossy(&buf[..i]).trim_end_matches('\r').to_string();
+                            buf.drain(..=i);
+                            if let Some(name) = line.strip_prefix("event:") {
+                                event = name.trim().to_string();
+                            } else if let Some(data) = line.strip_prefix("data:") {
+                                let data = data.strip_prefix(' ').unwrap_or(data).to_string();
+                                if event == "service" {
+                                    if last.is_none() {
+                                        eprintln!("following {data} (ctrl-c to stop)");
+                                    }
+                                } else if !(std::mem::take(&mut fresh) && last.as_deref() == Some(data.as_str())) {
+                                    println!("{data}");
+                                    last = Some(data);
+                                }
+                            } else if line.is_empty() {
+                                event.clear();
+                            }
                         }
                     }
+                    last.get_or_insert_with(String::new);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
-                return Ok(());
             }
             let v = api.get(&path).await?;
             if !as_json {

@@ -200,13 +200,19 @@ impl Source for CodeSource {
         }
     }
 
-    async fn budget(&self, repos: &[String], alert: &crate::ports::BudgetAlert) {
+    async fn budget(&self, repos: &[String], alert: &crate::ports::BudgetAlert) -> anyhow::Result<()> {
         let web = self.code.config.web_url.trim_end_matches('/');
         let dashboard = (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{}/previews", alert.project));
         for full in repos {
-            let Ok(repo) = self.repo(full) else { continue };
-            self.code.emit(&repo.id, "preview", serde_json::json!({ "change": null, "preview": null, "budget": alert, "dashboard_url": dashboard }));
+            // A repo gone from roll code has nobody to tell; anything else is tried again.
+            let repo = match self.repo(full) {
+                Ok(r) => r,
+                Err(e) if e.downcast_ref::<code_control::Error>().is_some_and(|e| matches!(e, code_control::Error::NotFound(_))) => continue,
+                Err(e) => return Err(e),
+            };
+            self.code.emit_budget(&repo.id, serde_json::json!({ "budget": alert, "dashboard_url": dashboard }))?;
         }
+        Ok(())
     }
 
     async fn forget(&self, p: &Preview) {

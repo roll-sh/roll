@@ -304,6 +304,17 @@ function ActivityList({ id, updated }: { id: string; updated: number }) {
   );
 }
 
+/** Whether the page is in view (a hidden tab follows no logs). */
+function useVisible() {
+  const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState === "visible");
+  useEffect(() => {
+    const on = () => setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  return visible;
+}
+
 /** Lines a followed log keeps. */
 const LOG_KEEP = 2000;
 
@@ -312,10 +323,12 @@ function Logs({ preview: p }: { preview: Preview }) {
   const [lines, setLines] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [n, setN] = useState(0);
-  // A running service's log follows as it comes (pushed); any other is read once.
+  // A running service's log follows as it comes (pushed) while the page is in view; any other
+  // is read once.
   const running = p.services.some((x) => x.name === service && x.state === "running");
+  const visible = useVisible();
   useEffect(() => {
-    if (!service) return;
+    if (!service || !visible) return;
     let live = true;
     setError(null);
     if (!running) {
@@ -347,7 +360,7 @@ function Logs({ preview: p }: { preview: Preview }) {
       live = false;
       abort.abort();
     };
-  }, [p.id, service, running, n]);
+  }, [p.id, service, running, visible, n]);
   if (!p.services.length) return <p className="text-[11.5px] text-subtle">No services, so no logs.</p>;
   return (
     <>

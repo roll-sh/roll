@@ -193,9 +193,13 @@ export const previewsApi = {
 /** Server-sent events in `text` (after `rest`, what was left of the last chunk): the complete
  * events, and what's left over. */
 export function parseSse(rest: string, text: string): { events: { event: string; data: string }[]; rest: string } {
-  const all = (rest + text).replace(/\r\n?/g, "\n");
+  let raw = rest + text;
+  // A \r at the very end may be the first half of a \r\n split across chunks: wait for the next.
+  const held = raw.endsWith("\r") ? "\r" : "";
+  if (held) raw = raw.slice(0, -1);
+  const all = raw.replace(/\r\n?/g, "\n");
   const blocks = all.split("\n\n");
-  const left = blocks.pop() ?? "";
+  const left = (blocks.pop() ?? "") + held;
   const events = blocks.flatMap((b) => {
     let event = "message";
     const data: string[] = [];

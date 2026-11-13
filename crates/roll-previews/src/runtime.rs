@@ -737,6 +737,10 @@ mod tests {
         assert!(raw(with("rpb_wrong")).await.starts_with("HTTP/1.1 401"));
         rt.store.rotate_bypass("prj_1").unwrap();
         assert!(raw(with(&secret)).await.starts_with("HTTP/1.1 401"), "a rotated secret stops working");
+        let (secret, _) = rt.store.rotate_bypass("prj_1").unwrap();
+        rt.store.update(&row.id, |r| r.trusted = false).unwrap();
+        assert!(raw(with(&secret)).await.starts_with("HTTP/1.1 401"), "a fork's preview never opens to the secret");
+        rt.store.update(&row.id, |r| r.trusted = true).unwrap();
         rt.store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
         assert!(get("web-pr1-shop.preview.test:7070").await.ends_with("service saw /hello"), "public previews need no link");
         assert!(get("localhost").await.ends_with("api"));

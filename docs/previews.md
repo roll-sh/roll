@@ -93,9 +93,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     they've cost this month reaches it, new previews wait as `queued` (saying why), and the
     running ones carry on. Previews deleted this month still count (`spend`, a per-project,
     per-month ledger). When the month's cost passes 80% and then 100% of it, each of the
-    project's repos gets a `preview` event (webhooks and the event stream) with
-    `{change: null, preview: null, budget: {project, project_name, percent, spent_usd_month,
-    max_usd_month}, dashboard_url}`, once per level per month. It's recorded after it's queued, so a
+    project's repos gets a `budget` event (webhooks, the event stream and automations) with
+    `{budget: {project, project_name, percent, spent_usd_month, max_usd_month}, dashboard_url}`,
+    once per level per month and budget (raising the budget alerts afresh). It's recorded after it's queued, so a
     crash repeats one rather than losing it, and every live preview's activity says so.
   - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches own. A preview
     over the cap goes to sleep with `error`, and resetting it brings it back under.
@@ -265,9 +265,13 @@ endpoints' query route: one line per table, view, sequence, column (type, nullab
 default), index, constraint, enum, function and extension in the user's schemas. The two sets
 are compared (`roll_previews::schema::diff`), and `+ …`/`- …` lines, at most 200, go on the
 preview. The pull request comment folds them under "Schema changes", the dashboard's preview
-sheet and `roll preview show` list them. A catalog query is milliseconds; reading the parent's
+sheet and `roll preview show` list them. A catalog query is milliseconds; it runs only for projects
+with a `seed` or `release` (what changes a schema before services run), and reading the parent's
 starts its compute if it sleeps, once per push. Object names come from the change's own
-migrations, so the comment keeps them inside a fence they can't close. A failure to read is
+migrations (a fork's too), so each line is made printable once, where the diff is made:
+control characters escaped (a newline in a name can't fake a line, an escape sequence can't reach
+a terminal), lines cut at 300 characters, 200 lines at most; the comment keeps them inside a fence
+they can't close. A failure to read is
 logged and read again on the next converge; it never fails the preview.
 
 ## Safety
@@ -333,8 +337,11 @@ logged and read again on the next converge; it never fails the preview.
     Automation field). A request with it in the `x-roll-preview-bypass` header reaches any of
     the project's private previews, with no cookie or redirect. The service never sees the
     header. The secret is shown once, kept only as its SHA-256, and compared in constant time.
-    Rotating it stops the old one at once. CI gets each preview's plain URL from the GitHub
-    deployment (`deployment_status`), so the secret is the only thing it has to keep:
+    Rotating it stops the old one at once. A fork's preview (`trusted: false`) never opens to
+    it: CI that visited one would hand the secret to the fork's code. Send the header only to the
+    preview's own origin (`page.route` on the base URL, never `extraHTTPHeaders`, which a page can
+    send anywhere). CI gets each preview's plain URL from the GitHub deployment
+    (`deployment_status`), so the secret is the only thing it has to keep:
 
     ```yaml
     on: deployment_status
@@ -347,7 +354,8 @@ logged and read again on the next converge; it never fails the preview.
           - run: npx playwright test
             env:
               BASE_URL: ${{ github.event.deployment_status.environment_url }}
-              # extraHTTPHeaders: { 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS }
+              # in a fixture: page.route(new URL(baseURL).origin + '/**', r => r.continue({
+              #   headers: { ...r.request().headers(), 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS } }))
               ROLL_PREVIEW_BYPASS: ${{ secrets.ROLL_PREVIEW_BYPASS }}
     ```
 
@@ -480,7 +488,7 @@ Bodies are JSON. Every error is `{"error": string}`.
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
-| `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s and only new lines are sent. Runs on the preview's holder; the stream ends when the client goes |
+| `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |

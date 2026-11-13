@@ -82,5 +82,8 @@ describe("following logs", () => {
     const b = parseSse(a.rest, "ta: GET /\r\n\r\n: keep-alive\n\n");
     expect(b.events).toEqual([{ event: "message", data: "GET /" }]);
     expect(b.rest).toBe("");
+    // A \r\n split between two chunks is one line end, not an event's end.
+    const c = parseSse("", "event: service\r");
+    expect(parseSse(c.rest, "\ndata: web\r\n\r\n").events).toEqual([{ event: "service", data: "web" }]);
   });
 });

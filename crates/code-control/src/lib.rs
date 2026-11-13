@@ -597,6 +597,16 @@ impl Code {
     /// Send an event to the repo's webhooks and its feed (`/events`). The webhook deliveries are
     /// queued (durably) before this returns. The feed is best effort: in a cluster it lives on the
     /// repo's owner, and a node that doesn't own the repo passes the event on to it.
+    /// A workspace project's previews passed a share of their monthly budget (roll previews):
+    /// the repo's `budget` event. `Err` when its webhook deliveries couldn't be queued, so the
+    /// caller tries again rather than losing it.
+    pub fn emit_budget(&self, repo_id: &str, data: Value) -> Result<()> {
+        self.start_webhooks();
+        self.fan_out_event(repo_id, "budget", &data)?;
+        self.broadcast(repo_id, "budget", data);
+        Ok(())
+    }
+
     pub fn emit(&self, repo_id: &str, kind: &'static str, data: Value) {
         self.webhook_event(repo_id, kind, &data);
         self.broadcast(repo_id, kind, data);

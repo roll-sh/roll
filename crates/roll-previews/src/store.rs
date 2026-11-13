@@ -90,12 +90,13 @@ CREATE TABLE IF NOT EXISTS activity (
     message TEXT NOT NULL,
     PRIMARY KEY (preview_id, seq)
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS alerts (
+CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
     month INTEGER NOT NULL,
+    max_usd REAL NOT NULL,
     level INTEGER NOT NULL,
     at INTEGER NOT NULL,
-    PRIMARY KEY (project_id, month, level)
+    PRIMARY KEY (project_id, month, max_usd, level)
 );
 CREATE TABLE IF NOT EXISTS bypass (
     project_id TEXT PRIMARY KEY,
@@ -116,7 +117,8 @@ pub struct Access {
     pub token: String,
     /// Whether the link is needed (`access: link`), or anyone may (`public`).
     pub required: bool,
-    /// The project's bypass secret's SHA-256 (hex), for automation (`x-roll-preview-bypass`).
+    /// The project's bypass secret's SHA-256 (hex), for automation (`x-roll-preview-bypass`);
+    /// never for a fork's (`trusted: false`) preview.
     pub bypass: Option<String>,
 }
 
@@ -326,10 +328,10 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        if !db.has_column("previews", "released")? {
-            db.add_column("previews", "released", "TEXT")?;
-            db.add_column("previews", "schema_head", "TEXT")?;
-            db.add_column("previews", "schema_changes", "TEXT")?;
+        for col in ["released", "schema_head", "schema_changes"] {
+            if !db.has_column("previews", col)? {
+                db.add_column("previews", col, "TEXT")?;
+            }
         }
         Ok(Store { db, rates: Rates::default() })
     }
@@ -375,17 +377,21 @@ impl Store {
         })
     }
 
-    /// The highest budget alert level (percent) sent for `project` this `month`, if any.
-    pub fn alerted(&self, project: &str, month: i64) -> Result<Option<i64>> {
-        Ok(self.db.read(|c| c.query_row("SELECT MAX(level) FROM alerts WHERE project_id = ? AND month = ?", params![project, month], |r| r.get(0)))?)
+    /// The highest budget alert level (percent) sent for `project` this `month` against a budget
+    /// of `max_usd`, if any (a new budget is alerted on afresh).
+    pub fn alerted(&self, project: &str, month: i64, max_usd: f64) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT MAX(level) FROM budget_alerts WHERE project_id = ? AND month = ? AND max_usd = ?", params![project, month, max_usd], |r| r.get(0)))?)
     }
 
-    /// Record that the alert at `level` went out (after it did: a crash repeats one, never loses
-    /// one).
-    pub fn set_alerted(&self, project: &str, month: i64, level: i64) -> Result<()> {
+    /// Record that the alert at `level` was queued (after it was: a crash repeats one, never
+    /// loses one).
+    pub fn set_alerted(&self, project: &str, month: i64, max_usd: f64, level: i64) -> Result<()> {
         let now = self.now_ms()?;
         self.db.write(|c| {
-            c.execute("INSERT INTO alerts (project_id, month, level, at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", params![project, month, level, now])?;
+            c.execute(
+                "INSERT INTO budget_alerts (project_id, month, max_usd, level, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                params![project, month, max_usd, level, now],
+            )?;
             Ok::<_, Error>(())
         })
     }
@@ -420,7 +426,7 @@ impl Store {
         self.db.write(|c| {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
-            c.execute("DELETE FROM alerts WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
     }
@@ -794,6 +800,14 @@ impl Store {
         })
     }
 
+    /// No schema changes shown (the head they were read at stays, so they're read again).
+    pub fn clear_schema_changes(&self, id: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE previews SET schema_changes = NULL WHERE id = ? AND schema_changes IS NOT NULL", [id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     fn schema_changes(&self, id: &str) -> Result<Option<Vec<String>>> {
         let raw: Option<String> = self.db.read(|c| c.query_row("SELECT schema_changes FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
         Ok(raw.and_then(|j| serde_json::from_str(&j).ok()))
@@ -801,17 +815,19 @@ impl Store {
 
     /// A preview's access token, and whether its project requires it.
     pub fn access(&self, id: &str) -> Result<Option<Access>> {
-        let row: Option<(Option<String>, String, Option<String>)> = self.db.read(|c| {
+        let row: Option<(Option<String>, String, Option<String>, bool)> = self.db.read(|c| {
             c.query_row(
-                "SELECT p.token, p.project_id, b.hash FROM previews p LEFT JOIN bypass b ON b.project_id = p.project_id WHERE p.id = ?",
+                "SELECT p.token, p.project_id, b.hash, p.trusted FROM previews p LEFT JOIN bypass b ON b.project_id = p.project_id WHERE p.id = ?",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()
         })?;
-        let Some((token, project, bypass)) = row else { return Ok(None) };
+        let Some((token, project, bypass, trusted)) = row else { return Ok(None) };
         let required = self.settings(&project)?.access == crate::settings::Access::Link;
-        Ok(Some(Access { token: token.unwrap_or_default(), required, bypass }))
+        // A fork's preview never opens to the project's secret: CI that visits it would hand the
+        // secret to the fork's code.
+        Ok(Some(Access { token: token.unwrap_or_default(), required, bypass: bypass.filter(|_| trusted) }))
     }
 
     /// A new bypass secret for `project`'s private previews (replacing any): returned once,

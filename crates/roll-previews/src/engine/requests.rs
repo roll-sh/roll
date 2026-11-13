@@ -188,15 +188,27 @@ impl Engine {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         let (me, id, svc) = (self.clone(), id.to_string(), name.clone());
         tokio::spawn(async move {
-            let mut seen: Vec<String> = Vec::new();
+            // The first read is what was asked for; later ones read wide, so a burst between two
+            // reads isn't lost.
+            let (mut seen, mut first): (Vec<String>, bool) = (Vec::new(), true);
             loop {
-                let now = me.apps.logs(&id, &svc, lines).await;
-                for l in &now[overlap(&seen, &now)..] {
+                let now = me.apps.logs(&id, &svc, if first { lines } else { FOLLOW_WINDOW }).await;
+                let from = match resume_at(&seen, &now) {
+                    Some(i) => i,
+                    None => {
+                        let _ = tx.send("… (lines skipped: more came between two reads than a read sees)".into()).await;
+                        0
+                    }
+                };
+                for l in &now[from..] {
                     if tx.send(l.clone()).await.is_err() {
                         return;
                     }
                 }
-                seen = now;
+                if !now.is_empty() {
+                    seen = now;
+                }
+                first = false;
                 tokio::select! {
                     _ = tokio::time::sleep(FOLLOW_POLL) => {}
                     _ = tx.closed() => return,
@@ -207,13 +219,23 @@ impl Engine {
     }
 }
 
+/// How many lines each later read of a polled log asks for.
+pub const FOLLOW_WINDOW: usize = 2000;
+
 /// How often a service that can't be followed has its tail read again.
 pub const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How many of `now`'s first lines `before` already ended with: the longest suffix of `before`
-/// that's a prefix of `now`.
-pub fn overlap(before: &[String], now: &[String]) -> usize {
-    (0..=before.len().min(now.len())).rev().find(|&k| before[before.len() - k..] == now[..k]).unwrap_or(0)
+/// Where in `now` (a later, possibly wider read of the same log) the lines after `before` start:
+/// just past the first place `before`'s last lines (up to 20) appear in it. `None`: they don't,
+/// so lines were missed. The first match, so repeated lines are passed on again rather than
+/// silently dropped.
+pub fn resume_at(before: &[String], now: &[String]) -> Option<usize> {
+    if before.is_empty() {
+        return Some(0);
+    }
+    let k = before.len().min(20);
+    let tail = &before[before.len() - k..];
+    (k..=now.len()).find(|&p| &now[p - k..p] == tail)
 }
 
 #[cfg(test)]
@@ -223,10 +245,10 @@ mod tests {
     #[test]
     fn a_polled_log_passes_on_only_new_lines() {
         let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(super::overlap(&[], &v(&["a", "b"])), 0);
-        assert_eq!(super::overlap(&v(&["a", "b"]), &v(&["a", "b"])), 2, "nothing new");
-        assert_eq!(super::overlap(&v(&["a", "b", "c"]), &v(&["b", "c", "d"])), 2, "the tail scrolled by one");
-        assert_eq!(super::overlap(&v(&["x", "x"]), &v(&["x", "x", "x"])), 2, "repeated lines aren't swallowed");
-        assert_eq!(super::overlap(&v(&["a"]), &v(&["q", "r"])), 0, "moved past everything seen");
+        assert_eq!(super::resume_at(&[], &v(&["a", "b"])), Some(0));
+        assert_eq!(super::resume_at(&v(&["a", "b"]), &v(&["a", "b"])), Some(2), "nothing new");
+        assert_eq!(super::resume_at(&v(&["b", "c"]), &v(&["z", "a", "b", "c", "d"])), Some(4), "a wider read: only d is new");
+        assert_eq!(super::resume_at(&v(&["x", "x"]), &v(&["x", "x", "x"])), Some(2), "repeated lines aren't swallowed");
+        assert_eq!(super::resume_at(&v(&["a"]), &v(&["q", "r"])), None, "moved past everything seen: a gap");
     }
 }

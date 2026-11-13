@@ -214,6 +214,11 @@ async fn previews_wait_once_the_month_s_budget_is_spent() {
     let sent = e.code.budgets.lock().clone();
     assert_eq!(sent.iter().map(|(_, a)| a.percent).collect::<Vec<_>>(), [100], "{sent:?}");
     assert!(sent[0].0.contains(&"acme/web".to_string()) && sent[0].1.max_usd_month == 0.015, "{sent:?}");
+    // A raised budget is alerted on afresh: $0.02 is 80% of $0.025.
+    e.engine.store.put_settings(&e.project, &roll_previews::Settings { enabled: true, max_usd_month: 0.025, ..Default::default() }).unwrap();
+    e.engine.pass().await.unwrap();
+    let sent = e.code.budgets.lock().clone();
+    assert_eq!(sent.iter().map(|(_, a)| a.percent).collect::<Vec<_>>(), [100, 80], "{sent:?}");
 }
 
 #[tokio::test]

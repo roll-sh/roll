@@ -246,8 +246,11 @@ impl Engine {
             self.store.set_released(&r.id, &r.head)?;
             self.store.log(&r.id, "released")?;
         }
-        // 3d. What that did to the schema, once per head (best effort: a reviewer's aid).
-        if self.store.schema_head(&r.id)?.as_deref() != Some(r.head.as_str()) {
+        // 3d. What that did to the schema, once per head (best effort: a reviewer's aid). Only
+        // after a seed or release could have changed it: reading the parent's starts its compute.
+        if s.seed.is_none() && s.release.is_none() {
+            self.store.clear_schema_changes(&r.id)?;
+        } else if self.store.schema_head(&r.id)?.as_deref() != Some(r.head.as_str()) {
             self.read_schema(r).await;
         }
 
@@ -255,7 +258,8 @@ impl Engine {
         // From roll apps' catalog when the project has services there, else the repos'
         // `roll.toml`.
         let repos: Vec<String> = project.resources.iter().filter(|x| x.kind == roll_workspace::Kind::Repo).map(|x| x.r#ref.clone()).collect();
-        let mut wanted: Vec<(ServiceSpec, String, String)> = Vec::new(); // (spec, repo, revision)
+        // (spec, repo, revision, whether roll apps runs it)
+        let mut wanted: Vec<(ServiceSpec, String, String, bool)> = Vec::new();
         let head_of = |repo: String| async move {
             if repo == r.repo { Ok::<_, anyhow::Error>(Some(r.head.clone())) } else { self.source.head(&repo, None).await }
         };
@@ -270,26 +274,28 @@ impl Engine {
                         None => String::new(),
                     };
                     let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new() };
-                    wanted.push((spec, c.repo.unwrap_or_default(), rev));
+                    wanted.push((spec, c.repo.unwrap_or_default(), rev, true));
                 }
             }
             _ => {
                 for repo in &repos {
                     let Some(rev) = head_of(repo.clone()).await? else { continue };
                     for spec in self.source.services(repo, &rev).await.map_err(|e| anyhow::anyhow!("reading {repo}'s services: {e:#}"))? {
-                        wanted.push((spec, repo.clone(), rev.clone()));
+                        wanted.push((spec, repo.clone(), rev.clone(), false));
                     }
                 }
             }
         }
         let mut keep: Vec<String> = Vec::new();
-        for (spec, repo, rev) in wanted {
+        for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
             // a reset's new URLs, changed overrides; its access): the runtime restarts it on its
             // next request, roll apps redeploys it.
-            let fingerprint = config_fingerprint(&vars, access_token.is_some(), bypass.as_deref());
+            // The bypass only matters to a backend that checks access itself (roll apps): the
+            // runtime's gate reads it on each request, so a rotation restarts nothing there.
+            let fingerprint = config_fingerprint(&vars, access_token.is_some(), bypass.as_deref().filter(|_| on_apps));
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             if svc.deployed.as_deref() != Some(&rev) || reset_any || config_moved {
                 let git = if repo.is_empty() || rev.is_empty() { None } else { self.source.git_commit(&repo, &rev).await? };
@@ -392,7 +398,7 @@ impl Engine {
                 }
                 out.extend(lines);
             }
-            anyhow::Ok(all)
+            anyhow::Ok(all.map(crate::schema::cap))
         };
         match read.await {
             Ok(changes) => {
@@ -401,6 +407,8 @@ impl Engine {
                 }
             }
             Err(e) => {
+                // An older head's changes aren't this one's: none shown until a read works.
+                let _ = self.store.clear_schema_changes(&r.id);
                 let _ = self.store.log(&r.id, &format!("couldn't read the schema's changes: {e:#}"));
             }
         }

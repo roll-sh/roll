@@ -457,10 +457,10 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 ## Events (SSE)
 
 `GET /v1/code/repos/{owner}/{repo}/events` sends the event types `landed`, `change`, `work`, `check`,
-`preview`, `queue`, `review`, `thread` and `push`. Repo webhooks get the same events with the same data.
-A `preview` event is `{change, preview}` for a change's preview, or `{change: null, preview: null,
-budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month}, dashboard_url}`
-when a workspace project's previews pass that share of their monthly budget (docs/previews.md).
+`preview`, `queue`, `review`, `thread`, `push` and `budget`. Repo webhooks get the same events with the same data.
+A `budget` event is `{budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month},
+dashboard_url}`: the repo's workspace project's previews passed that share of their monthly budget
+(docs/previews.md).
 
 **Stream limits.** Each caller may hold at most 32 event streams open at once
 (`--code-max-streams-per-caller`, `ROLL_CODE_MAX_STREAMS_PER_CALLER`), and the server 10,000 in total

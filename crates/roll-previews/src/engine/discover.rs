@@ -11,8 +11,11 @@ impl Engine {
             return;
         }
         let Some(&level) = BUDGET_LEVELS.iter().rev().find(|&&l| spent >= s.max_usd_month * l as f64 / 100.0) else { return };
-        if self.store.alerted(&project.id, month).ok().flatten().is_some_and(|sent| sent >= level as i64) {
-            return;
+        match self.store.alerted(&project.id, month, s.max_usd_month) {
+            Ok(Some(sent)) if sent >= level as i64 => return,
+            Ok(_) => {}
+            // Unknown: never risk an alert every pass; the next pass reads it again.
+            Err(e) => return warn!(project = %project.id, error = %e, "previews: reading budget alerts"),
         }
         let alert = crate::ports::BudgetAlert {
             project: project.id.clone(),
@@ -21,13 +24,15 @@ impl Engine {
             spent_usd_month: (spent * 100.0).round() / 100.0,
             max_usd_month: s.max_usd_month,
         };
-        self.source.budget(repos, &alert).await;
+        if let Err(e) = self.source.budget(repos, &alert).await {
+            return warn!(project = %project.id, error = %e, "previews: sending a budget alert (tried again next pass)");
+        }
         let msg = format!("the project's previews passed {level}% of the month's budget (${:.2} of ${:.2})", alert.spent_usd_month, s.max_usd_month);
         info!(project = %project.id, "{msg}");
         for r in self.store.rows(Some(&project.id)).unwrap_or_default().iter().filter(|r| r.desired == Desired::Active) {
             let _ = self.store.log(&r.id, &msg);
         }
-        if let Err(e) = self.store.set_alerted(&project.id, month, level as i64) {
+        if let Err(e) = self.store.set_alerted(&project.id, month, s.max_usd_month, level as i64) {
             warn!(project = %project.id, error = %e, "previews: recording a budget alert");
         }
     }

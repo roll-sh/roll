@@ -860,7 +860,7 @@ export interface Blame {
 
 // ── webhooks and commit statuses ──
 
-export const WEBHOOK_EVENTS = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push"] as const;
+export const WEBHOOK_EVENTS = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push", "budget"] as const;
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
 export interface Webhook {
@@ -1130,6 +1130,8 @@ export interface CodeEvents {
   review: Review;
   thread: Thread;
   push: PushEvent;
+  /** A workspace project's previews passed a share of their monthly budget (roll previews). */
+  budget: { budget: { project: string; project_name: string; percent: number; spent_usd_month: number; max_usd_month: number }; dashboard_url: string | null };
 }
 
 // ── client ──

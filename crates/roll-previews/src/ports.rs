@@ -144,8 +144,11 @@ pub trait Source: Send + Sync {
     /// The preview is gone.
     async fn forget(&self, preview: &Preview);
     /// The project's previews passed `alert.percent` of their monthly budget: tell the people
-    /// who follow its repos (roll code: a `preview` webhook event with `budget`).
-    async fn budget(&self, _repos: &[String], _alert: &BudgetAlert) {}
+    /// who follow its repos (roll code: each repo's `budget` event). `Err` when it couldn't be
+    /// queued: the engine tries again on its next pass.
+    async fn budget(&self, _repos: &[String], _alert: &BudgetAlert) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// A receiver that fires when roll code changed something (a nudge to converge sooner).
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>>;
 }

@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS commit_statuses (
 "#;
 
 /// Events a webhook can subscribe to (`ping` is always sent on request).
-pub const EVENTS: [&str; 9] = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push"];
+pub const EVENTS: [&str; 10] = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push", "budget"];
 const MAX_HOOKS_PER_REPO: usize = 20;
 const STATES: [&str; 4] = ["pending", "success", "failure", "error"];
 /// Land log rows read at a time.
@@ -809,6 +809,10 @@ impl Code {
 
     /// Queue an event's deliveries now: a read to see whether anything listens, then one write
     /// that reads the webhooks again and queues a delivery for each.
+    pub(crate) fn fan_out_event(&self, repo_id: &str, kind: &str, data: &Value) -> Result<()> {
+        self.fan_out(repo_id, kind, data)
+    }
+
     fn fan_out(&self, repo_id: &str, kind: &str, data: &Value) -> Result<()> {
         if !self.db.sql().read(|c| hooked_on(c, repo_id, kind))? {
             return Ok(());

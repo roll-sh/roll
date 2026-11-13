@@ -57,8 +57,9 @@ impl Source for FakeCode {
     async fn forget(&self, p: &Preview) {
         self.forgotten.lock().push(p.id.clone());
     }
-    async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) {
+    async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
+        Ok(())
     }
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
         None
