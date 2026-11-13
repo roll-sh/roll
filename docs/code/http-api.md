@@ -142,7 +142,13 @@ Check   = {name, status: "queued" | "running" | "success" | "failure" | "cancell
            source: "runner" | "external" | "github", url: string | null, summary: string | null,
            started_at: number | null, finished_at: number | null}
 Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | null,
-           postgres: {project_id, branch_id} | null, redis: {db_id} | null, error: string | null, created_at}
+           postgres: {project_id, branch_id} | null, redis: {db_id} | null, error: string | null, created_at,
+           environment?: {id /* pv_… */, slug, state /* roll previews' Preview.state */,
+                          services: [{name, url, state}], resources: [{kind, parent, ref: string | null}],
+                          sleeping_usd_month, active_usd_hour, dashboard_url: string | null,
+                          github: {comment, status, deployment},
+                          head?: string /* the changeset it runs: statuses are about it */,
+                          schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",
            base, head, revision, work_item: string | null, branch: string | null /* git branch it was pushed as */,
@@ -451,7 +457,10 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 ## Events (SSE)
 
 `GET /v1/code/repos/{owner}/{repo}/events` sends the event types `landed`, `change`, `work`, `check`,
-`preview`, `queue`, `review`, `thread` and `push`. Repo webhooks get the same events with the same data.
+`preview`, `queue`, `review`, `thread`, `push` and `budget`. Repo webhooks get the same events with the same data.
+A `budget` event is `{budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month},
+dashboard_url}`: the repo's workspace project's previews passed that share of their monthly budget
+(docs/previews.md).
 
 **Stream limits.** Each caller may hold at most 32 event streams open at once
 (`--code-max-streams-per-caller`, `ROLL_CODE_MAX_STREAMS_PER_CALLER`), and the server 10,000 in total
@@ -485,7 +494,7 @@ Status  = {context, state: "pending" | "success" | "failure" | "error", target_u
 GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                       writers (401 anonymous, 403 others)
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
-       events: any of landed, change, review, thread, check, queue, work, preview, push, or ["*"] (default
+       events: any of landed, change, review, thread, check, queue, work, preview, push, budget, or ["*"] (default
        ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret;
        at most 20 per repo (422)
 GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} → Webhook · PATCH {url?, events?, secret?, active?} → Webhook

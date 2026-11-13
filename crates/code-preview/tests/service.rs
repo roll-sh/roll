@@ -62,7 +62,7 @@ struct FakePreviews {
 impl PreviewBackend for FakePreviews {
     async fn create(&self, _repo: &RepoRow, change: &Change, _dir: &Path) -> anyhow::Result<Preview> {
         self.created.lock().push(change.id.clone());
-        Ok(Preview { state: PreviewState::Sleeping, url: Some("http://p".into()), postgres: None, redis: None, error: None, created_at: 1 })
+        Ok(Preview { state: PreviewState::Sleeping, url: Some("http://p".into()), postgres: None, redis: None, error: None, created_at: 1, environment: None })
     }
     async fn delete(&self, _repo: &RepoRow, change: &Change) -> anyhow::Result<()> {
         self.deleted.lock().push(change.id.clone());

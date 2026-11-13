@@ -10,6 +10,7 @@
 //! - A drain hands the stream off: an idempotent producer and a consumer see nothing but a
 //!   reconnect, and nothing is lost or written twice.
 //! - Two nodes believing they own a stream: the one that claimed it last is the only writer.
+//! - A branch of records acknowledged only in the write-ahead log has every one of them.
 
 mod common;
 
@@ -526,3 +527,43 @@ fn dynamodb_endpoint() -> Option<String> {
     ep.clone()
 }
 
+
+async fn http_records(base: &str, stream: &str, topic: &str) -> Vec<(i64, String)> {
+    let v: serde_json::Value = reqwest::get(format!("{base}/v1/streams/{stream}/topics/{topic}/partitions/0/records?offset=0&limit=1000")).await.unwrap().json().await.unwrap();
+    v["records"].as_array().unwrap_or_else(|| panic!("no records in {v}")).iter().map(|r| (r["offset"].as_i64().unwrap(), r["value"].as_str().unwrap().to_string())).collect()
+}
+
+/// A branch asked of a node that doesn't own the parent, whose records are acknowledged only in
+/// the write-ahead log: the parent's owner uploads them and cuts the branch there, and the branch
+/// (owned on its own) serves every one of them at the same offsets, then goes its own way.
+/// Leases don't matter here, so this runs on the memory backend only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_branch_has_every_acknowledged_record() {
+    let Some(mut f) = Fleet::new(Kind::Memory, "branch") else { return };
+    f.lazy_uploads = true;
+    let nodes = f.nodes(&["a", "b", "c"]).await;
+    let (owner, via) = owner_and_other(&nodes);
+    let http = reqwest::Client::new();
+    let r = http.post(format!("{}/v1/streams/test/topics", via.http)).json(&serde_json::json!({ "name": "orders" })).send().await.unwrap();
+    assert!(r.status().is_success());
+    for i in 0..20 {
+        assert!(http_produce(&via.http, "orders", &i.to_string()).await.status().is_success());
+    }
+    let p = owner.broker.find_stream("test").unwrap().topic("orders").unwrap().partition(0).unwrap();
+    assert!(p.loaded().unwrap().stats().pending_upload_bytes > 0, "records are only in the write-ahead log");
+
+    let r = http.post(format!("{}/v1/streams/test/branches", via.http)).json(&serde_json::json!({ "name": "pv" })).send().await.unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::CREATED);
+    let id = r.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    let want: Vec<(i64, String)> = (0..20).map(|i| (i, i.to_string())).collect();
+    for n in &nodes {
+        assert_eq!(http_records(&n.http, &id, "orders").await, want, "through {}", n.id);
+    }
+    assert_eq!(nodes.iter().filter(|n| serving(n, &id)).count(), 1, "the branch has one owner");
+
+    let r = http.post(format!("{}/v1/streams/{id}/topics/orders/records", via.http)).json(&serde_json::json!({ "value": "branch" })).send().await.unwrap();
+    assert!(r.status().is_success());
+    assert!(http_produce(&via.http, "orders", "parent").await.status().is_success());
+    assert_eq!(http_records(&via.http, &id, "orders").await.last().unwrap(), &(20, "branch".to_string()));
+    assert_eq!(http_records(&via.http, "test", "orders").await.last().unwrap(), &(20, "parent".to_string()));
+}

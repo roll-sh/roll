@@ -72,6 +72,37 @@ swaps them into the catalog atomically. Offsets don't change. The triggers are
 `min.cleanable.dirty.ratio`, `min.compaction.lag.ms` and `max.compaction.lag.ms`. Old objects are
 deleted after a grace period, so in-flight reads still find them.
 
+**Branches** (`branch.rs`, `POST /v1/streams/{s}/branches {name}`, `roll stream branch`). A branch
+is a new stream, with its own id and its first key (the secret is in the answer, once), that has
+the parent's topics, partitions and configs, the parent's records as of the branch at the same
+offsets, and the parent's committed group offsets. Nothing is copied: the branch's chunk rows in
+the catalog name the parent's objects. roll previews use it to give a preview the project's
+stream data (docs/previews.md).
+
+- **The cut.** The request runs on the parent's owner. It opens every partition and uploads until
+  object storage has everything that was visible when the branch was asked for (on the fleet
+  that includes records acknowledged only in the write-ahead log), then reads each log's
+  `branch_point` under its lock: the end of what's uploaded and the transactions open at that
+  moment. One catalog transaction, fenced on the parent, creates the branch: its stream row and
+  key, topics with new ids, each partition's log start, the chunk rows below the cut, aborted
+  transactions, committed offsets (never past the cut) and group rows. The branch's high
+  watermark is the cut, which object storage has.
+- **Open transactions** at the cut are aborted in the branch (an aborted range ending at the
+  cut). Their markers come after it, and their producers never write to the branch.
+- **After the branch** the two are independent: each appends at its own log end and uploads under
+  its own prefix, so the same offset can hold different records in each.
+- **Deleting shared objects.** A chunk row's key is its reference. Retention, compaction and
+  deleting a topic or a stream delete rows, and the same transaction returns only the keys no
+  row of any stream references any more; only those objects are deleted. Deleting a stream or
+  topic then sweeps its prefix (write-ahead log objects, leftovers) except keys some row still
+  references. So deleting the parent leaves the branch readable, deleting a branch never touches
+  the parent, and the last stream to drop a chunk deletes it. Keys are never reused and a
+  reference is only ever copied from an existing row, so a key nobody references stays that way.
+- **What a branch costs.** `GET /v1/streams/{s}` (`storage`) and `/usage` (`remote`) split object
+  storage into `own_bytes` (chunks under the stream's own prefix, or that no other stream
+  references) and `shared_bytes`. A fresh branch owns nothing. `/usage`'s estimate bills
+  `own_bytes`.
+
 **Semantics.**
 
 - Idempotent producers, including KIP-360 epoch bumps.
@@ -370,6 +401,7 @@ These are planned work, not design limits:
 | `src/handlers/` | one module per API family. `mod.rs` lists the supported versions (`APIS`) |
 | `src/broker.rs` | streams, topics, partitions, the uploader, cleaner, idle unload and remote reads |
 | `src/compaction.rs` | log compaction over uploaded chunks |
+| `src/branch.rs` | copy-on-write branches of a stream |
 | `src/groups.rs`, `src/txn.rs` | group and transaction coordinators |
 | `src/auth.rs`, `src/tls.rs` | SASL and per-stream keys, TLS |
 | `src/records.rs` | record decoding for the few places that need it (compaction, timestamps, HTTP, key checks) |
@@ -390,12 +422,14 @@ the curl and SASL headers (`apt-get install cmake libcurl4-openssl-dev libsasl2-
 - `tests/java.rs`: the Kafka 4.1 CLI tools, perf tools, verifiable clients and Kafka Streams with
   exactly-once, all in Docker.
 - `tests/storage.rs`: tiered reads, retention, torn writes, unclean stops, scale to zero, closed
-  partitions keeping nothing on disk, the local disk budget.
+  partitions keeping nothing on disk, the local disk budget, a branch outliving its parent.
 - `tests/cluster.rs`: the fleet, several brokers in one process with leases on the memory backend and
   on DynamoDB Local (`ROLL_CLUSTER_TEST_DYNAMODB`, else `amazon/dynamodb-local` in Docker; skipped
   without either): connections and HTTP through any node, the owner dying with acknowledged records
-  only in the write-ahead log, a drain under librdkafka traffic, and fencing.
-- `tests/compaction.rs`: latest value per key, tombstones, reading across gaps.
-- `tests/http.rs`: the HTTP API and how it interoperates with Kafka clients.
+  only in the write-ahead log, a drain under librdkafka traffic, fencing, and a branch of records
+  only in the write-ahead log.
+- `tests/compaction.rs`: latest value per key, tombstones, reading across gaps, compaction on
+  either side of a branch.
+- `tests/http.rs`: the HTTP API and how it interoperates with Kafka clients, branches.
 
 Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run them against S3.

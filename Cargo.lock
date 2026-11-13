@@ -6302,6 +6302,7 @@ dependencies = [
  "clap",
  "code-chat",
  "code-control",
+ "code-preview",
  "code-sql",
  "getrandom 0.4.3",
  "libc",
@@ -6315,6 +6316,8 @@ dependencies = [
  "pg-storage",
  "regex",
  "reqwest",
+ "roll-previews",
+ "roll-workspace",
  "rustls-pemfile",
  "rustyline",
  "s3-control",
@@ -6407,6 +6410,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-previews"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "code-control",
+ "code-preview",
+ "code-sql",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "hyper 1.12.0",
+ "hyper-util",
+ "parking_lot",
+ "roll-cluster",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "roll-workspace"
 version = "0.1.0"
 dependencies = [
@@ -6428,6 +6459,7 @@ name = "rolld"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "aws-sdk-dynamodb",
  "aws-sdk-s3",
  "aws-smithy-http-client",
@@ -6478,6 +6510,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-previews",
  "roll-workspace",
  "rusqlite",
  "s3-api",
