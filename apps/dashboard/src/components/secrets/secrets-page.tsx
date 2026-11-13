@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeftRight, ChevronRight, KeyRound, LayoutGrid, Lock, RefreshCw, ScrollText, Settings2, ShieldCheck } from "lucide-react";
+import { ArrowLeftRight, ChevronRight, HeartPulse, KeyRound, LayoutGrid, Lock, RefreshCw, ScrollText, Settings2, ShieldCheck } from "lucide-react";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { secretsApi, type Environment, type Link as SecretLink, type Required, type SecretsApi } from "@/lib/secrets-api";
@@ -15,11 +15,12 @@ import { CompareView } from "./compare";
 import { EnvView } from "./env-view";
 import { EnvironmentsView } from "./environments";
 import { FindKey } from "./find";
+import { HealthView } from "./health";
 import { OverviewGrid } from "./grid";
 import { SyncsView } from "./syncs";
 import { ErrorNote, useLoad } from "./ui";
 
-export type View = "overview" | "compare" | "environments" | "access" | "syncs" | "audit";
+export type View = "overview" | "health" | "compare" | "environments" | "access" | "syncs" | "audit";
 
 type Ctx = {
   project: WorkspaceProject;
@@ -92,13 +93,14 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   };
 
   const env = search.env ? envs.find((e) => e.slug === search.env) : undefined;
-  const view: View = (["compare", "environments", "access", "syncs", "audit"] as const).find((v) => v === search.view) ?? "overview";
+  const view: View = (["health", "compare", "environments", "access", "syncs", "audit"] as const).find((v) => v === search.view) ?? "overview";
 
   let body: ReactNode;
   if (overview.error && !overview.data) body = <ErrorNote error={`Secrets didn't load: ${overview.error}`} className="m-4" />;
   else if (!overview.data) body = null;
   else if (search.env && !env) body = <ErrorNote error={`There's no environment "${search.env}" in ${project.name}.`} className="m-4" />;
   else if (env) body = <EnvView key={env.slug} env={env} />;
+  else if (view === "health") body = <HealthView />;
   else if (view === "compare") body = <CompareView />;
   else if (view === "environments") body = <EnvironmentsView />;
   else if (view === "access") body = <AccessView />;
@@ -152,6 +154,7 @@ function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
   const { standard, previews, search, project } = useSecrets();
   const path = search.path && search.path !== "/" ? search.path : undefined;
   const side: { view: View; label: string; icon: ReactNode }[] = [
+    { view: "health", label: "Health", icon: <HeartPulse className="size-3.5" /> },
     { view: "compare", label: "Compare", icon: <ArrowLeftRight className="size-3.5" /> },
     { view: "environments", label: "Environments", icon: <Settings2 className="size-3.5" /> },
     { view: "access", label: "Access", icon: <ShieldCheck className="size-3.5" /> },

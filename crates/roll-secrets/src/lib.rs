@@ -13,6 +13,7 @@
 pub mod access;
 mod alerts;
 pub mod api;
+pub mod health;
 pub mod rotators;
 mod strength;
 mod audit;

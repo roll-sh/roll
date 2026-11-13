@@ -180,6 +180,9 @@ pub enum Secrets {
         #[arg(long, requires = "watch", value_name = "COMMAND")]
         exec: Option<String>,
     },
+    /// Every finding in every environment, worst first: expired, missing, exposed, weak,
+    /// expiring, stale, unread. Fails when there's an expired, missing or exposed one.
+    Health,
     /// The keys a template (`.env.example`) names that the environment doesn't have, without
     /// reading a value; fails when one is missing (`--strict`: also when it has keys the template
     /// doesn't name).
@@ -899,6 +902,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             replace_private(&out, &text)?;
             if watch {
                 render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
+            }
+        }
+        Secrets::Health => {
+            let v = c.call(Method::GET, &format!("{}/health", c.base()), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            let found = v.as_array().cloned().unwrap_or_default();
+            for f in &found {
+                println!("{:<9} {:<14} {:<28} {}{}", s(&f["issue"]).to_uppercase(), s(&f["environment"]), s(&f["key"]), s(&f["detail"]), if f["path"] == "/" { String::new() } else { format!("  ({})", s(&f["path"])) });
+            }
+            let serious = found.iter().filter(|f| ["expired", "missing", "exposed"].contains(&f["issue"].as_str().unwrap_or_default())).count();
+            if found.is_empty() {
+                eprintln!("Nothing to fix");
+            }
+            if serious > 0 {
+                bail!("{serious} to fix now (expired, missing or exposed)");
             }
         }
         Secrets::Check { template, strict } => {

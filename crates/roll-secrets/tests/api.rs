@@ -821,6 +821,29 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
 }
 
 #[tokio::test]
+async fn health_lists_every_finding_in_every_environment_worst_first() {
+    let api = Api::new().await;
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "DB_PASSWORD", "value": "Password1" }, { "op": "set", "key": "CERT", "value": "c", "expires_at": 1000 }] }))).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
+    api.set("staging", "DB_PASSWORD", "Password1").await;
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "CERT" }]))).await;
+    let found = api.ok(Method::GET, "/health", None).await;
+    let got: Vec<(&str, &str, &str)> = found.as_array().unwrap().iter().map(|f| (f["issue"].as_str().unwrap(), f["environment"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
+    assert_eq!(
+        got,
+        [
+            ("expired", "production", "CERT"),
+            ("missing", "development", "CERT"),
+            ("missing", "staging", "CERT"),
+            ("exposed", "production", "DB_PASSWORD"),
+            ("weak", "staging", "DB_PASSWORD"),
+            ("weak", "production", "DB_PASSWORD"),
+        ]
+    );
+    assert_eq!(found[3]["detail"], "also in staging");
+}
+
+#[tokio::test]
 async fn a_scan_finds_values_only_its_caller_may_reveal() {
     let api = Api::new().await;
     api.set("production", "STRIPE_KEY", "sk_live_51Hx9Q2abc").await;

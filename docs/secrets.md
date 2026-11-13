@@ -390,6 +390,17 @@ its next write. The environment's list marks it "weak", and `roll secrets insigh
 letters and digits made in the browser (rejection-sampled, like the CLI's `--generate`), so the fix
 is one click.
 
+### Health
+
+`GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
+every standard environment and folder at once, worst first, so none waits on someone opening the
+right folder: `expired`, `missing` (a required key an environment doesn't define, through its
+imports and base), `exposed` (a protected value also in an unprotected environment), `weak`,
+`expiring`, `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
+and it's older than that). Each `Finding` names the environment, folder and key where it's set,
+with a detail (the other environments, the reason, the date): never a value, and nothing is
+decrypted. Only what the caller may read is listed, and `weak` only where it may reveal.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -507,6 +518,7 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
+roll secrets health                                            # every finding, every environment, worst first
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
 roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
@@ -1182,6 +1194,7 @@ isn't in the workspace is 404.
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
+| `GET /health` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
@@ -1240,6 +1253,7 @@ type Grid = { path: string; environments: string[]; rows: { key: string; cells: 
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
@@ -1352,9 +1366,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **One health view across environments** (1Password Watchtower): every key insights flag, in
-   every environment the caller can read: weak, also in an unprotected environment, expiring or
-   expired, stale, unread in 90 days, required but missing; each links to its key.
 
 Waiting on other pull requests:
 
