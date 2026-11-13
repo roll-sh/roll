@@ -36,6 +36,7 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::Cloudflare(http.clone())));
     s.register(Arc::new(platforms::Ssm(http)));
     s.register(Arc::new(platforms::Kubernetes { allow_private }));
+    s.register(Arc::new(platforms::GitLab { allow_private }));
     s
 }
 

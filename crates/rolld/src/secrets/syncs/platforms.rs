@@ -387,6 +387,105 @@ impl SyncTarget for Kubernetes {
     }
 }
 
+// ── gitlab ──
+
+/// A GitLab project's CI/CD variables in one environment scope (gitlab.com, or a self-managed
+/// instance at a URL the tenant chose: fetched like a webhook, `PublicOnly`).
+pub(super) struct GitLab {
+    pub(super) allow_private: bool,
+}
+
+struct GitLabTarget {
+    base: url::Url,
+    project: String,
+    scope: String,
+    token_key: String,
+}
+
+/// GitLab's largest variable value.
+const GITLAB_VALUE_MAX: usize = 10_000;
+
+impl GitLab {
+    fn target(&self, t: &Json) -> Result<GitLabTarget> {
+        let [base, project, scope, token_key] = target("gitlab", t, [("base_url", false), ("project", true), ("environment_scope", false), ("token_key", true)])?;
+        let base = super::Hooks::new(self.allow_private).url(base.as_deref().unwrap_or("https://gitlab.com")).map_err(|_| bad("base_url is the GitLab instance's public https:// URL"))?;
+        let project = project.unwrap_or_default();
+        // An id, or a full path (`group/sub/project`), which the API takes URL-encoded.
+        if project.is_empty() || project.len() > 255 || !project.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c)) || project.starts_with('/') || project.contains("..") {
+            return Err(bad("project is a GitLab project's id or path (group/project)"));
+        }
+        let scope = scope.unwrap_or_else(|| "*".into());
+        if scope.is_empty() || scope.len() > 255 || scope.chars().any(char::is_control) {
+            return Err(bad("environment_scope is a GitLab environment scope (* for all)"));
+        }
+        Ok(GitLabTarget { base, project, scope, token_key: key_field("gitlab", "token_key", token_key)? })
+    }
+}
+
+impl SyncTarget for GitLab {
+    fn kind(&self) -> &str {
+        "gitlab"
+    }
+    fn label(&self) -> &str {
+        "GitLab CI/CD variables"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "project", label: "Project (id or group/project)", required: true, placeholder: "acme/web" },
+            SyncField { name: "environment_scope", label: "Environment scope", required: false, placeholder: "* (all), or production" },
+            SyncField { name: "token_key", label: "Key holding an access token (api scope)", required: true, placeholder: "GITLAB_TOKEN" },
+            SyncField { name: "base_url", label: "Instance (self-managed)", required: false, placeholder: "https://gitlab.com" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let g = self.target(t)?;
+        let token = credential(p, &g.token_key)?;
+        too_long(p, GITLAB_VALUE_MAX, "a GitLab variable's 10,000 characters")?;
+        let mut b = reqwest::Client::builder().timeout(Duration::from_secs(20)).connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync");
+        if !self.allow_private {
+            b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
+        }
+        let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None };
+        let what = format!("gitlab {}", g.project);
+        let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
+        let scope = urlencoding::encode(&g.scope).into_owned();
+        // A variable GitLab can mask is masked (8+ characters, no spaces): it stays out of job logs.
+        let maskable = |v: &str| v.len() >= 8 && !v.contains(char::is_whitespace);
+        block_on(async {
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                let body = json!({ "key": name, "value": v.expose(), "environment_scope": g.scope, "masked": maskable(v.expose()), "raw": true });
+                let at = format!("{vars}/{}?filter[environment_scope]={scope}", urlencoding::encode(name));
+                let (status, _) = http.send(client.put(&at).header("PRIVATE-TOKEN", token).json(&body), &what).await?;
+                let status = if status == reqwest::StatusCode::NOT_FOUND {
+                    http.send(client.post(&vars).header("PRIVATE-TOKEN", token).json(&body), &what).await?.0
+                } else {
+                    status
+                };
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {name}: {status}")));
+                }
+            }
+            for name in p.removed {
+                let at = format!("{vars}/{}?filter[environment_scope]={scope}", urlencoding::encode(name));
+                let (status, _) = http.send(client.delete(&at).header("PRIVATE-TOKEN", token), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {name}: {status}")));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 // ── aws-ssm ──
 
 struct SsmTarget {
@@ -657,6 +756,17 @@ mod tests {
         let theirs = push(k(), t("theirs"), &[("KUBE_TOKEN", "sa-token")]).await.unwrap_err().to_string();
         assert!(theirs.contains("isn't roll's") && !theirs.contains("v-123"), "{theirs}");
         assert!(Kubernetes { allow_private: false }.check("p", &BTreeSet::new(), &t("shop-env")).is_err(), "a private address");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gitlab_updates_or_creates_scoped_masked_variables_and_deletes_removed_ones() {
+        let (base, seen) = mock().await;
+        let t = json!({ "base_url": base, "project": "acme/web", "environment_scope": "production", "token_key": "GITLAB_TOKEN" });
+        push(Arc::new(GitLab { allow_private: true }), t, &[("GITLAB_TOKEN", "glpat-x")]).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!((seen[0].0.as_str(), seen[0].1.as_str()), ("PUT", "/api/v4/projects/acme%2Fweb/variables/NEW?filter[environment_scope]=production"));
+        assert_eq!(seen[0].2, json!({ "key": "NEW", "value": "v-123", "environment_scope": "production", "masked": false, "raw": true }));
+        assert_eq!((seen[1].0.as_str(), seen[1].1.as_str()), ("DELETE", "/api/v4/projects/acme%2Fweb/variables/OLD?filter[environment_scope]=production"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
