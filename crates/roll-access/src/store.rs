@@ -115,8 +115,9 @@ pub const REFRESH_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 pub const CODE_TTL_MS: i64 = 60 * 1000;
 /// `last_used_at` is written at most this often per grant.
 const TOUCH_MS: i64 = 60 * 1000;
-/// Grants kept at most (revoked ones count until they're pruned).
+/// Live grants kept at most, and per person.
 pub const MAX_GRANTS: usize = 10_000;
+pub const USER_MAX_GRANTS: usize = 100;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Grant {
@@ -461,6 +462,7 @@ impl Store {
         if !db.has_column("grants", "user_id")? {
             db.add_column("grants", "user_id", "TEXT")?;
         }
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS grants_user ON grants (user_id);")?;
         // Why it was revoked, when roll did it (a leaked secret).
         if !db.has_column("grants", "revoked_why")? {
             db.add_column("grants", "revoked_why", "TEXT")?;
@@ -514,6 +516,11 @@ impl Store {
     // ── grants ──
 
     /// Store a new grant; the token is returned this once.
+    /// The ids of the grants `user` owns (live or not).
+    pub fn grant_ids_of(&self, user: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.db.read(|c| c.query("SELECT id FROM grants WHERE user_id = ?", [user], |r| r.get::<_, String>(0)))?.into_iter().collect())
+    }
+
     /// A new grant; `user`: whose own token it is (it acts as them), `None` for the operator's.
     pub fn create(&self, new: &NewGrant, kind: GrantKind, created_by: &str, client_id: Option<&str>, user: Option<&str>) -> Result<(Grant, String)> {
         check_name(&new.name)?;
@@ -538,6 +545,13 @@ impl Store {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL", (), |r| r.get(0))?;
             if count as usize >= MAX_GRANTS {
                 return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
+            }
+            // One person never fills everyone's room.
+            if let Some(u) = user {
+                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL", [u], |r| r.get(0))?;
+                if theirs as usize >= USER_MAX_GRANTS {
+                    return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
+                }
             }
             c.execute(
                 "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -978,6 +992,17 @@ impl Store {
         let rules = serde_json::to_string(&new.rules).unwrap_or_default();
         let ip = serde_json::to_string(&new.ip_allow).unwrap_or_default();
         self.db.write(|c| {
+            // The same room a token takes: everyone's, and its person's.
+            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL", (), |r| r.get(0))?;
+            if count as usize >= MAX_GRANTS {
+                return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
+            }
+            if let Some(u) = user {
+                let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE user_id = ? AND revoked_at IS NULL", [u], |r| r.get(0))?;
+                if theirs as usize >= USER_MAX_GRANTS {
+                    return Err(Error::Conflict(format!("a person has at most {USER_MAX_GRANTS} live tokens and connections: revoke some first")));
+                }
+            }
             // The grant exists from now, unusable (no secret) until the code is exchanged.
             c.execute(
                 "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?)",

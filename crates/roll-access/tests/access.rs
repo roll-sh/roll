@@ -43,6 +43,11 @@ impl People {
     fn remove(&self, user: &str) {
         self.0.lock().unwrap().remove(user);
     }
+    fn set_admin(&self, user: &str, admin: bool) {
+        if let Some(p) = self.0.lock().unwrap().get_mut(user) {
+            p.admin = admin;
+        }
+    }
 }
 
 impl roll_auth::Sessions for People {
@@ -766,6 +771,20 @@ async fn a_users_token_acts_as_them() {
     // Her account turned off: the token stops on its next request.
     d.people.remove("usr_alice");
     assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+
+    // An admin's token is theirs too: the operator's reach while they're an admin, their own once
+    // they aren't, nothing once they're gone.
+    d.people.add("usr_root", "root");
+    d.people.set_admin("usr_root", true);
+    let read_all = json!({ "name": "admin's", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] });
+    let (s, made) = d.as_user("usr_root", Method::POST, "/v1/access/tokens", Some(read_all)).await;
+    assert_eq!((s, made["grant"]["user"].as_str()), (StatusCode::CREATED, Some("usr_root")), "{made}");
+    let admins = made["token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&admins, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+    d.people.set_admin("usr_root", false);
+    assert_eq!(d.call(&admins, Method::GET, "/v1/projects", None).await.1["code"], "operator_only");
+    d.people.remove("usr_root");
+    assert_eq!(d.call(&admins, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED);
 }
 
 /// A leaked token (docs/permissions.md, "Leaked tokens") is revoked as soon as roll finds it: it

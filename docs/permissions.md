@@ -419,6 +419,11 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   answers `403 operator_only`, whatever the rules say.
 - They see and manage only their own tokens, connections, approvals and audit rows, and **they
   decide their own token's approvals** (a token never decides one). The operator sees everyone's.
+- A token or connection made from an admin's session is that admin's too: it acts as the operator
+  while they're an admin, as their own session would once they aren't, and stops when their
+  account does. Tokens made with the operator's token belong to nobody.
+- A person holds at most 100 live tokens and connections (`USER_MAX_GRANTS`), so nobody signed in
+  can fill everyone's room (10,000 live grants in all).
 - The builder and the consent screen offer only what they reach (`GET /v1/access` answers
   `{kind: "user", reach: ["code", "agents", "workspace"]}`).
 

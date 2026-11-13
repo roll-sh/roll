@@ -182,7 +182,8 @@ pub struct Consent {
 /// browser to.
 pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Json<Value>> {
     let user = match crate::api::who(&a, &ext)? {
-        crate::api::Who::Operator => None,
+        // A signed-in admin's connection is theirs (it acts as the operator while they're one).
+        crate::api::Who::Operator => ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone()),
         crate::api::Who::User(u) => Some(u.user),
         crate::api::Who::Grant(_) => return Err(Error::Forbidden("a token never connects an MCP client".into())),
     };

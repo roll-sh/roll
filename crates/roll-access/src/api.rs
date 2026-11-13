@@ -240,7 +240,9 @@ async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate:
     let new: NewGrant = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     // A user's token is theirs, and so is one their token makes: it acts as them.
     let (by, user) = match who(&a, &ext)? {
-        Who::Operator => (actor(&ext), None),
+        // An admin's token is theirs too: it acts as the operator while they're an admin, and
+        // stops (or narrows to their own reach) when they aren't.
+        Who::Operator => (actor(&ext), ext.get::<roll_auth::SignedIn>().map(|u| u.user.clone())),
         Who::User(u) => (u.user.clone(), Some(u.user)),
         Who::Grant(g) => {
             check_within(&a, &g, &Shape { rules: &new.rules, expires_at: new.expires_at, ip_allow: &new.ip_allow, rate: new.rate_per_minute }).await?;
@@ -361,7 +363,7 @@ struct ApprovalsQuery {
 /// The ids of the grants `user` owns.
 async fn grants_of(a: &Arc<Access>, user: &str) -> crate::Result<std::collections::HashSet<String>> {
     let user = user.to_string();
-    blocking(a.clone(), move |a| Ok(a.store.list()?.into_iter().filter(|g| g.user.as_deref() == Some(user.as_str())).map(|g| g.id).collect())).await
+    blocking(a.clone(), move |a| a.store.grant_ids_of(&user)).await
 }
 
 async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>) -> crate::Result<Json<Value>> {
