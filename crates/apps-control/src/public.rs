@@ -86,7 +86,7 @@ pub fn token_hash(token: &str) -> String {
 }
 
 /// Whether two hashes are equal, in time that doesn't depend on where they differ.
-fn same(a: &str, b: &str) -> bool {
+pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

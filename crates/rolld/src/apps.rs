@@ -438,6 +438,11 @@ impl AppsNode {
     }
 
     /// Services' hostnames and custom domains, for the edge's HTTPS listener.
+    /// Deploy hooks: no API token (the URL is the secret), so outside the gate.
+    pub fn hooks_router(&self) -> axum::Router {
+        apps_control::api::hooks_router(self.apps.clone())
+    }
+
     pub fn public_router(&self) -> axum::Router {
         apps_control::public::router(self.apps.clone())
     }

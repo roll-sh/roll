@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { appsApi, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
-import { CPU, MEMORY, mb, type Runner } from "./shared";
+import { CPU, MEMORY, mb, SureButton, type Runner } from "./shared";
 
 /** A private environment's token: 32 of [a-z0-9], from the browser's CSPRNG. */
 export function newAccessToken(): string {
@@ -28,6 +28,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const sources = service.environments.filter((e) => e.name !== env.name && e.active);
   const [from, setFrom] = useState(sources[0]?.name ?? "");
   const [link, setLink] = useState<string | null>(null);
+  const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const { copied, copy } = useCopy();
   const repo = service.source.kind === "repo";
@@ -81,6 +82,46 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         )}
 
         <OwnRun service={service} env={env} runner={runner} />
+
+        <div className="space-y-3 px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[13px] font-medium">Deploy hook</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.hook
+                  ? `A POST to its URL deploys ${env.name}, from CI or a registry's webhook${service.source.kind === "image" ? " (?image= another tag of the same image)" : ""}.`
+                  : "A secret URL that deploys this environment, without an API token."}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              {env.hook && (
+                <SureButton className={btn} disabled={busy} sure="Sure? It stops working" onSure={() => runner.run("hook", () => appsApi.removeHook(service.id, env.name)).then(() => setHook(null))}>
+                  Remove
+                </SureButton>
+              )}
+              <button
+                className={btn}
+                disabled={busy}
+                title={env.hook ? "A new URL; the old one stops working" : undefined}
+                onClick={async () => {
+                  const url = await runner.run("hook", () => appsApi.createHook(service.id, env.name));
+                  if (typeof url === "string") setHook(url);
+                }}
+              >
+                {env.hook ? "New URL" : "Create"}
+              </button>
+            </div>
+          </div>
+          {hook && (
+            <div className="rise rounded-lg border border-line bg-bg px-3 py-2">
+              <p className="text-[11px] text-subtle">The hook's URL, shown once (only its hash is kept):</p>
+              <div className="mt-1 flex items-center gap-1">
+                <code className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{hook}</code>
+                <CopyButton id="hook-url" text={hook} copied={copied} onCopy={copy} />
+              </div>
+            </div>
+          )}
+        </div>
 
         {service.run.volume && <Backups service={service} env={env} runner={runner} />}
 

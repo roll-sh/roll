@@ -316,6 +316,14 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// The environment's deploy hook: a new secret URL that deploys it (printed once; the old
+    /// one stops working), or `--remove`.
+    Hook {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        remove: bool,
+    },
     /// The environment's volume backups (daily, the newest seven kept): list them, `--now` to
     /// back up now, or `--restore <id>` to put the volume back as it was then (asks first;
     /// `--yes` doesn't).
@@ -1303,6 +1311,23 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Hook { target, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/hook", env_path(&svc, &target.env));
+            if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?;
+                json!({ "removed": true })
+            } else {
+                let h = api.post(&path, json!({})).await?;
+                let url = format!("{}{}", api.base, s(&h["path"]));
+                if !json_out {
+                    println!("{url}");
+                    eprintln!("shown once: a POST to it deploys {} (only its hash is kept)", target.env);
+                    return Ok(());
+                }
+                json!({ "url": url })
+            }
         }
         AppsCmd::Backups { target, now, restore, yes } => {
             let svc = service(api, &target).await?;

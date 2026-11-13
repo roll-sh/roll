@@ -498,8 +498,11 @@ impl Apps {
         } else {
             Some(prepared)
         };
-        if let Some(p) = &prepared {
-            live.rest_if_asleep(&tpl, p).await;
+        match &prepared {
+            Some(p) => live.rest_if_asleep(&tpl, p).await,
+            // Every request to the new deployment from here: once the store says it's live, no
+            // visitor gets the old one (a failed switch takes the canary out again).
+            None => live.set_share(100),
         }
         let (sid, e, from, to, vh) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone());
         let switched: anyhow::Result<()> = async {

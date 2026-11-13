@@ -791,11 +791,12 @@ impl EnvLive {
         *self.template.lock() = Some(tpl.clone());
         // A canary of an earlier rollout (one this deploy superseded) goes with the old ones.
         *self.canary.lock() = None;
-        // Instances of this deployment already here stay: a request between the store's switch
-        // and this commit can adopt the deployment from the store and wake one.
+        // Awake instances of this deployment already here stay: a request between the store's
+        // switch and this commit can adopt the deployment from the store and wake one. The rest
+        // (the old deployment's, and one adopted but never started) go.
         let old: Vec<Arc<Inst>> = {
             let mut insts = self.insts.lock();
-            let (same, old): (Vec<_>, Vec<_>) = std::mem::take(&mut *insts).into_iter().partition(|i| i.deployment == tpl.deployment);
+            let (same, old): (Vec<_>, Vec<_>) = std::mem::take(&mut *insts).into_iter().partition(|i| i.deployment == tpl.deployment && i.awake());
             *insts = made.iter().cloned().chain(same).collect();
             old
         };

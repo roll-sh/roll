@@ -471,6 +471,11 @@ async fn run() -> anyhow::Result<()> {
     // without the token) stays the fallback.
     let router = on.info_route(cluster.node_id().to_string()).merge(on.off_routes()).merge(auth.gate("api", router));
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
+    // roll apps' deploy hooks carry their secret in the URL: outside the gate, and outside the
+    // access log (which logs route patterns, but never needs to see these).
+    if let Some(a) = &apps {
+        router = router.merge(a.hooks_router());
+    }
     if let Some(c) = &code {
         router = c.router(router);
     }

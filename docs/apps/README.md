@@ -688,6 +688,18 @@ places it beside the service on the canvas, and creates the service linked to it
 in the project, and a retry links it rather than making another. The first `roll up` in a
 directory prints the same finding with the two commands that do it.
 
+## Deploy hooks
+
+An environment can have a deploy hook (Render's): a secret URL that deploys it with no API
+token, for CI or a registry's webhook (`POST …/hook`, "Deploy hook" in the environment panel,
+`roll apps hook`). Only the token's hash is kept, and a new one replaces the old. A POST to it
+deploys the service's own source as a manual deploy would (actor `deploy hook`); for an image
+service, `?image=` may name another tag or digest of the same repository
+(`docker.io/library/nginx` stays nginx), never another image, so a leaked URL can only redeploy
+what the service already runs. Any token that isn't the live hook's is the same 404. The route
+is mounted outside the API's token gate and its access log (the path holds the token), and runs
+on the service's owner like every other service route.
+
 ## Volume backups
 
 A volume is backed up to object storage as a tar (`apps/volumes/<service>/<env>/<unix ms>.tar`),
@@ -894,9 +906,9 @@ Ranked; the top item not marked *waiting* is what's being worked on. A product r
 2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
 earlier security, product and integration reviews).
 
-1. **Deploy hooks and image tag watching**: a secret deploy URL per environment (only its hash
-   stored; it can only deploy the service's own image repository), as Render's, and an opt-in
-   watch that redeploys an image service when its tag moves, as Railway's Image Auto Updates.
+1. **Image tag watching**: an opt-in watch that redeploys an image service when its tag moves
+   (Railway's Image Auto Updates), resolving the digest on the owner every few minutes. (Done:
+   deploy hooks.)
 2. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
    environment's access token, and `no_traffic` deploys promoted later (Cloud Run's revision
    tags, Vercel's deployment URLs).

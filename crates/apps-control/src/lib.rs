@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod backups;
+pub mod hooks;
 pub mod config;
 pub mod cron;
 pub mod deploy;
@@ -709,6 +710,7 @@ impl Apps {
             crash_loop,
             canary,
             run: r.run.clone(),
+            hook: r.hook_hash.is_some(),
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
             created_at: r.created_at,

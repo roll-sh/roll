@@ -821,8 +821,9 @@ async fn requests_are_access_lines_filtered_by_status() {
     let id = svc["id"].as_str().unwrap().to_string();
     let host = host(&svc["environments"][0]["url"]);
     assert_eq!(visit(&w, &host, "/ok?token=s3cr3t").await.0, StatusCode::OK);
-    let up = w.fake.instances(&id).into_iter().find(|(_, _, st)| *st == FakeState::Running).unwrap().0;
-    w.fake.sicken(&up);
+    for (up, _, _) in w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running) {
+        w.fake.sicken(&up);
+    }
     assert_eq!(visit(&w, &host, "/broken").await.0, StatusCode::INTERNAL_SERVER_ERROR);
     let base = format!("/v1/apps/services/{id}/environments/production/logs?http=1");
     let all = get_until(&w.api, &base, |l| l.as_array().is_some_and(|a| a.len() >= 2)).await;
@@ -1361,4 +1362,29 @@ async fn a_services_changes_are_streamed_as_they_happen() {
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(visit(&w, &host(&env["url"]), "/").await.0, StatusCode::OK);
     assert_eq!(tokio::time::timeout(Duration::from_secs(3), next(&mut body)).await.expect("a tick for the wake"), "changed");
+}
+
+/// A deploy hook deploys its environment with nothing but its URL, only the service's own image
+/// repository, and stops working when removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deploy_hook_deploys_with_its_url_alone() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let hooks = apps_control::api::hooks_router(w.apps.clone());
+    let (st, h) = call(&w.api, "POST", &format!("{base}/hook"), None).await;
+    assert_eq!(st, StatusCode::CREATED, "{h}");
+    let path = h["path"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["hook"], true);
+    let wrong = format!("{}x", &path[..path.len() - 1]);
+    assert_eq!(call(&hooks, "POST", &wrong, None).await.0, StatusCode::NOT_FOUND, "a wrong token is a 404 like any other");
+    let (st, d) = call(&hooks, "POST", &format!("{path}?image=nginx:1.28"), None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["actor"].as_str()), (Some("active"), Some("deploy hook")), "{d}");
+    assert!(d["image"].as_str().unwrap().starts_with("nginx:1.28"), "{d}");
+    assert_eq!(call(&hooks, "POST", &format!("{path}?image=evil/miner:1"), None).await.0, StatusCode::BAD_REQUEST, "only its own repository");
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/hook"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&hooks, "POST", &path, None).await.0, StatusCode::NOT_FOUND, "removed, it's gone");
 }

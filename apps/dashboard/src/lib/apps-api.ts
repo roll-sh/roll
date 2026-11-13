@@ -210,6 +210,8 @@ export interface Environment extends EnvironmentSummary {
   canary?: { deployment: string; share: number } | null;
   /** Its own run settings over the service's; empty: the service's. */
   run?: Partial<Record<EnvRunField, number>>;
+  /** It has a deploy hook. */
+  hook?: boolean;
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -457,6 +459,9 @@ export const appsApi = {
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
   promote: (id: string, e: string, from: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from }),
   backups: (id: string, e: string) => call<Backup[]>("GET", `${env(id, e)}/volume/backups`),
+  /** A new deploy hook (the old one stops working): its URL, shown once. */
+  createHook: async (id: string, e: string) => `${ROLL_API}${(await call<{ path: string }>("POST", `${env(id, e)}/hook`)).path}`,
+  removeHook: (id: string, e: string) => call<void>("DELETE", `${env(id, e)}/hook`),
   backUp: (id: string, e: string) => call<Backup>("POST", `${env(id, e)}/volume/backups`),
   restore: (id: string, e: string, b: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),

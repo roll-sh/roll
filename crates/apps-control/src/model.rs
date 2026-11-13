@@ -91,6 +91,22 @@ pub fn registry_key(server: &str) -> String {
     }
 }
 
+/// An image's repository, without its tag or digest, as one name to compare
+/// (`nginx:1.27` → `docker.io/library/nginx`).
+pub fn image_repository(image: &str) -> String {
+    let image = image.trim();
+    let no_digest = image.split('@').next().unwrap_or(image);
+    let (head, last) = no_digest.rsplit_once('/').unwrap_or(("", no_digest));
+    let name = last.split(':').next().unwrap_or(last);
+    let path = if head.is_empty() { name.to_string() } else { format!("{head}/{name}") };
+    let (registry, rest) = match registry_host(&path) {
+        Some(h) => (registry_key(h), path[h.len() + 1..].to_string()),
+        None => ("docker.io".to_string(), path.clone()),
+    };
+    let rest = if registry == "docker.io" && !rest.contains('/') { format!("library/{rest}") } else { rest };
+    format!("{registry}/{}", rest.to_ascii_lowercase())
+}
+
 /// The registry an image is pulled from, as [`registry_key`].
 pub fn image_registry(image: &str) -> String {
     registry_key(registry_host(image).unwrap_or("docker.io"))
@@ -627,6 +643,8 @@ pub struct Environment {
     pub canary: Option<Canary>,
     /// Its own run settings over the service's ([`ENV_RUN_FIELDS`]); empty: the service's.
     pub run: serde_json::Map<String, serde_json::Value>,
+    /// It has a deploy hook (`POST …/hook`).
+    pub hook: bool,
     /// A push deploys only once its commit's checks pass (Railway's "Wait for CI").
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.

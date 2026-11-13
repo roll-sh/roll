@@ -78,6 +78,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
         .route(&format!("{env}/promote"), post(promote))
+        .route(&format!("{env}/hook"), post(put_hook).delete(delete_hook))
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
@@ -638,6 +639,43 @@ async fn restore_volume(State(apps): S, Path((id, env, bid)): Path<(String, Stri
     let b = apps.restore_volume(&id, &env, &bid).await?;
     apps.audit("volume.restored", &id, &env, actor(&ext), json!({ "backup": b.id })).await;
     ok(b)
+}
+
+async fn put_hook(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    let v = apps.put_hook(&id, &env).await?;
+    apps.audit("hook.created", &id, &env, actor(&ext), json!({})).await;
+    Ok((StatusCode::CREATED, Json(v)).into_response())
+}
+
+async fn delete_hook(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    apps.delete_hook(&id, &env).await?;
+    apps.audit("hook.removed", &id, &env, actor(&ext), json!({})).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct HookQuery {
+    image: Option<String>,
+}
+
+/// Deploy hooks: outside the API's token gate (the URL is the secret), on the service's owner.
+/// Mounted by rolld next to the gated router; the path is never logged (it holds the token).
+pub fn hooks_router(apps: Arc<Apps>) -> Router {
+    Router::new()
+        .route("/v1/apps/hooks/{id}/{env}/{token}", post(run_hook))
+        .route_layer(axum::middleware::from_fn_with_state(apps.clone(), hook_on_owner))
+        .with_state(apps)
+}
+
+async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
+    let id = req.uri().path().strip_prefix("/v1/apps/hooks/").and_then(|r| r.split('/').next()).unwrap_or("").to_string();
+    let cluster = apps.deps.cluster.clone();
+    cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
+}
+
+async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>) -> R {
+    let d = apps.run_hook(&id, &env, &token, q.image).await?;
+    Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
 async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
