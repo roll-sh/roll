@@ -672,6 +672,34 @@ service with a volume refuses `steps` (one instance writes it). The state lives 
 If the owner changes mid-rollout, the new owner runs the deploy again from the start, like any
 other deploy it takes over.
 
+## A project in one file
+
+A root `roll.toml` can declare a whole project (Render's Blueprints), next to whatever else is in
+it:
+
+```toml
+[apps.web]
+root = "apps/web"          # uploaded by roll up; its own roll.toml [app] still applies
+links = ["db", "cache"]
+[apps.proxy]
+image = "nginx:1.27"
+[databases.db]
+kind = "postgres"
+[databases.cache]
+kind = "redis"
+```
+
+`roll up --all` (the project is `--project` or the directory's name, made if missing) prints the
+plan first (`+` made, `=` there, `~` linked, `↑` deployed; `--dry-run` stops there), then makes
+the missing databases and places them on the project's canvas, makes the missing services with
+their links so the first deploy has the variables, links what an existing service lacks,
+uploads each `root`, and redeploys an image service whose image changed. Names are matched, so
+running it again only does what changed. Nothing is ever deleted: a service or database removed
+from the file stays until removed by hand. The file is checked before anything is made: one of
+`root` or `image`, a root inside the directory, links to declared databases, kinds `postgres`
+or `redis`. The plan and the checks are unit-tested in roll-cli. The calls are the API's routes
+as documented and haven't run against a live rolld yet: that needs Postgres and Redis up.
+
 ## A service and its database
 
 Railway's and Render's templates make an app and its database together. roll does it without a
@@ -955,9 +983,9 @@ earlier security, product and integration reviews).
    bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
    (Render's and Vercel's static sites). Exporting the files needs the built image: easy on
    Docker, through CodeBuild on the fleet, so it's tested with the first AWS run.
-2. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
-   by `roll up --all` with the plan shown first (Render's Blueprints), then importing a Compose
-   file's image services (Railway's).
+2. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
+   next, importing a Compose file's image services (Railway's) and an end-to-end run against a
+   live rolld with Postgres and Redis.
 3. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
 4. **Region**: the region shown on the overview and each environment, defaulting to the project's

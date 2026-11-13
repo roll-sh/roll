@@ -36,6 +36,14 @@ pub struct Up {
     /// What the deployment is (shown in the dashboard).
     #[arg(long, short = 'm')]
     pub message: Option<String>,
+    /// Every service and database the directory's roll.toml declares (`[apps.<name>]`,
+    /// `[databases.<name>]`): made where missing, linked, and deployed. The plan is printed
+    /// first.
+    #[arg(long)]
+    pub all: bool,
+    /// With `--all`: print the plan, change nothing.
+    #[arg(long, requires = "all")]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -815,11 +823,14 @@ async fn watch(api: &Api, svc: &Value, env: &str, dep: &Value) -> anyhow::Result
 }
 
 pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
-    let dir = match u.dir {
+    let dir = match u.dir.clone() {
         Some(d) => d,
         None => std::env::current_dir()?,
     };
     let dir = std::fs::canonicalize(&dir).with_context(|| format!("{}", dir.display()))?;
+    if u.all {
+        return up_all(api, json_out, &dir, &u).await;
+    }
     let link = read_link(&dir);
     let git = git_head(&dir);
     let svc = match (&u.target.service, &link) {
@@ -879,6 +890,229 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
         return Ok(());
     }
     watch(api, &svc, &u.target.env, &dep).await
+}
+
+// ── a project in one file: `roll up --all` ──
+
+/// A root roll.toml's project: the services (`[apps.<name>]`) and databases
+/// (`[databases.<name>]`) it declares (Render's Blueprints). Each app's own settings stay in
+/// its root's roll.toml `[app]`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct ProjectFile {
+    #[serde(default)]
+    apps: std::collections::BTreeMap<String, AppEntry>,
+    #[serde(default)]
+    databases: std::collections::BTreeMap<String, DbEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppEntry {
+    /// The directory `roll up` uploads (relative to the file).
+    root: Option<String>,
+    /// Or a public image.
+    image: Option<String>,
+    /// Databases below, by name: their connection variables go in.
+    #[serde(default)]
+    links: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DbEntry {
+    /// `postgres` or `redis`.
+    kind: String,
+}
+
+fn valid_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 32 && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !n.starts_with('-') && !n.ends_with('-')
+}
+
+/// The `[apps]` and `[databases]` of `text` (the rest of roll.toml is other things'), checked.
+fn parse_project(text: &str) -> anyhow::Result<ProjectFile> {
+    let v: toml::Table = toml::from_str(text).context("roll.toml isn't TOML")?;
+    let mut t = toml::Table::new();
+    for k in ["apps", "databases"] {
+        if let Some(x) = v.get(k) {
+            t.insert(k.into(), x.clone());
+        }
+    }
+    let f: ProjectFile = toml::Value::Table(t).try_into().context("roll.toml's [apps] or [databases]")?;
+    anyhow::ensure!(!f.apps.is_empty(), "roll.toml declares no [apps.<name>]");
+    for (n, d) in &f.databases {
+        anyhow::ensure!(valid_name(n), "database {n:?}: a name is a-z, 0-9 and -, at most 32");
+        anyhow::ensure!(matches!(d.kind.as_str(), "postgres" | "redis"), "database {n}: kind is postgres or redis");
+    }
+    for (n, a) in &f.apps {
+        anyhow::ensure!(valid_name(n), "app {n:?}: a name is a-z, 0-9 and -, at most 32");
+        match (&a.root, &a.image) {
+            (Some(r), None) => anyhow::ensure!(!r.starts_with('/') && !r.split('/').any(|c| c == ".."), "app {n}: root is a directory inside this one"),
+            (None, Some(_)) => {}
+            _ => bail!("app {n}: give root (a directory to upload) or image, not both"),
+        }
+        for l in &a.links {
+            anyhow::ensure!(f.databases.contains_key(l), "app {n} links {l}, which isn't in [databases]");
+        }
+    }
+    Ok(f)
+}
+
+/// What `--all` will do, as lines: `+` made, `=` already there, `~` linked, `↑` deployed.
+fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Value>, dbs: &std::collections::BTreeMap<(String, String), String>, links: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (n, d) in &f.databases {
+        let have = dbs.contains_key(&(d.kind.clone(), n.clone()));
+        out.push(format!("{} {} database {n}", if have { "=" } else { "+" }, d.kind));
+    }
+    for (n, a) in &f.apps {
+        let from = a.root.as_ref().map(|r| format!("from {r}")).unwrap_or_else(|| format!("image {}", a.image.as_deref().unwrap_or("")));
+        let have = services.get(n);
+        out.push(format!("{} service {n} ({from})", if have.is_some() { "=" } else { "+" }));
+        for l in &a.links {
+            let kind = &f.databases[l].kind;
+            let linked = dbs.get(&(kind.clone(), l.clone())).is_some_and(|r| links.get(n).is_some_and(|ls| ls.contains(r)));
+            if !linked {
+                out.push(format!("~ link {n} to {l}"));
+            }
+        }
+        let image_moved = a.image.as_ref().is_some_and(|i| have.is_some_and(|s| s["source"]["image"].as_str() != Some(i.as_str())));
+        if a.root.is_some() || image_moved {
+            out.push(format!("↑ deploy {n}"));
+        }
+    }
+    out
+}
+
+async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(dir.join("roll.toml")).with_context(|| format!("no roll.toml in {}", dir.display()))?;
+    let f = parse_project(&text)?;
+    let pname = match &u.target.project {
+        Some(p) => p.clone(),
+        None => dir.file_name().and_then(|n| n.to_str()).unwrap_or("app").to_ascii_lowercase(),
+    };
+    // Looked up, not guessed from an error: a failed request must never make a second project.
+    let project = if pname.starts_with("prj_") {
+        Some(pname.clone())
+    } else {
+        api.get("/v1/workspace/projects").await?.as_array().into_iter().flatten().find(|x| x["name"] == pname.as_str()).map(|x| s(&x["id"]))
+    };
+    // What's there: the project's services, databases by name, links by service.
+    let mut services = std::collections::BTreeMap::new();
+    let mut links: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    if let Some(p) = &project {
+        for svc in api.get(&format!("/v1/apps/services?project={}", enc(p))).await?.as_array().into_iter().flatten() {
+            let ls = api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await.unwrap_or(Value::Null);
+            links.insert(s(&svc["name"]), ls.as_array().into_iter().flatten().map(|l| s(&l["ref"])).collect());
+            services.insert(s(&svc["name"]), svc.clone());
+        }
+    }
+    let mut dbs = std::collections::BTreeMap::new();
+    let wants = |k: &str| f.databases.values().any(|d| d.kind == k);
+    if wants("postgres") {
+        for p in api.get("/v1/projects").await?.as_array().into_iter().flatten() {
+            dbs.insert(("postgres".to_string(), s(&p["name"])), s(&p["id"]));
+        }
+    }
+    if wants("redis") {
+        for d in api.get("/v1/redis/databases").await?.as_array().into_iter().flatten() {
+            dbs.insert(("redis".to_string(), s(&d["name"])), s(&d["id"]));
+        }
+    }
+    let plan = plan_lines(&f, &services, &dbs, &links);
+    if !json_out {
+        println!("project {pname}{}", if project.is_none() { " (new)" } else { "" });
+        for l in &plan {
+            println!("  {l}");
+        }
+    }
+    if u.dry_run {
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&json!({ "project": pname, "plan": plan }))?);
+        }
+        return Ok(());
+    }
+    let project = match project {
+        Some(p) => p,
+        None => s(&api.post("/v1/workspace/projects", json!({ "name": pname })).await?["id"]),
+    };
+    // Databases first (their variables are in the services' first deploys), placed on the
+    // project's canvas in a row.
+    for (i, (n, d)) in f.databases.iter().enumerate() {
+        if dbs.contains_key(&(d.kind.clone(), n.clone())) {
+            continue;
+        }
+        let made = match d.kind.as_str() {
+            "postgres" => api.post("/v1/projects", json!({ "name": n })).await?,
+            _ => api.post("/v1/redis/databases", json!({ "name": n })).await?,
+        };
+        let r = s(&made["id"]);
+        let _ = api.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/{}/{}", enc(&project), d.kind, enc(&r)), Some(json!({ "x": 48 + 320 * i as i64, "y": 340 }))).await;
+        eprintln!("made {} database {n}", d.kind);
+        dbs.insert((d.kind.clone(), n.clone()), r);
+    }
+    let mut out = Vec::new();
+    for (n, a) in &f.apps {
+        let fresh = !services.contains_key(n);
+        let svc = match services.get(n) {
+            Some(svc) => svc.clone(),
+            None => {
+                let source = match &a.image {
+                    Some(i) => json!({ "kind": "image", "image": i }),
+                    None => json!({ "kind": "upload" }),
+                };
+                let made_links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
+                let svc = api.post("/v1/apps/services", json!({ "project": project, "name": n, "source": source, "links": made_links })).await?;
+                eprintln!("made service {n}");
+                svc
+            }
+        };
+        let id = s(&svc["id"]);
+        if !fresh {
+            for l in &a.links {
+                let kind = &f.databases[l].kind;
+                let r = &dbs[&(kind.clone(), l.clone())];
+                if !links.get(n).is_some_and(|ls| ls.contains(r)) {
+                    api.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/links/{kind}/{}", enc(&id), enc(r)), Some(json!({}))).await?;
+                    eprintln!("linked {n} to {l}");
+                }
+            }
+        }
+        let dep = match (&a.root, &a.image) {
+            (Some(root), _) => {
+                let tree = dir.join(root);
+                let bundle = tokio::task::spawn_blocking(move || pack(&tree)).await??;
+                let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(&svc, &u.target.env))).header("content-type", "application/gzip").body(bundle);
+                if let Some(k) = &api.key {
+                    req = req.bearer_auth(k);
+                }
+                if let Some(m) = &u.message {
+                    req = req.header("x-roll-message", urlencoding::encode(m).into_owned());
+                }
+                let res = req.send().await.with_context(|| format!("can't reach {}", api.base))?;
+                let (ok, v) = (res.status().is_success(), res.json::<Value>().await.unwrap_or(Value::Null));
+                anyhow::ensure!(ok, "{n}: {}", v["error"].as_str().unwrap_or("the upload failed"));
+                Some(v)
+            }
+            (None, Some(image)) if !fresh && svc["source"]["image"].as_str() != Some(image.as_str()) => {
+                api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&id)), Some(json!({ "source": { "kind": "image", "image": image } }))).await?;
+                Some(api.post(&format!("{}/deploys", env_path(&svc, &u.target.env)), json!({})).await?)
+            }
+            // A new image service deploys as it's made.
+            _ => svc["environments"][0]["latest"].as_object().map(|_| svc["environments"][0]["latest"].clone()),
+        };
+        if let Some(d) = &dep {
+            if !json_out {
+                println!("↑ {n}: {}", s(&d["id"]));
+            }
+            out.push(json!({ "service": n, "deployment": d["id"] }));
+        }
+    }
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&json!({ "project": pname, "deploys": out }))?);
+    } else if !out.is_empty() {
+        eprintln!("follow one with `roll logs --build latest -s <name>`");
+    }
+    Ok(())
 }
 
 pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> {
@@ -1526,6 +1760,23 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_projects_file_is_checked_and_planned() {
+        let f = parse_project("[app]\nport = 3000\n[apps.web]\nroot = \"apps/web\"\nlinks = [\"db\", \"cache\"]\n[apps.proxy]\nimage = \"nginx:1.27\"\n[databases.db]\nkind = \"postgres\"\n[databases.cache]\nkind = \"redis\"\n").unwrap();
+        let mut dbs = std::collections::BTreeMap::new();
+        dbs.insert(("postgres".to_string(), "db".to_string()), "pg_1".to_string());
+        let mut services = std::collections::BTreeMap::new();
+        services.insert("proxy".to_string(), serde_json::json!({ "source": { "kind": "image", "image": "nginx:1.27" } }));
+        let links = std::collections::BTreeMap::new();
+        assert_eq!(
+            plan_lines(&f, &services, &dbs, &links),
+            ["+ redis database cache", "= postgres database db", "= service proxy (image nginx:1.27)", "+ service web (from apps/web)", "~ link web to db", "~ link web to cache", "↑ deploy web"]
+        );
+        for bad in ["[apps.web]\nroot = \"../x\"\n", "[apps.web]\nroot = \"a\"\nimage = \"b\"\n", "[apps.web]\nroot = \"a\"\nlinks = [\"nope\"]\n", "[apps.Web]\nroot = \"a\"\n", "[apps.web]\nroot = \"a\"\n[databases.db]\nkind = \"mysql\"\n", "[apps.web]\nroot = \"a\"\nport = 1\n"] {
+            assert!(parse_project(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn a_dot_env_file_reads_as_the_dashboard_reads_it() {
