@@ -331,8 +331,8 @@ pub enum Cmd {
     MvExpand(String, usize),
     /// `DISSECT field "pattern" [APPEND_SEPARATOR = "sep"]`.
     Dissect { field: Expr, pattern: String, append_separator: Option<String>, at: usize },
-    /// `GROK field "pattern"`.
-    Grok { field: Expr, pattern: String, at: usize },
+    /// `GROK field "pattern"`, compiled (and checked) by the parser like Elasticsearch's.
+    Grok { field: Expr, grok: std::sync::Arc<search_painless::grok::Grok>, at: usize },
     /// `ENRICH policy [ON field] [WITH [name =] field, ...]` (`with`: output name, enrich field).
     Enrich { policy: String, policy_at: usize, on: Option<(String, usize)>, with: Option<Vec<(String, String, usize)>>, at: usize },
     /// `INLINE STATS`: `STATS` whose results are appended to every row of their group.
@@ -699,7 +699,7 @@ impl<'a> P<'a> {
                 let pt = self.bump();
                 let Tok::Str(pattern) = pt.tok else { return Err(parse_error(self.src, pt.start, &format!("mismatched input '{}' expecting QUOTED_STRING", self.token_text(&pt)))) };
                 if up == "GROK" {
-                    Cmd::Grok { field, pattern, at: t.start }
+                    Cmd::Grok { field, grok: std::sync::Arc::new(grok(self.src, &pattern, t.start)?), at: t.start }
                 } else {
                     let mut append_separator = None;
                     if let Tok::Ident(o) = &self.peek().tok {
@@ -1348,6 +1348,17 @@ impl<'a> P<'a> {
             _ => Err(self.mismatch(EXPRESSION)),
         }
     }
+}
+
+/// A `GROK` pattern compiled with Elasticsearch's legacy bank; a name captured by different
+/// groups (`%{NUMBER:x} %{WORD:x}`, or one typed `:int`) is refused.
+fn grok(src: &str, pattern: &str, at: usize) -> EsResult<search_painless::grok::Grok> {
+    let g = search_painless::grok::Grok::new(search_painless::grok::PatternBank::legacy(), pattern).map_err(|e| parse_error(src, at, &format!("Invalid pattern [{pattern}] for grok: {}", e.message)))?;
+    let caps = g.captures_config();
+    if let Some(dup) = caps.iter().enumerate().find_map(|(i, c)| caps[..i].iter().any(|p| p.name == c.name).then_some(&c.name)) {
+        return Err(parse_error(src, at, &format!("Invalid GROK pattern [{pattern}]: the attribute [{dup}] is defined multiple times with different types")));
+    }
+    Ok(g)
 }
 
 fn bin(op: BinOp, l: Expr, r: Expr) -> Expr {

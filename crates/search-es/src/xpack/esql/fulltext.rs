@@ -9,6 +9,11 @@
 //! the column, so any boolean structure around the call is evaluated exactly; the scan's
 //! scores (`METADATA _score`) come from the same clauses. Calls are only allowed where
 //! Elasticsearch allows them (`WHERE`, `STATS`), with its error otherwise.
+//!
+//! A `MATCH` or `:` on a column that isn't an index field (computed by `EVAL`, or a `ROW`
+//! column) runs per row instead, as Elasticsearch's runtime filter does: it becomes
+//! [`RUNTIME`]`(column, query)`, which the compiler resolves like any column reference (so an
+//! unknown one is `Unknown column`).
 
 use super::parser::{Cmd, Expr, ExprKind};
 use super::value::V;
@@ -18,6 +23,9 @@ use crate::obj;
 
 /// The prefix of the hidden columns (not a valid unquoted ES|QL identifier).
 pub const HIDDEN: &str = "$ft";
+
+/// The function a `MATCH` over a column that isn't an index field becomes.
+pub const RUNTIME: &str = "$match";
 
 fn is_full_text(name: &str) -> bool {
     matches!(name, "match" | "match_operator" | "match_phrase" | "multi_match" | "qstr" | "kql")
@@ -40,15 +48,18 @@ fn verification(src: &str, at: usize, msg: &str) -> EsError {
 }
 
 /// Rewrites the full-text calls of `cmds` (after the source command) into hidden columns and
-/// returns the query of each, in column order.
-pub fn extract(src: &str, cmds: &mut [Cmd]) -> EsResult<Vec<Value>> {
+/// returns the query of each, in column order. `is_field`: whether a name is a field of the
+/// source's index mappings (none for `ROW`).
+pub fn extract(src: &str, cmds: &mut [Cmd], is_field: &dyn Fn(&str) -> bool) -> EsResult<Vec<Value>> {
     let mut queries: Vec<(String, Value)> = Vec::new();
-    for c in cmds.iter_mut() {
-        match c {
-            Cmd::Where(e) => rewrite(src, e, &mut queries)?,
+    for i in 0..cmds.len() {
+        let (before, rest) = cmds.split_at_mut(i);
+        let resolve = |name: &str| index_field(before, name, is_field);
+        match &mut rest[0] {
+            Cmd::Where(e) => rewrite(src, e, &mut queries, &resolve)?,
             Cmd::Stats { aggs, by } => {
                 for n in aggs.iter_mut().chain(by.iter_mut()) {
-                    rewrite(src, &mut n.expr, &mut queries)?;
+                    rewrite(src, &mut n.expr, &mut queries, &resolve)?;
                 }
             }
             Cmd::Eval(list) => {
@@ -65,6 +76,46 @@ pub fn extract(src: &str, cmds: &mut [Cmd]) -> EsResult<Vec<Value>> {
         }
     }
     Ok(queries.into_iter().map(|(_, q)| q).collect())
+}
+
+/// The index field the column `name` reads after the commands `before`: itself, or what an
+/// `EVAL x = field` or `RENAME field AS x` names. `None` when a command computes it (or drops
+/// it, or it was never a field).
+fn index_field(before: &[Cmd], name: &str, is_field: &dyn Fn(&str) -> bool) -> Option<String> {
+    let mut name = name.to_string();
+    for c in before.iter().rev() {
+        match c {
+            Cmd::Eval(list) => {
+                for n in list.iter().rev() {
+                    if n.name == name {
+                        match &n.expr.kind {
+                            ExprKind::Col(c) => name = c.clone(),
+                            _ => return None,
+                        }
+                    }
+                }
+            }
+            Cmd::Rename(list) => {
+                for (old, new, _) in list.iter().rev() {
+                    if *new == name {
+                        name = old.clone();
+                    } else if *old == name {
+                        return None;
+                    }
+                }
+            }
+            Cmd::Drop(pats) if pats.iter().any(|(p, _)| crate::xcontent::filter::glob_match(p, &name)) => return None,
+            Cmd::Keep(pats) if !pats.iter().any(|(p, _)| crate::xcontent::filter::glob_match(p, &name)) => return None,
+            Cmd::Stats { .. } => return None,
+            Cmd::InlineStats { aggs, .. } if aggs.iter().any(|n| n.name == name) => return None,
+            Cmd::Enrich { with: Some(with), .. } if with.iter().any(|(n, ..)| *n == name) => return None,
+            Cmd::Dissect { pattern, .. } if super::exec::dissect_keys(pattern).contains(&name) => return None,
+            Cmd::Grok { grok, .. } if grok.captures_config().iter().any(|c| c.name == name) => return None,
+            Cmd::MvExpand(n, _) if *n == name => return None,
+            _ => {}
+        }
+    }
+    is_field(&name).then_some(name)
 }
 
 fn reject(src: &str, e: &Expr, what: &str) -> EsResult<()> {
@@ -101,14 +152,34 @@ fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
     }
 }
 
-fn rewrite(src: &str, e: &mut Expr, queries: &mut Vec<(String, Value)>) -> EsResult<()> {
+type Resolve<'a> = dyn Fn(&str) -> Option<String> + 'a;
+
+fn rewrite(src: &str, e: &mut Expr, queries: &mut Vec<(String, Value)>, resolve: &Resolve<'_>) -> EsResult<()> {
     let replace = match &mut e.kind {
         ExprKind::Call(n, args) if is_full_text(n) => {
+            // A match on a column that isn't an index field filters per row.
+            if matches!(n.as_str(), "match" | "match_operator")
+                && let Some(ExprKind::Col(c)) = args.first().map(|a| &a.kind)
+                && resolve(c).is_none()
+            {
+                if args.len() > 2 {
+                    return Err(verification(src, e.start, &format!("Options are not supported for [{}] function call on non-index-mapped field [{c}]", display(n))));
+                }
+                if args.len() == 2 {
+                    if matches!(args[1].kind, ExprKind::Lit(V::Null)) {
+                        return Err(verification(src, args[1].start, &format!("second argument of [{}] cannot be null, received [null]", &src[e.start..e.end])));
+                    }
+                    let q = query_text(src, &args[1], &src[e.start..e.end])?;
+                    let q = Expr { kind: ExprKind::Lit(json_value(&q)), start: args[1].start, end: args[1].end };
+                    e.kind = ExprKind::Call(RUNTIME.into(), vec![args[0].clone(), q]);
+                    return Ok(());
+                }
+            }
             let text = src[e.start..e.end].to_string();
             let i = match queries.iter().position(|(t, _)| *t == text) {
                 Some(i) => i,
                 None => {
-                    let q = query_of(src, n, args, e.start, &src[e.start..e.end])?;
+                    let q = query_of(src, n, args, e.start, &src[e.start..e.end], resolve)?;
                     queries.push((text, q));
                     queries.len() - 1
                 }
@@ -116,24 +187,24 @@ fn rewrite(src: &str, e: &mut Expr, queries: &mut Vec<(String, Value)>) -> EsRes
             Some(format!("{HIDDEN}{i}"))
         }
         ExprKind::Neg(x) | ExprKind::Not(x) | ExprKind::IsNull(x, _) | ExprKind::Like(x, ..) | ExprKind::Cast(x, _) => {
-            rewrite(src, x, queries)?;
+            rewrite(src, x, queries, resolve)?;
             None
         }
         ExprKind::Bin(_, a, b) => {
-            rewrite(src, a, queries)?;
-            rewrite(src, b, queries)?;
+            rewrite(src, a, queries, resolve)?;
+            rewrite(src, b, queries, resolve)?;
             None
         }
         ExprKind::In(x, list, _) => {
-            rewrite(src, x, queries)?;
+            rewrite(src, x, queries, resolve)?;
             for y in list.iter_mut() {
-                rewrite(src, y, queries)?;
+                rewrite(src, y, queries, resolve)?;
             }
             None
         }
         ExprKind::Call(_, args) => {
             for y in args.iter_mut() {
-                rewrite(src, y, queries)?;
+                rewrite(src, y, queries, resolve)?;
             }
             None
         }
@@ -166,9 +237,21 @@ fn query_text(src: &str, e: &Expr, call: &str) -> EsResult<Value> {
     }
 }
 
-fn field(src: &str, e: &Expr, func: &str) -> EsResult<String> {
+/// The literal a folded query becomes again.
+fn json_value(v: &Value) -> V {
+    match v {
+        Value::Bool(b) => V::Bool(*b),
+        Value::Str(s) => V::Str(s.clone()),
+        Value::Num(_) if v.as_number().is_some_and(|n| n.is_integer()) => v.as_i64().map_or(V::Null, |i| i32::try_from(i).map(V::Int).unwrap_or(V::Long(i))),
+        Value::Num(_) => v.as_f64().map_or(V::Null, V::Double),
+        _ => V::Null,
+    }
+}
+
+/// The index field a full-text call's field argument reads (through `EVAL`/`RENAME` aliases).
+fn field(src: &str, e: &Expr, func: &str, resolve: &Resolve<'_>) -> EsResult<String> {
     match &e.kind {
-        ExprKind::Col(c) => Ok(c.clone()),
+        ExprKind::Col(c) => Ok(resolve(c).unwrap_or_else(|| c.clone())),
         _ => Err(verification(src, e.start, &format!("[{func}] cannot operate on [{}], which is not a field from an index mapping", &src[e.start..e.end]))),
     }
 }
@@ -191,7 +274,7 @@ fn options(src: &str, e: Option<&Expr>, func: &str) -> EsResult<Map> {
     Ok(out)
 }
 
-fn query_of(src: &str, name: &str, args: &[Expr], at: usize, call: &str) -> EsResult<Value> {
+fn query_of(src: &str, name: &str, args: &[Expr], at: usize, call: &str, resolve: &Resolve<'_>) -> EsResult<Value> {
     let func = display(name);
     let arity = |n: std::ops::RangeInclusive<usize>| -> EsResult<()> {
         if n.contains(&args.len()) {
@@ -203,7 +286,7 @@ fn query_of(src: &str, name: &str, args: &[Expr], at: usize, call: &str) -> EsRe
     Ok(match name {
         "match" | "match_operator" | "match_phrase" => {
             arity(2..=3)?;
-            let f = field(src, &args[0], func)?;
+            let f = field(src, &args[0], func, resolve)?;
             let mut body = options(src, args.get(2), func)?;
             body.shift_insert(0, "query".into(), query_text(src, &args[1], call)?);
             let kind = if name == "match_phrase" { "match_phrase" } else { "match" };
@@ -219,7 +302,7 @@ fn query_of(src: &str, name: &str, args: &[Expr], at: usize, call: &str) -> EsRe
             for a in &args[1..] {
                 match &a.kind {
                     ExprKind::Call(n, _) if n == "$map" => opts = Some(a),
-                    _ => fields.push(Value::from(field(src, a, func)?)),
+                    _ => fields.push(Value::from(field(src, a, func, resolve)?)),
                 }
             }
             let mut body = options(src, opts, func)?;
@@ -250,7 +333,7 @@ mod tests {
         let src = "FROM i | WHERE MATCH(t, \"fox\") OR n > 1 | WHERE t : \"dog\" AND MATCH(t, \"fox\")";
         let q = super::super::parser::parse(src, &[], &[]).unwrap();
         let mut cmds = q.cmds;
-        let qs = extract(src, &mut cmds[1..]).unwrap();
+        let qs = extract(src, &mut cmds[1..], &|_| true).unwrap();
         assert_eq!(qs.len(), 2);
         assert_eq!(qs[0].to_json(), r#"{"match":{"t":{"query":"fox"}}}"#);
         assert_eq!(qs[1].to_json(), r#"{"match":{"t":{"query":"dog"}}}"#);
@@ -261,13 +344,13 @@ mod tests {
         let src = "FROM i | WHERE MATCH(t, \"a b\", {\"operator\": \"AND\"})";
         let q = super::super::parser::parse(src, &[], &[]).unwrap();
         let mut cmds = q.cmds;
-        let qs = extract(src, &mut cmds[1..]).unwrap();
+        let qs = extract(src, &mut cmds[1..], &|_| true).unwrap();
         assert_eq!(qs[0].to_json(), r#"{"match":{"t":{"query":"a b","operator":"AND"}}}"#);
         let src = "FROM i | EVAL m = MATCH(t, \"fox\")";
         let q = super::super::parser::parse(src, &[], &[]).unwrap();
         let mut cmds = q.cmds;
         assert_eq!(
-            extract(src, &mut cmds[1..]).unwrap_err().reason(),
+            extract(src, &mut cmds[1..], &|_| true).unwrap_err().reason(),
             "Found 1 problem\nline 1:19: [MATCH] function is only supported in WHERE and STATS commands or in EVAL within score(.) function"
         );
     }

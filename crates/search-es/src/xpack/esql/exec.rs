@@ -249,10 +249,54 @@ enum CE {
     Agg(usize),
     /// `BUCKET(field, span)` in a `BY` clause.
     Bucket(Box<CE>, BucketSpan),
+    /// `MATCH` (or `:`) over a column that isn't an index field (`fulltext::RUNTIME`).
+    Match(Box<CE>, std::sync::Arc<RuntimeMatch>),
     /// A date as the zone's wall clock read as UTC (zone-sensitive functions take dates so).
     ToLocal(Box<CE>, crate::time::Zone),
     /// The inverse: a wall-clock date of the zone back to the instant.
     FromLocal(Box<CE>, crate::time::Zone),
+}
+
+/// Elasticsearch's runtime match filter: a text value matches when it shares a term with the
+/// query (both through the `standard` analyzer); any other value when it equals the query
+/// converted to its type. A multi-value matches through any value; null never does.
+#[derive(Debug)]
+enum RuntimeMatch {
+    Terms(search_analysis::Analyzer, std::collections::HashSet<String>),
+    Equals(V),
+}
+
+impl RuntimeMatch {
+    fn new(query: &V, ty: DataType) -> RuntimeMatch {
+        if ty != DataType::Text {
+            return RuntimeMatch::Equals(if ty == DataType::Null { V::Null } else { value::convert(query, ty) });
+        }
+        let a = search_analysis::Analysis::global().analyzer("standard").expect("standard is built in");
+        let mut terms = std::collections::HashSet::new();
+        if let V::Str(q) = value::convert(query, DataType::Keyword) {
+            a.analyze(&q, &mut |t| {
+                terms.insert(t.term.to_string());
+            });
+        }
+        RuntimeMatch::Terms(a, terms)
+    }
+
+    fn matches(&self, v: &V) -> bool {
+        match (self, v) {
+            (_, V::Null) => false,
+            (_, V::Multi(vs)) => vs.iter().any(|x| self.matches(x)),
+            (RuntimeMatch::Terms(a, terms), V::Str(s)) => {
+                let mut hit = false;
+                a.analyze(s, &mut |t| hit = hit || terms.contains(t.term));
+                hit
+            }
+            (RuntimeMatch::Terms(..), _) => false,
+            (RuntimeMatch::Equals(q), v) => {
+                let (x, y) = coerce_pair(v.clone(), q.clone());
+                value::eq(&x, &y) == Some(true)
+            }
+        }
+    }
 }
 
 /// Applies `f` to a date and each date of a multi-value.
@@ -680,6 +724,11 @@ impl Compiler<'_> {
                 }
                 (c, t)
             }
+            ExprKind::Call(name, args) if name == super::fulltext::RUNTIME => {
+                let (c, t) = self.compile(&args[0])?;
+                let ExprKind::Lit(q) = &args[1].kind else { unreachable!("fulltext::extract passes the query as a literal") };
+                (CE::Match(Box::new(c), std::sync::Arc::new(RuntimeMatch::new(q, t))), DataType::Boolean)
+            }
             ExprKind::Call(name, _) if name == "bucket" || name == "bin" => {
                 return Err(verification(self.src, e.start, &format!("can only use grouping function [{}] as part of the BY clause", &self.src[e.start..e.end])));
             }
@@ -1050,6 +1099,7 @@ fn eval(c: &CE, row: &[V], aggs: &[V], w: &mut Warnings) -> EsResult<V> {
             if i < args.len() { eval(&args[i], row, aggs, w)? } else { V::Null }
         }
         CE::Cast(x, t) => value::convert(&eval(x, row, aggs, w)?, *t),
+        CE::Match(x, m) => V::Bool(m.matches(&eval(x, row, aggs, w)?)),
         CE::Bucket(x, span) => match (eval(x, row, aggs, w)?, span) {
             (V::Null, _) => V::Null,
             (v, BucketSpan::Num(s)) => match v.as_f64() {
@@ -1192,7 +1242,7 @@ fn keep_except(cols: &[Col], names: &[String]) -> (Vec<usize>, Vec<Col>) {
 
 /// The output keys of a dissect pattern, in pattern order (skipped and `?` keys excluded,
 /// appended keys once).
-fn dissect_keys(pattern: &str) -> Vec<String> {
+pub(crate) fn dissect_keys(pattern: &str) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
     let mut rest = pattern;
     while let Some(i) = rest.find("%{") {
@@ -1325,13 +1375,11 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
             out.extend(keys.iter().map(|k| Col { name: k.clone(), ty: DataType::Keyword }));
             (Stage::Dissect { field: f, dissect: std::sync::Arc::new(d), keys, keep }, out)
         }
-        Cmd::Grok { field, pattern, at } => {
+        Cmd::Grok { field, grok: g, .. } => {
             let (f, t) = Compiler { src, cols, aggs: None }.compile(field)?;
             if !t.is_string() && t != DataType::Null {
                 return Err(verification(src, field.start, &format!("Grok only supports KEYWORD or TEXT values, found expression [{}] type [{}]", &src[field.start..field.end], t.name().to_ascii_uppercase())));
             }
-            let g = search_painless::grok::Grok::new(search_painless::grok::PatternBank::legacy(), pattern)
-                .map_err(|e| super::parser::parse_error(src, *at, &format!("Invalid pattern [{pattern}] for grok: {}", e.message)))?;
             use search_painless::grok::CaptureType as CT;
             let mut outputs: Vec<(String, DataType)> = Vec::new();
             for c in g.captures_config() {
@@ -1351,7 +1399,7 @@ fn compile_stage(src: &Src<'_>, cmd: &Cmd, cols: &[Col]) -> EsResult<(Stage, Vec
             let names: Vec<String> = outputs.iter().map(|(n, _)| n.clone()).collect();
             let (keep, mut out) = keep_except(cols, &names);
             out.extend(outputs.iter().map(|(n, t)| Col { name: n.clone(), ty: *t }));
-            (Stage::Grok { field: f, grok: std::sync::Arc::new(g), outputs, keep }, out)
+            (Stage::Grok { field: f, grok: g.clone(), outputs, keep }, out)
         }
         Cmd::Enrich { policy, policy_at, on, with, at: cmd_at } => {
             let name = policy.rsplit(':').next().unwrap_or(policy);
@@ -2545,16 +2593,9 @@ fn unmapped_references(cmds: &[Cmd], cols: &[Col]) -> Vec<String> {
                 names_of(field).iter().for_each(|x| note(x, &defined, &mut out));
                 defined.extend(dissect_keys(pattern));
             }
-            Cmd::Grok { field, pattern, .. } => {
+            Cmd::Grok { field, grok, .. } => {
                 names_of(field).iter().for_each(|x| note(x, &defined, &mut out));
-                let mut rest = pattern.as_str();
-                while let Some(i) = rest.find("%{") {
-                    let Some(j) = rest[i..].find('}') else { break };
-                    if let Some(name) = rest[i + 2..i + j].split(':').nth(1) {
-                        defined.insert(name.to_string());
-                    }
-                    rest = &rest[i + j..];
-                }
+                defined.extend(grok.captures_config().iter().map(|c| c.name.clone()));
             }
             Cmd::Enrich { on, with, .. } => {
                 if let Some((f, _)) = on {
@@ -3428,7 +3469,12 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
     let first = cmds.remove(0);
     // Fields the commands over this query's result reference count for `unmapped_fields`.
     let ref_cmds: Vec<Cmd> = cmds.iter().chain(outer).cloned().collect();
-    let ft = if matches!(first, Cmd::From { .. }) { super::fulltext::extract(&src, &mut cmds)? } else { Vec::new() };
+    // Full-text calls on index fields become clauses of the scan's query (`fulltext`).
+    let mut resolved = match &first {
+        Cmd::From { sources, metadata, at } => Some(resolve_source(cluster, &src, sources, metadata, *at).await?),
+        _ => None,
+    };
+    let ft = super::fulltext::extract(&src, &mut cmds, &|n| resolved.as_ref().is_some_and(|s| s.fields.iter().any(|f| f == n)))?;
     // The row-wise prefix runs on every batch.
     let split = cmds.iter().position(|c| !is_row_wise(c)).unwrap_or(cmds.len());
     let (prefix, rest) = cmds.split_at(split);
@@ -3464,8 +3510,8 @@ async fn execute_plain(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
             let (p, out) = build_pipeline(&src, prefix, cols)?;
             Table { rows: p.run(vec![row], w)?, cols: out }
         }
-        Cmd::From { sources, metadata, at } => {
-            let mut source = resolve_source(cluster, &src, sources, metadata, *at).await?;
+        Cmd::From { at, .. } => {
+            let mut source = resolved.take().expect("resolved above");
             if q.settings.unmapped == Unmapped::Load && !source.flattened.is_empty() {
                 check_flattened_load(&src, &source, &ref_cmds, *at)?;
             }
