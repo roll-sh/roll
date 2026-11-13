@@ -226,11 +226,16 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys;
    OpenSearch-flavor clusters have no API keys (a 400), so secrets' search link there wants a
    link user like apps'. The fleet test with every product on.
-2. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
-   both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is;
-   `auto_date_histogram` is now counted from the points tree too, 27.8 → 3.0 ms in an A/B): a full
-   rerun of every Rally track with variance for all three targets; one allocator policy (rolld's
-   against search-dev's purge governor, by a matched benchmark); `terms_enum`'s per-request
+2. **Indexing CPU and benchmarks on a quiet host** (docs/benchmarks/search.md). Indexing: the
+   direct document parser now takes float types, plain objects and the opensearch dialect
+   (nyc_taxis 8 clients 90k docs/s against Elasticsearch's 66k and OpenSearch's 60k; an ECS log
+   74.5k against 59.0k and 41.3k), but with one client roll spends more CPU per document than
+   Elasticsearch (51.8 against 34.6 µs on the ECS log): BP reordering at merge is about a quarter
+   of it (a delegate is measuring when BP pays, `wip/search-bp`); next are arrays of objects in
+   the direct parser and the request path's allocations. Queries: roll ahead of both engines on
+   every Rally measure but `autohisto_agg` (now counted from the points tree: 27.8 → 3.0 ms in an
+   A/B; Rally rerun pending) and `terms_enum`; a full rerun of every Rally track with variance;
+   one allocator policy (rolld's against search-dev's purge governor); `terms_enum`'s per-request
    overhead.
 3. **Compatibility gaps** from the extended suites (4,912 of the 5,541 Elasticsearch passes),
    largest first: platinum's machine learning (278, a product decision: anomaly detection and
