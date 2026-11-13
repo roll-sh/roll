@@ -1049,6 +1049,7 @@ async fn a_link_credential_uses_the_data_and_is_revoked() {
     let e = env().await;
     e.post("/v1/search/clusters", json!({"name": "os-link", "flavor": "opensearch"})).await;
     assert!(e.control.mint_link("os-link", "svc_1").await.is_err());
+    assert_eq!(e.call(reqwest::Method::POST, "/v1/search/clusters/os-link/keys", Some(json!({"name": "k"}))).await.0, 400);
     for (name, flavor) in [("es-link", "elasticsearch")] {
         e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
         let cred = e.control.mint_link(name, "svc_1").await.unwrap();

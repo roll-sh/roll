@@ -1149,6 +1149,9 @@ impl Control {
         if name.trim().is_empty() || name.len() > 1024 {
             return Err(ControlError::Invalid("name: 1 to 1024 characters".into()));
         }
+        if c.flavor == "opensearch" {
+            return Err(ControlError::Invalid(format!("the OpenSearch-flavor cluster {} has no API keys: OpenSearch clients sign in with a user", c.name)));
+        }
         let mut body = json!({ "name": name });
         match access.unwrap_or("admin") {
             "admin" => {}
