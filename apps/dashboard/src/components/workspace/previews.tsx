@@ -147,7 +147,8 @@ export function ProjectPreviews({
           {error && !list && <p className="mt-4 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">Previews didn't load: {error}</p>}
           {list && list.length > 0 && (
             <ul className="mt-4 overflow-hidden rounded-xl border border-line-2 bg-panel inset-shadow-highlight" aria-label="Previews">
-              {list.map((p) => (
+              {/* Those waiting for a visual review first (a stable sort keeps the rest newest first). */}
+              {[...list].sort((a, b) => Number(toReview(b)) - Number(toReview(a))).map((p) => (
                 <Row key={p.id} preview={p} open={p.id === openId} onOpen={() => setOpenId(p.id)} />
               ))}
             </ul>
@@ -189,6 +190,9 @@ export function ProjectPreviews({
   );
 }
 
+/** Its pages differ from main's and nobody has accepted them yet (the `roll/visual` review). */
+const toReview = (p: Preview) => p.visual_review?.state === "changed" && p.desired !== "deleted";
+
 function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; onOpen: () => void }) {
   const what = previewOf(p);
   return (
@@ -199,6 +203,11 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
           <StateDot state={p.state} />
           <span className="min-w-0 truncate font-medium text-soft">{p.title}</span>
           {what && <span className="shrink-0 font-mono text-[11px] text-muted">{what}</span>}
+          {toReview(p) && (
+            <span className="shrink-0 rounded border border-accent/40 px-1 text-[10.5px] text-accent" title={`Differs from ${p.visual_review?.branch} by ${Math.max(p.visual_review?.percent ?? 0, 0.1).toFixed(1)}%: waiting for a visual review`}>
+              to review
+            </span>
+          )}
           {p.baseline && (
             <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title="roll keeps it to compare the project's changes with">
               baseline

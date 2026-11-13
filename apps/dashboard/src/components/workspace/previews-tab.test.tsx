@@ -103,6 +103,16 @@ describe("the Previews tab", () => {
     expect(await within(list).findByRole("button", { name: "Checkout redesign: Deleting" })).toBeInTheDocument();
   });
 
+  it("lists the previews waiting for a visual review first, tagged", async () => {
+    const waiting: Preview = { ...preview, id: "pv_review", slug: "pr483-shop", title: "New header", visual_review: { state: "changed", branch: "main", percent: 8, by: null, at: null, required: false } };
+    api.list.mockResolvedValue([preview, waiting]);
+    view();
+    const list = await screen.findByRole("list", { name: "Previews" });
+    const rows = within(list).getAllByRole("button", { name: /: Ready$/ });
+    expect(rows.map((r) => r.getAttribute("aria-label"))).toEqual(["New header: Ready", "Checkout redesign: Ready"]);
+    expect(within(list).getAllByText("to review")).toHaveLength(1);
+  });
+
   it("posts a note from the preview page's feedback button on the change, once", async () => {
     const u = userEvent.setup({ delay: null });
     vi.mocked(codeApi.submitReview).mockResolvedValue({} as never);

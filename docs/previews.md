@@ -957,6 +957,7 @@ Ranked by what a person notices first. Done so far:
 - where a page changed, as a diff image (`?diff=base|previous`, the sheet's Diff);
 - a speed budget per project (`github.budget`, the `roll/speed` status);
 - screenshot comparisons off the async runtime, and a test for reading a run's pages;
+- the previews waiting for a visual review first in the list, tagged "to review";
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;
@@ -999,9 +1000,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
-   to a work item from Linear gets its preview's link and visual review posted there, as an
-   automation template on the `preview` trigger.
+1. **`roll preview screenshot`**: the CLI (and the agents that drive it) can't save a preview's
+   screenshot or diff; `roll preview screenshot <id> [--diff base|previous] [--page …] [--phone]
+   -o file.png`.
 2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
@@ -1015,7 +1016,12 @@ Ranked by what a person notices first. Done so far:
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+   to a work item from Linear gets its preview's link and visual review posted there, as an
+   automation template on the `preview` trigger.
+   It needs roll to remember which issue a change was made for (Linear's side only attaches it
+   today): the agents thread's `linear.attach` could record the link.
+6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.
