@@ -472,6 +472,8 @@ pub fn stats(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
     let mut names = resolve_data_streams(&st, &names(ctx), &opts)?;
     crate::xpack::security::retain_authorized(ctx, &mut names);
+    // Listed in the order of the `HashMap` Elasticsearch aggregates them in.
+    let names: Vec<String> = crate::json::java_hash_order(&names, 16).into_iter().map(|i| names[i].clone()).collect();
     let streams: Vec<&Arc<DataStream>> = names.iter().filter_map(|n| st.metadata.data_streams.get(n)).collect();
     let backing: Vec<&IndexMeta> = streams.iter().flat_map(|d| d.indices.iter()).filter_map(|i| st.metadata.indices.get(i)).map(|i| i.as_ref()).collect();
     let size = |bytes: i64, key: &str, m: &mut Map| {

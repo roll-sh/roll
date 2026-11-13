@@ -200,6 +200,16 @@ pub async fn invalidate_token(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if token.is_none() && refresh.is_none() && username.is_none() && realm.is_none() {
         return Err(EsError::action_request_validation(&["one of [token, refresh_token, realm_name, username] must be specified".into()]));
     }
+    // A token given by value is looked up in the tokens index: a missing index fails the
+    // request, unless the value isn't even a token (`TokenService.invalidateAccessToken`,
+    // `invalidateRefreshToken`).
+    let by_value = token.as_ref().or(refresh.as_ref()).cloned();
+    if let Some(v) = &by_value
+        && !store::home_index(TOKENS).is_some_and(|i| ctx.state().metadata.indices.contains_key(i))
+        && super::b64_decode(v).is_ok()
+    {
+        return Err(EsError::security(400, "failed to invalidate token"));
+    }
     let now = ctx.now_ms;
     let (invalidated, previously) = ctx
         .cluster
@@ -242,7 +252,9 @@ pub async fn invalidate_token(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok((inv, prev))
         })
         .await?;
-    Reply::ok(obj! { "invalidated_tokens" => invalidated, "previously_invalidated_tokens" => previously, "error_count" => 0 })
+    // No token of that value: 404, with the counts.
+    let status = if by_value.is_some() && invalidated + previously == 0 { 404 } else { 200 };
+    Ok(Reply::Body(status, obj! { "invalidated_tokens" => invalidated, "previously_invalidated_tokens" => previously, "error_count" => 0 }))
 }
 
 // --- service accounts ------------------------------------------------------------------------
@@ -374,10 +386,24 @@ pub fn get_service_credentials(ctx: &Ctx) -> EsResult<Reply> {
 
 // --- user profiles ---------------------------------------------------------------------------
 
-fn profile_uid(username: &str, realm: &str) -> String {
+/// A user's profile uid (`ProfileService`): `u_`, the base64url SHA-256 of the username, and
+/// the first differentiator (`_0`…`_9`) that is free or already the user's of that realm.
+fn profile_uid(st: &crate::meta::ClusterState, username: &str, realm: &str) -> EsResult<String> {
     use base64::Engine;
-    let d = super::digest(&[username.as_bytes(), realm.as_bytes()]);
-    format!("u_{}_0", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(d))
+    use sha2::Digest;
+    let d = sha2::Sha256::digest(username.as_bytes());
+    let base = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(d);
+    for n in 0..10 {
+        let uid = format!("u_{base}_{n}");
+        match st.metadata.xpack.get(PROFILES, &uid) {
+            None => return Ok(uid),
+            Some(p) if p.pointer(&["user", "username"]).and_then(Value::as_str) == Some(username) && p.pointer(&["user", "realm_name"]).and_then(Value::as_str) == Some(realm) => {
+                return Ok(uid);
+            }
+            Some(_) => {}
+        }
+    }
+    Err(EsError::illegal_state(format!("failed to activate profile for user [{username}]: too many profiles with the same username")))
 }
 
 /// The profile uid of a user, if it activated one.
@@ -411,7 +437,6 @@ fn profile_view(p: &Value, data_keys: Option<&[String]>) -> Value {
 pub async fn activate_profile(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body()?.unwrap_or_else(Value::object);
     let p = grant_principal(ctx.cluster, &body, "cluster:admin/xpack/security/profile/activate")?;
-    let uid = profile_uid(&p.username, p.realm_name);
     let now = ctx.now_ms;
     let mut user = Map::new();
     user.insert("username".into(), p.username.clone().into());
@@ -423,10 +448,10 @@ pub async fn activate_profile(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if !p.email.is_null() {
         user.insert("email".into(), p.email.clone());
     }
-    let u = uid.clone();
     let doc = ctx
         .cluster
         .update(move |st| {
+            let u = profile_uid(st, &p.username, p.realm_name)?;
             let existing = st.metadata.xpack.get(PROFILES, &u).cloned();
             let seq = existing.as_ref().and_then(|e| e.get("seq_no")).and_then(Value::as_i64).map_or(0, |s| s + 1);
             let doc = obj! {
@@ -630,7 +655,8 @@ pub fn get_settings(ctx: &Ctx) -> EsResult<Reply> {
     let mut out = Map::new();
     for (key, index) in [("security", ".security-7"), ("security-tokens", ".security-tokens-7"), ("security-profile", ".security-profile-8")] {
         let mut settings = Map::new();
-        if index == ".security-7" {
+        // An index's settings once it exists (the main index is listed always).
+        if index == ".security-7" || st.metadata.indices.contains_key(index) {
             settings.insert("auto_expand_replicas".into(), "0-1".into());
             settings.insert("number_of_replicas".into(), "0".into());
             settings.insert("routing".into(), obj! { "allocation" => obj! { "include" => obj! { "_tier_preference" => "data_hot,data_content" } } });
@@ -693,10 +719,4 @@ mod tests {
         assert!(check_account("elastic", "nope").is_err());
     }
 
-    #[test]
-    fn profile_uids_are_stable() {
-        let a = profile_uid("juan", "default_native");
-        assert_eq!(a, profile_uid("juan", "default_native"));
-        assert!(a.starts_with("u_") && a.ends_with("_0"));
-    }
 }

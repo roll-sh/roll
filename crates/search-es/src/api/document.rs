@@ -661,6 +661,20 @@ pub fn get(ctx: &Ctx, head: bool) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     let args = get_args(ctx)?;
     let idx = single_index(ctx, expr)?;
+    crate::api::warn_system_access(ctx, std::slice::from_ref(&idx.name));
+    if let Some(source) = crate::xpack::security::users::security_document(&ctx.state(), &idx.name, &id) {
+        if head {
+            return Ok(Reply::Empty(200));
+        }
+        let mut m = Map::new();
+        for (k, v) in [("_index", Value::from(idx.name.clone())), ("_id", Value::from(id)), ("_version", Value::from(1)), ("_seq_no", Value::from(0)), ("_primary_term", Value::from(1)), ("found", Value::Bool(true))] {
+            m.insert(k.into(), v);
+        }
+        if args.source.as_ref().is_none_or(|fs| fs.fetch) {
+            m.insert("_source".into(), source);
+        }
+        return Ok(Reply::Body(200, Value::Obj(m)));
+    }
     let got = get_one(ctx, &idx, &id, &args)?;
     if head {
         return Ok(Reply::Empty(if got.is_some() { 200 } else { 404 }));

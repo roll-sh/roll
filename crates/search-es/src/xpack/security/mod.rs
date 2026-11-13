@@ -515,10 +515,16 @@ const DATA_STREAM_LISTS: &[&str] = &["indices.get_data_stream", "indices.data_st
 
 /// Keeps the names (data streams) the request's principal may act on with its action.
 pub fn retain_authorized(ctx: &Ctx, names: &mut Vec<String>) {
-    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return };
-    let (_, action) = privileges::action_of(ctx.api.name());
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    names.retain(|n| eff.allows_index(&action, n));
+    let visible = authorized_names(ctx);
+    names.retain(|n| visible(n));
+}
+
+/// Whether the request's principal may act on a name (index, alias, data stream) with the
+/// request's action: what a listing whose wildcards Elasticsearch expands to authorized names
+/// shows.
+pub fn authorized_names(ctx: &Ctx) -> impl Fn(&str) -> bool {
+    let check = ctx.principal.get().filter(|p| !p.is_superuser()).map(|p| (effective(&file_roles(ctx.cluster), &ctx.state(), p), privileges::action_of(ctx.api.name()).1));
+    move |n| check.as_ref().is_none_or(|(eff, action)| eff.allows_index(action, n))
 }
 
 /// Checks the request's action against its principal's roles, then the indices its queries
@@ -668,7 +674,12 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
                 None => Ok(None),
             }
         }
-        Scope::Index if DATA_STREAM_LISTS.contains(&ctx.api.name()) => {
+        // Its wildcards list what the principal may see (`authorized_names`); a role must grant
+        // the action on some index.
+        Scope::Index if ctx.api.name() == "indices.resolve_index" && !eff.allows_index_action(&action) => {
+            Err(denied(p, &action, Some(&target_expressions(ctx))))
+        }
+        Scope::Index if DATA_STREAM_LISTS.contains(&ctx.api.name()) || ctx.api.name() == "indices.resolve_index" => {
             let explicit = target_expressions(ctx).into_iter().filter(|e| !e.contains('*') && e != "_all" && !e.starts_with('-'));
             let denied_on: Vec<String> = explicit.filter(|n| !eff.allows_index(&action, n)).collect();
             if denied_on.is_empty() { Ok(None) } else { Err(denied(p, &action, Some(&denied_on))) }
@@ -894,7 +905,7 @@ pub fn authorize_search(ctx: &Ctx, exprs: &[String], opts: &crate::meta::resolve
     if p.os().is_some() {
         return check_all(ctx, p, &eff, SEARCH, exprs.to_vec(), opts).map(|_| None);
     }
-    narrow_exprs(ctx, p, &eff, SEARCH, exprs.to_vec(), opts)
+    narrow_exprs(ctx, p, &eff, SEARCH, exprs.to_vec(), opts, opts.ignore_unavailable)
 }
 
 /// OpenSearch's check of an index request (`do_not_fail_on_forbidden` off): every index its
@@ -923,12 +934,28 @@ fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec
 /// aren't (`IndexAbstractionResolver`). `-*` (no index) when nothing is left, as
 /// Elasticsearch's resolver does.
 fn narrow(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str) -> EsResult<Option<String>> {
+    use crate::meta::resolve::IndicesOptions;
     let defaults = narrow_defaults(ctx.api.name());
     let opts = ctx.indices_options(defaults).unwrap_or(defaults);
-    Ok(narrow_exprs(ctx, p, eff, action, crate::api::index_expressions(ctx), &opts)?.map(|v| v.join(",")))
+    // `ignore_unavailable` as the API takes it (only EQL's default is lenient).
+    let own = if ctx.api.name() == "eql.search" { IndicesOptions::LENIENT_EXPAND_OPEN } else { IndicesOptions::STRICT_EXPAND_OPEN };
+    let ignore_unavailable = ctx.indices_options(own).map(|o| o.ignore_unavailable).unwrap_or(false);
+    Ok(narrow_exprs(ctx, p, eff, action, crate::api::index_expressions(ctx), &opts, ignore_unavailable)?.map(|v| v.join(",")))
 }
 
-fn narrow_exprs(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, mut exprs: Vec<String>, opts: &crate::meta::resolve::IndicesOptions) -> EsResult<Option<Vec<String>>> {
+fn narrow_exprs(
+    ctx: &Ctx,
+    p: &Principal,
+    eff: &Effective,
+    action: &str,
+    mut exprs: Vec<String>,
+    opts: &crate::meta::resolve::IndicesOptions,
+    ignore_unavailable: bool,
+) -> EsResult<Option<Vec<String>>> {
+    // ES|QL and SQL resolve the indices their queries name strictly (`IndexResolver`): the
+    // reads they make for their client (`internal::as_caller`) skip missing indices, never
+    // ones the client may not read.
+    let ignore_unavailable = ignore_unavailable && crate::xpack::internal::caller().is_none();
     let wildcard = |e: &str| e.contains('*') || e == "_all";
     if !exprs.is_empty() && !exprs.iter().any(|e| wildcard(e)) {
         let mut names: Vec<String> = exprs.iter().map(|e| e.trim_start_matches('-').to_string()).collect();
@@ -938,7 +965,7 @@ fn narrow_exprs(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, mut exp
         if denied_on.is_empty() {
             return Ok(None);
         }
-        if !opts.ignore_unavailable {
+        if !ignore_unavailable {
             return Err(denied(p, action, Some(&denied_on)));
         }
     }
@@ -962,7 +989,7 @@ fn narrow_exprs(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, mut exp
             }
         } else if eff.allows_index(action, e) {
             out.push(e.clone());
-        } else if !opts.ignore_unavailable {
+        } else if !ignore_unavailable {
             denied_on.push(e.clone());
         }
     }
@@ -1040,6 +1067,7 @@ pub fn ingest_user(cluster: &Cluster, p: &Principal, properties: &[String]) -> c
 pub(crate) fn who(p: &Principal) -> String {
     match &p.kind {
         AuthKind::ApiKey(a) => format!("API key id [{}] of user [{}]", a.id, p.username),
+        AuthKind::ServiceAccount { .. } => format!("service account [{}]", p.username),
         _ => {
             let mut roles = p.roles.clone();
             roles.sort();
@@ -1095,11 +1123,13 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     out
 }
 
-/// The expressions naming a request's targets: its `{index}`, or the `{name}` of the data
-/// stream APIs.
+/// The expressions naming a request's targets: its `{index}`, the `{name}` of the data
+/// stream APIs, or the `{alias}` (or data stream) a rollover rolls over.
 fn target_expressions(ctx: &Ctx) -> Vec<String> {
     match ctx.api.name() {
         api if DATA_STREAM_APIS.contains(&api) => ctx.param("name").map(crate::meta::resolve::split_expressions).unwrap_or_default(),
+        "indices.rollover" => ctx.path_param("alias").map(|a| vec![a.to_string()]).unwrap_or_default(),
+        "indices.resolve_index" => ctx.param("name").map(crate::meta::resolve::split_expressions).unwrap_or_default(),
         _ => crate::api::index_expressions(ctx),
     }
 }

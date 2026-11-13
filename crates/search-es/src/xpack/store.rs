@@ -64,6 +64,11 @@ fn home(family: &str) -> Option<&'static Home> {
     HOMES.iter().find(|h| family.starts_with(h.prefix))
 }
 
+/// The system index a family's objects live in (`None`: the cluster state).
+pub fn home_index(family: &str) -> Option<&'static str> {
+    home(family).map(|h| h.index)
+}
+
 impl XpackState {
     pub fn family(&self, family: &str) -> Option<&Family> {
         self.families.get(family).map(|f| &**f)
