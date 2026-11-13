@@ -7,7 +7,10 @@
 //! or, for a hostname Cloudflare proxies and a peer that is Cloudflare, `CF-Connecting-IP`; and
 //! with a [`ViaEdge`] extension. Every response, the listener's own included, passes through
 //! [`HttpsConfig::observe`] (access logs, metrics).
+//!
+//! [`serve_plain`] is the plain-HTTP listener: ACME HTTP-01 answers and redirects to HTTPS.
 
+use crate::acme::Http01;
 use crate::drain::Drain;
 use crate::hosts::{Host, Hostnames};
 use crate::listener::{self, Accepted, ListenOptions};
@@ -119,6 +122,66 @@ pub async fn serve(listener: TcpListener, tls: Arc<ServerConfig>, cfg: Arc<Https
         }
     })
     .await
+}
+
+/// Where ACME HTTP-01 tokens are asked for.
+pub const ACME_CHALLENGE_PATH: &str = "/.well-known/acme-challenge/";
+
+/// The plain-HTTP listener (port 80 on a node alone): `GET /.well-known/acme-challenge/<token>`
+/// is answered from `challenges` for any host, before anything else routes (an unknown token, or
+/// anything else under that path, is a 404); every other request is redirected to HTTPS. Nothing
+/// is served in the clear.
+pub async fn serve_plain(listener: TcpListener, opts: ListenOptions, challenges: Arc<Http01>, drain: Drain) -> std::io::Result<()> {
+    listener::serve_tcp(listener, opts, drain.clone(), move |sock, peer| {
+        let (challenges, drain) = (challenges.clone(), drain.clone());
+        async move {
+            let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
+                let challenges = challenges.clone();
+                async move { Ok::<_, Infallible>(plain(&req, &challenges)) }
+            });
+            let conn = hyper::server::conn::http1::Builder::new().timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10)).serve_connection(TokioIo::new(sock), svc);
+            tokio::pin!(conn);
+            let result = tokio::select! {
+                r = conn.as_mut() => r,
+                _ = drain.refusing() => {
+                    conn.as_mut().graceful_shutdown();
+                    conn.await
+                }
+            };
+            if let Err(e) = result {
+                debug!(%peer, error = %e, "edge: plain HTTP connection ended with an error");
+            }
+        }
+    })
+    .await
+}
+
+/// One request on the plain-HTTP listener.
+pub fn plain<B>(req: &Request<B>, challenges: &Http01) -> Response<Body> {
+    if let Some(token) = req.uri().path().strip_prefix(ACME_CHALLENGE_PATH) {
+        let well_formed = (1..=256).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        let answer = well_formed.then(|| challenges.answer(token)).flatten();
+        return match (req.method(), answer) {
+            (&Method::GET | &Method::HEAD, Some(key_authorization)) => {
+                let mut r = Response::new(Body::from(key_authorization));
+                r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+                r
+            }
+            _ => text(StatusCode::NOT_FOUND, "no such challenge\n"),
+        };
+    }
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(crate::hosts::normalize);
+    let host = host.filter(|h| !h.is_empty() && h.len() <= 253 && h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'));
+    let Some(host) = host else { return text(StatusCode::BAD_REQUEST, "no Host header\n") };
+    let pq = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    match HeaderValue::from_str(&format!("https://{host}{pq}")) {
+        Ok(location) => {
+            let mut r = text(StatusCode::PERMANENT_REDIRECT, "");
+            r.headers_mut().insert(header::LOCATION, location);
+            r
+        }
+        Err(_) => text(StatusCode::BAD_REQUEST, "bad path\n"),
+    }
 }
 
 /// The client's address for a request (see the module docs).
@@ -269,5 +332,29 @@ impl Upstream {
             strip_hop_headers(resp.headers_mut());
         }
         resp.map(Body::new)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a token an order is waiting on is answered, for any host; nothing else under the
+    /// challenge path; everything else goes to HTTPS.
+    #[test]
+    fn the_plain_listener_answers_challenges_and_redirects_the_rest() {
+        let challenges = Http01::new();
+        challenges.put("tok-1_A", "tok-1_A.thumbprint");
+        let req = |method: Method, path: &str| Request::builder().method(method).uri(path).header(header::HOST, "Shop.Example.com:80").body(()).unwrap();
+        let r = plain(&req(Method::GET, "/.well-known/acme-challenge/tok-1_A"), &challenges);
+        assert_eq!(r.status(), StatusCode::OK);
+        for (m, p) in [(Method::GET, "/.well-known/acme-challenge/other"), (Method::GET, "/.well-known/acme-challenge/tok-1_A/x"), (Method::POST, "/.well-known/acme-challenge/tok-1_A"), (Method::GET, "/.well-known/acme-challenge/")] {
+            assert_eq!(plain(&req(m, p), &challenges).status(), StatusCode::NOT_FOUND, "{p}");
+        }
+        let r = plain(&req(Method::GET, "/cart?x=1"), &challenges);
+        assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(r.headers()[header::LOCATION], "https://shop.example.com/cart?x=1");
+        let odd = Request::builder().uri("/").header(header::HOST, "evil.com@x").body(()).unwrap();
+        assert_eq!(plain(&odd, &challenges).status(), StatusCode::BAD_REQUEST);
     }
 }

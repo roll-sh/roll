@@ -54,6 +54,8 @@ pub struct ChangeDraft {
     pub fork: Option<String>,
     /// Clone URL for fetching `head_sha` from a fork.
     pub head_clone_url: Option<String>,
+    /// The pull request's labels, by name.
+    pub labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,6 +135,7 @@ pub fn pull_request_draft(pr: &PullRequest) -> ChangeDraft {
         url: pr.html_url.clone(),
         author: pr.user.as_ref().map(|u| u.login.clone()),
         head_clone_url: head_repo.and_then(|r| r.clone_url.clone()),
+        labels: pr.labels.iter().map(|l| l.name.clone()).collect(),
         fork,
     }
 }

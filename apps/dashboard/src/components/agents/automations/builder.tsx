@@ -459,7 +459,7 @@ function TriggerCard({
   );
 }
 
-const codeEventLabels: Record<string, string> = { landed: "Landed", change: "Changes", check: "Checks", review: "Reviews", queue: "Merge queue", work: "Work items", preview: "Previews", push: "Pushes", thread: "Discussions" };
+const codeEventLabels: Record<string, string> = { landed: "Landed", change: "Changes", check: "Checks", review: "Reviews", queue: "Merge queue", work: "Work items", preview: "Previews", push: "Pushes", thread: "Discussions", budget: "Preview budget" };
 const agentEventLabels: Record<string, string> = { "thread.created": "Started", "thread.done": "Done", "thread.failed": "Failed", "thread.waiting": "Waiting on you", "thread.settled": "Settled", "request.opened": "Asks" };
 
 const PRESETS = [

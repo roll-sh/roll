@@ -12,9 +12,11 @@ use serde_json::{Value, json};
 
 mod nosql;
 mod queues;
+mod preview;
 mod search;
 mod storage;
 mod redis;
+mod apps;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -50,6 +52,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Deploy this directory to roll apps (makes the service the first time).
+    Up(apps::Up),
+    /// Deploy a service's source (a repo's branch head, a revision, or an image).
+    Deploy(apps::Deploy),
+    /// A service's runtime log, or a deployment's build log (`--build`).
+    Logs(apps::Logs),
+    /// A service's hostnames and custom domains.
+    #[command(subcommand)]
+    Domains(apps::Domains),
+    /// roll apps: services, deploys, variables, links, scaling.
+    #[command(subcommand, alias = "app")]
+    Apps(Box<apps::AppsCmd>),
     /// Run coding agents on this machine and drive them from roll (`login`, `up`, `status`, `logout`).
     #[command(subcommand)]
     Agent(agent::Agent),
@@ -83,6 +97,10 @@ enum Cmd {
     /// S3-compatible object storage.
     #[command(subcommand, alias = "s3")]
     Storage(storage::Storage),
+    /// Preview environments: every service and a branch of every data resource of a project,
+    /// per change or pull request.
+    #[command(subcommand, alias = "previews")]
+    Preview(preview::Preview),
     /// Scoped tokens: what an agent, a CI job or a script may do (`create`, `list`, `revoke`, …).
     #[command(subcommand, alias = "tokens")]
     Token(access::Token),
@@ -200,6 +218,29 @@ struct Api {
 }
 
 impl Api {
+    /// A GET whose body is read as it comes (server-sent events): the response, once its
+    /// status is a success.
+    async fn open_stream(&self, path: &str) -> anyhow::Result<reqwest::Response> {
+        let mut req = self.http.get(format!("{}{path}", self.base));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            match value["error"].as_str() {
+                Some(e) => bail!("{e}"),
+                None => bail!("{status}"),
+            }
+        }
+        Ok(res)
+    }
+
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
         if let Some(k) = &self.key {
@@ -382,6 +423,11 @@ async fn main() -> anyhow::Result<()> {
             return code::run(&code_api, cli.json, cmd).await;
         }
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
+        Cmd::Up(u) => return apps::up(&api, cli.json, u).await,
+        Cmd::Deploy(d) => return apps::deploy(&api, cli.json, d).await,
+        Cmd::Logs(l) => return apps::logs(&api, cli.json, l).await,
+        Cmd::Domains(d) => return apps::domains(&api, cli.json, d).await,
+        Cmd::Apps(cmd) => return apps::run(&api, cli.json, *cmd).await,
         Cmd::Stream(cmd) => {
             if let Some(out) = stream::run(&api, cli.json, cmd).await? {
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -396,6 +442,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Search(cmd) => return search::run(&api, cli.json, cmd).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
+        Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
         Cmd::Nosql(cmd) => {

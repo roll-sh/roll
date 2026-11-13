@@ -14,6 +14,9 @@ pub enum Stream {
     List,
     /// Create a stream; prints its bootstrap address and a key.
     Create { name: String },
+    /// Branch a stream: a new stream NAME with its topics, records (shared, not copied) and
+    /// committed group offsets; prints its bootstrap address and a key.
+    Branch { stream: String, name: String },
     /// Show a stream: topics, keys, throughput.
     Show { stream: String },
     /// Delete a stream with all its topics and data.
@@ -212,12 +215,28 @@ pub async fn run(api: &Api, json: bool, cmd: Stream) -> anyhow::Result<Option<Va
             print_connect(&v["connect"]);
             return Ok(None);
         }
+        Stream::Branch { stream, name } => {
+            let v = api.post(&format!("{}/branches", st(&stream)), json!({ "name": name })).await?;
+            if json {
+                return Ok(Some(v));
+            }
+            print_stream(&v);
+            println!("  branch of {}", s(&v["branch_of"]["stream"]));
+            print_connect(&v["connect"]);
+            return Ok(None);
+        }
         Stream::Show { stream } => {
             let v = api.get(&st(&stream)).await?;
             if json {
                 return Ok(Some(v));
             }
             print_stream(&v);
+            if !v["branch_of"].is_null() {
+                println!("  branch of {}", s(&v["branch_of"]["stream"]));
+            }
+            let f = |x: &Value| x.as_f64().unwrap_or(0.0);
+            let storage = &v["storage"];
+            println!("  object storage {} (own {}, shared {})", bytes(f(&storage["remote_bytes"])), bytes(f(&storage["own_bytes"])), bytes(f(&storage["shared_bytes"])));
             for t in v["topic_list"].as_array().into_iter().flatten() {
                 println!("  topic {:<30} {} partitions", s(&t["name"]), s(&t["partitions"]));
             }

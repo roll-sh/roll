@@ -28,6 +28,7 @@ export const WEBHOOK_EVENT_HINT: Record<WebhookEvent, string> = {
   work: "a work item is created, claimed or finished",
   preview: "a preview starts, sleeps or fails",
   push: "a branch is pushed over git (accepted or not)",
+  budget: "the project's previews pass 80% or 100% of their monthly budget",
 };
 
 export const emptyWebhookForm = (): WebhookForm => ({ url: "", all: false, events: ["landed"], secret: "", active: true });

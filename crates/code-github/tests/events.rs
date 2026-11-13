@@ -28,6 +28,8 @@ fn every_pull_request_action() {
         ("ready_for_review", PullRequestAction::ReadyForReview),
         ("converted_to_draft", PullRequestAction::ConvertedToDraft),
         ("review_requested", PullRequestAction::ReviewRequested),
+        ("labeled", PullRequestAction::Labeled),
+        ("unlabeled", PullRequestAction::Unlabeled),
     ] {
         let Event::PullRequest(pr) = Event::parse("pull_request", &with_action("pull_request_opened", action)).unwrap() else {
             panic!("{action}")
@@ -37,7 +39,7 @@ fn every_pull_request_action() {
         assert_eq!(d.github_pr, pr.number);
         assert!(!d.head_sha.is_empty() && !d.head_ref.is_empty());
     }
-    for ignored in ["labeled", "unlabeled", "assigned", "locked", "auto_merge_enabled", "enqueued"] {
+    for ignored in ["assigned", "locked", "auto_merge_enabled", "enqueued"] {
         assert!(matches!(Event::parse("pull_request", &with_action("pull_request_opened", ignored)).unwrap(), Event::Ignored { .. }), "{ignored}");
     }
 }

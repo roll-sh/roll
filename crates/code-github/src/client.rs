@@ -503,6 +503,82 @@ impl GitHub {
         }
     }
 
+    /// The comments on an issue or a pull request, oldest first.
+    pub async fn issue_comments(&self, installation: u64, owner: &str, repo: &str, number: u64) -> Result<Vec<Comment>> {
+        self.list(Who::Installation(installation), &repo_path(owner, repo, &format!("/issues/{number}/comments?per_page=100")), None).await
+    }
+
+    /// Replace an issue or pull request comment's body.
+    pub async fn update_comment(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<Comment> {
+        let path = repo_path(owner, repo, &format!("/issues/comments/{comment_id}"));
+        self.send_json(
+            Who::Installation(installation),
+            Method::PATCH,
+            &path,
+            &json!({ "body": body }),
+        )
+        .await
+    }
+
+    /// Create a deployment of `sha` to `environment` (a preview: transient, not production,
+    /// no auto-merge or required contexts). Returns its id.
+    pub async fn create_deployment(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        environment: &str,
+        description: &str,
+    ) -> Result<u64> {
+        let path = repo_path(owner, repo, "/deployments");
+        let body = json!({
+            "ref": sha,
+            "environment": environment,
+            "description": description,
+            "auto_merge": false,
+            "required_contexts": [],
+            "transient_environment": true,
+            "production_environment": false,
+        });
+        let v: Value = self
+            .send_json(Who::Installation(installation), Method::POST, &path, &body)
+            .await?;
+        v["id"].as_u64().ok_or_else(|| Error::Decode("a deployment without an id".into()))
+    }
+
+    /// Set a deployment's status: `in_progress`, `success`, `failure`, `error` or `inactive`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_deployment_status(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        deployment: u64,
+        state: &str,
+        environment_url: Option<&str>,
+        log_url: Option<&str>,
+        description: &str,
+    ) -> Result<Value> {
+        let path = repo_path(owner, repo, &format!("/deployments/{deployment}/statuses"));
+        let mut body = json!({ "state": state, "description": description, "auto_inactive": true });
+        if let Some(u) = environment_url {
+            body["environment_url"] = json!(u);
+        }
+        if let Some(u) = log_url {
+            body["log_url"] = json!(u);
+        }
+        self.send_json(Who::Installation(installation), Method::POST, &path, &body)
+            .await
+    }
+
     /// Set a commit status; `state` is `pending`, `success`, `failure` or `error`.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_status(

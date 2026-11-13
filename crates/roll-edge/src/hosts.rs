@@ -47,6 +47,8 @@ pub enum Host {
     Preview(String),
     /// `<bucket>.roll.site`: a public bucket or site (served by the CDN Worker).
     Site(String),
+    /// `<slug>.up.roll.site`: a roll apps service's environment (docs/apps/README.md).
+    App(String),
     Unknown,
 }
 
@@ -57,7 +59,7 @@ impl Host {
     /// Whether Cloudflare proxies this hostname (so `CF-Connecting-IP` from a Cloudflare address
     /// is the client).
     pub fn proxied(&self) -> bool {
-        matches!(self, Host::Dashboard | Host::Api | Host::Preview(_) | Host::Site(_))
+        matches!(self, Host::Dashboard | Host::Api | Host::Preview(_) | Host::Site(_) | Host::App(_))
     }
 
     /// The tenant a tenant hostname names.
@@ -152,6 +154,9 @@ impl Hostnames {
                     None => Host::Unknown,
                 };
             }
+            if let Some(slug) = sub.strip_suffix(".up") {
+                return label(slug).map_or(Host::Unknown, Host::App);
+            }
             return match label(sub) {
                 Some(l) if l.starts_with("chg-") => Host::Preview(l),
                 Some(l) => Host::Site(l),
@@ -169,7 +174,7 @@ impl Hostnames {
         let mut product = vec![d.clone(), format!("api.{d}"), format!("git.{d}"), self.product_domain("tasks")];
         product.extend(TENANT_PRODUCTS.iter().map(|p| format!("*.{}", self.product_domain(p))));
         let s3 = self.s3_domain();
-        let site = vec![format!("*.{}", self.site_domain), s3.clone(), format!("*.{s3}")];
+        let site = vec![format!("*.{}", self.site_domain), s3.clone(), format!("*.{s3}"), format!("*.up.{}", self.site_domain)];
         vec![CertSet { name: "product".into(), names: product }, CertSet { name: "site".into(), names: site }]
     }
 
@@ -211,6 +216,8 @@ mod tests {
             ("my.bucket.s3.us-east-1.roll.site", Host::S3 { bucket: Some("my.bucket".into()) }),
             ("chg-abc.roll.site", Host::Preview("chg-abc".into())),
             ("photos.roll.site", Host::Site("photos".into())),
+            ("web-acme.up.roll.site", Host::App("web-acme".into())),
+            ("a.b.up.roll.site", Host::Unknown),
             // Region-less endpoints, other regions, and names that aren't in the table.
             ("ep1.pg.roll.sh", Host::Unknown),
             ("tasks.roll.sh", Host::Unknown),

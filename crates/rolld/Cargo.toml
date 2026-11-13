@@ -7,6 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+getrandom.workspace = true
+apps-control.workspace = true
+async-trait.workspace = true
+code-store.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
@@ -51,6 +55,7 @@ roll-accounts.workspace = true
 roll-auth.workspace = true
 roll-edge.workspace = true
 roll-workspace.workspace = true
+roll-previews.workspace = true
 roll-access.workspace = true
 roll-mcp.workspace = true
 s3-api.workspace = true
