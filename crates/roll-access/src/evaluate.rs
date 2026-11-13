@@ -817,7 +817,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
             })
             .await
             .map_err(|e| Box::new(e.into_response()))
-            .inspect(|a| access.announce(a))?
+            .inspect(|a| access.announce(a, ctx.grant.user.as_deref()))?
         }
     };
     let max = if ctx.mcp.as_ref().is_some_and(|m| m.elicits) { std::time::Duration::ZERO } else { access.config.approval_wait };

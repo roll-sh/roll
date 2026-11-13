@@ -653,8 +653,26 @@ impl Access {
         });
     }
 
-    /// A new approval: posted to chat, when approvals go there (in the background).
-    pub fn announce(self: &Arc<Self>, a: &store::Approval) {
+    /// A new approval: posted to chat, when approvals go there, and mailed to the token's person
+    /// (they decide their own token's), in the background. The mail names the token, the action
+    /// and the resource, never the request's arguments: what an agent wrote stays on roll's page.
+    pub fn announce(self: &Arc<Self>, a: &store::Approval, user: Option<&str>) {
+        if user.is_some() {
+            let name = plain(&a.grant_name);
+            let what = a.resource.as_deref().map_or_else(|| a.product.clone(), plain);
+            self.tell(
+                user,
+                format!("Your roll token \"{name}\" asks to {} {what}", a.action),
+                format!(
+                    "Your roll token \"{name}\" asks to {} {what}. Approve or deny it at {}/dashboard/access/approvals?id={}; it waits until it expires.\n\nNot something you're running? Revoke the token at {}/dashboard/access/tokens/{}.\n",
+                    a.action,
+                    self.web_url(),
+                    a.id,
+                    self.web_url(),
+                    a.grant_id,
+                ),
+            );
+        }
         let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
         let (me, a) = (self.clone(), a.clone());
         tokio::spawn(async move {
