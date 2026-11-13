@@ -9,7 +9,21 @@ const trailingSlash = createMiddleware().server(({ request, next }) => {
   return next();
 });
 
+/** The OAuth consent screen is never framed: another site can't overlay it and steal a click. */
+const noFraming = createMiddleware().server(async ({ request, next }) => {
+  const result = await next();
+  if (new URL(request.url).pathname.startsWith("/oauth/")) {
+    try {
+      result.response.headers.set("x-frame-options", "DENY");
+      result.response.headers.set("content-security-policy", "frame-ancestors 'none'");
+    } catch {
+      // An immutable response (a redirect made elsewhere): nothing of ours to frame.
+    }
+  }
+  return result;
+});
+
 export const startInstance = createStart(() => ({
   // Start installs CSRF protection for server functions only when there's no start.ts; keep it.
-  requestMiddleware: [createCsrfMiddleware({ filter: (ctx) => ctx.handlerType === "serverFn" }), trailingSlash],
+  requestMiddleware: [createCsrfMiddleware({ filter: (ctx) => ctx.handlerType === "serverFn" }), trailingSlash, noFraming],
 }));

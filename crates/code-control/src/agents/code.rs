@@ -54,15 +54,36 @@ pub(crate) const WORK_IDLE: Duration = Duration::from_secs(10 * 60);
 const CHANGE_EVENTS: [&str; 5] = ["change", "check", "landed", "queue", "review"];
 
 /// The API router, so the relay calls roll code's routes on a caller's behalf (with their token,
-/// routed in a cluster) the way MCP tools do. Added as a request extension by `api::router`.
+/// routed in a cluster) the way MCP tools do. Added as a request extension by `api::router`. When
+/// the host set one ([`crate::Code::relay_through`]), calls go through it instead: rolld's gate.
 #[derive(Clone)]
-pub struct ApiRouter(pub Router);
+pub struct ApiRouter(pub Router, pub Arc<std::sync::OnceLock<Router>>);
 
-/// Call the API as the request with `headers` (its token and agent headers).
-pub(super) async fn call(api: &ApiRouter, headers: &HeaderMap, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+/// What a relayed call carries from the request that caused it: the caller's headers (its token
+/// and agent headers, which the gate decides again) and the client's address the gate saw.
+#[derive(Clone)]
+pub struct Forward {
+    pub headers: HeaderMap,
+    extensions: axum::http::Extensions,
+}
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Forward {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &S) -> std::result::Result<Self, Self::Rejection> {
+        let mut extensions = axum::http::Extensions::new();
+        if let Some(ip) = parts.extensions.get::<roll_auth::ClientIp>() {
+            extensions.insert(*ip);
+        }
+        Ok(Forward { headers: parts.headers.clone(), extensions })
+    }
+}
+
+/// Call the API as the request `fwd` came from.
+pub(super) async fn call(api: &ApiRouter, fwd: &Forward, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut b = Request::builder().method(method).uri(path);
     for name in [header::AUTHORIZATION.as_str(), "x-roll-agent", "x-roll-user"] {
-        if let Some(v) = headers.get(name) {
+        if let Some(v) = fwd.headers.get(name) {
             b = b.header(name, v.clone());
         }
     }
@@ -70,8 +91,10 @@ pub(super) async fn call(api: &ApiRouter, headers: &HeaderMap, method: Method, p
         Some(v) => b.header(header::CONTENT_TYPE, "application/json").body(AxumBody::from(v.to_string())),
         None => b.body(AxumBody::empty()),
     };
-    let Ok(req) = req else { return (StatusCode::BAD_REQUEST, json!({ "error": "bad request" })) };
-    let resp = match api.0.clone().oneshot(req).await {
+    let Ok(mut req) = req else { return (StatusCode::BAD_REQUEST, json!({ "error": "bad request" })) };
+    req.extensions_mut().extend(fwd.extensions.clone());
+    let router = api.1.get().unwrap_or(&api.0).clone();
+    let resp = match router.oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
     };
@@ -270,7 +293,7 @@ async fn relink(code: &Code, owner_id: &str, machine_id: &str, thread: &str, upd
 
 /// What the relay adds to the reply of a `thread.publish` in a roll code repo `r`: the branch's
 /// change (linked to the thread), and with `land` what sending it to landing did.
-pub(super) async fn published(code: &Code, api: Option<&ApiRouter>, headers: &HeaderMap, m: &MachineRow, command: &Command, r: &RepoRow, reply: Reply) -> Reply {
+pub(super) async fn published(code: &Code, api: Option<&ApiRouter>, headers: &Forward, m: &MachineRow, command: &Command, r: &RepoRow, reply: Reply) -> Reply {
     let (Command::ThreadPublish { thread, land, .. }, Reply::Published(mut p)) = (command, reply.clone()) else { return reply };
     let (thread, land) = (thread.as_str(), *land);
     if p.branch == r.default_branch {
@@ -336,7 +359,7 @@ fn first_commit(code: &Code, r: &RepoRow, p: &mut agent_proto::Published) {
 /// The thread's work item is what its change does: linked on the sender's behalf (`PATCH
 /// /v1/code/changes/{id}` with `work_item`), so landing the change completes it. Only an item
 /// of the change's repo; a change already doing it is left as it is.
-async fn link_work(code: &Code, api: &ApiRouter, headers: &HeaderMap, m: &MachineRow, thread: &str, r: &RepoRow, c: &Change) {
+async fn link_work(code: &Code, api: &ApiRouter, headers: &Forward, m: &MachineRow, thread: &str, r: &RepoRow, c: &Change) {
     let work = match store::mirrored(code.db.sql(), &m.id, EntityKind::Thread, thread) {
         Ok(Some(agent_proto::Entity::Thread(t))) => t.work,
         _ => None,
@@ -352,7 +375,7 @@ async fn link_work(code: &Code, api: &ApiRouter, headers: &HeaderMap, m: &Machin
 }
 
 /// `POST /v1/code/changes/{id}/land` on the sender's behalf, as a [`Landing`].
-async fn send_to_land(api: &ApiRouter, headers: &HeaderMap, change_id: &str) -> Landing {
+async fn send_to_land(api: &ApiRouter, headers: &Forward, change_id: &str) -> Landing {
     let (status, v) = call(api, headers, Method::POST, &format!("/v1/code/changes/{}/land", seg(change_id)), Some(json!({}))).await;
     let error = v["error"].as_str().unwrap_or("").to_string();
     let (status, message, blockers) = match status {
@@ -515,7 +538,7 @@ fn working(code: &Code, l: &store::LinkRow) -> bool {
 
 /// `POST /v1/code/agents/{owner}/machines/{machine}/projects`: create a roll code repo (or take
 /// the one of that name) and clone it onto the machine as a project, in one step.
-pub(super) async fn create_project(code: &Arc<Code>, api: Option<&ApiRouter>, caller: &Caller, headers: &HeaderMap, o: &Owner, m: &MachineRow, b: &Value) -> Result<Reply> {
+pub(super) async fn create_project(code: &Arc<Code>, api: Option<&ApiRouter>, caller: &Caller, headers: &Forward, o: &Owner, m: &MachineRow, b: &Value) -> Result<Reply> {
     let api = api_of(api)?;
     let id = b.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty() && s.len() <= 128).ok_or_else(|| Error::Invalid("id must be 1 to 128 characters".into()))?;
     let repo = b.get("repo").filter(|r| r.is_object()).ok_or_else(|| Error::Invalid("repo is required: {name, description?, visibility?}".into()))?;
@@ -573,7 +596,7 @@ fn work_ref(v: &Value) -> Option<WorkRef> {
 /// `POST /v1/code/agents/{owner}/threads/{thread}/work`: the thread takes a work item: `work`
 /// (`wi_…` or `owner/repo#N`, already claimed or not) or the next one `claim`ed from `repo`.
 /// Answers the work item, or 204 when there's nothing to claim.
-pub(super) async fn take_work(code: &Code, api: Option<&ApiRouter>, caller: &Caller, headers: &HeaderMap, o: &Owner, thread: &str, b: &Value) -> Result<Option<Value>> {
+pub(super) async fn take_work(code: &Code, api: Option<&ApiRouter>, caller: &Caller, headers: &Forward, o: &Owner, thread: &str, b: &Value) -> Result<Option<Value>> {
     let api = api_of(api)?;
     let (machine_id, _) = store::thread_of(code.db.sql(), &o.id, thread)?.ok_or_else(|| Error::NotFound(format!("thread {thread}")))?;
     let machine = store::machine(code.db.sql(), &machine_id)?.filter(|m| !m.revoked).ok_or_else(|| Error::NotFound(format!("thread {thread}")))?;

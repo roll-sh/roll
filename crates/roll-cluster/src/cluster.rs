@@ -1269,7 +1269,7 @@ impl Cluster {
     }
 
     pub fn sign(&self, method: &axum::http::Method, path_and_query: &str) -> axum::http::HeaderMap {
-        sign::sign(&self.inner.cfg.secret, self.node_id(), method, path_and_query, None, None)
+        sign::sign(&self.inner.cfg.secret, self.node_id(), method, path_and_query, None, sign::Carried::default())
     }
 
     /// Check an internal request's signature (see [`crate::sign`]); the sender's node id.
