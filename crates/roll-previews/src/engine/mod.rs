@@ -338,7 +338,27 @@ fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&
 
 /// Whether a change gets a preview under the project's rules (approval aside).
 fn wants(s: &Settings, c: &ChangeInfo) -> bool {
-    c.open && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*"))
+    if !c.open {
+        return false;
+    }
+    match title_says(&c.title) {
+        Some(asked) => asked,
+        None => (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")),
+    }
+}
+
+/// What a change's title says about its preview, as Render's `[skip render]` does: `[skip preview]`
+/// (or `[preview skip]`, `[no preview]`) skips it, and `[preview]` asks for one the project's
+/// `branches` or `drafts` rules would leave out. `None` leaves it to the rules.
+fn title_says(title: &str) -> Option<bool> {
+    let t = title.to_ascii_lowercase();
+    if ["[skip preview]", "[preview skip]", "[no preview]"].iter().any(|m| t.contains(m)) {
+        Some(false)
+    } else if t.contains("[preview]") {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// The secrets environment of a preview: its branch name (`pv-<id>`, within roll secrets'
@@ -385,6 +405,9 @@ mod tests {
         assert!(wants(&s, &ch));
         assert!(!wants(&s, &ChangeInfo { branch: Some("fix/x".into()), ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { draft: true, ..ch.clone() }));
+        assert!(!wants(&s, &ChangeInfo { title: "Fix typo [Skip Preview]".into(), ..ch.clone() }));
+        assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
+        assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
         assert_eq!(env_suffix("prj_ab-c"), "PRJ_AB_C");
     }
 }

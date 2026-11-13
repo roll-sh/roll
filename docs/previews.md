@@ -67,6 +67,10 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - A change gets a preview when the project's rules match it: its branch matches `branches`
     (globs, `*` by default), it is not a draft unless `drafts`, and it is trusted or its head is
     approved.
+  - The change's title can say otherwise (Render's `[skip render]`): `[skip preview]` (or
+    `[no preview]`) skips it, and deletes the preview it has; `[preview]` asks for one the
+    `branches` or `drafts` rules would leave out. A fork still waits for `approve-run`. GitHub
+    pull requests carry their title into the change, so the same words work there.
   - `roll preview create --repo acme/web --branch feat-x` (or `POST /v1/previews`) makes one for a
     branch with no change. It lives until it is deleted or its TTL passes.
 - **Update**: every new head redeploys the services of the change's repo at that head. Services
@@ -713,6 +717,7 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- `[skip preview]` and `[preview]` in a change's title;
 - the same branch across a project's repos (another repo runs its own branch of the change's name,
   and a push to it reaches the preview);
 - a look at the Previews tab and sheet from screenshots of the real thing (each row says its state
@@ -733,12 +738,15 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Skipping or asking for a preview per change**: `[skip preview]` in a change's title or a
-   `no-preview` label skips it (Render's `[skip render]`, Vercel's ignored builds); with
-   `branches` narrowed, a `preview` label asks for one anyway.
-2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+1. **Path filters**: `paths` and `ignore_paths` globs on what a change touches (Render's build
+   filters, Vercel's ignored build step), so a docs-only change in a monorepo gets no preview, and
+   a push that touches only ignored paths doesn't redeploy. The change's paths are everything since
+   its merge base (as reviews read them), from roll code's diff.
+2. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
+   words do now. roll code changes have no labels yet; GitHub's go through the mirror.
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

@@ -119,6 +119,9 @@ function Form({
           <input value={branches} onChange={(e) => setBranches(e.target.value)} className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
         </Field>
         <Toggle label="Draft changes too" checked={s.drafts} onChange={(v) => set("drafts", v)} />
+        <p className="text-muted">
+          A change's title overrides these: <span className="font-mono text-[12px]">[skip preview]</span> skips it, <span className="font-mono text-[12px]">[preview]</span> asks for one.
+        </p>
       </Section>
 
       <Section title="Data">
