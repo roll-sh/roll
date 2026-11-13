@@ -19,6 +19,7 @@ pub mod rate;
 pub mod sinks;
 pub mod redact;
 pub mod store;
+pub mod tighten;
 
 use axum::Json;
 use axum::http::StatusCode;

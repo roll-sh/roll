@@ -250,7 +250,8 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
   lookups, `more_like_this`, lookup runtime fields, `indexed_shape`, templates after rendering, and
   the bodies of reindex, ES|QL, SQL and the other query-bearing APIs) and a body's `_index` values
   stay within `{index}` (search's `control.rs`, `per_index_routes`; feature/roll-search 5db7c2602
-  and fae055c31). A document an ingest pipeline moves to another index isn't re-checked there yet.
+  and fae055c31), and a document an ingest pipeline moves (`_index`, `reroute`) is checked again
+  as a write at the index it lands in (ea6be2f0f).
 - An approval about some indices names them (`cl_1/logs-a`), and remembering it allows those
   indices only.
 
@@ -476,6 +477,22 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
+### Tighten to what it used
+
+A token's page proposes its rules narrowed to what its allowed requests used in the last 30 days
+(`GET /v1/access/tokens/{id}/tighten?days=`, `roll_access::tighten`), as AWS's access analyzer
+writes a policy from activity:
+
+- Each proposed rule is within the rule it came from: the same product (one rule per product a `*`
+  rule was used for), environments, paths and effects (`ask` stays `ask`), only the actions used,
+  and the resources used, by id, when the rule named every resource or ids (at most 20).
+- A rule placed by project keeps its project: a resource can leave the project, and its id would
+  still match. An action used without a resource (a list, the product as a whole) keeps the rule's
+  resources. What a person allowed for a while is never made permanent.
+- The server checks the proposal is covered by the token's rules, else proposes them unchanged;
+  a token that made no allowed requests is proposed unchanged (revoke it instead).
+- Applying it is a `PATCH` of `rules`.
+
 ## Leaked tokens
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
@@ -547,6 +564,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |

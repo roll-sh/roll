@@ -25,6 +25,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/tokens", get(list).post(create))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
+        .route("/v1/access/tokens/{id}/tighten", get(tighten))
         .route("/v1/access/approvals", get(approvals))
         .route("/v1/access/approvals/{id}", get(approval))
         .route("/v1/access/approvals/{id}/approve", post(approve))
@@ -201,6 +202,22 @@ async fn list(State(a): S) -> crate::Result<Json<Value>> {
 
 async fn get_one(State(a): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     Ok(Json(json!(blocking(a, move |a| a.store.get(&id)).await?)))
+}
+
+#[derive(Deserialize)]
+struct TightenQuery {
+    /// The days of activity it's narrowed to (1-90; default 30).
+    days: Option<i64>,
+}
+
+/// Its rules narrowed to what its allowed requests used ([`crate::tighten`]): a proposal, never
+/// wider; applying it is a `PATCH` of `rules`.
+async fn tighten(State(a): S, Path(id): Path<String>, Query(q): Query<TightenQuery>) -> crate::Result<Json<Value>> {
+    let days = q.days.unwrap_or(30).clamp(1, 90);
+    let since = code_sql::now_ms() - days * 86_400_000;
+    let (grant, used) = blocking(a, move |a| Ok((a.store.get(&id)?, a.store.used(&id, since)?))).await?;
+    let rules = crate::tighten::tighten(&grant.rules, &used);
+    Ok(Json(json!({ "since": since, "days": days, "used": used, "rules": rules, "narrower": rules != grant.rules })))
 }
 
 async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes) -> crate::Result<Response> {

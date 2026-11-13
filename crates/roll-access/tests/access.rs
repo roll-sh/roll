@@ -886,7 +886,7 @@ async fn approvals_can_be_remembered() {
 #[tokio::test]
 async fn a_rule_can_grant_some_indices() {
     let d = Daemon::new(50);
-    let (logs, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*" }], "actions": { "read": "allow" } }]), json!({})).await;
+    let (logs, logs_id) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*" }], "actions": { "read": "allow" } }]), json!({})).await;
     let search = |t: &str, index: &str| {
         let (d, t, path) = (&d, t.to_string(), format!("/v1/search/clusters/cl_1/indices/{index}/search"));
         async move { d.call(&t, Method::POST, &path, Some(json!({}))).await.0 }
@@ -897,6 +897,11 @@ async fn a_rule_can_grant_some_indices() {
     assert_eq!(search(&logs, "*").await, StatusCode::FORBIDDEN);
     assert_eq!(d.call(&logs, Method::GET, "/v1/search/clusters/cl_1/indices", None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(d.call(&logs, Method::POST, "/v1/search/clusters/cl_1/request", Some(json!({}))).await.0, StatusCode::FORBIDDEN);
+    // Tightened to what it used: the two expressions it searched, nothing else.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{logs_id}/tighten"), None).await;
+    assert_eq!(t["narrower"], true, "{t}");
+    assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*,-logs-old" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
 
     // Asked about one index and remembered: that index, not its neighbours.
     let (asker, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "ask" } }]), json!({})).await;
