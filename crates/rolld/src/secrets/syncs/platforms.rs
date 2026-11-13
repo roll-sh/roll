@@ -35,6 +35,9 @@ pub(super) struct Http {
     /// `https://secretmanager.googleapis.com` and `https://oauth2.googleapis.com/token`.
     google: String,
     google_token: String,
+    /// `https://login.microsoftonline.com`; the vault's own host when `None`.
+    azure_login: String,
+    azure_vault: Option<String>,
 }
 
 impl Http {
@@ -45,6 +48,8 @@ impl Http {
         h.heroku = "https://api.heroku.com".into();
         h.google = "https://secretmanager.googleapis.com".into();
         h.google_token = "https://oauth2.googleapis.com/token".into();
+        h.azure_login = "https://login.microsoftonline.com".into();
+        h.azure_vault = None;
         h
     }
 
@@ -56,7 +61,7 @@ impl Http {
             .user_agent("roll-secrets-sync")
             .build()
             .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token") }
+        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()) }
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -368,7 +373,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -652,6 +657,121 @@ impl SyncTarget for GoogleSecrets {
                 let (status, got) = self.0.send(self.0.client.delete(format!("{base}/{id}")).bearer_auth(&token), &what).await?;
                 if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
                     return Err(Error::Link(format!("{what}: deleting {id}: {status} {}", status_of(&got))));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── azure-key-vault ──
+
+/// One Azure Key Vault secret per key (`_` becomes `-`: the only characters Key Vault names allow
+/// are letters, digits and `-`, and roll's keys never hold a `-`). Secrets roll creates carry the
+/// tag `managed-by=roll-secrets`; only those are written or deleted.
+pub(super) struct AzureKeyVault(pub(super) Http);
+
+struct AkvTarget {
+    vault: String,
+    tenant: String,
+    client_id: String,
+    secret_key: String,
+}
+
+const AKV_API: &str = "api-version=7.4";
+
+impl AzureKeyVault {
+    fn target(&self, t: &Json) -> Result<AkvTarget> {
+        let [vault, tenant, client, secret] = target("azure-key-vault", t, [("vault", true), ("tenant_id", true), ("client_id", true), ("client_secret_key", true)])?;
+        let vault = vault.unwrap_or_default();
+        if !(3..=24).contains(&vault.len()) || !ident(&vault, 24, "-") {
+            return Err(bad("vault is a Key Vault's name (3–24 letters, digits and -)"));
+        }
+        let tenant = tenant.unwrap_or_default();
+        if !ident(&tenant, 64, "-.") {
+            return Err(bad("tenant_id is a Microsoft Entra tenant's id or domain"));
+        }
+        let client_id = client.unwrap_or_default();
+        if !ident(&client_id, 64, "-") {
+            return Err(bad("client_id is an app registration's client id"));
+        }
+        Ok(AkvTarget { vault, tenant, client_id, secret_key: key_field("azure-key-vault", "client_secret_key", secret)? })
+    }
+}
+
+impl SyncTarget for AzureKeyVault {
+    fn kind(&self) -> &str {
+        "azure-key-vault"
+    }
+    fn label(&self) -> &str {
+        "Azure Key Vault"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "vault", label: "Vault name", required: true, placeholder: "shop-prod" },
+            SyncField { name: "tenant_id", label: "Tenant id", required: true, placeholder: "contoso.onmicrosoft.com" },
+            SyncField { name: "client_id", label: "App registration's client id", required: true, placeholder: "00000000-0000-0000-0000-000000000000" },
+            SyncField { name: "client_secret_key", label: "Key holding its client secret", required: true, placeholder: "AZURE_SYNC_CLIENT_SECRET" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["client_secret_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let t = self.target(t)?;
+        let secret = credential(p, &t.secret_key)?;
+        too_long(p, 25_000, "Key Vault's 25 KB")?;
+        let what = format!("azure-key-vault {}", t.vault);
+        let vault = self.0.azure_vault.clone().unwrap_or_else(|| format!("https://{}.vault.azure.net", t.vault));
+        let url = |name: &str, rest: &str| format!("{vault}{rest}/{}?{AKV_API}", name.replace('_', "-"));
+        // Key Vault's `error.code` (`SecretNotFound`, `Forbidden`), never the answer.
+        let code_of = |v: &Json| v["error"]["code"].as_str().unwrap_or_default().to_string();
+        block_on(async {
+            let form = format!(
+                "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
+                urlencoding::encode(&t.client_id),
+                urlencoding::encode(secret),
+                urlencoding::encode("https://vault.azure.net/.default")
+            );
+            let login = self.0.client.post(format!("{}/{}/oauth2/v2.0/token", self.0.azure_login, t.tenant)).header("content-type", "application/x-www-form-urlencoded").body(form);
+            let (status, v) = self.0.send(login, &what).await?;
+            let token = match v["access_token"].as_str() {
+                Some(tok) if status.is_success() => tok.to_string(),
+                _ => return Err(Error::Link(format!("{what}: signing in: {status} {}", v["error"].as_str().unwrap_or_default()))),
+            };
+            let ours = |v: &Json| v["tags"]["managed-by"] == "roll-secrets";
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                let (status, got) = self.0.send(self.0.client.get(url(name, "/secrets")).bearer_auth(&token), &what).await?;
+                if status.is_success() && !ours(&got) {
+                    return Err(Error::Link(format!("{what}: {name} exists and roll didn't create it (no managed-by=roll-secrets tag): roll never writes to it")));
+                }
+                let body = json!({ "value": v.expose(), "tags": { "managed-by": "roll-secrets" }, "contentType": "roll-secrets" });
+                let mut put = self.0.send(self.0.client.put(url(name, "/secrets")).bearer_auth(&token).json(&body), &what).await?;
+                // Deleted by roll before, and kept by the vault's soft delete: recover, then set.
+                if put.0 == reqwest::StatusCode::CONFLICT && code_of(&put.1) == "Conflict" {
+                    let (status, got) = self.0.send(self.0.client.post(format!("{vault}/deletedsecrets/{}/recover?{AKV_API}", name.replace('_', "-"))).bearer_auth(&token), &what).await?;
+                    if !status.is_success() {
+                        return Err(Error::Link(format!("{what}: recovering {name}: {status} {}", code_of(&got))));
+                    }
+                    put = self.0.send(self.0.client.put(url(name, "/secrets")).bearer_auth(&token).json(&body), &what).await?;
+                }
+                if !put.0.is_success() {
+                    return Err(Error::Link(format!("{what}: {name}: {} {}", put.0, code_of(&put.1))));
+                }
+            }
+            for name in p.removed {
+                let (status, got) = self.0.send(self.0.client.get(url(name, "/secrets")).bearer_auth(&token), &what).await?;
+                if status == reqwest::StatusCode::NOT_FOUND || (status.is_success() && !ours(&got)) {
+                    continue;
+                }
+                let (status, got) = self.0.send(self.0.client.delete(url(name, "/secrets")).bearer_auth(&token), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {name}: {status} {}", code_of(&got))));
                 }
             }
             Ok(())
@@ -952,7 +1072,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -1267,6 +1387,20 @@ mod tests {
             // A form (Google's token request) is kept as its text.
             seen.lock().unwrap().push((method.to_string(), pq.clone(), serde_json::from_slice(&body).unwrap_or_else(|_| Json::String(String::from_utf8_lossy(&body).into()))));
             // Google: the token endpoint, then Secret Manager (OLD is roll's, NEW doesn't exist yet).
+            // Azure: sign-in, then Key Vault (OLD is roll's, NEW doesn't exist yet).
+            if pq == "/contoso.onmicrosoft.com/oauth2/v2.0/token" {
+                return (StatusCode::OK, axum::Json(json!({ "access_token": "akv.test", "token_type": "Bearer" })));
+            }
+            if pq.starts_with("/secrets/") {
+                if headers.get("authorization").and_then(|a| a.to_str().ok()) != Some("Bearer akv.test") {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": { "code": "Unauthorized" } })));
+                }
+                return match (method.as_str(), pq.as_str()) {
+                    ("GET", "/secrets/NEW?api-version=7.4") => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": { "code": "SecretNotFound" } }))),
+                    ("GET", "/secrets/OLD?api-version=7.4") => (StatusCode::OK, axum::Json(json!({ "tags": { "managed-by": "roll-secrets" } }))),
+                    _ => (StatusCode::OK, axum::Json(json!({}))),
+                };
+            }
             if pq == "/token" {
                 return (StatusCode::OK, axum::Json(json!({ "access_token": "ya29.test", "expires_in": 3600 })));
             }
@@ -1382,6 +1516,27 @@ mod tests {
         key.verify(signed.as_bytes(), &rsa::pkcs1v15::Signature::try_from(b64.decode(sig).unwrap().as_slice()).unwrap()).expect("RS256 by the service account");
         let claims: Json = serde_json::from_slice(&b64.decode(signed.split('.').nth(1).unwrap()).unwrap()).unwrap();
         assert_eq!((claims["iss"].as_str(), claims["aud"].as_str()), (Some("sync@shop-prod.iam.gserviceaccount.com"), Some(format!("{base}/token").as_str())));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn azure_key_vault_signs_in_with_the_client_secret_and_writes_only_its_own_secrets() {
+        let (base, seen) = mock().await;
+        let t = json!({ "vault": "shop-prod", "tenant_id": "contoso.onmicrosoft.com", "client_id": "app-1", "client_secret_key": "AZURE_SECRET" });
+        push(Arc::new(AzureKeyVault(http(&base))), t, &[("AZURE_SECRET", "s3cret&=")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        assert_eq!(
+            route,
+            [
+                ("POST", "/contoso.onmicrosoft.com/oauth2/v2.0/token"),
+                ("GET", "/secrets/NEW?api-version=7.4"),
+                ("PUT", "/secrets/NEW?api-version=7.4"),
+                ("GET", "/secrets/OLD?api-version=7.4"),
+                ("DELETE", "/secrets/OLD?api-version=7.4"),
+            ]
+        );
+        assert!(calls[0].2.as_str().unwrap().contains("client_secret=s3cret%26%3D&scope=https%3A%2F%2Fvault.azure.net%2F.default"), "{}", calls[0].2);
+        assert_eq!((calls[2].2["value"].as_str(), calls[2].2["tags"].clone()), (Some("v-123"), json!({ "managed-by": "roll-secrets" })));
     }
 
     #[tokio::test(flavor = "multi_thread")]

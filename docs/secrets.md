@@ -800,7 +800,7 @@ open it.
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
 they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
-Railway, Heroku, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, a Kubernetes Secret, an endpoint
+Railway, Heroku, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -864,6 +864,7 @@ last_synced_at, error}`:
 | `cloudflare` | `{account: "<account id>", script: "<worker>", token_key: "CLOUDFLARE_API_TOKEN"}` | A Worker's secrets (`secret_text`) |
 | `aws-ssm` | `{region, prefix: "/shop/production/", access_key_id_key, secret_access_key_key, kms_key_id?}` | Parameter Store `SecureString`s named `<prefix><name>` |
 | `google-secret-manager` | `{project, prefix?, service_account_key}` | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
+| `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
 | `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
 
 ### `github`
@@ -880,7 +881,7 @@ last_synced_at, error}`:
 - GitHub's names are `[A-Za-z_][A-Za-z0-9_]*` and may not start with `GITHUB_`; a key that would is
   an error naming it (rename it or use `keys`/`prefix`).
 
-### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`, `aws-secrets-manager`, `google-secret-manager`)
+### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`, `aws-secrets-manager`, `google-secret-manager`, `azure-key-vault`)
 
 A platform's own credential is never in the sync. The target names **keys of the sync's own
 environment and folder** that hold it (`token_key`; for AWS `access_key_id_key` and
@@ -913,6 +914,14 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   automatic replication), and `addVersion` with the value; per removed key, delete the secret only
   when it carries that label. A secret that exists without the label is someone else's: roll never
   writes to it. Errors carry Google's `error.status`, never an answer.
+- **`azure-key-vault`**: rolld signs in as the app registration (client credentials at
+  `login.microsoftonline.com`, scope `vault.azure.net`), with its client secret from the key
+  `client_secret_key` names, then per changed key: `GET` the secret (a name's `_` becomes `-`, since
+  Key Vault allows only letters, digits and `-`, and roll's keys never hold a `-`), and `PUT` the
+  value with the tag `managed-by=roll-secrets`; per removed key, delete it only when it carries the
+  tag. A secret roll deleted earlier is kept by the vault's soft delete: setting it again recovers it
+  first. One that exists without the tag is someone else's, never written. Errors carry Key Vault's
+  `error.code`, never an answer.
 - **`aws-secrets-manager`**: one secret holding the environment's values as a JSON object (what an
   app reads with one `GetSecretValue`), sent whole on each push, so a removed key is simply gone
   from it. `DescribeSecret`, then `PutSecretValue` on a secret roll created (tagged
@@ -1421,7 +1430,7 @@ Done and in PR #20:
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Heroku, Cloudflare Workers, AWS
-  Parameter Store and Secrets Manager, Google Secret Manager, Kubernetes, sealed webhooks and deploy notifications;
+  Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
   identities pinned to client addresses; encrypted project backup and restore;
 - the dashboard's Secrets surface, with the deployment key's source and a rotation's progress,
@@ -1444,8 +1453,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Azure Key Vault sync**: one Key Vault secret per key, an app registration's client secret held
-   as a roll secret.
 
 Waiting on other pull requests:
 
