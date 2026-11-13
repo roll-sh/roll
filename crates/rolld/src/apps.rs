@@ -260,7 +260,11 @@ impl Sources for CodeSources {
         blocking(move || {
             let r = this.repo(&repo)?;
             let v = this.0.get_statuses(&r, &sha).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let theirs: Vec<&serde_json::Value> = v["statuses"].as_array().into_iter().flatten().filter(|s| !s["context"].as_str().unwrap_or("").starts_with("roll/apps")).collect();
+            // Deploy statuses aren't checks of the code: roll apps' own, and roll previews'
+            // (`roll/preview`, about a preview environment: pending while it waits for a slot,
+            // failed for roll's own reasons), which would otherwise hold production back.
+            let check = |ctx: &str| !ctx.starts_with("roll/apps") && !ctx.starts_with("roll/preview");
+            let theirs: Vec<&serde_json::Value> = v["statuses"].as_array().into_iter().flatten().filter(|s| check(s["context"].as_str().unwrap_or(""))).collect();
             Ok(if theirs.is_empty() {
                 Ci::None
             } else if let Some(f) = theirs.iter().find(|s| matches!(s["state"].as_str(), Some("failure" | "error"))) {

@@ -615,7 +615,9 @@ mirrored to GitHub with the rest), pending while it's on its way and then succes
 linking to the environment, as Railway's and Vercel's GitHub deployments do. An environment with
 `wait_for_ci` (the Environment panel, `roll apps env --wait-for-ci true`) deploys a push only
 once its commit's checks pass (Railway's "Wait for CI", Render's "after CI checks pass"): the
-statuses other than roll apps' own. With none, it deploys at once. One that's pending waits (a
+statuses other than roll's deploy statuses (roll apps' own `roll/apps/…`, and roll previews'
+`roll/preview`, which is about a preview environment, not the code). With none, it deploys at
+once. One that's pending waits (a
 newer push takes its place, as it would supersede the deploy; `Environment.waiting_for_ci` names
 it), is settled by the landing follower every couple of seconds, and is dropped after an hour. A
 failed one isn't deployed, which the environment's log says.
