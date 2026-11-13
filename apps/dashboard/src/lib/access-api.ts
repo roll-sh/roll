@@ -159,6 +159,8 @@ export interface AuditEvent {
   args: unknown;
   ip: string | null;
   duration_ms: number;
+  /** What made it: an MCP client's name and version, else its User-Agent (what it says it is). */
+  client?: string;
 }
 
 export interface Preset {

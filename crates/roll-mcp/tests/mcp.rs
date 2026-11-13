@@ -136,7 +136,7 @@ async fn tools_follow_the_tokens_rules() {
 
     // A client that opens URLs gets the approval as one to open (MCP's URL elicitation), named by
     // the session id initialize gave it.
-    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": { "elicitation": { "url": {} } } } });
+    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": { "elicitation": { "url": {} } }, "clientInfo": { "name": "cursor", "version": "1.2" } } });
     let (_, h, _) = d.http(&asker, Method::POST, "/v1/mcp", Some(init)).await;
     let session = h["mcp-session-id"].to_str().unwrap().to_string();
     assert!(session.starts_with("roll-url-1.") && session.len() > 20, "unique per session: {session}");
@@ -145,6 +145,10 @@ async fn tools_follow_the_tokens_rules() {
     let e = &out["error"]["data"]["elicitations"][0];
     assert_eq!((out["error"]["code"].as_i64(), e["mode"].as_str()), (Some(-32042), Some("url")), "{out}");
     assert!(e["url"].as_str().unwrap().contains(e["elicitationId"].as_str().unwrap()), "{out}");
+    // And it's named in the audit log by what it called itself (the session id carries it).
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (_, _, log) = d.http(OPERATOR, Method::GET, "/v1/access/audit?source=mcp&limit=1", None).await;
+    assert_eq!(log[0]["client"], "cursor 1.2", "{log}");
 
     // Every call is audited with its tool and redacted arguments.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

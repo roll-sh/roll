@@ -481,6 +481,16 @@ static TOOLS: &[Tool] = &[
     t("secrets_reveal", "Reveal a secret", "A secret's value.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_set", "Set a secret", "Create or change a secret's value.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), breq("value", Ty::Str, "The value"), q("path", Ty::Str, "Folder")]),
     t("secrets_delete", "Delete a secret", "Delete a secret.", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
+    t("secrets_health", "Secrets health", "What needs fixing in a project's secrets: expired, missing, exposed, weak, expiring, stale or unread ones, by name (never values), in the environments you may read.", "secrets", "GET", "/v1/secrets/projects/{project}/health", &[
+        SECRET_PROJECT,
+        q("code", Ty::Bool, "Also keys no repository on the project's canvas mentions (needs code read on every one)"),
+    ]),
+    t("secrets_findings", "Secrets to fix", "Every project's secrets health findings you may read, leaving out projects with none.", "secrets", "GET", "/v1/secrets/findings", &[]),
+    t("secrets_find", "Find a key", "Where a key is set (project, environment, folder) across the projects you may read: before rotating it.", "secrets", "GET", "/v1/secrets/search", &[qreq("key", "The key, e.g. STRIPE_KEY")]),
+    t("secrets_scan", "Scan for committed secrets", "Which of these values are a project's stored secrets (by key, environment and path, never the value): check a diff before committing it. Only values you may reveal are confirmed.", "secrets", "POST", "/v1/secrets/projects/{project}/leaks", &[
+        SECRET_PROJECT,
+        breq("candidates", Ty::Arr, "Strings from the diff to check (at most 20,000)"),
+    ]),
     // ── apps (roll apps) ──
     t("apps_list_services", "List services", "App services.", "apps", "GET", "/v1/apps/services", &[]),
     t(

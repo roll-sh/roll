@@ -724,6 +724,7 @@ async fn the_audit_log_streams_to_a_sink() {
         args: None,
         ip: None,
         duration_ms: 1,
+        client: None,
     };
     for n in 0..3 {
         d.access.store.audit(&row(n));
@@ -1074,6 +1075,11 @@ async fn a_rule_can_grant_some_indices() {
     assert_eq!(search(&asker, "logs-a").await, StatusCode::OK);
     let (_, again) = d.call(&asker, Method::POST, "/v1/search/clusters/cl_1/indices/logs-b/search", Some(json!({}))).await;
     assert_eq!(again["code"], "approval_pending", "logs-b still asks: {again}");
+    // A request says what made it (its User-Agent), and the log keeps it.
+    d.send(&logs, Method::POST, "/v1/search/clusters/cl_1/indices/logs-ua/search", Some(json!({})), &[("user-agent", "roll-cli/0.9\tforged")]).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (_, ua) = d.call(OPERATOR, Method::GET, "/v1/access/audit?resource=cl_1/logs-ua", None).await;
+    assert_eq!(ua[0]["client"], "roll-cli/0.9forged", "one line: {ua}");
 }
 
 /// A link hands the linked resource's credentials to a service (its variables): it needs reveal
@@ -1192,6 +1198,7 @@ async fn the_audit_log_keeps_its_days() {
         args: None,
         ip: None,
         duration_ms: 1,
+        client: None,
     };
     for n in 0..12_000 {
         d.access.store.audit(&row(n, now - 91 * day + n));
