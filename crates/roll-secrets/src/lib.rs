@@ -350,6 +350,8 @@ impl Secrets {
         // Typed keys (required.rs).
         db.add_column("required", "type", "TEXT")?;
         db.add_column("required", "pattern", "TEXT")?;
+        // Rotation reminders (notices.rs): when an environment was last reminded.
+        db.add_column("environments", "reminded_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
     }

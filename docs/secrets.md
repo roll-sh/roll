@@ -320,6 +320,12 @@ it's **stale**: unchanged for longer than the environment's `max_age_days`
 log (reveal, export, resolve and sync pushes) over the last 90 days; nothing is decrypted. A stale
 key is only flagged: it doesn't stop `roll run`, a deploy or a check.
 
+**Rotation reminders.** An environment with a `max_age_days` limit and a notify URL (its
+protection policy's `notify_url`) gets one notice a day while it has stale keys: their names (up to
+20, then a count), the limit and a link, through the same outbox and retries as approval notices.
+Live and dynamic links don't count (they change on their own); managed ones do. Two nodes never
+both remind: the day is claimed in the same write that queues the notice.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a

@@ -734,6 +734,21 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     assert_eq!((used["key"].as_str(), used["reads_30d"].as_i64(), used["last_read_by"].as_str(), used["stale"].as_bool()), (Some("USED"), Some(1), Some("operator"), Some(false)));
     let idle = api.ok(Method::GET, "/environments/production/insights?path=/old", None).await;
     assert_eq!((idle["keys"][0]["key"].as_str(), idle["keys"][0]["last_read_at"].clone()), (Some("IDLE"), Value::Null));
+
+    // An environment with a limit and somewhere to say so is reminded of its stale keys, once a day.
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    api.db.write(|c| c.execute("UPDATE secrets SET updated_at = updated_at - 100 * 86400000 WHERE key = 'USED'", ())).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || {
+        s.sweep().unwrap();
+        s.sweep().unwrap();
+    })
+    .await
+    .unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one reminder a day");
+    assert_eq!((sent[0]["stale"].clone(), sent[0]["max_age_days"].as_i64()), (json!(["USED"]), Some(90)));
+    assert!(!sent[0].to_string().contains("\"u\""), "names, never values");
 }
 
 #[tokio::test]
