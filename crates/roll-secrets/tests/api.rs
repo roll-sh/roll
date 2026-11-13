@@ -806,6 +806,15 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     assert_eq!(sent[0]["expiring"], json!([{ "key": "CERT", "expires_at": soon }]));
     assert!(sent[0]["text"].as_str().unwrap().contains("CERT in 3 days"), "{}", sent[0]["text"]);
     assert!(!sent[0].to_string().contains("\"u\"") && !sent[0].to_string().contains("\"c2\""), "names, never values");
+
+    // A credential anyone could guess is flagged, to whoever may reveal it.
+    api.set("staging", "DB_PASSWORD", "Password1").await;
+    let weak = |v: &Value| v["keys"].as_array().unwrap().iter().find(|k| k["key"] == "DB_PASSWORD").map(|k| k["weak"].clone());
+    let i = api.ok(Method::GET, "/environments/staging/insights", None).await;
+    assert_eq!(weak(&i), Some(json!("a common password")));
+    let token = api.ok(Method::POST, "/tokens", Some(json!({ "name": "lint", "actions": ["read"] }))).await;
+    let (_, i) = api.req(Method::GET, "/environments/staging/insights", None, token["token"].as_str()).await;
+    assert_eq!(weak(&i), Some(Value::Null));
 }
 
 #[tokio::test]

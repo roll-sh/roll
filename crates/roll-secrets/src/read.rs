@@ -37,6 +37,8 @@ pub(crate) struct Row {
     /// The references in the value, as written (`None`: a row from before they were kept).
     pub refs: Option<Vec<String>>,
     pub expires_at: Option<i64>,
+    /// Why its value is easy to guess (strength.rs), if it is.
+    pub weak: Option<String>,
 }
 
 impl Row {
@@ -50,7 +52,7 @@ impl Row {
     }
 }
 
-const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id, expires_at";
+const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id, expires_at, weak";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     Ok(Row {
@@ -70,6 +72,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         refs: r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()),
         project_id: r.get(14)?,
         expires_at: r.get(15)?,
+        weak: r.get(16)?,
     })
 }
 
@@ -118,6 +121,9 @@ pub struct Secret {
     pub overridden: bool,
     /// When the value stops working outside roll (ms), if someone said.
     pub expires_at: Option<i64>,
+    /// Why its value is easy to guess: only for a caller who may reveal it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weak: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -284,7 +290,8 @@ impl Secrets {
     /// `e` as the API shows it. Its fingerprint only to a caller who may reveal it: a writer
     /// could otherwise test guesses against values it can't read.
     fn secret_of(&self, dek: &Dek, project: &str, e: Entry, caller: &Caller) -> Secret {
-        let fp = if caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path)) { e.row.fp.clone() } else { String::new() };
+        let reveal = caller.allows(Action::Reveal, &Scope::at(project, &e.env, &e.row.path));
+        let fp = if reveal { e.row.fp.clone() } else { String::new() };
         let references = e.row.references(dek, project);
         Secret {
             id: e.row.id,
@@ -302,6 +309,7 @@ impl Secrets {
             source: e.source,
             overridden: e.overridden,
             expires_at: e.row.expires_at,
+            weak: if reveal { e.row.weak } else { None },
         }
     }
 

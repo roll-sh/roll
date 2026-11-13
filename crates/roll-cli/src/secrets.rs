@@ -1312,6 +1312,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 };
                 let exposed: Vec<String> = k["exposed_in"].as_array().into_iter().flatten().map(s).collect();
                 let exposed = if exposed.is_empty() { String::new() } else { format!("  ALSO IN {}", exposed.join(", ")) };
+                let exposed = match k["weak"].as_str() {
+                    Some(w) => format!("{exposed}  WEAK ({w})"),
+                    None => exposed,
+                };
                 println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}{expiry}{exposed}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
             }
         }

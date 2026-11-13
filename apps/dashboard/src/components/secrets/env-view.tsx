@@ -580,6 +580,11 @@ function SecretRow({
             </span>
           ))}
           {s.expires_at != null && <ExpiryMark at={s.expires_at} />}
+          {s.weak && (
+            <span className="shrink-0 rounded border border-danger/40 px-1 font-mono text-[10px] text-danger" title={`Easy to guess: ${s.weak}. Generate one (roll secrets set ${s.key} --generate 48).`}>
+              weak
+            </span>
+          )}
           {!!insight?.exposed_in.length && (
             <span className="shrink-0 rounded border border-danger/40 px-1 font-mono text-[10px] text-danger" title={`The same value is set in ${insight.exposed_in.join(", ")}, which isn't protected: whoever reads it there has this protected value. Give each its own value.`}>
               also in {insight.exposed_in.join(", ")}

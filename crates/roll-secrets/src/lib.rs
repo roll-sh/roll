@@ -14,6 +14,7 @@ pub mod access;
 mod alerts;
 pub mod api;
 pub mod rotators;
+mod strength;
 mod audit;
 pub mod backup;
 pub mod crypto;
@@ -368,6 +369,8 @@ impl Secrets {
         // When a value stops working outside roll (a vendor's key, a certificate): ms, or null.
         db.add_column("secrets", "expires_at", "INTEGER")?;
         db.add_column("versions", "expires_at", "INTEGER")?;
+        // Why a credential's value is easy to guess (strength.rs), judged when it was written.
+        db.add_column("secrets", "weak", "TEXT")?;
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;

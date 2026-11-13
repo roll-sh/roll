@@ -74,6 +74,8 @@ export type Secret = {
   overridden: boolean;
   /** When the value stops working outside roll (ms), if someone said. */
   expires_at: number | null;
+  /** Why a credential's value is easy to guess; only for a caller who may reveal it. */
+  weak?: string;
 };
 /** `expires_at`: null clears it; absent keeps it. */
 export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null };
@@ -115,6 +117,8 @@ export type RequestValue = { key: string; path: string; type: "shared" | "person
 export type KeyInsight = { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean; expires_at: number | null; expiring: boolean;
   /** In a protected environment: unprotected environments holding the very same value. */
   exposed_in: string[];
+  /** Why a credential's value is easy to guess; only for a caller who may reveal it. */
+  weak?: string;
 };
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 

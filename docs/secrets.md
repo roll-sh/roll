@@ -372,6 +372,15 @@ not: the environment's Activity has an Alerts filter, and audit sinks carry them
 recording the addresses seen and queueing the notices are one write, so two nodes never both
 alert, and history from before the first sweep isn't alerted on.
 
+**Weak values** (1Password Watchtower). A key whose name says it's a credential (`PASSWORD`,
+`SECRET`, `TOKEN`, `API_KEY`, `PRIVATE_KEY`…, but not `…_URL`, `…_HOST`, `…_ID` and the like) is
+judged when it's written, from the plaintext then: a common password, its own key's name, under
+12 characters, too few different characters, or under 64 bits of randomness (as if each character
+were drawn from its classes). Only the reason is kept (`weak`, never anything of the value), on
+`Secret` and in insights, and only a caller who may reveal the value sees it: that it's weak says
+something about it. Values with references aren't judged; a value written before this is judged at
+its next write. The environment's list marks it "weak", and `roll secrets insights` prints `WEAK`.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -1298,7 +1307,7 @@ Done and in PR #20:
 - leaked secrets don't land, plus scans of a repo's default branch and history, and `roll secrets
   scan [--staged]` before a commit;
 - required and typed keys; insights, rotation reminders and expiry dates for values that expire
-  outside roll; a protected environment's values that are also set in an unprotected one; read
+  outside roll; weak credentials; a protected environment's values that are also set in an unprotected one; read
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
@@ -1324,15 +1333,10 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Weak values** (1Password Watchtower): a key whose name says it's a credential (`PASSWORD`,
-   `SECRET`, `TOKEN`, `API_KEY`…) and whose value is short, of one kind of character, a common
-   password or its own key's name is flagged `weak` when it's written (computed from the plaintext
-   then, kept as a flag), shown to whoever may reveal it, in insights, the list and `roll secrets
-   insights`.
-2. **Values as they were**: `GET …/values?seq=` resolves an environment as it was after a change
+1. **Values as they were**: `GET …/values?seq=` resolves an environment as it was after a change
    (reveal, audited), for "what did production have before the incident"; `roll secrets export
    --at`.
-3. **`roll secrets check .env.example`**: the keys a template names that the environment lacks (and
+2. **`roll secrets check .env.example`**: the keys a template names that the environment lacks (and
    the ones it has that the template doesn't), without reading a value, for CI and onboarding.
 
 Waiting on other pull requests:

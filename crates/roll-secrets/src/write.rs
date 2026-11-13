@@ -308,6 +308,7 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 };
                 let comment_now = comment.clone().or_else(|| cur.as_ref().map(|c| c.comment.clone())).unwrap_or_default();
                 let tags_now = tags.clone().or_else(|| cur.as_ref().map(|c| c.tags.clone())).unwrap_or_default();
+                let weak = stored_value.as_ref().and_then(|v| crate::strength::weakness(&item.key, v.expose()));
                 // Unless the writer said: a new certificate's own date, else the date it had.
                 let expires_now = expires_at.unwrap_or_else(|| value.as_ref().and_then(|v| certificate_expiry(v.expose())).or_else(|| cur.as_ref().and_then(|c| c.expires_at)));
                 let mut what = vec![];
@@ -363,15 +364,15 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 match &cur {
                     Some(_) => {
                         c.execute(
-                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ?, expires_at = ? WHERE id = ?",
-                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, id],
+                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ?, expires_at = ?, weak = ? WHERE id = ?",
+                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak, id],
                         )?;
                     }
                     None => {
                         c.execute(
-                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now],
+                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at, weak)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, weak],
                         )?;
                         envs::ensure_folders(c, &env.id, &item.path, now)?;
                     }
