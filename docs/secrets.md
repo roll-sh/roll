@@ -343,7 +343,8 @@ both remind: the day is claimed in the same write that queues the notice.
 certificate, a trial token. A secret's optional `expires_at` (ms; set in any write's `set`
 operation, `null` clears it, leaving it out keeps it) records that date. It's versioned like the
 comment, so history, rollback, promote, change requests and backups carry it, and a new value
-keeps the date until someone changes it. Insights add `expires_at` and `expiring` (within 14 days,
+keeps the date until someone changes it, except a certificate: a new value holding PEM
+certificates is dated by the earliest `notAfter` among them, unless the write gives a date. Insights add `expires_at` and `expiring` (within 14 days,
 or past); the grid and the environment's list show a clock, with the days left inside two weeks
 and "expired" in red after. The daily reminder above also lists expiring and expired keys (soonest
 first, names and dates only), for any environment with a notify URL, limit or not. Like

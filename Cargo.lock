@@ -6480,6 +6480,7 @@ dependencies = [
  "hmac 0.12.1",
  "http-body-util",
  "ipnet",
+ "rcgen",
  "regex",
  "ring",
  "roll-auth",
@@ -6492,6 +6493,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "x509-parser",
  "zeroize",
 ]
 
