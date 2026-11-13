@@ -292,11 +292,12 @@ impl Hooks {
 }
 
 /// Audit sinks' deliveries (roll_secrets::sinks): the same client, signature and guards.
-pub struct AuditDeliver(Hooks);
+/// The products' routes too: a sink can be a roll bucket (`bucket:<name>`).
+pub struct AuditDeliver(Hooks, Api);
 
 impl AuditDeliver {
-    pub fn new(allow_private: bool) -> AuditDeliver {
-        AuditDeliver(Hooks::new(allow_private))
+    pub fn new(allow_private: bool, api: Api) -> AuditDeliver {
+        AuditDeliver(Hooks::new(allow_private), api)
     }
 }
 
@@ -306,6 +307,12 @@ impl roll_secrets::Deliver for AuditDeliver {
     }
 
     fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()> {
+        // A retried batch is the same delivery: the same object, written again.
+        if let Some(bucket) = url.strip_prefix(roll_secrets::sinks::BUCKET) {
+            let delivery = delivery_id(&format!("{id}:{body}"));
+            let key = format!("roll-secrets/audit/{id}/{delivery}.json");
+            return self.1.call(axum::http::Method::PUT, &format!("/v1/storage/buckets/{}/upload?key={}", urlencoding::encode(bucket), urlencoding::encode(&key)), Some(body.clone())).map(|_| ());
+        }
         let u = self.0.url(url)?;
         // A retried batch (or notice) is the same body: the same delivery.
         let delivery = delivery_id(&format!("{id}:{body}"));

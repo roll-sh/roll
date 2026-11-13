@@ -94,6 +94,10 @@ fn sink_row(r: &code_sql::Row<'_>) -> code_sql::Result<Sink> {
     Ok(Sink { id: r.get(0)?, url: r.get(1)?, status: r.get(2)?, error: r.get(3)?, cursor: r.get(4)?, delivered_at: r.get(5)?, created_at: r.get(6)?, created_by: r.get(7)? })
 }
 
+/// A sink URL naming a roll bucket instead of an endpoint: `bucket:<name>`. Each batch becomes an
+/// object `roll-secrets/audit/<sink>/<delivery>.json` there.
+pub const BUCKET: &str = "bucket:";
+
 impl Secrets {
     fn deliver(&self) -> Result<&Arc<dyn Deliver>> {
         self.deliver.as_ref().ok_or_else(|| Error::BadRequest("audit streaming isn't on this server".into()))
@@ -108,7 +112,17 @@ impl Secrets {
     /// A new sink; the second value is its signing secret, shown once.
     pub fn create_sink(&self, project: &str, n: NewSink, caller: &Caller) -> Result<(Sink, String)> {
         caller.need(Action::Admin, &Scope::project(project))?;
-        self.deliver()?.check(&n.url)?;
+        // A roll bucket of the project's own canvas (an archive with the bucket's retention and
+        // Object Lock), or an HTTPS endpoint.
+        match n.url.strip_prefix(BUCKET) {
+            Some(bucket) => {
+                if !self.members(project)?.contains(&("bucket".to_string(), bucket.to_string())) {
+                    return Err(Error::BadRequest(format!("{bucket} isn't a bucket on this project's canvas")));
+                }
+                self.deliver()?;
+            }
+            None => self.deliver()?.check(&n.url)?,
+        }
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;
         let id = names::new_id("snk", 12);
