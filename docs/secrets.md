@@ -1361,6 +1361,11 @@ Postgres. Measured 2026-11-13 on ai-server under a load average of about 27 (sec
 | digest | 90 ms | 143 ms |
 | insights | 27 ms | 40 ms |
 | compare | 38 ms | 62 ms |
+| health (the whole project) | 53 ms* | 58 ms* |
+
+\* Health was measured later the same day under a load average of about 39, with the grid at 77 ms
+(SQLite) and 65 ms (Postgres) in the same runs: it stays under the grid, which the sidebar's count
+and Home rely on.
 
 Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 environments took
 3.07 s before that, 0.43 s after, on a debug build).
@@ -1404,9 +1409,7 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Health's cost measured**: the bench times `…/health` at 9,000 keys next to the grid, since the
-   sidebar and Home call it on every page; make it fit under the grid's time.
-2. **Keys no code reads** (roll code's index): for repositories on the project's canvas, a key whose
+1. **Keys no code reads** (roll code's index): for repositories on the project's canvas, a key whose
    name appears nowhere on the default branch is flagged `unreferenced` in health, from the
    trigram index, never by reading files here.
 
