@@ -328,6 +328,20 @@ pub struct Session {
     /// BEGIN / SET TRANSACTION options for a transaction not started yet.
     txn_opts: Option<(Isolation, bool)>,
     txn_time: i64,
+    /// statement_timestamp(): when the client message being run came (PostgreSQL's
+    /// SetCurrentStatementStartTimestamp at each Query, Parse, Bind, Execute and fastpath
+    /// call, `message_starts`), read once and shared by pg_stat_activity's query_start, the
+    /// statements' contexts and a transaction the message starts. 0: no message yet (a
+    /// session run in-process reads the clock per statement).
+    stmt_start: std::cell::Cell<i64>,
+    /// When the first message since the last transaction ended came (start_xact_command's
+    /// StartTransaction, whose start is that message's statement timestamp): the start of
+    /// the transaction `ensure_txn` or BEGIN opens (now(), xact_start), however many
+    /// messages later it does.
+    xact_from: std::cell::Cell<Option<i64>>,
+    /// The statement timestamp of the message whose transaction's end last touched the
+    /// database (`finish_txn`).
+    touched: std::cell::Cell<i64>,
     /// (Looked up by name at every Bind and Execute: hashed with hashbrown's hasher, not
     /// SipHash.)
     pub prepared: hashbrown::HashMap<String, Arc<Prepared>>,
@@ -515,6 +529,9 @@ impl Session {
             implicit: false,
             txn_opts: None,
             txn_time: 0,
+            stmt_start: std::cell::Cell::new(0),
+            xact_from: std::cell::Cell::new(None),
+            touched: std::cell::Cell::new(0),
             prepared: Default::default(),
             prepared_meta: Default::default(),
             prepared_listed: false,
@@ -719,6 +736,32 @@ impl Session {
         Clock::system().now
     }
 
+    /// A client message starts (Query, Parse, Bind, Execute, a fastpath call): the clock
+    /// read once for it (`stmt_start`), and, when no transaction is open, for the one it
+    /// starts (`xact_from`). Returns it.
+    pub fn message_starts(&self) -> i64 {
+        let now = Self::now();
+        self.stmt_start.set(now);
+        if self.txn.is_none() && self.status == TxnStatus::Idle && self.xact_from.get().is_none() {
+            self.xact_from.set(Some(now));
+        }
+        now
+    }
+
+    /// statement_timestamp(): the message's (`message_starts`), or the clock's now.
+    pub(crate) fn statement_time(&self) -> i64 {
+        match self.stmt_start.get() {
+            0 => Self::now(),
+            t => t,
+        }
+    }
+
+    /// The start of a transaction opened now (StartTransaction: the statement timestamp of
+    /// the message that began it).
+    fn txn_start_time(&self) -> i64 {
+        self.xact_from.take().unwrap_or_else(|| self.statement_time())
+    }
+
     fn default_txn_opts(&self) -> (Isolation, bool) {
         default_txn_opts(&self.state)
     }
@@ -730,7 +773,7 @@ impl Session {
         }
         if self.status == TxnStatus::Idle {
             self.implicit = true;
-            self.txn_time = Self::now();
+            self.txn_time = self.txn_start_time();
         }
         let (iso, ro) = self
             .txn_opts
@@ -897,7 +940,14 @@ impl Session {
             .borrow_mut()
             .end_transaction(commit && r.is_ok());
         crate::exec::pgstat::clear_snapshot(&self.state);
-        self.state.db.touch();
+        // (`Database::touch` keeps the last use to a millisecond: not read again for the
+        // transactions of messages less than one apart. A database with a session is never
+        // idle, and the session's end touches it.)
+        let at = self.stmt_start.get();
+        if at == 0 || at - self.touched.get() >= 1000 {
+            self.touched.set(at);
+            self.state.db.touch();
+        }
         r
     }
 
@@ -1113,7 +1163,7 @@ impl Session {
             &self.state,
             params,
             self.txn_time,
-            Self::now(),
+            self.statement_time(),
             search_path,
         );
         let entered = current::enter(&ctx);
@@ -1447,7 +1497,8 @@ impl Session {
                 "current transaction is aborted, commands ignored until end of transaction block",
             ));
         }
-        self.state.db.touch();
+        // (No `Database::touch` here: a database with a session is never idle, and the
+        // session's transactions and its end touch it.)
         self.sync_lists();
         // Only a SELECT's rows and COPY TO's data go to the sink as they're made; what else
         // returns rows (EXECUTE, FETCH, EXPLAIN, SHOW, RETURNING) sends them once it's done,
@@ -2094,7 +2145,8 @@ impl Session {
     fn run_query(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<QueryResult> {
         self.ensure_txn();
         let fetch = std::mem::take(&mut self.fetch_limit);
-        let planning = std::time::Instant::now();
+        // (Timed only for pg_stat_statements' planning time, which alone reads it.)
+        let planning = self.pgss_tracked.is_some().then(std::time::Instant::now);
         fn own(p: &Prepared) -> Result<&Node> {
             p.stmt.as_ref().ok_or_else(|| Error::new(code::INTERNAL_ERROR, "a query without a tree"))
         }
@@ -2121,7 +2173,9 @@ impl Session {
                 }
             },
         };
-        self.pgss_planned(planning.elapsed());
+        if let Some(p) = planning {
+            self.pgss_planned(p.elapsed());
+        }
         // Its relations are locked before it runs; a wait for a lock may end with another
         // transaction's DDL committed, which the statement then sees (Postgres analyzes it
         // only once it holds them): it is bound again over the catalog it finds. The first
@@ -2210,7 +2264,7 @@ impl Session {
                     *ctx.instr.borrow_mut() = Some(i.clone());
                     i
                 });
-                let ae_start = std::time::Instant::now();
+                let ae_start = ae.as_ref().map(|_| std::time::Instant::now());
                 // The Gathers' workers (other backends see them while the statement runs); the
                 // part below each Gather that only the workers would run (its locks end with
                 // them).
@@ -2269,7 +2323,7 @@ impl Session {
                     drop(put);
                     made = collect(&bq.plan, ctx, None)?;
                 }
-                if let Some(a) = &ae {
+                if let (Some(a), Some(ae_start)) = (&ae, ae_start) {
                     let secs = ae_start.elapsed().as_secs_f64();
                     if ae_instr.is_some() {
                         *ctx.instr.borrow_mut() = None;
@@ -2391,7 +2445,7 @@ impl Session {
                 self.prepared.insert(name.to_string(), p.clone());
                 self.prepared_listed = false;
                 self.prepared_meta
-                    .insert(name.to_string(), (sql.to_string(), Self::now(), false));
+                    .insert(name.to_string(), (sql.to_string(), self.statement_time(), false));
                 Ok(p)
             }
             Err(e) => {
@@ -3320,7 +3374,7 @@ impl Session {
                     // Earlier statements of this batch join the block.
                     self.implicit = false;
                 } else {
-                    self.txn_time = Self::now();
+                    self.txn_time = self.txn_start_time();
                     self.txn_opts = Some((iso, ro));
                 }
                 self.status = TxnStatus::InBlock;
