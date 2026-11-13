@@ -8,6 +8,7 @@ import {
   describeRule,
   expiringSoon,
   mcpConfig,
+  byConcern,
   FIX_LABEL,
   type Checkup,
   productName,
@@ -159,6 +160,8 @@ export function ConnectPanel({ token }: { token?: string }) {
  */
 function Attention({ list, refresh }: { list: Checkup[]; refresh: () => Promise<void> }) {
   const [error, setError] = useState<string | null>(null);
+  const [all, setAll] = useState(false);
+  const shown = byConcern(list).slice(0, all ? undefined : 8);
   const revoke = async (id: string) => {
     setError(null);
     try {
@@ -171,7 +174,7 @@ function Attention({ list, refresh }: { list: Checkup[]; refresh: () => Promise<
   return (
     <Panel title={`Needs attention (${list.length})`}>
       <ul className="divide-y divide-line">
-        {list.map((c) => (
+        {shown.map((c) => (
           <li key={c.grant.id} className="space-y-1 px-5 py-3 text-[12px]">
             <Link href={`/dashboard/access/tokens/${encodeURIComponent(c.grant.id)}`} className="text-[13px] font-medium hover:underline">
               {c.grant.name}
@@ -193,6 +196,11 @@ function Attention({ list, refresh }: { list: Checkup[]; refresh: () => Promise<
           </li>
         ))}
       </ul>
+      {list.length > shown.length && (
+        <button onClick={() => setAll(true)} className="block w-full border-t border-line px-5 py-2 text-left text-[12px] text-accent hover:underline">
+          {list.length - shown.length} more
+        </button>
+      )}
       {error && (
         <div className="px-5 pb-3">
           <ErrorNote error={error} />

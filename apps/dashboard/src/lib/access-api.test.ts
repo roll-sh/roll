@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, catalogFor, denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, type Approval, type Preset } from "./access-api";
+import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -97,5 +97,12 @@ describe("approving together", () => {
       a("6", "cursor", "write", null, "production"),
     ]);
     expect(groups).toEqual([{ grant_id: "cursor", grant_name: "cursor", ids: ["1", "2"] }]);
+  });
+});
+
+describe("the checkup", () => {
+  it("puts the most serious first", () => {
+    const c = (id: string, ...kinds: string[]) => ({ grant: { id }, findings: kinds.map((kind) => ({ kind })) }) as never;
+    expect(byConcern([c("a", "narrower"), c("b", "never_expires"), c("c", "everything", "never_expires"), c("d", "never_expires", "unused")]).map((x: { grant: { id: string } }) => x.grant.id)).toEqual(["c", "d", "b", "a"]);
   });
 });
