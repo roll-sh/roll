@@ -64,7 +64,7 @@ impl Secrets {
                 if !caller.allows(Action::Read, &Scope::at(&project, &env, &path)) {
                     continue;
                 }
-                let project_name = names_of.entry(project.clone()).or_insert_with(|| self.workspace.get(&project).map(|p| p.name).unwrap_or_else(|_| project.clone())).clone();
+                let project_name = names_of.entry(project.clone()).or_insert_with(|| self.workspace.get(roll_workspace::Scope::All, &project).map(|p| p.name).unwrap_or_else(|_| project.clone())).clone();
                 out.push(Place { project, project_name, environment: env, path, key, version, updated_at, linked: link.is_some() });
             }
             if last {

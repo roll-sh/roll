@@ -1,0 +1,36 @@
+[package]
+name = "roll-accounts"
+description = "roll's own accounts and sign-in (/v1/accounts): invites, email codes, GitHub and Google, TOTP, sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+anyhow.workspace = true
+argon2.workspace = true
+aws-config.workspace = true
+aws-sdk-sesv2.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+code-sql.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+reqwest = { workspace = true, features = ["rustls", "form"] }
+roll-auth.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+url.workspace = true
+tempfile.workspace = true
+tower.workspace = true

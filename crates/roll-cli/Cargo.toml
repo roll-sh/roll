@@ -52,6 +52,10 @@ urlencoding.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# `tests/token.rs`: scoped tokens behind the real gate in process.
+roll-access.workspace = true
+roll-auth.workspace = true
+roll-workspace.workspace = true
 code-chat.workspace = true
 code-control.workspace = true
 code-sql.workspace = true
@@ -68,7 +72,6 @@ s3-server.workspace = true
 s3-store.workspace = true
 # `tests/secrets.rs`: roll secrets in process.
 roll-secrets.workspace = true
-roll-workspace.workspace = true
 
 [[test]]
 name = "cqlsh_roll"

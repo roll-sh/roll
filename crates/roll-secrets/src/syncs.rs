@@ -442,6 +442,12 @@ impl Secrets {
         let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
         let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
         let now = self.db.now_ms()?;
+        let ours: bool = self.db.read(|c| c.query_row("SELECT 1 FROM tokens WHERE id = ? AND project_id = ?", [token, r.project.as_str()], |_| Ok(())).optional())?.is_some();
+        // A roll-access grant: as it is now, or gone once revoked or expired.
+        if !ours {
+            let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
+            return Ok(Caller { principal, grants: Arc::new(crate::access::GrantGrants(g)), ip: None });
+        }
         type Grants = (Option<String>, Option<String>, String, Option<i64>, Option<i64>);
         let found: Option<Grants> = self.db.read(|c| {
             c.query_row("SELECT environments, paths, actions, expires_at, revoked_at FROM tokens WHERE id = ? AND project_id = ?", [token, r.project.as_str()], |x| {

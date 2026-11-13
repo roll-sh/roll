@@ -10,7 +10,15 @@ use async_trait::async_trait;
 pub struct Credentials {
     pub username: String,
     pub password: String,
+    /// The host authorized this request already ([`Vouched`]): `username` is who it says the
+    /// caller is, and there's no password to check.
+    pub vouched: bool,
 }
+
+/// In a request's extensions when the host decided the request itself (rolld's gate, for a scoped
+/// token): the caller's name. Set only by the host, never from the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Vouched(pub String);
 
 impl std::fmt::Debug for Credentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

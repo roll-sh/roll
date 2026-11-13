@@ -120,6 +120,14 @@ fn split_path(path: &str) -> Option<(String, Endpoint)> {
     Some((repo.to_string(), ep))
 }
 
+/// Who's calling: the host's word for it ([`crate::backend::Vouched`]), else the request's own.
+fn caller(ext: &axum::http::Extensions, headers: &HeaderMap) -> Option<Credentials> {
+    match ext.get::<crate::backend::Vouched>() {
+        Some(v) => Some(Credentials { username: v.0.clone(), password: String::new(), vouched: true }),
+        None => credentials(headers),
+    }
+}
+
 fn credentials(headers: &HeaderMap) -> Option<Credentials> {
     use base64::Engine;
     let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
@@ -128,9 +136,9 @@ fn credentials(headers: &HeaderMap) -> Option<Credentials> {
         let decoded = base64::engine::general_purpose::STANDARD.decode(value.trim()).ok()?;
         let s = String::from_utf8(decoded).ok()?;
         let (u, p) = s.split_once(':')?;
-        Some(Credentials { username: u.into(), password: p.into() })
+        Some(Credentials { username: u.into(), password: p.into(), vouched: false })
     } else if scheme.eq_ignore_ascii_case("bearer") {
-        Some(Credentials { username: String::new(), password: value.trim().into() })
+        Some(Credentials { username: String::new(), password: value.trim().into(), vouched: false })
     } else {
         None
     }
@@ -187,6 +195,7 @@ async fn get_handler(
     State(s): State<Arc<Server>>,
     Path(path): Path<String>,
     Query(q): Query<HashMap<String, String>>,
+    ext: axum::http::Extensions,
     headers: HeaderMap,
 ) -> Response {
     let Some((repo, Endpoint::InfoRefs)) = split_path(&path) else {
@@ -197,7 +206,7 @@ async fn get_handler(
         Some("git-receive-pack") => (Access::Write, false),
         _ => return (StatusCode::FORBIDDEN, "the dumb HTTP protocol is not supported\n").into_response(),
     };
-    if let Err(e) = s.backend.authorize(&repo, credentials(&headers).as_ref(), access).await {
+    if let Err(e) = s.backend.authorize(&repo, caller(&ext, &headers).as_ref(), access).await {
         return error_response(e);
     }
     let mut b = BytesMut::new();
@@ -383,11 +392,11 @@ impl BodyReader {
     }
 }
 
-async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, headers: HeaderMap, body: Body) -> Response {
+async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, ext: axum::http::Extensions, headers: HeaderMap, body: Body) -> Response {
     let Some((repo, ep)) = split_path(&path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let creds = credentials(&headers);
+    let creds = caller(&ext, &headers);
     match ep {
         Endpoint::InfoRefs => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         Endpoint::UploadPack => {

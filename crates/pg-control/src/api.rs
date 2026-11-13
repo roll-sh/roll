@@ -335,11 +335,14 @@ async fn suspend_endpoint(State(c): State<AppState>, Path(id): Path<String>) -> 
 #[derive(Deserialize)]
 struct QueryBody {
     sql: String,
+    /// Run as a role that can only read (docs/permissions.md): Postgres refuses writes.
+    #[serde(default)]
+    read_only: bool,
 }
 
 async fn query(State(c): State<AppState>, Path(id): Path<String>, Json(body): Json<QueryBody>) -> ApiResult<Value> {
     let started = std::time::Instant::now();
-    let results = c.query(&id, &body.sql).await?;
+    let results = c.query(&id, &body.sql, body.read_only).await?;
     Ok(Json(json!({ "results": results, "took_ms": started.elapsed().as_millis() as u64 })))
 }
 

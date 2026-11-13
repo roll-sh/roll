@@ -95,7 +95,7 @@ impl Secrets {
             if findings.is_empty() {
                 continue;
             }
-            let project_name = self.workspace.get(&project).map(|p| p.name).unwrap_or_else(|_| project.clone());
+            let project_name = self.workspace.get(roll_workspace::Scope::All, &project).map(|p| p.name).unwrap_or_else(|_| project.clone());
             out.push(ProjectFindings { project, project_name, findings });
         }
         Ok(out)
@@ -201,7 +201,7 @@ impl Secrets {
             }
         }
         if code && let Some(refs) = self.code_refs.get() {
-            let repos: Vec<String> = self.workspace.get(project).map(|p| p.resources.into_iter().filter(|r| r.kind == roll_workspace::Kind::Repo).map(|r| r.r#ref).collect()).unwrap_or_default();
+            let repos: Vec<String> = self.workspace.get(roll_workspace::Scope::All, project).map(|p| p.resources.into_iter().filter(|r| r.kind == roll_workspace::Kind::Repo).map(|r| r.r#ref).collect()).unwrap_or_default();
             // Whether a name appears in a repository says something about its contents: only for
             // a caller who may read every one of them.
             // Never naming it: that would tell a caller who can't see the canvas that it's there.

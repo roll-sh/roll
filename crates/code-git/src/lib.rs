@@ -14,7 +14,7 @@ pub mod walk;
 
 pub use backend::{
     Access, Credentials, FetchPlan, FetchRequest, Filter, GitBackend, GitError, GitResult, ReceiveOutcome, ReceiveRequest, Ref,
-    RefList, RefStatus, RefUpdate,
+    RefList, RefStatus, RefUpdate, Vouched,
 };
 pub use budget::{BudgetError, Lease, MemoryBudget};
 pub use client::{Client, FetchArgs, Fetched, PushReport};

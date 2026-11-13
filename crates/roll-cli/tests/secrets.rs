@@ -51,7 +51,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let dir = tempfile::tempdir().unwrap();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
-    ws.create("shop", "", None).unwrap();
+    ws.create("", "shop", "", None).unwrap();
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
     let opts = roll_secrets::Options {
         keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
@@ -62,6 +62,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
         trust_forwarded_for: false,
         web_url: None,
         deliver: None,
+        grants: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -153,7 +154,7 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let public = ok(&api, &[], &["secrets", "keygen", "--out", key], None).await;
     ok(&api, &[], &["secrets", "-p", "shop", "backup", "--to", public.trim(), "--out", file], None).await;
     assert!(!std::fs::read_to_string(file).unwrap().contains("s3cret"), "sealed at rest");
-    projects.create("copy", "", None).unwrap();
+    projects.create("", "copy", "", None).unwrap();
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
     let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");

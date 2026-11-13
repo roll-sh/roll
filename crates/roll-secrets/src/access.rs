@@ -1,10 +1,10 @@
 //! Who is calling and what they may do (docs/secrets.md, "Access").
 //!
-//! The roll-wide permission model (docs/permissions.md, branch `feature/roll-mcp`) classifies each
-//! request in rolld's gate. Inside the product, the checks that the gate can't make from the
-//! request alone (a second environment, a path inside a batch) go through [`Grants`], the one
-//! trait to swap when roll-access lands: today it is the operator (everything) or one of the
-//! project's scoped tokens (`rlst_…`, [`TokenScope`]).
+//! The roll-wide permission model (docs/permissions.md) classifies each request in rolld's gate.
+//! Inside the product, the checks that the gate can't make from the request alone (a second
+//! environment, a path inside a batch, each finding of a filtered answer) go through [`Grants`]:
+//! the operator (everything), a roll-access grant (`rlt_…`/`rlo_…`, [`GrantGrants`]) or one of the
+//! project's own scoped tokens (`rlst_…`, [`TokenScope`]).
 
 use crate::names;
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,7 @@ impl<'a> Scope<'a> {
     }
 }
 
-/// What a caller may do. The swap point for roll-access's `Grant`.
+/// What a caller may do.
 pub trait Grants: Send + Sync + std::fmt::Debug {
     fn allows(&self, action: Action, at: &Scope<'_>) -> bool;
     /// The one project the caller is limited to, if any (`whoami`, and the CLI's default).
@@ -157,6 +157,51 @@ impl Grants for TokenScope {
 
     fn project(&self) -> Option<&str> {
         Some(&self.project)
+    }
+}
+
+/// A roll-access grant (`rlt_…` tokens and OAuth connections, docs/permissions.md): rolld's gate
+/// classified the request already; this answers the second resources the product checks itself.
+#[derive(Debug)]
+pub struct GrantGrants(pub roll_auth::Grant);
+
+impl Grants for GrantGrants {
+    fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
+        use roll_auth::scope;
+        let action = match action {
+            Action::Read => scope::Action::Read,
+            Action::Reveal => scope::Action::Reveal,
+            Action::Write => scope::Action::Write,
+            Action::Delete => scope::Action::Delete,
+            Action::Admin => scope::Action::Admin,
+        };
+        let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), ..Default::default() };
+        // `ask` pauses a whole request at the gate; inside the product it's a no.
+        self.0.allows(&r, action) == scope::Outcome::Allow
+    }
+
+    /// Code read on the repository, as it sits on `project`'s canvas.
+    fn reads_code(&self, project: &str, repo: &str) -> bool {
+        use roll_auth::scope;
+        let r = scope::Resource { product: "code".into(), id: Some(repo.into()), project: Some(project.into()), ..Default::default() };
+        self.0.allows(&r, scope::Action::Read) == scope::Outcome::Allow
+    }
+
+    /// The one project its secrets rules name, if they name exactly one.
+    fn project(&self) -> Option<&str> {
+        use roll_auth::scope::{Resources, Selector};
+        let mut found: Option<&str> = None;
+        for rule in self.0.scope.0.iter().filter(|r| r.product == "secrets" || r.product == "*") {
+            let Resources::Some(sel) = &rule.resources else { return None };
+            for s in sel {
+                let Selector::Project { project } = s else { return None };
+                match found {
+                    Some(p) if p != project => return None,
+                    _ => found = Some(project),
+                }
+            }
+        }
+        found
     }
 }
 

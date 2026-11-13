@@ -206,7 +206,7 @@ impl crate::Secrets {
     pub fn link_targets(&self, project: &str, caller: &crate::Caller) -> Result<Vec<Target>> {
         caller.need(crate::Action::Read, &crate::Scope::project(project))?;
         self.project(project)?;
-        let p = self.workspace.get(project).map_err(|e| Error::Internal(e.to_string()))?;
+        let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
         let mut out: Vec<Target> = p
             .resources
             .into_iter()

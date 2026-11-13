@@ -164,6 +164,22 @@ Parameters:
     Description: >-
       The agent sandbox image (deploy/agent/Dockerfile, arm64) for sandboxes as Fargate tasks.
       Empty: no sandboxes on the fleet.
+  # Accounts and sign-in (docs/accounts.md). Each is off until set; put a provider's client
+  # secret in its Secrets Manager entry before setting its client id.
+  MailFrom:
+    Type: String
+    Default: ""
+    Description: >-
+      ROLL_ACCOUNTS_MAIL_FROM, the sender of sign-in codes and invites through SES (e.g.
+      "roll <noreply@roll.sh>", an address at Domain). Empty: no mail (email sign-in is off).
+  GitHubOAuthClientId:
+    Type: String
+    Default: ""
+    Description: ROLL_ACCOUNTS_GITHUB_CLIENT_ID, a GitHub OAuth app whose callback is https://api.<Domain>/v1/accounts/oauth/github/callback. Empty: no GitHub sign-in.
+  GoogleOAuthClientId:
+    Type: String
+    Default: ""
+    Description: ROLL_ACCOUNTS_GOOGLE_CLIENT_ID, a Google OAuth web client whose callback is https://api.<Domain>/v1/accounts/oauth/google/callback. Empty: no Google sign-in.
   EcsAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
@@ -176,6 +192,9 @@ Conditions:
   HasSandboxes: !Not [!Equals [!Ref SandboxImage, ""]]
   ChecksSpot: !Equals [!Ref ChecksOnSpot, "true"]
   CreateOidc: !Equals [!Ref GitHubOidcProviderArn, ""]
+  HasMail: !Not [!Equals [!Ref MailFrom, ""]]
+  HasGitHubSignIn: !Not [!Equals [!Ref GitHubOAuthClientId, ""]]
+  HasGoogleSignIn: !Not [!Equals [!Ref GoogleOAuthClientId, ""]]
 
 Resources:
   # ── network: three public subnets, no NAT; S3 and DynamoDB through free gateway endpoints ──
@@ -522,6 +541,33 @@ Resources:
       Description: ROLL_SYSTEM_DATABASE, the system database's Postgres URL. Put the real value before the first deploy.
       KmsKeyId: !Ref Key
       SecretString: unset
+  # Sign-in's OAuth client secrets (docs/accounts.md): read only when the client id parameter
+  # is set.
+  GitHubOAuthSecret:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}/github-oauth-client-secret
+      Description: ROLL_ACCOUNTS_GITHUB_CLIENT_SECRET, the GitHub OAuth app's client secret. Put the real value before setting GitHubOAuthClientId.
+      KmsKeyId: !Ref Key
+      SecretString: unset
+  GoogleOAuthSecret:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}/google-oauth-client-secret
+      Description: ROLL_ACCOUNTS_GOOGLE_CLIENT_SECRET, the Google OAuth client's secret. Put the real value before setting GoogleOAuthClientId.
+      KmsKeyId: !Ref Key
+      SecretString: unset
+  # Mail for sign-in codes and invites: the domain as an SES identity (Easy DKIM; the three
+  # CNAMEs are in the outputs). A new account's SES is in the sandbox until AWS lifts it.
+  MailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Condition: HasMail
+    Properties:
+      EmailIdentity: !Ref Domain
 
   # ── images ──
   Repository:
@@ -735,7 +781,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: [!Ref ClusterSecret, !Ref SecretKey, !Ref AdminToken, !Ref QueuesPassword, !Ref CloudflareToken, !Ref SystemDatabase]
+                Resource: [!Ref ClusterSecret, !Ref SecretKey, !Ref AdminToken, !Ref QueuesPassword, !Ref CloudflareToken, !Ref SystemDatabase, !Ref GitHubOAuthSecret, !Ref GoogleOAuthSecret]
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource: !GetAtt Key.Arn
@@ -827,6 +873,11 @@ Resources:
                 Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents]
                 Resource: !Sub "${NodeLogs.Arn}:*"
+              # Sign-in codes and invites (docs/accounts.md), from the domain's identity only.
+              - Sid: Mail
+                Effect: Allow
+                Action: ses:SendEmail
+                Resource: !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${Domain}"
 
   # ── isolated work: Fargate tasks for customer code (docs/cloud/README.md, "Isolated work") ──
   # Pulls the images and writes the logs; never in the task's reach.
@@ -1074,6 +1125,10 @@ Resources:
             - { Name: ROLL_PRODUCTS, Value: "redis,streams,tasks,storage,nosql,queues,code" }
             - { Name: ROLL_QUEUES_USER, Value: roll-admin }
             - { Name: ROLL_SYSTEM_DB_CONNECTIONS, Value: !Ref SystemDbConnections }
+            # Accounts and sign-in (docs/accounts.md): each method is on once its parameter is.
+            - !If [HasMail, { Name: ROLL_ACCOUNTS_MAIL_FROM, Value: !Ref MailFrom }, !Ref AWS::NoValue]
+            - !If [HasGitHubSignIn, { Name: ROLL_ACCOUNTS_GITHUB_CLIENT_ID, Value: !Ref GitHubOAuthClientId }, !Ref AWS::NoValue]
+            - !If [HasGoogleSignIn, { Name: ROLL_ACCOUNTS_GOOGLE_CLIENT_ID, Value: !Ref GoogleOAuthClientId }, !Ref AWS::NoValue]
           Secrets:
             - { Name: ROLL_CLUSTER_SECRET, ValueFrom: !Ref ClusterSecret }
             - { Name: ROLL_SECRET_KEY, ValueFrom: !Ref SecretKey }
@@ -1081,6 +1136,8 @@ Resources:
             - { Name: ROLL_QUEUES_PASSWORD, ValueFrom: !Ref QueuesPassword }
             - { Name: ROLL_CLOUDFLARE_API_TOKEN, ValueFrom: !Ref CloudflareToken }
             - { Name: ROLL_SYSTEM_DATABASE, ValueFrom: !Ref SystemDatabase }
+            - !If [HasGitHubSignIn, { Name: ROLL_ACCOUNTS_GITHUB_CLIENT_SECRET, ValueFrom: !Ref GitHubOAuthSecret }, !Ref AWS::NoValue]
+            - !If [HasGoogleSignIn, { Name: ROLL_ACCOUNTS_GOOGLE_CLIENT_SECRET, ValueFrom: !Ref GoogleOAuthSecret }, !Ref AWS::NoValue]
           # A deploy's next step waits for this. Generous retries: during a DynamoDB or system
           # database blip every node is unhealthy for a few seconds, and ECS must not replace
           # them all for it.
@@ -1829,8 +1886,16 @@ Outputs:
     Description: The alarms a canary's bake watches (and that roll a deploy back).
     Value: !Join [",", [!Ref CapacityAlarm, !Ref ResetsAlarm, !Ref TaskFailuresAlarm, !Ref ErrorsAlarm, !Ref LatencyAlarm, !Ref HandoffFailuresAlarm, !Ref TakeoversAlarm]]
   SuppliedSecrets:
-    Description: Secrets to fill in after creation (deploy/cloud/README.md).
-    Value: !Join [",", [!Ref CloudflareToken, !Ref SystemDatabase]]
+    Description: Secrets to fill in after creation (deploy/cloud/README.md); the OAuth ones before turning their sign-in on.
+    Value: !Join [",", [!Ref CloudflareToken, !Ref SystemDatabase, !Ref GitHubOAuthSecret, !Ref GoogleOAuthSecret]]
+  MailDkimRecords:
+    Condition: HasMail
+    Description: The CNAMEs SES's Easy DKIM needs in the domain's DNS (name=value).
+    Value: !Join
+      - ","
+      - - !Join ["=", [!GetAtt MailIdentity.DkimDNSTokenName1, !GetAtt MailIdentity.DkimDNSTokenValue1]]
+        - !Join ["=", [!GetAtt MailIdentity.DkimDNSTokenName2, !GetAtt MailIdentity.DkimDNSTokenValue2]]
+        - !Join ["=", [!GetAtt MailIdentity.DkimDNSTokenName3, !GetAtt MailIdentity.DkimDNSTokenValue3]]
   NodeLogGroup:
     Value: !Ref NodeLogs
   RunnerLogGroup:

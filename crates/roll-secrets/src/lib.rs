@@ -293,6 +293,8 @@ pub struct Options {
     pub syncs: Syncs,
     /// Posts audit rows to sinks (docs/secrets.md, "Audit log"); `None`: no streaming.
     pub deliver: Option<std::sync::Arc<dyn sinks::Deliver>>,
+    /// roll-access's grants, looked up when a sync made by one pushes (never cached).
+    pub grants: Option<std::sync::Arc<dyn roll_auth::Grants>>,
     /// rolld has no operator token (loopback development): a request without a token is the
     /// operator's.
     pub open: bool,
@@ -312,6 +314,7 @@ pub struct Secrets {
     links: Links,
     syncs: Syncs,
     deliver: Option<Arc<dyn sinks::Deliver>>,
+    grants: Option<Arc<dyn roll_auth::Grants>>,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -384,7 +387,7 @@ impl Secrets {
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -399,7 +402,7 @@ impl Secrets {
     /// environments) the first time. 404 if the workspace has no such project.
     fn project(&self, project: &str) -> Result<crypto::Dek> {
         let keys = self.keys()?;
-        self.workspace.get(project).map_err(|e| match e {
+        self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| match e {
             roll_workspace::Error::NotFound(m) => Error::NotFound(m),
             e => Error::Internal(e.to_string()),
         })?;

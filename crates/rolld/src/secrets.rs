@@ -132,7 +132,7 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     o.open(path)?.write_all(text.as_bytes())
 }
 
-pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api) -> anyhow::Result<Arc<Secrets>> {
+pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, grants: Option<Arc<dyn roll_auth::Grants>>) -> anyhow::Result<Arc<Secrets>> {
     let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
     let target = match system {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "secrets".into() },
@@ -146,7 +146,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))) };
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     // A deleted project's secrets go with it.
@@ -645,8 +645,8 @@ impl code_control::SecretEnv for ForCode {
         tokio::task::spawn_blocking(move || {
             // Every project with the repo on its canvas: a key missing from any of their environments.
             let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-            for p in ws.list()?.into_iter().filter(|p| p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref == r)) {
-                for (k, envs) in secrets.keys_missing(&p.id, &keys)? {
+            for p in ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)? {
+                for (k, envs) in secrets.keys_missing(&p, &keys)? {
                     out.entry(k).or_default().extend(envs);
                 }
             }
@@ -658,25 +658,28 @@ impl code_control::SecretEnv for ForCode {
     async fn for_repo(&self, repo: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
         let ws = self.workspace()?;
         let r = repo.to_string();
-        let project = tokio::task::spawn_blocking(move || ws.list())
+        let project = tokio::task::spawn_blocking(move || ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r))
             .await??
             .into_iter()
-            .find(|p| p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref == r))
+            .next()
             .ok_or_else(|| anyhow::anyhow!("{repo} isn't on a workspace project's canvas, so it has no secrets"))?;
-        self.resolve(project.id, environment, consumer).await
+        self.resolve(project, environment, consumer).await
     }
 
     async fn for_owner(&self, owner: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
         let ws = self.workspace()?;
         let prefix = format!("{owner}/");
-        let p = tokio::task::spawn_blocking(move || ws.list())
+        let has_repo = |p: &roll_workspace::Project| p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref.starts_with(&prefix));
+        // Names are unique per account, not across them: the one named that holds the owner's repos.
+        let named: Vec<roll_workspace::Project> = tokio::task::spawn_blocking(move || ws.list(roll_workspace::Scope::All))
             .await??
             .into_iter()
-            .find(|p| p.id == project || p.name == project)
-            .ok_or_else(|| anyhow::anyhow!("no project {project}"))?;
-        if !p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref.starts_with(&prefix)) {
-            anyhow::bail!("project {} has none of {owner}'s repos on its canvas", p.name);
+            .filter(|p| p.id == project || p.name == project)
+            .collect();
+        if named.is_empty() {
+            anyhow::bail!("no project {project}");
         }
+        let p = named.iter().find(|p| has_repo(p)).cloned().ok_or_else(|| anyhow::anyhow!("project {project} has none of {owner}'s repos on its canvas"))?;
         self.resolve(p.id, environment, consumer).await
     }
 
@@ -685,8 +688,8 @@ impl code_control::SecretEnv for ForCode {
         let r = repo.to_string();
         tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
-            for p in ws.list()?.into_iter().filter(|p| p.resources.iter().any(|x| x.kind == roll_workspace::Kind::Repo && x.r#ref == r)) {
-                out.extend(secrets.leak_matches(&p.id, &candidates)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
+            for p in ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)? {
+                out.extend(secrets.leak_matches(&p, &candidates)?.into_iter().map(|(i, l)| (i, l.key, l.environment, l.path)));
             }
             Ok(out)
         })

@@ -86,7 +86,7 @@ impl Secrets {
             if p == project {
                 return Err(Error::BadRequest("a folder is shared with other projects (its own environments import it directly)".into()));
             }
-            self.workspace.get(p).map_err(|_| Error::BadRequest(format!("no project {p}")))?;
+            self.workspace.get(roll_workspace::Scope::All, p).map_err(|_| Error::BadRequest(format!("no project {p}")))?;
         }
         self.project(project)?;
         let now = self.db.now_ms()?;

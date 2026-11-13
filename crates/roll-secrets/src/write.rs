@@ -573,7 +573,7 @@ impl Secrets {
     /// on every write, read, issue and rotation (a resource can move to another project).
     /// What this project may link: its canvas's resources and its own rotators.
     pub(crate) fn members(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
-        let mut out: BTreeSet<(String, String)> = self.workspace.get(project).map_err(|e| Error::Internal(e.to_string()))?.resources.into_iter().map(|r| (r.kind.as_str().to_string(), r.r#ref)).collect();
+        let mut out: BTreeSet<(String, String)> = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?.resources.into_iter().map(|r| (r.kind.as_str().to_string(), r.r#ref)).collect();
         out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
         Ok(out)
     }

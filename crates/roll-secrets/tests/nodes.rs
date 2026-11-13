@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 fn node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secrets> {
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap();
-    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None };
     Arc::new(Secrets::new(db, ws, opts).unwrap())
 }
 
@@ -20,7 +20,7 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
     let dir = tempfile::tempdir().unwrap();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
-    let project = ws.create("shop", "", None).unwrap().id;
+    let project = ws.create("", "shop", "", None).unwrap().id;
     let (a, b) = (node(dir.path(), ws.clone()), node(dir.path(), ws));
 
     // Both nodes touch the project first at once: one data key and one set of environments.

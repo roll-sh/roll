@@ -342,7 +342,7 @@ impl Kubernetes {
             b = b.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes()).map_err(|_| bad("the cluster CA isn't a PEM certificate"))?);
         }
         if !self.allow_private {
-            b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
+            b = b.dns_resolver(roll_net::PublicOnly).no_proxy();
         }
         b.build().map_err(|e| Error::Internal(e.to_string()))
     }
@@ -1434,7 +1434,7 @@ impl SyncTarget for GitLab {
         too_long(p, GITLAB_VALUE_MAX, "a GitLab variable's 10,000 characters")?;
         let mut b = reqwest::Client::builder().timeout(Duration::from_secs(20)).connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync");
         if !self.allow_private {
-            b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
+            b = b.dns_resolver(roll_net::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
         let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new(), digitalocean: String::new() };

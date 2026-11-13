@@ -436,12 +436,11 @@ the count of findings to fix now (expired, missing, exposed), and Home lists the
 project (`GET /v1/secrets/findings`, `roll secrets health --all`).
 
 Health, `POST …/leaks`, `GET /v1/secrets/search` and `GET /v1/secrets/findings` filter each
-finding by the caller's own access. With the roll-access swap (ready on `wip/secrets-on-mcp`, where
-roll secrets asks the caller's Grant), roll-access lets a token limited to some environments or
-folders call them (health and leaks are `filters_itself` in its catalogue, search and findings take
-any grant): its answer just leaves the rest out. Until then roll-access treats them as reads of the
-whole project, since the stopgap here sees a request it let through as the operator's. Keep the
-filter in each: without it, the mark would let such a token see the whole project.
+finding by the caller's own access: roll secrets asks the caller's roll-access Grant, so
+roll-access lets a token limited to some environments or folders call them (health and leaks are
+`filters_itself` in its catalogue, search and findings take any grant) and its answer just leaves
+the rest out. Keep the filter in each: without it, the mark would let such a token see the whole
+project.
 
 ### Compare and promote
 
@@ -522,8 +521,10 @@ a credential never drops data.
 | `search` | `url`, `host`, `port`, `username` | an API key of its own, credential `key`: `api_key` (`Authorization: ApiKey …`; a dynamic one expires by itself 5 minutes after its lease) | no (never the cluster's password) |
 
 `search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
-Products without a workspace kind yet (queues, tasks, roll apps) join by adding their kind to the
-workspace and registering a provider.
+roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
+variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
+without a workspace kind yet (queues, tasks) join by adding their kind to the workspace and
+registering a provider.
 
 ### Rotators
 
@@ -1129,26 +1130,35 @@ that follow from it:
 - Token scopes name environments by slug: a token for `pr-117` reaches a new `pr-117` made after the
   old one was deleted (it needs `reveal` on the new one's base to make it).
 
-Until roll-access lands, the checks are one trait in `crates/roll-secrets/src/access.rs`:
+rolld's gate decides each request from the route (roll-access's catalogue). The checks it can't
+make from the request alone (a second environment, a path inside a batch, each finding of a
+filtered answer) go through one trait in `crates/roll-secrets/src/access.rs`, which every caller
+carries:
 
 ```rust
-pub trait Authority: Send + Sync {
-    fn caller(&self, parts: &http::request::Parts) -> Result<Caller, Denied>;   // who
-    fn allows(&self, caller: &Caller, action: Action, at: &Scope) -> bool;       // may they
+pub trait Grants: Send + Sync + Debug {
+    fn allows(&self, action: Action, at: &Scope<'_>) -> bool;     // may they, here
+    fn project(&self) -> Option<&str>;                            // the one project they're limited to
+    fn untrusted(&self) -> bool;                                  // code nobody vetted
+    fn reads_code(&self, project: &str, repo: &str) -> bool;      // health's code check
 }
 ```
 
-The built-in authority accepts the operator (`roll_auth::Operator`, or any request when rolld has no
-operator token) and **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
+It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_…` tokens and
+`rlo_…` OAuth connections: `ask` inside the product is a no), or one of the project's own tokens.
+
+Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
+token), roll-access's grants, and its own **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
 environments (or all), a list of path prefixes (or all), the actions above and an optional expiry.
 A token can be pinned to client addresses (`allowed_ips`: up to 20 addresses or CIDRs, IPv4 or
 IPv6): from anywhere else it's refused (403), checked on every request against the connection's
 peer address (or `X-Forwarded-For` where rolld trusts it), as Infisical's trusted IPs and Doppler's
 IP restrictions do. An identity can be pinned the same way: a login from elsewhere is refused, and
 the token it gets carries the same list. `roll secrets tokens create … --allow-ip 203.0.113.0/24`.
-Tokens are stored as SHA-256 hashes, looked up on every request and never cached. When roll-access
-lands, its evaluator replaces the built-in authority, the `rlst_` tokens migrate to its scoped tokens,
-and the routes stay the same.
+Tokens are stored as SHA-256 hashes, looked up on every request and never cached. roll-access's
+scoped tokens (`rlt_…`) and OAuth connections (`rlo_…`) reach secrets too: rolld's gate classifies
+the request, and secrets asks the same `Grant` for every second check (`GrantGrants`). The `rlst_`
+tokens are to become roll-access's (Next).
 
 ### Workload identities (OIDC)
 
@@ -1547,23 +1557,33 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Signed-in people reach the secrets of their own projects.** Accounts (#18) made workspace
+   projects a user's; secrets is still the operator's and its tokens' only (403 with a session).
+   Let a session through `/v1/secrets` (`Access::User` in rolld's gate, `X-Roll-CSRF` on writes),
+   make its `Caller` from `roll_auth::SignedIn`: everything on projects the person owns (the
+   workspace's `Scope::Owner`), nothing on anyone else's. Cross-project routes (search, findings,
+   `health --all`) keep only their projects. An admin stays the operator.
+2. **One permission system.** `rlst_` tokens, and the tokens workload identities mint, become
+   roll-access grants (secrets × project × environments × paths, `allowed_ips` as the grant's IP
+   allowlist, the same expiry), with existing tokens migrated to the same reach; the built-in
+   authority goes, `GrantGrants` stays. The routes and `roll secrets tokens` stay the same.
+3. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
+   protected environment, and an approver grants it for minutes (the approval names the
+   environment and folder).
 
 Waiting on other pull requests:
 
-- **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
-   ready on `wip/secrets-on-mcp`, which is merged with both branches and green. Every route this
-   router serves has a catalogue row there (imports decided per source, rotators, search), ephemeral
-   environments are roll-access's `preview` class (`environment_fn`), and `ask` grants are
-   honoured. Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
-   `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
-   second.
 - **Merge with roll search** (#22), whichever merges second. Checked live on a branch with both
    (2026-11-13): a key linked to a cluster's `api_key` gets the cluster's own API key (200 with it,
    401 without), rotating issues a new one while the old works through the grace period and fails
    once its retired lease is revoked, and a `dynamic` link's key dies with its lease. The merge
    conflicts are additive: CI's matrix (`secrets` and `search` rows), roll-cli's test dependencies,
-   rolld's `main.rs` (search's router, then workspace and secrets) and `DbBudget` (both `search`
-   and `secrets`, with secrets' extra reserved connection).
-- *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
-   `reveal` on a protected environment, and an approver grants it for minutes.
-- **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+   rolld's `main.rs` (search's router, then workspace and secrets) and `DbBudget` (`search`,
+   `secrets` and `accounts`, one reserved connection each for the always-on ones).
+- **roll apps' `SecretSource`** wired to `Secrets::values` as `app:<svc>`, whichever of #20 and
+  #21 merges second.
+
+Done since the last review: main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
+caller's roll-access Grant (`GrantGrants`): a grant's request is checked inside the product too,
+health and leaks filter themselves, search and findings take any grant, ephemeral environments are
+roll-access's `preview` class, and a sync made by a grant pushes only while the grant may.

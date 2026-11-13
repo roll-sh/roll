@@ -150,6 +150,12 @@ pub(super) async fn handle(code: &Arc<Code>, install: &Install, action: &str, ki
         },
         "slack.interaction" => match wire::parse_interaction(body) {
             Ok(Interaction::BlockActions(b)) => {
+                // An access approval's card (roll's scoped tokens, not an agent's request).
+                if let Some((approval, approve)) = b.actions.iter().find_map(|a| a.value.as_deref().and_then(super::access::parse)) {
+                    let channel = b.channel_id.clone().unwrap_or_default();
+                    let press = super::access::Press { approval, approve, user: &b.user_id, channel: &channel };
+                    return super::access::pressed(code, client, &token, install, press).await;
+                }
                 let Some(hit) = b.actions.iter().find(|a| a.value.as_deref().and_then(cards::parse_value).is_some()) else { return Handled::Done };
                 let value = hit.value.clone().unwrap_or_default();
                 let Some((card, pick)) = cards::parse_value(&value) else { return Handled::Done };

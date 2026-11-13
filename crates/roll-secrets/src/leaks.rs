@@ -103,7 +103,7 @@ impl Secrets {
             }
             let Some(hits) = fps[&p].get(&fp) else { continue };
             if p != project {
-                let name = self.workspace.get(&p).map(|x| x.name).unwrap_or_else(|_| p.clone());
+                let name = self.workspace.get(roll_workspace::Scope::All, &p).map(|x| x.name).unwrap_or_else(|_| p.clone());
                 l.environment = format!("{name}/{}", l.environment);
             }
             out.extend(hits.iter().map(|i| (*i, l.clone())));
