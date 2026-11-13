@@ -14,6 +14,8 @@ chrono.workspace = true
 clap.workspace = true
 roll-cluster.workspace = true
 code-control.workspace = true
+code-review.workspace = true
+roll-net.workspace = true
 code-preview.workspace = true
 futures.workspace = true
 http-body.workspace = true
@@ -49,6 +51,8 @@ reqwest = { workspace = true, features = ["rustls"] }
 roll-accounts.workspace = true
 roll-auth.workspace = true
 roll-workspace.workspace = true
+roll-access.workspace = true
+roll-mcp.workspace = true
 s3-api.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true

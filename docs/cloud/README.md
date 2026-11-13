@@ -385,6 +385,11 @@ the host (`ROLL_CODE_RUNNER=docker`, the default), exactly as before.
   compared in constant time and never logged; products get only an `Operator` marker on the
   request. `RUST_LOG=rolld::auth=debug` lists every route with its access at startup, and
   `crates/rolld/tests/auth.rs` walks that list.
+- **Scoped tokens.** Besides the operator token, rolld takes scoped tokens (`rlt_…`) and OAuth
+  connections from MCP clients (`rlo_…`): the operator builds them (dashboard "MCP & access",
+  `roll token create`) with products, resources, actions, expiry and addresses. One evaluator in
+  front of every route decides them (docs/permissions.md); roll's MCP server is `/v1/mcp`
+  (docs/mcp.md). Their store is the system database's `access` schema.
 - **Secure by default.** rolld refuses to start when it listens on any non-loopback address, or
   with `ROLL_EDGE=1`, without `ROLL_ADMIN_TOKEN`. On loopback it starts open, as before, and says
   so. With a token, tasks requires a token or API key and streams' HTTP data plane requires an

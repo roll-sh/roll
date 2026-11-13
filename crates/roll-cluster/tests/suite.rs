@@ -160,7 +160,10 @@ fn a_node_cut_off_from_the_backend_fences_itself_first_and_recovers(kind: Kind) 
 
     a.fault_db(true);
     assert!(eventually(Duration::from_secs(10), || !a.owns(&key)), "a never fenced itself");
-    assert!(!a.is_healthy());
+    // The lease can lapse at its local deadline a moment before the failing heartbeat marks the
+    // node unhealthy (under load either comes first); fencing before b takes over is checked by
+    // the spans below.
+    assert!(eventually(Duration::from_secs(5), || !a.is_healthy()), "a never went unhealthy");
     match a.route(&key) {
         Ok(Route::Local(_)) => panic!("routed locally without a valid lease"),
         Ok(_) | Err(Error::Fault(_)) => {}

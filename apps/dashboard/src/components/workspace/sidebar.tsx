@@ -1,5 +1,5 @@
 import { RollLogo } from "@roll/brand";
-import { GitBranch, House, Plus, Search } from "lucide-react";
+import { GitBranch, House, KeyRound, Plus, Search } from "lucide-react";
 import { useLocation } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Link } from "@/components/link";
@@ -51,6 +51,9 @@ export function Sidebar({ onSearch }: { onSearch: () => void }) {
       </SideLink>
       <SideLink href="/dashboard/code" icon={<GitBranch className="size-3.5" />} active={pathname.startsWith("/dashboard/code")}>
         Code
+      </SideLink>
+      <SideLink href="/dashboard/access" icon={<KeyRound className="size-3.5" />} active={pathname.startsWith("/dashboard/access")}>
+        MCP &amp; access
       </SideLink>
 
       <Projects pathname={pathname} />

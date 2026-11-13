@@ -1670,6 +1670,7 @@ dependencies = [
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "roll-net",
  "rsa",
  "serde",
  "serde_json",
@@ -4252,6 +4253,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.8",
  "reqwest",
+ "roll-net",
  "rsa",
  "rusqlite",
  "serde",
@@ -6290,6 +6292,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-access"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "crc32fast",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "hmac 0.12.1",
+ "http-body-util",
+ "ipnet",
+ "percent-encoding",
+ "reqwest",
+ "ring",
+ "roll-auth",
+ "roll-cluster",
+ "roll-net",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "roll-accounts"
 version = "0.1.0"
 dependencies = [
@@ -6329,6 +6364,7 @@ dependencies = [
  "getrandom 0.4.3",
  "qrcode",
  "ring",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tower-http 0.7.1",
@@ -6364,6 +6400,9 @@ dependencies = [
  "pg-storage",
  "regex",
  "reqwest",
+ "roll-access",
+ "roll-auth",
+ "roll-workspace",
  "rustls-pemfile",
  "rustyline",
  "s3-control",
@@ -6453,6 +6492,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-mcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "code-sql",
+ "futures",
+ "http-body-util",
+ "percent-encoding",
+ "roll-access",
+ "roll-auth",
+ "roll-workspace",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "url",
+]
+
+[[package]]
+name = "roll-net"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "roll-workspace"
 version = "0.1.0"
 dependencies = [
@@ -6485,6 +6553,7 @@ dependencies = [
  "clap",
  "code-control",
  "code-preview",
+ "code-review",
  "code-sql",
  "futures",
  "futures-util",
@@ -6522,10 +6591,13 @@ dependencies = [
  "redis-control",
  "redis-server",
  "reqwest",
+ "roll-access",
  "roll-accounts",
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-mcp",
+ "roll-net",
  "roll-workspace",
  "s3-api",
  "s3-control",

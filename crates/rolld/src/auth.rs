@@ -20,6 +20,16 @@ use tracing::{debug, info, warn};
 /// Routes that don't need the operator's token, longest match wins (`/v1/code` covers everything
 /// under it). Everything not here is the operator's.
 pub const RULES: &[Rule] = &[
+    // OAuth for MCP clients (docs/mcp.md, "Authorization"): discovery, registration, the token
+    // endpoint and revocation are public by the spec; they're merged in front of the gate.
+    Rule { route: "/.well-known", access: Access::Public("OAuth discovery for MCP clients") },
+    Rule { route: "/v1/access/oauth/register", access: Access::Public("OAuth dynamic client registration (public clients, PKCE)") },
+    Rule { route: "/v1/access/oauth/token", access: Access::Public("OAuth token endpoint: codes and refresh tokens are the credentials") },
+    Rule { route: "/v1/access/oauth/revoke", access: Access::Public("OAuth token revocation") },
+    Rule { route: "/v1/access/leaks/github", access: Access::Public("GitHub's secret scanning reports: GitHub's signature is the credential") },
+    // roll's MCP server answers 401 itself, naming the OAuth metadata; grants are decided by the
+    // evaluator before it, and each tool call goes through the gate again.
+    Rule { route: "/v1/mcp", access: Access::Product("MCP: 401 with OAuth discovery without a token") },
     // Health: load balancers and the dashboard's status; nothing a tenant owns.
     Rule { route: "/v1/health", access: Access::Public("health: Postgres control plane version and status") },
     Rule { route: "/v1/code/health", access: Access::Public("health: load balancers") },
@@ -145,9 +155,20 @@ impl Auth {
                 Access::User(_) => user += 1,
                 Access::Operator => operator += 1,
             }
-            debug!(target: "rolld::auth", host = %host, route = %r, access = %access, "route");
+            let scoped = roll_access::catalog::classified(r).unwrap_or("none");
+            debug!(target: "rolld::auth", host = %host, route = %r, scoped = %scoped, access = %access, "route");
         }
         info!(host = %host, routes = routes.len(), operator, operator_or_credential = credential, user, product, public, "control-plane routes");
+        router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check))
+    }
+
+    /// Scoped tokens' evaluator (`access.rs`): set before serving.
+    pub fn set_authorizer(&self, a: std::sync::Arc<dyn roll_auth::Authorizer>) {
+        self.gate.set_authorizer(a);
+    }
+
+    /// `router` behind the gate, without listing its routes (the MCP server's view of the API).
+    pub fn layer(&self, router: axum::Router) -> axum::Router {
         router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check))
     }
 

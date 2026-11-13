@@ -2,6 +2,7 @@ import { RollLogo } from "@roll/brand";
 import { LucideProvider, Menu, X } from "lucide-react";
 import { useLocation } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
+import { WaitingApprovals } from "./access/waiting";
 import { AgentsControl } from "./agents/agents-control";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";
@@ -65,6 +66,7 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
                 {/* A page's buttons (Review, Land, Deploy) scroll sideways on a phone rather than widen the page. */}
                 {actions}
               </span>
+              <WaitingApprovals />
               <AgentsControl pill={false} />
             </header>
 
