@@ -51,6 +51,8 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   return (
     <Panel title={<>Environment <span className="font-mono text-[13px] text-muted">{env.name}</span></>}>
       <div className="divide-y divide-line">
+        {service.run.tcp && <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Network</p>}
+
         {service.run.tcp && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <div>
@@ -67,6 +69,8 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             )}
           </div>
         )}
+        <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Deploys</p>
+
         {repo && (
           <form
             className="flex flex-wrap items-end gap-3 px-5 py-4"
@@ -120,29 +124,108 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
-        {service.run.type === "web" && (
-          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-medium">Maintenance</p>
+        <div className="space-y-3 px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[13px] font-medium">Deploy hook</p>
               <p className="mt-1 text-[12px] text-muted">
-                {env.maintenance
-                  ? `Visitors get roll's maintenance page${env.maintenance.message ? " with your note" : ""}; nothing wakes. Deployment URLs still answer.`
-                  : "Serving. In maintenance its public names answer a maintenance page instead, and nothing wakes."}
+                {env.hook
+                  ? `A POST to its URL deploys ${env.name}, from CI or a registry's webhook${service.source.kind === "image" ? " (?image= another tag of the same image)" : ""}.`
+                  : "A secret URL that deploys this environment, without an API token."}
               </p>
-              {!env.maintenance && (
-                <input value={notice} onChange={(e) => setNotice(e.target.value.slice(0, 500))} placeholder="What visitors read (optional)" className={`${input} mt-2 w-full text-[12px]`} aria-label="Maintenance note" />
-              )}
             </div>
-            <button
-              className={env.maintenance ? primary : btn}
-              disabled={busy}
-              aria-pressed={!!env.maintenance}
-              onClick={() => runner.run("maintenance", () => appsApi.putEnvironment(service.id, env.name, { maintenance: env.maintenance ? false : { message: notice.trim() || null } }))}
-            >
-              {env.maintenance ? "End maintenance" : "Start maintenance"}
-            </button>
+            <div className="flex gap-2">
+              {env.hook && (
+                <SureButton className={btn} disabled={busy} sure="Sure? It stops working" onSure={() => runner.run("hook", () => appsApi.removeHook(service.id, env.name)).then(() => setHook(null))}>
+                  Remove
+                </SureButton>
+              )}
+              <button
+                className={btn}
+                disabled={busy}
+                title={env.hook ? "A new URL; the old one stops working" : undefined}
+                onClick={async () => {
+                  const url = await runner.run("hook", () => appsApi.createHook(service.id, env.name));
+                  if (typeof url === "string") setHook(url);
+                }}
+              >
+                {env.hook ? "New URL" : "Create"}
+              </button>
+            </div>
           </div>
-        )}
+          {hook && (
+            <div className="rise rounded-lg border border-line bg-bg px-3 py-2">
+              <p className="text-[11px] text-subtle">The hook's URL, shown once (only its hash is kept):</p>
+              <div className="mt-1 flex items-center gap-1">
+                <code className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{hook}</code>
+                <CopyButton id="hook-url" text={hook} copied={copied} onCopy={copy} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-end gap-3 px-5 py-4">
+          <div className="min-w-56 flex-1">
+            <p className="text-[13px] font-medium">Promote</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {sources.length ? (
+                <>Deploy what another environment runs here: its image, no build, with {env.name}'s variables.</>
+              ) : (
+                <>Another environment with a live deployment can be promoted here.</>
+              )}
+            </p>
+          </div>
+          {sources.length > 0 && (
+            <>
+              <select value={from} onChange={(e) => setFrom(e.target.value)} className={`${input} font-mono text-[12px]`} aria-label="Environment to promote">
+                {sources.map((e) => (
+                  <option key={e.name} value={e.name}>
+                    {e.name}
+                  </option>
+                ))}
+              </select>
+              <button className={btn} disabled={!from || busy} onClick={() => runner.run("promote", () => appsApi.promote(service.id, env.name, from))}>
+                <Rocket className="size-3.5" /> {runner.busy === "promote" ? <span className="shimmer">Promoting…</span> : `Promote ${from}`}
+              </button>
+            </>
+          )}
+        </div>
+
+        <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Who gets in</p>
+
+        <div className="space-y-3 px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[13px] font-medium">{env.private ? "Private" : "Public"}</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.private ? "Only visitors with its link get in; everyone else gets a 401 before anything wakes." : "Anyone with its URL can open it."}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              {env.private && (
+                <button className={btn} disabled={busy} onClick={makePrivate} title="A new link; the old one stops working">
+                  New link
+                </button>
+              )}
+              <button
+                className={btn}
+                disabled={busy}
+                onClick={() => (env.private ? runner.run("access", () => appsApi.putEnvironment(service.id, env.name, { access: null })).then(() => setLink(null)) : makePrivate())}
+              >
+                {env.private ? <Unlock className="size-3.5" /> : <Lock className="size-3.5" />} {env.private ? "Make public" : "Make private"}
+              </button>
+            </div>
+          </div>
+          {link && (
+            <div className="rise rounded-lg border border-line bg-bg px-3 py-2">
+              <p className="text-[11px] text-subtle">The private link, shown once (only its hash is kept):</p>
+              <div className="mt-1 flex items-center gap-1">
+                <code className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{link}</code>
+                <CopyButton id="access-link" text={link} copied={copied} onCopy={copy} />
+              </div>
+            </div>
+          )}
+        </div>
 
         {service.run.type === "web" && service.run.public !== false && (
           <div className="px-5 py-4">
@@ -196,6 +279,32 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        {service.run.type === "web" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-medium">Maintenance</p>
+              <p className="mt-1 text-[12px] text-muted">
+                {env.maintenance
+                  ? `Visitors get roll's maintenance page${env.maintenance.message ? " with your note" : ""}; nothing wakes. Deployment URLs still answer.`
+                  : "Serving. In maintenance its public names answer a maintenance page instead, and nothing wakes."}
+              </p>
+              {!env.maintenance && (
+                <input value={notice} onChange={(e) => setNotice(e.target.value.slice(0, 500))} placeholder="What visitors read (optional)" className={`${input} mt-2 w-full text-[12px]`} aria-label="Maintenance note" />
+              )}
+            </div>
+            <button
+              className={env.maintenance ? primary : btn}
+              disabled={busy}
+              aria-pressed={!!env.maintenance}
+              onClick={() => runner.run("maintenance", () => appsApi.putEnvironment(service.id, env.name, { maintenance: env.maintenance ? false : { message: notice.trim() || null } }))}
+            >
+              {env.maintenance ? "End maintenance" : "Start maintenance"}
+            </button>
+          </div>
+        )}
+
+        <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Scale</p>
+
         {env.scaling && (
           <div className="px-5 py-4">
             <p className="text-[13px] font-medium">Following {service.run.scale?.group ?? "its work"}</p>
@@ -208,108 +317,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
 
         <OwnRun service={service} env={env} runner={runner} />
 
-        <div className="space-y-3 px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-[13px] font-medium">Deploy hook</p>
-              <p className="mt-1 text-[12px] text-muted">
-                {env.hook
-                  ? `A POST to its URL deploys ${env.name}, from CI or a registry's webhook${service.source.kind === "image" ? " (?image= another tag of the same image)" : ""}.`
-                  : "A secret URL that deploys this environment, without an API token."}
-              </p>
-            </div>
-            <div className="flex gap-2">
-              {env.hook && (
-                <SureButton className={btn} disabled={busy} sure="Sure? It stops working" onSure={() => runner.run("hook", () => appsApi.removeHook(service.id, env.name)).then(() => setHook(null))}>
-                  Remove
-                </SureButton>
-              )}
-              <button
-                className={btn}
-                disabled={busy}
-                title={env.hook ? "A new URL; the old one stops working" : undefined}
-                onClick={async () => {
-                  const url = await runner.run("hook", () => appsApi.createHook(service.id, env.name));
-                  if (typeof url === "string") setHook(url);
-                }}
-              >
-                {env.hook ? "New URL" : "Create"}
-              </button>
-            </div>
-          </div>
-          {hook && (
-            <div className="rise rounded-lg border border-line bg-bg px-3 py-2">
-              <p className="text-[11px] text-subtle">The hook's URL, shown once (only its hash is kept):</p>
-              <div className="mt-1 flex items-center gap-1">
-                <code className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{hook}</code>
-                <CopyButton id="hook-url" text={hook} copied={copied} onCopy={copy} />
-              </div>
-            </div>
-          )}
-        </div>
-
         {service.run.volume && <Backups service={service} env={env} runner={runner} />}
-
-        <div className="flex flex-wrap items-end gap-3 px-5 py-4">
-          <div className="min-w-56 flex-1">
-            <p className="text-[13px] font-medium">Promote</p>
-            <p className="mt-1 text-[12px] text-muted">
-              {sources.length ? (
-                <>Deploy what another environment runs here: its image, no build, with {env.name}'s variables.</>
-              ) : (
-                <>Another environment with a live deployment can be promoted here.</>
-              )}
-            </p>
-          </div>
-          {sources.length > 0 && (
-            <>
-              <select value={from} onChange={(e) => setFrom(e.target.value)} className={`${input} font-mono text-[12px]`} aria-label="Environment to promote">
-                {sources.map((e) => (
-                  <option key={e.name} value={e.name}>
-                    {e.name}
-                  </option>
-                ))}
-              </select>
-              <button className={btn} disabled={!from || busy} onClick={() => runner.run("promote", () => appsApi.promote(service.id, env.name, from))}>
-                <Rocket className="size-3.5" /> {runner.busy === "promote" ? <span className="shimmer">Promoting…</span> : `Promote ${from}`}
-              </button>
-            </>
-          )}
-        </div>
-
-        <div className="space-y-3 px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-[13px] font-medium">{env.private ? "Private" : "Public"}</p>
-              <p className="mt-1 text-[12px] text-muted">
-                {env.private ? "Only visitors with its link get in; everyone else gets a 401 before anything wakes." : "Anyone with its URL can open it."}
-              </p>
-            </div>
-            <div className="flex gap-2">
-              {env.private && (
-                <button className={btn} disabled={busy} onClick={makePrivate} title="A new link; the old one stops working">
-                  New link
-                </button>
-              )}
-              <button
-                className={btn}
-                disabled={busy}
-                onClick={() => (env.private ? runner.run("access", () => appsApi.putEnvironment(service.id, env.name, { access: null })).then(() => setLink(null)) : makePrivate())}
-              >
-                {env.private ? <Unlock className="size-3.5" /> : <Lock className="size-3.5" />} {env.private ? "Make public" : "Make private"}
-              </button>
-            </div>
-          </div>
-          {link && (
-            <div className="rise rounded-lg border border-line bg-bg px-3 py-2">
-              <p className="text-[11px] text-subtle">The private link, shown once (only its hash is kept):</p>
-              <div className="mt-1 flex items-center gap-1">
-                <code className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{link}</code>
-                <CopyButton id="access-link" text={link} copied={copied} onCopy={copy} />
-              </div>
-            </div>
-          )}
-        </div>
 
         {env.name !== PRODUCTION && (
           <div className="px-5 py-4">
