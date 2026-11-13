@@ -44,6 +44,8 @@ pub(super) struct Http {
     bitbucket: String,
     /// `https://app.terraform.io/api/v2`.
     terraform: String,
+    /// `https://api.digitalocean.com/v2`.
+    digitalocean: String,
 }
 
 impl Http {
@@ -59,6 +61,7 @@ impl Http {
         h.circleci = "https://circleci.com/api/v2".into();
         h.bitbucket = "https://api.bitbucket.org/2.0".into();
         h.terraform = "https://app.terraform.io/api/v2".into();
+        h.digitalocean = "https://api.digitalocean.com/v2".into();
         h
     }
 
@@ -70,7 +73,7 @@ impl Http {
             .user_agent("roll-secrets-sync")
             .build()
             .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()), circleci: vercel.into(), bitbucket: format!("{vercel}/2.0"), terraform: format!("{vercel}/api/v2") }
+        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()), circleci: vercel.into(), bitbucket: format!("{vercel}/2.0"), terraform: format!("{vercel}/api/v2"), digitalocean: format!("{vercel}/v2") }
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -382,7 +385,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new(), digitalocean: String::new() };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -1041,6 +1044,92 @@ impl SyncTarget for TerraformCloud {
     }
 }
 
+// ── digitalocean ──
+
+/// A DigitalOcean App Platform app's environment variables (app-wide, or one component's), set in
+/// its app spec as encrypted `SECRET`s. The spec is read, only the synced keys change, and it's put
+/// back: every other variable stays as it was (already-encrypted values go back as they came).
+/// Updating the spec redeploys the app.
+pub(super) struct DigitalOcean(pub(super) Http);
+
+impl DigitalOcean {
+    /// (app id, component, token_key)
+    fn target(&self, t: &Json) -> Result<(String, Option<String>, String)> {
+        let [app, component, token_key] = target("digitalocean", t, [("app", true), ("component", false), ("token_key", true)])?;
+        let app = app.unwrap_or_default();
+        if !ident(&app, 64, "-") {
+            return Err(bad("app is an App Platform app's id"));
+        }
+        if component.as_ref().is_some_and(|c| !ident(c, 64, "-")) {
+            return Err(bad("component is one of the app's services, workers, jobs, functions or static sites, by name"));
+        }
+        Ok((app, component, key_field("digitalocean", "token_key", token_key)?))
+    }
+}
+
+impl SyncTarget for DigitalOcean {
+    fn kind(&self) -> &str {
+        "digitalocean"
+    }
+    fn label(&self) -> &str {
+        "DigitalOcean App Platform"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "app", label: "App id", required: true, placeholder: "8d2c…" },
+            SyncField { name: "component", label: "Component (optional: app-wide otherwise)", required: false, placeholder: "web" },
+            SyncField { name: "token_key", label: "Key holding an API token", required: true, placeholder: "DIGITALOCEAN_TOKEN" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (app, component, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        let what = format!("digitalocean {app}");
+        let url = format!("{}/apps/{app}", self.0.digitalocean);
+        block_on(async {
+            let (status, got) = self.0.send(self.0.client.get(&url).bearer_auth(token), &what).await?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("{what}: reading the app: {status} {}", got["id"].as_str().unwrap_or_default())));
+            }
+            let mut spec = got["app"]["spec"].clone();
+            if !spec.is_object() {
+                return Err(Error::Link(format!("{what}: the app has no spec")));
+            }
+            // Where the variables live: the app's, or the named component's.
+            let envs: &mut Json = match &component {
+                None => &mut spec["envs"],
+                Some(c) => {
+                    let found = ["services", "workers", "jobs", "functions", "static_sites"]
+                        .into_iter()
+                        .find_map(|kind| spec[kind].as_array().and_then(|a| a.iter().position(|x| x["name"] == c.as_str())).map(|i| (kind, i)));
+                    let Some((kind, i)) = found else { return Err(Error::Link(format!("{what}: no component named {c}"))) };
+                    &mut spec[kind][i]["envs"]
+                }
+            };
+            let mut list: Vec<Json> = envs.as_array().cloned().unwrap_or_default();
+            list.retain(|e| !e["key"].as_str().is_some_and(|k| p.changed.iter().any(|c| c == k) || p.removed.iter().any(|r| r == k)));
+            for name in p.changed {
+                if let Some(v) = p.values.get(name) {
+                    list.push(json!({ "key": name, "value": v.expose(), "scope": "RUN_AND_BUILD_TIME", "type": "SECRET" }));
+                }
+            }
+            *envs = Json::Array(list);
+            let (status, got) = self.0.send(self.0.client.put(&url).bearer_auth(token).json(&json!({ "spec": spec })), &what).await?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("{what}: updating the spec: {status} {}", got["id"].as_str().unwrap_or_default())));
+            }
+            Ok(())
+        })
+    }
+}
+
 // ── fly ──
 
 /// A Fly.io app's secrets, through Fly's GraphQL API (as flyctl's `fly-go` sends them).
@@ -1334,7 +1423,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new(), digitalocean: String::new() };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -1649,6 +1738,13 @@ mod tests {
             // A form (Google's token request) is kept as its text.
             seen.lock().unwrap().push((method.to_string(), pq.clone(), serde_json::from_slice(&body).unwrap_or_else(|_| Json::String(String::from_utf8_lossy(&body).into()))));
             // Google: the token endpoint, then Secret Manager (OLD is roll's, NEW doesn't exist yet).
+            // DigitalOcean: an app whose `web` service has OLD and KEEP.
+            if pq == "/v2/apps/app-1" && method == Method::GET {
+                return (StatusCode::OK, axum::Json(json!({ "app": { "spec": { "name": "shop", "services": [{ "name": "web", "envs": [
+                    { "key": "OLD", "value": "EV[1:abc]", "type": "SECRET" },
+                    { "key": "KEEP", "value": "EV[1:def]", "type": "SECRET" },
+                ] }] } } })));
+            }
             // Terraform Cloud: OLD is roll's, THEIRS isn't.
             if pq == "/api/v2/workspaces/ws-abc/vars" && method == Method::GET {
                 return (StatusCode::OK, axum::Json(json!({ "data": [
@@ -1841,6 +1937,19 @@ mod tests {
         let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
         assert_eq!(route, [("GET", "/api/v2/workspaces/ws-abc/vars"), ("POST", "/api/v2/workspaces/ws-abc/vars"), ("DELETE", "/api/v2/workspaces/ws-abc/vars/var-old")]);
         assert_eq!(calls[1].2["data"]["attributes"], json!({ "key": "NEW", "value": "v-123", "category": "env", "sensitive": true, "description": "managed by roll secrets" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn digitalocean_changes_only_the_synced_keys_in_a_components_spec() {
+        let (base, seen) = mock().await;
+        push(Arc::new(DigitalOcean(http(&base))), json!({ "app": "app-1", "component": "web", "token_key": "DO" }), &[("DO", "dop")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        assert_eq!(route, [("GET", "/v2/apps/app-1"), ("PUT", "/v2/apps/app-1")]);
+        assert_eq!(
+            calls[1].2["spec"]["services"][0]["envs"],
+            json!([{ "key": "KEEP", "value": "EV[1:def]", "type": "SECRET" }, { "key": "NEW", "value": "v-123", "scope": "RUN_AND_BUILD_TIME", "type": "SECRET" }])
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

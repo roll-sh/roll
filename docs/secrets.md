@@ -800,7 +800,7 @@ open it.
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
 they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
-Railway, Heroku, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
+Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -929,7 +929,7 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
   leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
 
-### `render`, `netlify`, `fly`, `railway`, `heroku`, `circleci`, `bitbucket` and `terraform-cloud`
+### `render`, `netlify`, `fly`, `railway`, `heroku`, `digitalocean`, `circleci`, `bitbucket` and `terraform-cloud`
 
 - **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
   environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
@@ -958,6 +958,11 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   variables (`category` `env`, the default, or `terraform`), all `sensitive`, over its JSON:API
   (`…/workspaces/{id}/vars`). Terraform Cloud keeps no tag on a variable, so roll describes its own
   as `managed by roll secrets` and never writes to or deletes one without that description.
+- **`digitalocean`**, `{app, component?, token_key}`: an App Platform app's environment variables,
+  app-wide or one component's (a service, worker, job, function or static site, by name). The sync
+  reads the app spec, replaces only the keys it pushes (as encrypted `SECRET`s, run and build time),
+  drops the keys it removes, leaves every other variable as it came (already-encrypted values go
+  back unchanged), and puts the spec back. Updating the spec redeploys the app.
 - **`heroku`**, `{app, token_key}`: a Heroku app's config vars, in one `PATCH /apps/{app}/config-vars`
   per push (changed names with their values, removed ones as `null`). A failure names Heroku's error
   `id`, never the answer, which echoes the vars.
@@ -1441,7 +1446,7 @@ Done and in PR #20:
   alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, CircleCI, Bitbucket Pipelines, Terraform Cloud, Vercel, Netlify, Render, Fly.io, Railway,
-  Heroku, Cloudflare Workers, AWS
+  Heroku, DigitalOcean App Platform, Cloudflare Workers, AWS
   Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
   identities pinned to client addresses; encrypted project backup and restore;
@@ -1465,8 +1470,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **DigitalOcean App Platform sync**: an app's (or one component's) environment variables, set
-   through the app spec, encrypted (`SECRET` type).
 
 Waiting on other pull requests:
 

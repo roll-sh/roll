@@ -73,7 +73,7 @@ export function SyncsView() {
 /** The kind picker's groups, in order; `[]`: every kind no group names. */
 const GROUPS: [string, string[]][] = [
   ["CI", ["github", "gitlab", "circleci", "bitbucket"]],
-  ["Hosting", ["vercel", "netlify", "render", "fly", "railway", "heroku", "cloudflare"]],
+  ["Hosting", ["vercel", "netlify", "render", "fly", "railway", "heroku", "digitalocean", "cloudflare"]],
   ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "kubernetes", "terraform-cloud"]],
   ["Anything else", []],
 ];
@@ -90,6 +90,7 @@ function targetSummary(s: Sync): string {
   if (s.kind === "fly") return str("app");
   if (s.kind === "railway") return `${str("project")} · ${str("environment")}${str("service") ? ` · ${str("service")}` : ""}`;
   if (s.kind === "heroku") return str("app");
+  if (s.kind === "digitalocean") return str("component") ? `${str("app")} · ${str("component")}` : str("app");
   if (s.kind === "circleci") return str("project");
   if (s.kind === "bitbucket") return `${str("workspace")}/${str("repo")}${str("environment") ? " · deployment" : ""}`;
   if (s.kind === "aws-ssm") return `${str("region")} · ${str("prefix")}`;
