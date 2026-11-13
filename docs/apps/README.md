@@ -13,7 +13,8 @@ every deployment is immutable with instant rollback.
   together.
 - CLI: `roll up`, `roll deploy`, `roll logs`, `roll domains`, `roll apps …` (`crates/roll-cli/src/apps.rs`).
 - Dashboard: services on the project canvas (`/dashboard/projects/$id`) and a service page at
-  `/dashboard/apps/$id` (deployments, logs, metrics, variables, domains, settings).
+  `/dashboard/apps/$id` (deployments, logs, metrics, variables, jobs, shell, domains, usage,
+  settings).
 
 ```
   browser / curl ──▶ <slug>.up.roll.site, custom domains  (Cloudflare, proxied)
@@ -688,7 +689,8 @@ directory prints the same finding with the two commands that do it.
 ## Volume backups
 
 A volume is backed up to object storage as a tar (`apps/volumes/<service>/<env>/<unix ms>.tar`),
-on demand (`POST …/volume/backups`) and once a day by its owner, the newest seven kept, as
+on demand (`POST …/volume/backups`, "Back up now" in the environment panel, `roll apps backups
+--now`) and once a day by its owner, the newest seven kept, as
 Railway's volume backups and Render's and Fly's snapshots. A throwaway busybox container with no
 network mounts the volume read-only and streams `tar c` into `Objects::upload`, so nothing holds
 the volume in memory; it's the disk at that moment, so an app mid-write can leave a file half
@@ -721,7 +723,7 @@ the public-only client, no redirects, private addresses refused unless
 
 A project can have a monthly alert and a hard limit (`PUT /v1/apps/projects/{project}/limits`,
 Settings → Spend limits, `roll apps limits --alert 20 --hard 50`), in US dollars at the prices
-below, over its services' metered use this calendar month (UTC), as Railway's usage limits
+in "Observability and cost", over its services' metered use this calendar month (UTC), as Railway's usage limits
 work. One node (`apps:spend`) checks every 30 s: past the alert it writes one
 `spend.alert` event for the month; past the hard limit one `spend.limit` and marks the project
 capped. Each mark is a compare-and-set in the event's own transaction, so a handover never sends
@@ -794,7 +796,8 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 - Framework entries run directly (Nuxt `node .output/server/index.mjs`, Nest `node dist/main`,
   SvelteKit adapter-node `node build`, Astro's node adapter); Next and Remix use the start script.
   Static builds (Vite, CRA, Gatsby, Astro without an adapter, adapter-static) are provider
-  `static` on busybox httpd (no SPA fallback yet).
+  `static` on busybox httpd; one with a client-side router is a single-page app ("Single-page
+  apps").
 - Go runs on distroless static (no shell); Rust builds on `rust:<v>-slim-bookworm` so the binary
   runs on `debian:bookworm-slim`; Java runs the built jar on a JRE image; Python installs into
   `/opt/venv`; PHP serves `php -S` with `PHP_CLI_SERVER_WORKERS=4`.
@@ -889,45 +892,41 @@ Ranked; the top item not marked *waiting* is what's being worked on. A product r
 2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
 earlier security, product and integration reviews).
 
-1. **Rough edges**: hide the link kinds that aren't wired yet (buckets, streams, NoSQL fail on
-   this node); volume backups and restore in the dashboard and CLI; confirmations for rollback,
-   removing a domain, unlinking, removing a drain, sleep and restart; the docs that disagree with
-   the product (static SPA fallback, the tab list).
-2. **Sticky rollouts**: a visitor stays on one deployment through a gradual rollout (a
+1. **Sticky rollouts**: a visitor stays on one deployment through a gradual rollout (a
    `roll_bucket` cookie compared with the step's share, as Vercel's rolling releases), so the
    numbers are clean and a page's client and server versions match.
-3. **Deploy hooks and image tag watching**: a secret deploy URL per environment (only its hash
+2. **Deploy hooks and image tag watching**: a secret deploy URL per environment (only its hash
    stored; it can only deploy the service's own image repository), as Render's, and an opt-in
    watch that redeploys an image service when its tag moves, as Railway's Image Auto Updates.
-4. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
+3. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
    environment's access token, and `no_traffic` deploys promoted later (Cloud Run's revision
    tags, Vercel's deployment URLs).
-5. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
+4. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
    bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
    (Render's and Vercel's static sites).
-6. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
+5. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
    (Cloud Run's `--use-http2`, Fly's `h2_backend`); then TCP services.
-7. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
+6. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
    by `roll up --all` with the plan shown first (Render's Blueprints), then importing a Compose
    file's image services (Railway's).
-8. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
+7. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-9. **Region**: the region shown on the overview and each environment, defaulting to the project's
+8. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-10. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+9. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-11. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+10. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-12. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-13. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-14. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+12. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+13. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-15. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+14. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-16. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+15. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

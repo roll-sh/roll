@@ -361,7 +361,11 @@ export function SettingsTab({
           <Field label="Volume mount" hint="optional; one instance at most">
             {t("volumeMount", "/data")}
           </Field>
-          {form.volumeMount.trim() && <Field label="Volume size (GB)">{t("volumeSize", "1")}</Field>}
+          {form.volumeMount.trim() && (
+            <Field label="Volume size (GB)" hint="what it's billed and planned at; a host without disk quotas doesn't stop it growing past">
+              {t("volumeSize", "1")}
+            </Field>
+          )}
         </Grid>
       </Panel>
 

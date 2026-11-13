@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
-import { useState } from "react";
-import { appsApi, PRODUCTION, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { useCallback, useEffect, useState } from "react";
+import { appsApi, PRODUCTION, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
@@ -81,6 +81,8 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         )}
 
         <OwnRun service={service} env={env} runner={runner} />
+
+        {service.run.volume && <Backups service={service} env={env} runner={runner} />}
 
         <div className="flex flex-wrap items-end gap-3 px-5 py-4">
           <div className="min-w-56 flex-1">
@@ -242,6 +244,71 @@ function OwnRun({ service, env, runner }: { service: Service; env: Environment; 
         </div>
       )}
     </form>
+  );
+}
+
+const size = (n: number) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+
+/** The volume's backups (daily, the newest seven kept): back up now, or restore one after typing the environment's name. */
+function Backups({ service, env, runner }: { service: Service; env: Environment; runner: Runner }) {
+  const [list, setList] = useState<Backup[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState<Backup | null>(null);
+  const busy = runner.busy !== null;
+  const load = useCallback(() => {
+    appsApi.backups(service.id, env.name).then(
+      (l) => {
+        setList(l);
+        setError(null);
+      },
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+  }, [service.id, env.name]);
+  useEffect(load, [load]);
+  return (
+    <div className="space-y-3 px-5 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-[13px] font-medium">Volume backups</p>
+          <p className="mt-1 text-[12px] text-muted">{service.run.volume!.mount} is copied to object storage once a day; the newest seven are kept.</p>
+        </div>
+        <button className={btn} disabled={busy} onClick={() => runner.run("backup", () => appsApi.backUp(service.id, env.name)).then(load)}>
+          {runner.busy === "backup" ? <span className="shimmer">Backing up…</span> : "Back up now"}
+        </button>
+      </div>
+      {error ? (
+        <p className="text-[12px] text-muted">{error}</p>
+      ) : list === null ? null : list.length === 0 ? (
+        <p className="text-[12px] text-subtle">No backups yet.</p>
+      ) : (
+        <ul className="divide-y divide-line rounded-lg border border-line">
+          {list.map((b) => (
+            <li key={b.id} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
+              <span className="flex-1">{new Date(b.at).toLocaleString()}</span>
+              <span className="font-mono text-[12px] text-subtle">{size(b.size)}</span>
+              <button className={btn} disabled={busy} onClick={() => setRestoring(b)}>
+                Restore
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {restoring && (
+        <Confirm
+          word={env.name}
+          action="Restore"
+          busy={runner.busy === "restore"}
+          onCancel={() => setRestoring(null)}
+          onConfirm={() =>
+            runner.run("restore", () => appsApi.restore(service.id, env.name, restoring.id)).then((ok) => {
+              if (ok) setRestoring(null);
+            })
+          }
+        >
+          {env.name}'s volume becomes what it was on {new Date(restoring.at).toLocaleString()}: what's on it now is replaced. It sleeps meanwhile and wakes on the next request. Type <span className="font-mono text-fg">{env.name}</span> to restore.
+        </Confirm>
+      )}
+    </div>
   );
 }
 

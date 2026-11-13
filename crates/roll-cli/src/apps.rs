@@ -316,6 +316,19 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// The environment's volume backups (daily, the newest seven kept): list them, `--now` to
+    /// back up now, or `--restore <id>` to put the volume back as it was then (asks first;
+    /// `--yes` doesn't).
+    Backups {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with = "restore")]
+        now: bool,
+        #[arg(long, value_name = "ID")]
+        restore: Option<String>,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// The project's log drains: list them, `--add <https url>` (prints its signing secret
     /// once), or `--remove <id>`.
     Drains {
@@ -1290,6 +1303,36 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Backups { target, now, restore, yes } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/volume/backups", env_path(&svc, &target.env));
+            let when = |b: &Value| b["at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+            if now {
+                let b = api.post(&path, json!({})).await?;
+                if !json_out {
+                    println!("{}  {}  {} KiB", s(&b["id"]), when(&b), b["size"].as_u64().unwrap_or(0) / 1024);
+                    return Ok(());
+                }
+                b
+            } else if let Some(id) = restore {
+                confirm(yes, &target.env, "the volume's current files (they become the backup's)")?;
+                let b = api.post(&format!("{path}/{}/restore", enc(&id)), json!({})).await?;
+                if !json_out {
+                    println!("restored {} from {}; it wakes on the next request", target.env, when(&b));
+                    return Ok(());
+                }
+                b
+            } else {
+                let v = api.get(&path).await?;
+                if !json_out {
+                    for b in v.as_array().into_iter().flatten() {
+                        println!("{}  {}  {} KiB", s(&b["id"]), when(b), b["size"].as_u64().unwrap_or(0) / 1024);
+                    }
+                    return Ok(());
+                }
+                v
+            }
         }
         AppsCmd::Activity { target } => {
             let svc = service(api, &target).await?;

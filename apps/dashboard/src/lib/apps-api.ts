@@ -377,6 +377,13 @@ export interface CronRun {
 }
 
 /** A one-off command in a fresh container of the active deployment (`roll apps run`). */
+/** A volume's backup in object storage (`…/volume/backups`). */
+export interface Backup {
+  id: string;
+  at: number;
+  size: number;
+}
+
 export interface Job {
   id: string;
   deployment: string;
@@ -449,6 +456,9 @@ export const appsApi = {
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
   promote: (id: string, e: string, from: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from }),
+  backups: (id: string, e: string) => call<Backup[]>("GET", `${env(id, e)}/volume/backups`),
+  backUp: (id: string, e: string) => call<Backup>("POST", `${env(id, e)}/volume/backups`),
+  restore: (id: string, e: string, b: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
 
   restart: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/restart`),
