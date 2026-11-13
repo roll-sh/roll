@@ -18,6 +18,9 @@ const field = "h-8 w-full rounded-lg border border-line-2 bg-canvas px-2.5 font-
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** A word for `sh`: as is when it's plain, else in single quotes. */
+const shellQuote = (w: string) => (/^[A-Za-z0-9_./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`);
+
 /** A name rolld takes, from a repo or image name: `acme/web-site` → `web-site`, `nginx:1.27` → `nginx`. */
 export function nameFrom(s: string) {
   const last = s.split("/").pop()?.split(/[:@]/)[0] ?? "";
@@ -46,6 +49,8 @@ export function NewServiceSheet({
   const [repo, setRepo] = useState("");
   const [root, setRoot] = useState("");
   const [image, setImage] = useState("");
+  const [regUser, setRegUser] = useState("");
+  const [regPassword, setRegPassword] = useState("");
   const [name, setName] = useState("");
   const [named, setNamed] = useState(false);
   const [port, setPort] = useState("");
@@ -110,7 +115,8 @@ export function NewServiceSheet({
     try {
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
       const run = kind === "web" ? (portN ? { port: portN } : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
-      const s = await appsApi.create({ project: project.id, name, source, ...(run ? { run } : {}), ...variables, ...spot });
+      const registry = from === "image" && regUser.trim() && regPassword ? { registry: { username: regUser.trim(), password: regPassword } } : {};
+      const s = await appsApi.create({ project: project.id, name, source, ...(run ? { run } : {}), ...variables, ...registry, ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
@@ -176,13 +182,19 @@ export function NewServiceSheet({
           <>
             <Label>Image</Label>
             <input value={image} onChange={(e) => setImage(e.target.value)} placeholder="docker.io/library/nginx:1.27" className={field} spellCheck={false} autoFocus />
-            <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">A public image. Each deploy pins its digest, so a moving tag never changes what's running.</p>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">Each deploy pins its digest, so a moving tag never changes what's running.</p>
+            <Label>Private registry login (optional)</Label>
+            <div className="flex gap-2">
+              <input value={regUser} onChange={(e) => setRegUser(e.target.value)} placeholder="username" className={field} spellCheck={false} autoComplete="off" />
+              <input value={regPassword} onChange={(e) => setRegPassword(e.target.value)} placeholder="password or token" type="password" className={field} autoComplete="new-password" />
+            </div>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">Sealed, sent only to the image's own registry, never shown again.</p>
           </>
         )}
         {from === "upload" ? (
           <>
             <Label>From the app's directory</Label>
-            <CopyField shown={`roll up --project ${project.name}`} value={`roll up --project ${project.name}`} />
+            <CopyField shown={`roll up --project ${shellQuote(project.name)}`} value={`roll up --project ${shellQuote(project.name)}`} />
             <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
               Makes a service named after the directory in {project.name}, uploads the tree and follows the build. Its card shows up here; run it again to deploy what changed.
             </p>

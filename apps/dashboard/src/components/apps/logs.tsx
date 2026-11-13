@@ -13,16 +13,16 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
   const [filter, setFilter] = useState("");
   const [instance, setInstance] = useState("");
   // A search back through the stored days, shown instead of the live tail until left.
-  const [found, setFound] = useState<{ q: string; lines: LogLine[] } | null>(null);
+  const [found, setFound] = useState<{ q: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
   const [searching, setSearching] = useState(false);
   const search = async () => {
     const q = filter.trim();
     if (!q) return;
     setSearching(true);
     try {
-      setFound({ q, lines: await appsApi.searchLogs(service, env, q, Date.now() - 7 * 86_400_000) });
-    } catch {
-      setFound({ q, lines: [] });
+      setFound({ q, ...(await appsApi.searchLogs(service, env, q, Date.now() - 7 * 86_400_000)) });
+    } catch (e) {
+      setFound({ q, lines: [], truncated: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
       setSearching(false);
     }
@@ -103,7 +103,14 @@ export function RuntimeLogs({ service, env }: { service: string; env: string }) 
       />
       {found && (
         <p className="mb-2 flex items-center gap-2 text-[12px] text-muted">
-          {found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{found.q}” in the last 7 days
+          {found.error ? (
+            <span className="text-danger">The search failed: {found.error}</span>
+          ) : (
+            <>
+              {found.truncated ? `The newest ${found.lines.length}` : found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{found.q}” in the last 7 days
+              {found.truncated && " (more matched: narrow the search)"}
+            </>
+          )}
           <button type="button" className="text-accent hover:underline" onClick={() => setFound(null)}>
             Back to live
           </button>

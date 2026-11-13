@@ -44,12 +44,22 @@ pub async fn serve(apps: Arc<Apps>, service: String, env: String, req: Request) 
         .await
 }
 
+/// The Horizon mark, `@roll/brand`'s export (`packages/brand/assets/horizon-dark.svg`) drawn in
+/// the text's colour; a test keeps the copy equal to it.
+const HORIZON: &str = include_str!("../assets/horizon.svg");
+
+/// What a visitor sees when roll answers instead of the app: the mark, a title and a line, dark
+/// or light as their system is. A 503 (waking, restarting, busy) looks again by itself.
 fn page(status: StatusCode, title: &str, text: &str) -> Response {
+    let refresh = if status == StatusCode::SERVICE_UNAVAILABLE { "<meta http-equiv=refresh content=5>" } else { "" };
     let html = format!(
-        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>{title}</title>\
-         <style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#000;color:#ededed;font:14px system-ui,sans-serif}}\
-         div{{max-width:420px;padding:24px}}h1{{font-size:18px;font-weight:600;letter-spacing:-.02em;margin:0 0 8px}}p{{color:#a1a1a1;margin:0}}</style>\
-         <div><h1>{title}</h1><p>{text}</p></div>"
+        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\">{refresh}<title>{title}</title>\
+         <style>:root{{color-scheme:dark light;--bg:#000;--fg:#ededed;--muted:#a1a1a1;--accent:#4c8dff}}\
+         @media (prefers-color-scheme:light){{:root{{--bg:#fff;--fg:#0a0a0a;--muted:#666}}}}\
+         body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}}\
+         main{{max-width:420px;padding:24px}}svg{{display:block;width:28px;height:28px;margin:0 0 16px}}\
+         h1{{font-size:18px;font-weight:600;letter-spacing:-.04em;margin:0 0 8px}}p{{color:var(--muted);margin:0;line-height:1.5}}a{{color:var(--accent)}}</style>\
+         <main>{HORIZON}<h1>{title}</h1><p>{text}</p></main>"
     );
     let mut r = (status, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
     if status == StatusCode::SERVICE_UNAVAILABLE {
@@ -156,7 +166,7 @@ async fn denied(apps: &Arc<Apps>, service: &str, env: &str) -> Response {
         Some(format!("{web}/dashboard/projects/{}/previews?preview=pv_{}&go={}", q(&svc.project), q(preview), q(&svc.name)))
     };
     match link.await {
-        Some(url) => page(StatusCode::UNAUTHORIZED, "This preview is private", &format!("<a href=\"{url}\" style=\"color:#4c8dff\">Open it through roll</a>: sign in, and you're sent on with its link.")),
+        Some(url) => page(StatusCode::UNAUTHORIZED, "This preview is private", &format!("<a href=\"{url}\">Open it through roll</a>: sign in, and you're sent on with its link.")),
         None => page(StatusCode::UNAUTHORIZED, "This environment is private", text),
     }
 }
@@ -256,7 +266,9 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
         }
         Err(e) => {
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 502, 0);
-            return page(StatusCode::BAD_GATEWAY, "The service didn't answer", &format!("The instance closed the connection: {e}"));
+            // What went wrong is the owner's to read (the environment's log), not a visitor's.
+            live.log.stream(crate::logs::Stream::System).line(format!("a request failed: the instance closed the connection: {e}"));
+            return page(StatusCode::BAD_GATEWAY, "The service didn't answer", "It closed the connection before it answered. Try again in a moment.");
         }
     };
     let status = resp.status().as_u16();
@@ -314,5 +326,15 @@ struct Done {
 impl Drop for Done {
     fn drop(&mut self) {
         self.live.meter.lock().request(code_sql::now_ms(), self.began.elapsed().as_secs_f64() * 1000.0, self.status, self.counted.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_pages_mark_is_the_brands_export() {
+        let brand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/brand/assets/horizon-dark.svg");
+        let Ok(svg) = std::fs::read_to_string(brand) else { return };
+        assert_eq!(super::HORIZON.trim(), svg.trim().replace("fill=\"#0a0a0a\"", "fill=\"currentColor\""), "regenerate crates/apps-control/assets/horizon.svg from @roll/brand");
     }
 }

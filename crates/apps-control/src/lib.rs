@@ -264,7 +264,7 @@ impl Apps {
     pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
-            if !["project", "name", "source", "build", "run", "variables", "x", "y"].contains(&k.as_str()) {
+            if !["project", "name", "source", "build", "run", "variables", "registry", "x", "y"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -290,6 +290,13 @@ impl Apps {
                 Some(Value::Object(m.clone()))
             }
             Some(_) => return Err(Error::BadRequest("variables is an object of names to values".into())),
+        };
+        // A private image's login, before its first pull (`PUT …/registry`'s body).
+        let registry = match o.get("registry") {
+            None | Some(Value::Null) => None,
+            Some(r @ Value::Object(_)) if matches!(source, Source::Image { .. }) => Some(r.clone()),
+            Some(Value::Object(_)) => return Err(Error::BadRequest("registry is for an image source".into())),
+            Some(_) => return Err(Error::BadRequest("registry is {username, password, server?}".into())),
         };
         let (x, y) = (o.get("x").and_then(Value::as_f64), o.get("y").and_then(Value::as_f64));
         let this = self.clone();
@@ -324,6 +331,13 @@ impl Apps {
         self.ensure_environment(&row, PRODUCTION, Some(branch.as_deref()), Some(false), &pname).await?;
         if let Some(set) = variables {
             self.change_variables(&row.id, PRODUCTION, json!({ "set": set })).await?;
+        }
+        if let Some(r) = registry
+            && let Err(e) = self.put_registry(&row.id, r).await
+        {
+            // A login that doesn't check out makes no service: nothing to clean up by hand.
+            let _ = self.delete_service(&row.id).await;
+            return Err(e);
         }
         // A repo or an image deploys at once; an upload waits for `roll up`.
         if !matches!(source, Source::Upload) {

@@ -147,7 +147,9 @@ every deployment is immutable with instant rollback.
   to dockerd with each pull only (`X-Registry-Auth` on the Engine API), never `docker login`,
   which would keep it in the host's docker config for everyone. An image on a registry on this
   host or a private network (loopback, RFC 1918, link-local, unique-local, `localhost`) is
-  refused: dockerd would fetch it on a tenant's say-so.
+  refused: dockerd would fetch it on a tenant's say-so, and so is one whose name resolves to such
+  an address. The login goes only to the registry the image names (a source moved to another
+  registry forgets it), and New service (`registry` on create) takes it before the first pull.
 - **Public images** skip the build: the deployment pins the image's digest at deploy time, so a
   moving tag never changes a running deployment.
 - Build logs stream line by line to the dashboard and `roll deploy` as they're written
@@ -226,6 +228,13 @@ every deployment is immutable with instant rollback.
   build: seconds, not minutes.
 
 ### The runtime: scale to zero, wake on request
+
+- **What a visitor sees when roll answers instead of the app**: one small page with the Horizon
+  mark (`assets/horizon.svg`, `@roll/brand`'s export, a test keeps it equal), dark or light as
+  their system is: "Starting up" or "Restarting" (503, `Retry-After`, and it reloads itself after
+  5 s), "Paused" (402, the project's spend limit), private (401), not deployed (404). An app's
+  failure (a connection closed before it answered) is a 502 that says so without the error, which
+  goes to the environment's log.
 
 - **The waking proxy** (Knative's activator, Fly's proxy) runs on the service's owner node. A
   request for a service with no running instance is held (up to `wake_timeout`, 60 s, then a

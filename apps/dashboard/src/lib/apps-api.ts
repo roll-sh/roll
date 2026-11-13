@@ -4,7 +4,7 @@
  */
 
 import { operatorHeaders } from "./code-token";
-import { call, ROLL_API } from "./roll-api";
+import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { streamSse } from "./sse";
 
 // ── shapes (docs/apps/http-api.md) ──
@@ -94,6 +94,8 @@ export interface NewService {
   run?: Partial<Run>;
   /** Production's variables, set before its first deploy. */
   variables?: Record<string, string>;
+  /** An image source's private registry login, before its first pull. */
+  registry?: { username: string; password: string; server?: string };
   x?: number;
   y?: number;
 }
@@ -403,7 +405,14 @@ export const appsApi = {
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
   /** Lines that contain `q` (any case), back through the stored logs (7 days), newest last. */
-  searchLogs: (id: string, e: string, q: string, since?: number) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ q, since, tail: 2000 })}`),
+  /** `truncated`: more matched than came back (the newest are shown). */
+  searchLogs: async (id: string, e: string, q: string, since?: number): Promise<{ lines: LogLine[]; truncated: boolean }> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ q, since, tail: 2000 })}`, { headers: apiHeaders(), cache: "no-store" });
+    onApiStatus(res.status);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    return { lines: data as LogLine[], truncated: res.headers.get("x-roll-search-truncated") === "1" };
+  },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
 

@@ -401,6 +401,12 @@ async fn variables_are_sealed_masked_and_revealed_only_on_their_route() {
     assert_eq!(svc["registry"]["username"], "bot", "same registry: {svc}");
     let (_, svc) = call(&w.api, "PATCH", &format!("/v1/apps/services/{sid}"), Some(json!({"source": {"kind": "image", "image": "evil.example/x:1"}}))).await;
     assert_eq!(svc["registry"], Value::Null, "{svc}");
+    // Given at creation, a private image's first pull already logs in.
+    *w.fake.pulled_as.lock() = None;
+    let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "private", "source": {"kind": "image", "image": "ghcr.io/acme/api:1"}, "registry": {"username": "ci", "password": "ghp-x"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    settled(&w, v["id"].as_str().unwrap(), "production", v["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!(w.fake.pulled_as.lock().as_deref(), Some("ci"));
     // A registry on this host or a private network isn't one dockerd is sent to.
     for image in ["127.0.0.1:5000/app", "localhost:5000/app", "10.0.0.5/app:1", "[::1]:5000/app"] {
         let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "priv", "source": {"kind": "image", "image": image} }))).await;
