@@ -113,6 +113,8 @@ export function secretsApi(project: string) {
     setImports: (env: string, path: string, imports: Import[]) => req<Import[]>("PUT", `${E(env)}/imports${qs({ path })}`, imports),
     shared: () => req<Import[]>("GET", `${P}/shared`),
     suggestions: () => req<Suggestion[]>("GET", `${P}/suggestions`),
+    /** The whole project sealed to `recipient` (an X25519 public key): only its holder opens it. */
+    backup: (recipient: string) => req<{ sealed: unknown; context: string }>("POST", `${P}/backup`, { recipient }),
     exports: (env: string, path = "/") => req<Export[]>("GET", `${E(env)}/exports${qs({ path })}`),
     setExports: (env: string, path: string, projects: string[]) => req<Export[]>("PUT", `${E(env)}/exports${qs({ path })}`, projects.map((project) => ({ project }))),
 

@@ -593,6 +593,9 @@ opens it; `POST …/backup {recipient}` (admin, audited `project.backup`) is the
 carry their link and no value: a restore issues its own credentials. Personal values, history,
 leases, tokens and identities aren't in it.
 
+Environments → Backup downloads the same file from the dashboard, sealed to a public key pasted
+there: the browser never holds the secret key.
+
 `roll secrets restore shop.backup --key roll-secrets-backup.key` opens it on the CLI's machine and
 loads it into the selected project, which must have no secrets yet (`POST …/restore` with the
 opened archive; admin, audited `project.restore`), on this server or another. Values are written
@@ -1211,14 +1214,11 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Backup and restore in the dashboard**: Environments offers a backup sealed to a public key
-   pasted there (the secret key never touches the browser), and restoring stays in the CLI, which
-   holds the key.
-3. **A change's activity in one place**: the audit log, change requests and syncs' pushes as one
+2. **A change's activity in one place**: the audit log, change requests and syncs' pushes as one
    per-environment timeline in the environment view, filterable by key, so "who changed what, and
    where did it go" is one page.
-4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-5. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+4. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

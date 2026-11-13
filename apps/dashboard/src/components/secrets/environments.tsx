@@ -91,6 +91,8 @@ export function EnvironmentsView() {
 
       <Retention onError={setError} />
 
+      <Backup />
+
       <DeploymentKey />
 
       <DeleteEnvironment
@@ -314,6 +316,57 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
           <Plus className="size-3.5" /> Require
         </button>
       </form>
+    </Section>
+  );
+}
+
+/** A backup sealed to a public key the team holds (`roll secrets keygen`): the browser never sees the secret key. */
+function Backup() {
+  const { api, project } = useSecrets();
+  const [recipient, setRecipient] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const ok = /^[A-Za-z0-9_-]{43}$/.test(recipient.trim());
+  const download = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const b = await api.backup(recipient.trim());
+      const url = URL.createObjectURL(new Blob([JSON.stringify(b, null, 2)], { type: "application/json" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${project.name}-${new Date().toISOString().slice(0, 10)}.backup`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setDone(true);
+    } catch (e) {
+      setError(errorText(e));
+    }
+    setBusy(false);
+  };
+  return (
+    <Section title="Backup" aside={<span className="text-[11.5px] text-subtle max-sm:hidden">Every environment, value, link and policy, sealed to your key.</span>}>
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (ok && !busy) void download();
+        }}
+      >
+        <label className="min-w-72 flex-1">
+          <span className={label}>Public key (from roll secrets keygen)</span>
+          <input value={recipient} onChange={(e) => setRecipient(e.target.value)} placeholder="base64url, 43 characters" spellCheck={false} className={`${field} h-7 font-mono text-[12px]`} aria-invalid={recipient.trim() !== "" && !ok} />
+        </label>
+        <button type="submit" className={button} disabled={!ok || busy}>
+          {busy ? "Sealing…" : "Download backup"}
+        </button>
+      </form>
+      <ErrorNote error={error} onDismiss={() => setError(null)} className="mt-2" />
+      <p className="mt-1.5 text-[11.5px] text-muted">
+        Only the matching secret key opens it, so the file is safe to keep anywhere.{done ? " Downloaded." : ""} Restore into an empty project with{" "}
+        <code className="font-mono text-[11px]">roll secrets -p &lt;project&gt; restore {project.name}.backup --key &lt;secret key file&gt;</code>.
+      </p>
     </Section>
   );
 }
