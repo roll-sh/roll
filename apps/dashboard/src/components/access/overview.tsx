@@ -8,6 +8,8 @@ import {
   describeRule,
   expiringSoon,
   mcpConfig,
+  FIX_LABEL,
+  type Checkup,
   productName,
   withToolsets,
   mcpUrl,
@@ -29,6 +31,7 @@ import { AccessShell, relative, usePoll } from "./shell";
 export function AccessOverview() {
   const { data: grants, error, refresh } = usePoll(() => accessApi.tokens(), 10_000);
   const { data: me } = usePoll(() => accessApi.me(), 60_000);
+  const { data: checkup, refresh: recheck } = usePoll(() => accessApi.checkup(), 60_000);
   return (
     <AccessShell tab="overview">
       <div className="space-y-6">
@@ -42,6 +45,14 @@ export function AccessOverview() {
         <ConnectPanel />
         <PolicyPanel />
         <ErrorNote error={error} />
+        {checkup && checkup.length > 0 && (
+          <Attention
+            list={checkup}
+            refresh={async () => {
+              await Promise.all([refresh(), recheck()]);
+            }}
+          />
+        )}
         {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}
       </div>
     </AccessShell>
@@ -132,6 +143,55 @@ export function ConnectPanel({ token }: { token?: string }) {
           </p>
         )}
       </div>
+    </Panel>
+  );
+}
+
+/**
+ * The checkup: tokens that need attention, why, and the fix (Google's security checkup, GitHub's
+ * security overview). Revoking an unused token is right here; the others are on its page.
+ */
+function Attention({ list, refresh }: { list: Checkup[]; refresh: () => Promise<void> }) {
+  const [error, setError] = useState<string | null>(null);
+  const revoke = async (id: string) => {
+    setError(null);
+    try {
+      await accessApi.revoke(id);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <Panel title={`Needs attention (${list.length})`}>
+      <ul className="divide-y divide-line">
+        {list.map((c) => (
+          <li key={c.grant.id} className="space-y-1 px-5 py-3 text-[12px]">
+            <Link href={`/dashboard/access/tokens/${encodeURIComponent(c.grant.id)}`} className="text-[13px] font-medium hover:underline">
+              {c.grant.name}
+            </Link>
+            {c.findings.map((f) => (
+              <div key={f.kind} className="flex flex-wrap items-center gap-2">
+                <span className="min-w-0 flex-1 text-muted">{f.why[0].toUpperCase() + f.why.slice(1)}.</span>
+                {f.fix === "revoke" ? (
+                  <button onClick={() => void revoke(c.grant.id)} className={btn}>
+                    {FIX_LABEL[f.fix]}
+                  </button>
+                ) : (
+                  <Link href={`/dashboard/access/tokens/${encodeURIComponent(c.grant.id)}`} className={btn}>
+                    {FIX_LABEL[f.fix]}
+                  </Link>
+                )}
+              </div>
+            ))}
+          </li>
+        ))}
+      </ul>
+      {error && (
+        <div className="px-5 pb-3">
+          <ErrorNote error={error} />
+        </div>
+      )}
     </Panel>
   );
 }
