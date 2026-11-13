@@ -920,16 +920,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **A baseline that keeps itself**: comparing with the default branch needs someone to make a
+   preview of it. A `baseline` rule (on with screenshots) keeps one per repo with services,
+   following the default branch and asleep until compared (about $0.0006 a month), so every
+   change is compared with main without a step.
+2. **A tidier pull request comment**: the page's checks (speed, errors, accessibility, visual
+   change, against main) in one summary line with the details folded (Vercel's bot comment), so
+   the comment stays short however much it knows.
+3. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+4. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+5. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
