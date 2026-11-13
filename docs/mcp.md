@@ -351,8 +351,9 @@ waits on a sibling PR reaching main is last.
    merged; lands after #20 and #25): a person's canvas stands only for what's theirs in project
    rules (`Workspace::trusted_projects_of`), and people's tokens reach secrets. Keep it merged
    with secrets' swap (`feature/roll-secrets-access`: `rlst_` gone, tokens on `/v1/access/tokens`,
-   identity logins on `mint_workload`), and measure the gate with the canvas check
-   (`gate_latency`, release).
+   identity logins on `mint_workload`; merged there and green). The canvas check costs nothing
+   measurable (`gate_latency`, release, pinned, A/B twice: a token's one-resource request 83–115 µs
+   p50 with it, 105–116 µs without).
 2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
 3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
