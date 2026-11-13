@@ -429,13 +429,14 @@ name no caller; the expiry digest leaves out tokens made for a day or less); wor
 (`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the list
 and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an approval
 waiting on them, used from a new network, revoked as leaked, about to expire; only their own, never
-a secret); every open sibling's head passes the route check with #25 (apps-next's rollback to the
-last deploy, previews-next's share revoke, search's index refresh and settings reviewed: 178 in
-all); `secrets_list_aws_users` (secrets #40); `apps_set_environment` takes who gets in (maintenance,
-allowed addresses, a rate limit, firewall rules; apps-next #26); routes a prefix row decides are
-reviewed (`prefix-reviewed.txt`, 138 looked at; rolld's auth test fails on a new one until it has
-its own row or is listed); previews-next's routes (#28): a preview's env is reveal, accepting a
-visual change is admin with no tool, screenshots come back as MCP image content
+a secret); completions named as such in the audit log (`completion/complete:<tool>`); a connection's
+tool names worked out once per request; every open sibling's head passes the route check with #25
+(apps-next's rollback to the last deploy, previews-next's share revoke, search's index refresh and
+settings reviewed: 178 in all); `secrets_list_aws_users` (secrets #40); `apps_set_environment` takes
+who gets in (maintenance, allowed addresses, a rate limit, firewall rules; apps-next #26); routes a
+prefix row decides are reviewed (`prefix-reviewed.txt`, 138 looked at; rolld's auth test fails on a
+new one until it has its own row or is listed); previews-next's routes (#28): a preview's env is
+reveal, accepting a visual change is admin with no tool, screenshots come back as MCP image content
 (`previews_screenshot`), `previews_list_shares`, `previews_env`; the eleventh review (MCP's new
 surface): read-only excludes reveals that make something (a presigned PUT, a share link), either
 switch turns it on and a misspelled key is a 400; completions offer only ids and never ask a person;

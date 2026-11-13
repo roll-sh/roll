@@ -243,7 +243,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, toolsets, readonly, client });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, toolsets, readonly, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -331,6 +331,9 @@ struct Ctx {
     readonly: bool,
     /// The client's name and version, as it said in `initialize`.
     client: Option<Arc<str>>,
+    /// The names of the tools it's offered, worked out once per request (prompts, completions and
+    /// read-only checks ask for them).
+    names: std::sync::OnceLock<Vec<String>>,
 }
 
 impl Ctx {
@@ -481,7 +484,7 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
 
 /// The names of the tools this connection is offered (what prompts may use).
 fn tool_names(ctx: &Ctx) -> Vec<String> {
-    ctx.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()
+    ctx.names.get_or_init(|| ctx.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).clone()
 }
 
 /// A call waiting on a person, for a client that opens URLs: open the approval page, then send the
@@ -531,7 +534,9 @@ async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
 async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option<Value> {
     let redacted = roll_access::redact::value(&args);
     let mut ext = Extensions::new();
-    ext.insert(McpCall { tool: name.into(), args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet });
+    // The audit log says a completion was one (a person typing), not the agent listing.
+    let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
+    ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet });
     let started = std::time::Instant::now();
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
     let (result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
