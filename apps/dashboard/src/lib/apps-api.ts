@@ -68,6 +68,8 @@ export interface Run {
   rollout?: { steps: number[]; step_s: number; error_pct: number };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
+  /** false: no public URL, only the project's private network (absent: public). */
+  public?: boolean;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
 }

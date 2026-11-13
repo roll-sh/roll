@@ -183,6 +183,10 @@ type Run = {
    *  service's project; another's is never read), one per `per_instance` (default 1000) behind,
    *  within min_instances–max_instances; read every 10 s on the owner, scaled in one at a time. */
   scale?: { stream: string; group: string; per_instance?: number };
+  /** false: no public URL (its up.roll.site names, its deployments' and its custom domains are
+   *  404s like an unknown address, at once); the private `<svc>.<env>.internal` still answers.
+   *  Default true. Environment.url is null while it's false. */
+  public?: boolean;
 };
 
 type Service = {

@@ -1572,3 +1572,20 @@ async fn a_worker_follows_its_streams_backlog() {
     assert_eq!((st, s["run"].get("scale")), (StatusCode::OK, None), "{s}");
 }
 
+
+/// A private service answers no public name (the same 404 as an unknown address) and has no
+/// URL, at once; public again, it answers again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_service_has_no_public_url() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "admin", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    assert_eq!(visit(&w, &h, "/").await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"public": false}}))).await.0, StatusCode::OK);
+    assert_eq!(visit(&w, &h, "/").await.0, StatusCode::NOT_FOUND, "no deploy needed");
+    assert!(call(&w.api, "GET", &base, None).await.1["url"].is_null());
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"public": true}}))).await;
+    assert_eq!(visit(&w, &h, "/").await.0, StatusCode::OK);
+}

@@ -47,6 +47,7 @@ interface Form {
   rolloutStep: string;
   rolloutErrors: string;
   h2c: boolean;
+  public: boolean;
   scaleStream: string;
   scaleGroup: string;
   scalePer: string;
@@ -91,6 +92,7 @@ export function formOf(s: Service): Form {
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
     h2c: !!s.run.h2c,
+    public: s.run.public !== false,
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
     scalePer: str(s.run.scale?.per_instance),
@@ -145,6 +147,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors)
     run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
+  if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.scaleStream !== before.scaleStream || f.scaleGroup !== before.scaleGroup || f.scalePer !== before.scalePer)
     run.scale = f.scaleStream && f.scaleGroup.trim() ? { stream: f.scaleStream, group: f.scaleGroup.trim(), ...(f.scalePer.trim() ? { per_instance: Number(f.scalePer) } : {}) } : null;
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
@@ -376,6 +379,14 @@ export function SettingsTab({
           <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
             {t("alertMemory", "90")}
           </Field>
+          {web && (
+            <Field label="Reachable" hint={form.public ? "its URL and custom domains answer anyone" : "no public URL: only this project's services reach it"}>
+              <select value={form.public ? "public" : "private"} onChange={(e) => set("public", e.target.value === "public")} className={`${input} w-full`}>
+                <option value="public">Public URL</option>
+                <option value="private">Private network only</option>
+              </select>
+            </Field>
+          )}
           {web && (
             <Field label="Protocol" hint="h2c: HTTP/2 without TLS, as a gRPC server speaks">
               <select value={form.h2c ? "h2c" : "http1"} onChange={(e) => set("h2c", e.target.value === "h2c")} className={`${input} w-full`}>

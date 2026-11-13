@@ -221,6 +221,9 @@ pub enum AppsCmd {
         /// A worker follows a stream group's lag: `<stream>:<group>[:<per instance>]`, or `none`.
         #[arg(long, value_name = "STREAM:GROUP[:PER]")]
         scale: Option<String>,
+        /// Public URLs (`true`), or only the project's private network (`false`).
+        #[arg(long)]
+        public: Option<bool>,
     },
     /// Delete a service: its environments, instances, deployments and images (asks first;
     /// `--yes` doesn't).
@@ -1469,7 +1472,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale } => {
+        AppsCmd::Set { target, min, max, cpu, memory, port, start, pre_deploy, health, schedule, kind, concurrency, suspend_after, sleep_after, timeout, volume, watch, rollout, rollout_step, rollout_errors, h2c, scale, public } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
@@ -1533,6 +1536,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("volume", volume),
                 ("rollout", rollout),
                 ("h2c", h2c.map(Value::from)),
+                ("public", public.map(Value::from)),
                 ("scale", match scale.as_deref() {
                     None => None,
                     Some("none") => Some(Value::Null),
