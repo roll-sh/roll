@@ -390,7 +390,9 @@ judged when it's written, from the plaintext then: a common password, its own ke
 were drawn from its classes). Only the reason is kept (`weak`, never anything of the value), on
 `Secret` and in insights, and only a caller who may reveal the value sees it: that it's weak says
 something about it. Values with references aren't judged; a value written before this is judged at
-its next write. The environment's list marks it "weak", and `roll secrets insights` prints `WEAK`. The add and edit forms' "Generate" fills in 48 random
+its next write. The environment's list marks it "weak", and `roll secrets insights` prints `WEAK`. A change request's values (`…/requests/{id}/values`, for
+reviewers who may reveal them) carry `proposed_weak` too, so a guessable credential is caught before
+it's approved. The add and edit forms' "Generate" fills in 48 random
 letters and digits made in the browser (rejection-sampled, like the CLI's `--generate`), so the fix
 is one click.
 
@@ -1431,8 +1433,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Weak values in change requests**: a request's proposed credential that's easy to guess is
-   flagged to its reviewers (who may reveal it) before they approve.
 
 Waiting on other pull requests:
 

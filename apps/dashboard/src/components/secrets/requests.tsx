@@ -183,6 +183,11 @@ function RequestCard({ env, request: r, onChanged }: { env: Environment; request
             <li key={`${i.path}:${i.key}:${i.type}`} className="py-1.5">
               <ItemWhat item={i} />
               {v && <ValueCompare before={sides(i, v)[0]} after={sides(i, v)[1]} labels={["now", "after"]} />}
+              {v?.proposed_weak && (
+                <p className="mt-1 text-[11px] text-danger" role="note">
+                  The proposed value is easy to guess: {v.proposed_weak}.
+                </p>
+              )}
             </li>
           );
         })}
