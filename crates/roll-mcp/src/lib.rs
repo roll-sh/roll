@@ -256,7 +256,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 Some(resources::GUIDE) => rpc_result(id, resources::guide()),
                 Some(resources::ME) => match read_me(ctx).await {
                     Ok(v) => rpc_result(id, v),
-                    Err(e) => rpc_error(id, -32603, e),
+                    Err((message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": message, "data": data } }),
                 },
                 other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
             },
@@ -338,23 +338,30 @@ async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
 
 /// `roll://access/me`: `GET /v1/access` through the gated router with the caller's headers, as a
 /// tool's request is, put in words.
-async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, String> {
+/// A refusal comes back with its HTTP status (and `Retry-After` when rate limited) in `data`.
+async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
+    let fail = |e: String| (e, json!({}));
     let mut req = Request::builder().method("GET").uri(resources::ME_ROUTE);
     for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
         req = req.header(k, v);
     }
-    let mut req = req.body(Body::empty()).map_err(|e| e.to_string())?;
+    let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
     req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": resources::ME })), ip: ctx.ip });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
     };
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.map_err(|e| e.to_string())?;
+    let retry_after = resp.headers().get(header::RETRY_AFTER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+    let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.map_err(|e| fail(e.to_string()))?;
     if !status.is_success() {
-        return Err(format!("{status}: {}", String::from_utf8_lossy(&bytes).trim()));
+        let mut data = json!({ "http_status": status.as_u16() });
+        if let Some(s) = retry_after {
+            data["retry_after"] = json!(s);
+        }
+        return Err((format!("{status}: {}", String::from_utf8_lossy(&bytes).trim()), data));
     }
-    let answer: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let answer: Value = serde_json::from_slice(&bytes).map_err(|e| fail(e.to_string()))?;
     Ok(resources::me(&answer, code_sql_now()))
 }
 

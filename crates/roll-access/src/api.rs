@@ -112,7 +112,16 @@ async fn me(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
         Who::Grant(g) => {
             let id = g.id.to_string();
             let grant = blocking(a.clone(), move |a| a.store.get(&id)).await?;
-            json!({ "kind": if g.kind == GrantKind::Oauth { "oauth" } else { "token" }, "grant": grant, "locked": a.config.locked })
+            let mut out = json!({ "kind": if g.kind == GrantKind::Oauth { "oauth" } else { "token" }, "grant": grant, "locked": a.config.locked });
+            // A person's own token reaches what they do, as the gate decides it: say so.
+            if let (Some(user), Some(people)) = (g.user.as_deref(), a.people.get())
+                && let Ok(Some(p)) = people.person(user).await
+                && !p.admin
+            {
+                out["as_user"] = json!(p.handle);
+                out["reach"] = json!(USER_REACH);
+            }
+            out
         }
         // What a user's tokens can reach: what their session can (docs/accounts.md).
         Who::User(u) => json!({ "kind": "user", "user": { "id": u.user, "handle": u.handle }, "reach": USER_REACH, "locked": a.config.locked }),
@@ -205,7 +214,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
     let mut action = row.action(&method, &params, c.body.as_ref());
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
-    if let Some((copied, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, c.body.as_ref(), &scope).await
+    if let Some((copied, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (copied, Action::Reveal);
@@ -374,6 +383,8 @@ async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
 #[derive(Deserialize)]
 struct ApprovalsQuery {
     state: Option<String>,
+    /// One token's approvals (its page).
+    grant: Option<String>,
     limit: Option<usize>,
 }
 
@@ -383,13 +394,20 @@ async fn grants_of(a: &Arc<Access>, user: &str) -> crate::Result<std::collection
     blocking(a.clone(), move |a| a.store.grant_ids_of(&user)).await
 }
 
+/// A person sees their own tokens' approvals only: filtered in the query, so the limit counts theirs.
 async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>) -> crate::Result<Json<Value>> {
     let who = who(&a, &ext)?;
-    let mut list = blocking(a.clone(), move |a| a.store.approvals(q.state.as_deref(), q.limit.unwrap_or(100))).await?;
-    if let Some(user) = who.mine() {
-        let mine = grants_of(&a, user).await?;
-        list.retain(|x| mine.contains(&x.grant_id));
-    }
+    let grants: Option<Vec<String>> = match (who.mine(), q.grant) {
+        (None, g) => g.map(|g| vec![g]),
+        (Some(user), g) => {
+            let mine = grants_of(&a, user).await?;
+            Some(match g {
+                Some(g) => mine.contains(&g).then_some(g).into_iter().collect(),
+                None => mine.into_iter().collect(),
+            })
+        }
+    };
+    let list = blocking(a, move |a| a.store.approvals(q.state.as_deref(), grants.as_deref(), q.limit.unwrap_or(100))).await?;
     Ok(Json(json!(list)))
 }
 
@@ -489,6 +507,10 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         paths: found.scope_path.clone().map(|p| vec![p]),
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     };
+    // What the request named becomes a rule: it meets the rules' own checks (one line, sizes).
+    if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
+        return Err(Error::BadRequest(format!("this request can't be remembered ({p}): approve it once")));
+    }
     // For good is a change to the token: it meets the policy as it is now.
     if until.is_none() {
         let g = found.grant_id.clone();

@@ -380,7 +380,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // reveal on the same resource there too, and the request gets the weaker of the two. When the
     // copy decides, the approval is about the environment copied from.
     let mut asked_env: Option<String> = None;
-    if let Some((copied, from)) = copy_outcome(&access, row, &params, &target, json_body.as_ref(), &scope).await
+    if let Some((copied, from)) = copy_outcome(&access, row, &params, &target, (json_body.as_ref(), original.query()), &scope).await
         && rank(copied) < rank(outcome)
     {
         (outcome, action) = (copied, Action::Reveal);
@@ -522,13 +522,23 @@ fn limit_headers(h: &mut axum::http::HeaderMap, rate: u32, remaining: u32, reset
 
 /// The decision on everything a request needs: the weakest outcome, and the action it's for
 /// (the strongest among equals).
-/// What copying another environment's values needs (a `copies_from` row whose body names one):
+/// What copying another environment's values needs (a `copies_from` row whose body or query names one):
 /// `reveal` on the same resource in that environment, as the product classes it (resolved off the
 /// runtime, with the path's own id, as `target` resolves the path's environment). The outcome, and
 /// the environment it's about.
-pub(crate) async fn copy_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], target: &Target, body: Option<&Value>, scope: &Scope) -> Option<(Outcome, String)> {
-    let (Some(field), Target::One(r), Tgt::Param(names, _)) = (row.copies_from, target, row.target) else { return None };
-    let src = body?.get(field)?.as_str()?.to_string();
+pub(crate) async fn copy_outcome(
+    access: &Arc<Access>,
+    row: &'static Row,
+    params: &[(String, String)],
+    target: &Target,
+    (body, query): (Option<&Value>, Option<&str>),
+    scope: &Scope,
+) -> Option<(Outcome, String)> {
+    let (Some(from), Target::One(r), Tgt::Param(names, _)) = (row.copies_from, target, row.target) else { return None };
+    let src = match from {
+        catalog::CopyFrom::Body(field) => body?.get(field)?.as_str()?.to_string(),
+        catalog::CopyFrom::Query(name) => url::form_urlencoded::parse(query?.as_bytes()).find(|(k, _)| k == name)?.1.into_owned(),
+    };
     let id = names.iter().filter_map(|n| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone())).collect::<Vec<_>>().join("/");
     let (a, product) = (access.clone(), row.product);
     let env = tokio::task::spawn_blocking(move || a.resolvers.environment(product, &id, &src)).await.ok()?;

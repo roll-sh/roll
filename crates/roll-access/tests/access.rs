@@ -102,6 +102,7 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
 }
 
 impl Daemon {
@@ -763,6 +764,9 @@ async fn a_users_token_acts_as_them() {
     // Never more than her account: an operator's route is refused though the rules name it.
     let (s, e) = d.call(&token, Method::GET, "/v1/projects", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("operator_only")));
+    // And it says so when asked what it may do (MCP's roll://access/me reads this).
+    let (_, me) = d.call(&token, Method::GET, "/v1/access", None).await;
+    assert_eq!((me["as_user"].as_str(), me["reach"].as_array().map(Vec::len)), (Some("alice"), Some(3)), "{me}");
 
     // She sees and manages only her own tokens; bob can't touch hers.
     let (_, op_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
@@ -923,6 +927,10 @@ async fn approvals_can_be_remembered() {
     assert_eq!(c["decision"], "ask", "{c}");
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{asks_id}"), None).await;
     assert_eq!(g["rules"].as_array().map(Vec::len), Some(2), "{g}");
+    // A token's page lists its own approvals, however many others there are.
+    // (`id`'s approvals are older than `asks`' just now.)
+    let (_, its) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals?grant={id}&limit=1"), None).await;
+    assert_eq!(its.as_array().map(|l| l.iter().filter(|x| x["grant_id"] == json!(id)).count()), Some(1), "{its}");
     // Only a token that asks may make one that asks.
     let child = |ask: bool| json!({ "name": "child", "rules": [{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }], "ask_otherwise": ask });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child(false))).await.0, StatusCode::CREATED);
@@ -945,6 +953,15 @@ async fn approvals_can_be_remembered() {
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
     assert_eq!((asked["action"].as_str(), asked["environment"].as_str()), (Some("reveal"), Some("production")), "{asked}");
     assert_eq!(d.call(&dev, Method::PUT, "/v1/apps/services/svc_a/environments/dev2", Some(json!({}))).await.0, StatusCode::OK);
+    // Secrets' promote names where it copies from in the query: the same rule.
+    let (promoter, _) = d.token(json!([{ "product": "secrets", "resources": "*", "environments": ["development", "staging"], "actions": { "write": "allow", "reveal": "allow" } }]), json!({})).await;
+    let promote = |from: &'static str| {
+        let (d, t) = (&d, promoter.clone());
+        async move { d.call(&t, Method::POST, &format!("/v1/secrets/projects/prj_s/environments/staging/promote?from={from}"), Some(json!({}))).await }
+    };
+    let (s, e) = promote("production").await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    assert_eq!(promote("development").await.0, StatusCode::OK);
 
     // Remembered where it was asked: development's values, never production's.
     let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;

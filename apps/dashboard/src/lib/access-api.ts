@@ -239,7 +239,8 @@ export const accessApi = {
       "/v1/access/check",
       { method, path, ...opts },
     ),
-  approvals: (state?: ApprovalState) => call<Approval[]>("GET", `/v1/access/approvals${query({ state })}`),
+  /** The newest approvals, in a state and of one token (`grant`) when given. */
+  approvals: (state?: ApprovalState, grant?: string) => call<Approval[]>("GET", `/v1/access/approvals${query({ state, grant })}`),
   /** `remember`: also allow the same action on the same resource for a while, or always. */
   approve: (id: string, remember?: Remember) => call<Approval>("POST", `${approval(id)}/approve`, remember && remember !== "once" ? { remember } : {}),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),

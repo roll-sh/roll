@@ -138,6 +138,11 @@ pub struct Rule {
     pub actions: BTreeMap<Action, Effect>,
 }
 
+/// One line of text with no backticks: what a rule names is shown to agents and people as text.
+fn plain(s: &str) -> bool {
+    !s.chars().any(|c| c.is_control() || c == '`')
+}
+
 /// Whether environment entry `pattern` covers `env` (a name, or another entry): the same name, or,
 /// for a pattern ending in `*`, any name starting with what's before it (`pv-*` covers `pv-42`, a
 /// preview's own environment).
@@ -313,8 +318,8 @@ impl Scope {
                 Resources::Some(v) => {
                     for s in v {
                         let (Selector::Project { project: x } | Selector::Id { id: x }) = s;
-                        if x.is_empty() || x.len() > 200 {
-                            out.push(format!("{at}: a resource id must be 1-200 characters"));
+                        if x.is_empty() || x.len() > 200 || !plain(x) {
+                            out.push(format!("{at}: a resource id must be 1-200 characters, one line without backticks"));
                         }
                     }
                 }
@@ -322,7 +327,7 @@ impl Scope {
             }
             for (name, list) in [("environments", &r.environments), ("paths", &r.paths)] {
                 if let Some(l) = list
-                    && (l.is_empty() || l.len() > 32 || l.iter().any(|e| e.is_empty() || e.len() > 200))
+                    && (l.is_empty() || l.len() > 32 || l.iter().any(|e| e.is_empty() || e.len() > 200 || !plain(e)))
                 {
                     out.push(format!("{at}: {name} must list 1-32 non-empty names"));
                 }

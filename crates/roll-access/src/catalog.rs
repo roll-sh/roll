@@ -67,14 +67,23 @@ pub struct Row {
     pub path_query: Option<&'static str>,
     /// Fields of the answer that are credentials: replaced unless the grant may `reveal`.
     pub reveals: &'static [&'static str],
-    /// A body field naming another environment of the same resource whose values the request
-    /// copies (apps' `variables_from`): it also needs `reveal` there.
-    pub copies_from: Option<&'static str>,
+    /// Where the request names another environment of the same resource whose values it copies
+    /// (apps' `variables_from`, secrets' promote `?from=`): it also needs `reveal` there.
+    pub copies_from: Option<CopyFrom>,
+}
+
+/// Where a copying request names the environment it copies from.
+#[derive(Clone, Copy, Debug)]
+pub enum CopyFrom {
+    /// A top-level string field of the JSON body.
+    Body(&'static str),
+    /// A query parameter.
+    Query(&'static str),
 }
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_) | Act::Raw(_)) || self.copies_from.is_some()
+        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -136,8 +145,8 @@ impl Row {
         self.path_query = Some(q);
         self
     }
-    const fn copies_from(mut self, field: &'static str) -> Row {
-        self.copies_from = Some(field);
+    const fn copies_from(mut self, from: CopyFrom) -> Row {
+        self.copies_from = Some(from);
         self
     }
 }
@@ -855,6 +864,15 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("PATCH", "/v1/secrets/projects/{project}/environments/{env}", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("PUT", "/v1/secrets/projects/{project}/environments/order", "secrets", ADMIN, one(&["project"], "project")),
+    // Promote copies the selected keys' values from `?from=` into `{env}`: reveal there too.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/promote", "secrets", W, one(&["project"], "project"))
+        .env(EnvFrom::Param("env"))
+        .path_query("path")
+        .copies_from(CopyFrom::Query("from")),
+    // A backup seals every environment's values to a key the caller chooses; a restore loads a
+    // whole project. Both are admin in secrets too.
+    row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/restore", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/policy", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -913,7 +931,7 @@ static ROWS: &[Row] = &[
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // `variables_from` copies another environment's values into this one: reveal there too.
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from("variables_from"),
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1113,6 +1131,11 @@ mod tests {
         // Static segments beat parameters; production decides deploy.
         let env = find("PUT", "/v1/secrets/projects/{project}/environments/order", "x").unwrap();
         assert_eq!(env.row.action("PUT", &[], None), Action::Admin);
+        // A whole project's values out (a backup) or in (a restore) is admin, never the prefix's write.
+        for r in ["backup", "restore"] {
+            let f = find("POST", &format!("/v1/secrets/projects/{{project}}/{r}"), "x").unwrap();
+            assert_eq!(f.row.action("POST", &[], None), Action::Admin, "{r}");
+        }
         // A product naming a parameter differently from its row still gets its row (secrets'
         // router says `{key}`, the row `{name}`): a value read is never the prefix's read.
         let f = find("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "x").unwrap();
