@@ -42,6 +42,9 @@ pub enum Token {
     },
     /// Take back what an approval allowed a token for a while (`roll token show` lists them).
     TakeBack { id: String, approval: String },
+    /// Which tokens need attention and why (admin over everything, never expiring, unused,
+    /// narrower than their rules, roaming), each with its fix.
+    Checkup,
     /// Who the token you're using is (`ROLL_TOKEN` or `ROLL_ADMIN_TOKEN`).
     Whoami,
     /// The products, actions and presets the builder offers.
@@ -433,6 +436,30 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 println!("  {}", describe_rule(r));
             }
             eprintln!("roll token tighten {id} --apply to keep only that");
+        }
+        Token::Checkup => {
+            let list = api.get("/v1/access/checkup").await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(());
+            }
+            let list = list.as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("nothing needs attention");
+            }
+            for c in &list {
+                println!("{}  {}", s(&c["grant"]["id"]), s(&c["grant"]["name"]));
+                for f in c["findings"].as_array().into_iter().flatten() {
+                    let fix = match f["fix"].as_str().unwrap_or("") {
+                        "revoke" => format!("roll token revoke {}", s(&c["grant"]["id"])),
+                        "tighten" => format!("roll token tighten {} --apply", s(&c["grant"]["id"])),
+                        "expire" => format!("roll token edit {} --expires 30d", s(&c["grant"]["id"])),
+                        "limit_addresses" => format!("roll token edit {} --ip <cidr>", s(&c["grant"]["id"])),
+                        other => other.to_string(),
+                    };
+                    println!("  {}: {fix}", s(&f["why"]));
+                }
+            }
         }
         Token::TakeBack { id, approval } => {
             let g = api.call(reqwest::Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{approval}"), None).await?;
