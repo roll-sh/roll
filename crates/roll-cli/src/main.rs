@@ -14,6 +14,7 @@ mod nosql;
 mod queues;
 mod storage;
 mod redis;
+mod apps;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -49,6 +50,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Deploy this directory to roll apps (makes the service the first time).
+    Up(apps::Up),
+    /// Deploy a service's source (a repo's branch head, a revision, or an image).
+    Deploy(apps::Deploy),
+    /// A service's runtime log, or a deployment's build log (`--build`).
+    Logs(apps::Logs),
+    /// A service's hostnames and custom domains.
+    #[command(subcommand)]
+    Domains(apps::Domains),
+    /// roll apps: services, deploys, variables, links, scaling.
+    #[command(subcommand, alias = "app")]
+    Apps(Box<apps::AppsCmd>),
     /// Run coding agents on this machine and drive them from roll (`login`, `up`, `status`, `logout`).
     #[command(subcommand)]
     Agent(agent::Agent),
@@ -378,6 +391,11 @@ async fn main() -> anyhow::Result<()> {
             return code::run(&code_api, cli.json, cmd).await;
         }
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
+        Cmd::Up(u) => return apps::up(&api, cli.json, u).await,
+        Cmd::Deploy(d) => return apps::deploy(&api, cli.json, d).await,
+        Cmd::Logs(l) => return apps::logs(&api, cli.json, l).await,
+        Cmd::Domains(d) => return apps::domains(&api, cli.json, d).await,
+        Cmd::Apps(cmd) => return apps::run(&api, cli.json, *cmd).await,
         Cmd::Stream(cmd) => {
             if let Some(out) = stream::run(&api, cli.json, cmd).await? {
                 println!("{}", serde_json::to_string_pretty(&out)?);

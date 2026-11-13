@@ -11,6 +11,7 @@
     "test:redis": "scripts/test-redis.sh",
     "test:nosql": "scripts/test-nosql.sh",
     "test:tasks": "scripts/test-tasks.sh",
+    "test:apps": "scripts/test-apps.sh",
     "test:stream": "scripts/test-stream.sh",
     "test:queues": "scripts/test-queues.sh",
     "test:fleet": "scripts/test-fleet.sh",

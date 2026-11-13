@@ -221,7 +221,9 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
   pulls are off unless `ROLL_EDGE_ORIGIN_PULL=1`. Every listener's address is a setting
   (`ROLL_EDGE_HTTPS`, `ROLL_EDGE_PG`, `ROLL_EDGE_REDIS`, `ROLL_EDGE_KAFKA`, `ROLL_EDGE_NOSQL`,
   `ROLL_EDGE_AMQPS`, `ROLL_EDGE_MQTTS`, `ROLL_EDGE_STOMPS`, `ROLL_EDGE_MQ_STREAM`; `0.0.0.0` and
-  the public port by default), so a laptop can run it next to a local Postgres.
+  the public port by default), so a laptop can run it next to a local Postgres. `ROLL_EDGE_HTTP`
+  (unset by default) adds plain HTTP: ACME HTTP-01 answers for roll apps' custom domains
+  (`ROLL_APPS_TLS=acme`, docs/apps/README.md) and a redirect to HTTPS for the rest.
 - With the edge on, rolld points the products' own names at the edge's unless they're set:
   `ROLL_S3_DOMAIN`, `ROLL_S3_PUBLIC_ENDPOINT` (`https://s3.<region>.<site domain>`, the endpoint
   storage shows), Alternator's domain, `ROLL_CODE_PREVIEW_DOMAIN` (`roll.site`), roll code's

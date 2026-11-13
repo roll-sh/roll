@@ -81,6 +81,9 @@ struct RawFile {
     preview: Option<RawPreview>,
     queue: Option<RawQueue>,
     main: Option<RawMain>,
+    /// roll apps' section (`apps_control::config`): read there, only allowed here.
+    #[allow(dead_code)]
+    app: Option<toml::Table>,
 }
 
 #[derive(Deserialize)]
@@ -299,7 +302,8 @@ mod tests {
     #[test]
     fn queue_and_main_tables() {
         let t = RollToml::parse(
-            "[checks.test]\nimage = \"a\"\nrun = \"x\"\n[queue]\nchecks = [\"test\"]\nbatch_size = 4\nrequire_change_checks = true\n[main]\nauto_revert = true\n",
+            // [app] is roll apps' (apps_control::config): allowed here, not read.
+            "[checks.test]\nimage = \"a\"\nrun = \"x\"\n[queue]\nchecks = [\"test\"]\nbatch_size = 4\nrequire_change_checks = true\n[main]\nauto_revert = true\n[app]\nbuild = \"pnpm build\"\n",
         )
         .unwrap();
         assert_eq!(t.queue.checks.as_deref(), Some(&["test".to_string()][..]));
