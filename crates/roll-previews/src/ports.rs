@@ -128,6 +128,8 @@ pub struct ServiceSpec {
     pub memory_mb: u32,
     pub cpus: f64,
     pub env: Vec<(String, String)>,
+    /// A path that answers 2xx/3xx once the service works (`roll.toml` `health`).
+    pub health: Option<String>,
 }
 
 /// roll code, as previews read it and report to it.
@@ -288,6 +290,11 @@ pub trait Apps: Send + Sync {
         anyhow::bail!("this server can't run seed commands")
     }
     /// A PNG of the service's page as it first shows (`None`: this backend can't take one).
+    /// Ask the service for `path` (starting it if it sleeps): its status and the first line of
+    /// what it said. `None`: this backend can't tell (a health check is then skipped).
+    async fn probe(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
+        Ok(None)
+    }
     async fn screenshot(&self, _preview: &str, _service: &str) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
     }

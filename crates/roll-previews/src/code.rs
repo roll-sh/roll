@@ -139,6 +139,7 @@ pub fn service_of(repo: &str, p: &PreviewSpec) -> ServiceSpec {
         memory_mb: p.memory_mb,
         cpus: p.cpus,
         env: p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        health: p.health.clone(),
     }
 }
 

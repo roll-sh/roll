@@ -676,6 +676,28 @@ impl Apps for Runtime {
     /// The service's page as a browser first shows it (a PNG): the browser runs in the service
     /// container's own network (it reaches nothing the service can't), bounded in memory, CPU and
     /// time, and goes when done.
+    async fn probe(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<(u16, String)>> {
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let addr = match me.ready(preview, service, self.cfg.start_timeout).await {
+            Ok(a) => a,
+            Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
+            Err(_) => anyhow::bail!("the service didn't start in time"),
+        };
+        let req = axum::http::Request::get(format!("http://{addr}{path}")).header(header::USER_AGENT, "roll-previews-health").body(Body::empty())?;
+        let resp = tokio::time::timeout(Duration::from_secs(30), self.client.request(req)).await.map_err(|_| anyhow::anyhow!("no answer in 30 s"))??;
+        let status = resp.status().as_u16();
+        // The first line of what it said, read no further than 4 KiB.
+        let mut stream = Body::new(resp.into_body()).into_data_stream();
+        let mut said = Vec::new();
+        while said.len() < 4096
+            && let Ok(Some(Ok(chunk))) = tokio::time::timeout(Duration::from_secs(5), stream.next()).await
+        {
+            said.extend_from_slice(&chunk);
+        }
+        let first = String::from_utf8_lossy(&said[..said.len().min(4096)]).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect();
+        Ok(Some((status, first)))
+    }
+
     async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<Vec<u8>>> {
         use base64::Engine as _;
         if self.iso.name() != "docker" {

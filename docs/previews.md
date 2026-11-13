@@ -231,6 +231,11 @@ behind the `Apps` trait:
   project's repos whose `roll.toml` has a `[preview]` section, named after the repo
   (`[preview] name = "api"` overrides that). Each runs in the container `roll.toml` describes,
   through code-preview's `Isolation`: Docker here, a Fargate task on the fleet.
+  - With `health = "/healthz"` in `[preview]`, a service counts once it answers 2xx/3xx there
+    (Render's and Railway's health checks), asked once per deploy (it wakes the service once). A
+    service that answers 500 fails the preview with the status and the first line it said, so
+    `roll/preview` and `roll preview wait` don't pass on a broken page; the retry asks again.
+    roll apps services are checked by roll apps.
 - The tree is copied into the container, never bind-mounted.
 - Each service answers at `<service>-<slug>.<domain>`.
   - `<slug>` is `pr<number>` for a GitHub PR, `c<number>` for a roll code change, or the branch
@@ -471,7 +476,7 @@ own rates (the same ones its usage page shows).
 
 `scripts/preview-cost.sh` runs a rolld of its own (ports 27xxx, home in `~/.cache`). It:
 
-1. makes a project with a repo (`roll.toml` `[preview]`: `python -m http.server`, 128 MiB,
+1. makes a project with a repo (`roll.toml` `[preview]`: `python -m http.server`, `health = "/"`, 128 MiB,
    0.25 CPU) and a Postgres project, a Redis database, a bucket, a NoSQL database, a queues
    vhost, a stream with a topic and a tasks tenant;
 2. puts 20 MiB of objects and 20,000 1 KiB keys into the parents;
@@ -781,6 +786,7 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- a health check before "ready" (`roll.toml` `health`);
 - a feedback button on a preview's pages for people who came in through roll, posting on the
   change from roll (Vercel Comments);
 - a preview's own variables over the project's (`…/env`, the sheet, `roll preview env`);
@@ -813,18 +819,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A health check before "ready"**: today a preview is ready once its service's container
-   accepts a connection, so one that answers 500 on every page still turns `roll/preview`
-   green and lets `roll preview wait` pass. With a `health` path (roll.toml `[preview]`, or the
-   rules), roll asks it once per head (as the screenshot does) and reports the preview ready only
-   on 2xx/3xx, else failed with the status and the first lines of the body (Render's and
-   Railway's health checks).
-2. **A URL per push** (Vercel's deployment URLs): the change's earlier heads stay reachable at
+1. **A URL per push** (Vercel's deployment URLs): the change's earlier heads stay reachable at
    `<head>-<service>-<slug>`, asleep and costing nothing until opened, for comparing before and
    after on the same data.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

@@ -430,3 +430,20 @@ async fn a_preview_s_own_variables_redeploy_it_and_never_shadow_roll_s() {
     e.engine.pass().await.unwrap();
     assert_eq!(var("FEATURE").as_deref(), Some("off"), "removed: the project's again");
 }
+
+#[tokio::test]
+async fn a_service_with_a_health_path_is_ready_only_once_it_answers_well() {
+    let e = env(json!({ "enabled": true }));
+    *e.code.health.lock() = Some("/healthz".into());
+    *e.apps.answers.lock() = Some((500, "TypeError: db is undefined".into()));
+    e.code.open(change("chg_hc", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_hc").unwrap().unwrap();
+    assert_eq!(p.state, State::Failed);
+    assert!(p.error.as_deref().is_some_and(|m| m.contains("answered 500 on /healthz: TypeError: db is undefined")), "{:?}", p.error);
+    // Fixed (or warmed up): the retry asks again and it's ready.
+    *e.apps.answers.lock() = Some((200, "ok".into()));
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+}

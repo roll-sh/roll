@@ -348,8 +348,10 @@ impl Store {
         if !db.has_column("services", "active_month")? {
             db.add_column("services", "active_month", "INTEGER NOT NULL DEFAULT 0")?;
         }
-        if !db.has_column("services", "config")? {
-            db.add_column("services", "config", "TEXT")?;
+        for col in ["config", "healthy"] {
+            if !db.has_column("services", col)? {
+                db.add_column("services", col, "TEXT")?;
+            }
         }
         if !db.has_column("previews", "idled")? {
             db.add_column("previews", "idled", "INTEGER NOT NULL DEFAULT 0")?;
@@ -442,6 +444,18 @@ impl Store {
     /// A service's deploy fingerprint (what it was deployed with: variables, access).
     pub fn service_config(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| c.query_row("SELECT config FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
+    }
+
+    /// The revision a service last passed its health check at.
+    pub fn healthy(&self, id: &str, name: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT healthy FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
+    }
+
+    pub fn set_healthy(&self, id: &str, name: &str, revision: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE services SET healthy = ? WHERE preview_id = ? AND name = ?", params![revision, id, name])?;
+            Ok::<_, Error>(())
+        })
     }
 
     pub fn set_service_config(&self, id: &str, name: &str, config: &str) -> Result<()> {

@@ -258,6 +258,14 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.seed(job).await
     }
 
+    async fn probe(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<(u16, String)>> {
+        // roll apps checks its own deploys' health.
+        match self.apps.find(preview, service).await? {
+            Some(_) => Ok(None),
+            None => self.runtime.probe(preview, service, path).await,
+        }
+    }
+
     async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<Vec<u8>>> {
         match self.apps.find(preview, service).await? {
             Some(_) => Ok(None),

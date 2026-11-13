@@ -71,7 +71,7 @@ RSS0=$(ps -o rss= -p "$PID")
 say "a repo with a service, and one of each data resource"
 api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
-TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nmemory = 128\ncpus = 0.25\n'
+TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http.server $PORT\"\nport = 8000\nhealth = \"/\"\nmemory = 128\ncpus = 0.25\n'
 api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"}}}" >/dev/null
 REDIS=$(api POST /v1/redis/databases '{"name":"cache"}' | jq_ "d['id']")
 api POST /v1/storage/buckets '{"name":"assets"}' >/dev/null
@@ -129,6 +129,8 @@ done
 T1=$(now_ms)
 P=$(api GET "/v1/previews/$PV")
 echo "$P" | python3 -m json.tool > "$HOME_DIR/preview.json"
+# Ready only once its health path answered (roll.toml `health = "/"`).
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "is healthy (/: 200)" || { echo "the service's health check should have passed before ready"; exit 1; }
 # What CI outside GitHub does: wait for the change's preview, take the URL it prints.
 WAITED=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview wait --change "$CHG" --timeout 60)
 [ "$WAITED" = "$(echo "$P" | jq_ "d['url']")" ] || { echo "roll preview wait printed $WAITED"; exit 1; }

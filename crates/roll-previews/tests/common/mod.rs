@@ -20,6 +20,8 @@ pub struct FakeCode {
     pub paths: Mutex<HashMap<String, Vec<String>>>,
     /// The paths between two heads, by `"<from>..<to>"` (unlisted: not known).
     pub between: Mutex<HashMap<String, Vec<String>>>,
+    /// The `health` path every service says it has.
+    pub health: Mutex<Option<String>>,
     pub reports: Mutex<Vec<Preview>>,
     pub forgotten: Mutex<Vec<String>>,
     /// Budget alerts sent: (the repos told, the alert).
@@ -59,7 +61,7 @@ impl Source for FakeCode {
     }
     async fn services(&self, repo: &str, _revision: &str) -> anyhow::Result<Vec<ServiceSpec>> {
         let name = repo.rsplit('/').next().unwrap().to_string();
-        Ok(vec![ServiceSpec { name, image: "node:22".into(), run: "node app.js".into(), port: 3000, memory_mb: 512, cpus: 0.5, env: vec![] }])
+        Ok(vec![ServiceSpec { name, image: "node:22".into(), run: "node app.js".into(), port: 3000, memory_mb: 512, cpus: 0.5, env: vec![], health: self.health.lock().clone() }])
     }
     async fn report(&self, p: &Preview, _s: &Settings) {
         self.reports.lock().push(p.clone());
@@ -158,6 +160,8 @@ pub type Vars = Vec<(String, String)>;
 #[derive(Default)]
 pub struct FakeApps {
     pub deployed: Mutex<HashMap<(String, String), String>>,
+    /// What a service answers on its health path (unset: the backend can't tell).
+    pub answers: Mutex<Option<(u16, String)>>,
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
@@ -191,6 +195,9 @@ impl Apps for FakeApps {
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         Ok(None)
+    }
+    async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
+        Ok(self.answers.lock().clone())
     }
     async fn wake(&self, _: &str, _: &str) -> anyhow::Result<()> {
         Ok(())

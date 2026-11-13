@@ -315,7 +315,7 @@ impl Engine {
                         },
                         None => String::new(),
                     };
-                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new() };
+                    let spec = ServiceSpec { name: c.name.clone(), image: String::new(), run: String::new(), port: 0, memory_mb: c.memory_mb, cpus: 0.0, env: Vec::new(), health: None };
                     wanted.push((spec, c.repo.unwrap_or_default(), rev, true));
                 }
             }
@@ -330,8 +330,12 @@ impl Engine {
         }
         let mut keep: Vec<String> = Vec::new();
         let mut still_deploying = false;
+        let mut checks: Vec<(String, String, String)> = Vec::new();
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
+            if let Some(path) = &spec.health {
+                checks.push((spec.name.clone(), rev.clone(), path.clone()));
+            }
             let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
             // a reset's new URLs, changed overrides; its access): the runtime restarts it on its
@@ -368,6 +372,8 @@ impl Engine {
                         let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
                         self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
                         self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
+                        // A new deploy is checked again, even at the same revision.
+                        self.store.set_healthy(&r.id, &spec.name, "")?;
                         self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
                     }
                     // Accepted, not live yet: no slot waits on a build; come back and ask again.
@@ -401,6 +407,22 @@ impl Engine {
                 self.apps.remove(&r.id, &svc.name).await.map_err(|e| anyhow::anyhow!("removing {}: {e:#}", svc.name))?;
                 self.store.drop_service(&r.id, &svc.name)?;
                 self.store.log(&r.id, &format!("removed service {}", svc.name))?;
+            }
+        }
+        // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
+        // once per revision (Render's and Railway's checks). Anything else fails the preview, and
+        // the retry asks again.
+        for (name, rev, path) in checks {
+            if self.store.healthy(&r.id, &name)?.as_deref() == Some(rev.as_str()) {
+                continue;
+            }
+            match self.apps.probe(&r.id, &name, &path).await.map_err(|e| anyhow::anyhow!("{name} didn't answer {path}: {e:#}"))? {
+                Some((status, _)) if (200..400).contains(&status) => {
+                    self.store.set_healthy(&r.id, &name, &rev)?;
+                    self.store.log(&r.id, &format!("{name} is healthy ({path}: {status})"))?;
+                }
+                Some((status, said)) => anyhow::bail!("{name} answered {status} on {path}: {}", said.chars().take(200).collect::<String>()),
+                None => {}
             }
         }
 
