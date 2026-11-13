@@ -490,8 +490,8 @@ async fn run() -> anyhow::Result<()> {
     // Accounts and sign-in: always on; the gate resolves their session cookies. (Before the
     // evaluator joins the gate: setting sessions makes the gate anew.)
     let accounts = accounts::open(&args, &home, code.as_ref().map(|c| c.code.clone()), !auth.enforcing()).await?;
-    let people = accounts.sessions();
-    auth.sessions(people.clone(), &accounts.config().api_url);
+    let sessions = accounts.sessions();
+    auth.sessions(sessions.clone(), &accounts.config().api_url);
     router = router.merge(roll_accounts::router(accounts));
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
     let access = access::open(
@@ -510,7 +510,7 @@ async fn run() -> anyhow::Result<()> {
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
     // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
-    let _ = access.people.set(people);
+    let _ = access.people.set(sessions);
     // A grant's rate is shared among the nodes serving requests (each enforces its share).
     let nodes = cluster.clone();
     let _ = access.nodes.set(Box::new(move || nodes.nodes().len()));
