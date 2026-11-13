@@ -2949,7 +2949,7 @@ mod tests {
                                 live.push(w << 20 | i);
                                 Op::Insert(w << 20 | i, len)
                             }
-                            4..=7 if !live.is_empty() => Op::Update(live[(x >> 20) as usize % live.len()], len, (x >> 9) % 3 != 0),
+                            4..=7 if !live.is_empty() => Op::Update(live[(x >> 20) as usize % live.len()], len, !(x >> 9).is_multiple_of(3)),
                             8 if !live.is_empty() => Op::Delete(live.swap_remove((x >> 20) as usize % live.len())),
                             _ => Op::Prune((x >> 24) as u32),
                         }

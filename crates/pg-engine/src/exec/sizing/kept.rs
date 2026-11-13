@@ -331,7 +331,7 @@ pub fn persist(db: &Database) {
 fn persist_inner(db: &Database) -> Result<()> {
     let cat = db.catalog();
     let xids = db.xids();
-    let v = Vis::new(&xids);
+    let v = Vis::new(xids);
     // (One compression context for every record.)
     let mut zc = zstd::bulk::Compressor::new(1).map_err(|e| crate::error::internal(format!("zstd: {e}")))?;
     let mut writes: Vec<(Vec<u8>, Option<bytes::Bytes>)> = Vec::new();

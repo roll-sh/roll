@@ -2906,7 +2906,7 @@ impl Session {
                 None if ty.missing_oid().is_some() => return Err(missing(Error::new(code::INTERNAL_ERROR, ""))),
                 None => Value::Null,
                 // Bytes the type's recv leaves over name the parameter; its own errors are its.
-                Some(b) if f == 1 => crate::types::binary::decode(&b, ty, &fmt)
+                Some(b) if f == 1 => crate::types::binary::decode(b, ty, &fmt)
                     .map_err(|e| match e.code {
                         code::INVALID_BINARY_REPRESENTATION
                             if e.message.starts_with("incorrect binary data format") =>
@@ -2922,7 +2922,7 @@ impl Session {
                     .map_err(missing)?,
                 // Text arrives in the client's encoding (pg_client_to_server, which checks it).
                 Some(b) => {
-                    let s = crate::types::mbconv::server::from_client(&b, fmt.client_encoding, fmt.server_encoding)
+                    let s = crate::types::mbconv::server::from_client(b, fmt.client_encoding, fmt.server_encoding)
                         .map_err(|e| param_err(e, None))?;
                     crate::types::text::parse_value(&s, ty, &fmt)
                         .map_err(|e| param_err(e, Some(&s)))

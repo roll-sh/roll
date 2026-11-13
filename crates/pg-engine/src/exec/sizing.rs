@@ -2153,7 +2153,7 @@ pub fn inserted_with(
     let cid = ctx.txn.borrow_mut().output_cid();
     let xids = db.xids();
     // (The horizon before the shard's lock: it only gets older while the lock is waited for.)
-    let v = vis_of(&xids, t, ctx);
+    let v = vis_of(xids, t, ctx);
     let big;
     let tid = {
         let mut rf = db.relfiles.of(t.oid).write();
@@ -2353,7 +2353,7 @@ pub fn updated(
                 .all(|bix| columns_unchanged(bix, old, new));
         let xid = ctx.txn.borrow_mut().cur_xid();
         // (The horizon before the shard's lock: other sessions' readers wait while it is held.)
-        let v = vis_of(&xids, t, ctx);
+        let v = vis_of(xids, t, ctx);
         let big;
         let (tid, hot) = {
             let mut rf = db.relfiles.of(t.oid).write();
@@ -2468,7 +2468,7 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
     }
     let xid = ctx.txn.borrow_mut().cur_xid();
     let xids = db.xids();
-    let v = vis_of(&xids, t, ctx);
+    let v = vis_of(xids, t, ctx);
     let mut rf = db.relfiles.of(t.oid).write();
     let RelFiles { heaps, toast, .. } = &mut *rf;
     if let Some(heap) = heaps.get_mut(&t.oid) {
@@ -2509,7 +2509,7 @@ pub fn scanned_pages(table: u32, from: u32, to: Option<u32>, ctx: &ExecCtx) {
     {
         let rf = db.relfiles.of(table).read();
         let Some(heap) = rf.heaps.get(&table) else { return };
-        let v = vis_for(&xids, table, ctx);
+        let v = vis_for(xids, table, ctx);
         let end = to.unwrap_or(heap.nblocks()).min(heap.nblocks());
         if !(from..end).any(|b| heap.prune_wanted(b, &v)) {
             return;
@@ -2518,7 +2518,7 @@ pub fn scanned_pages(table: u32, from: u32, to: Option<u32>, ctx: &ExecCtx) {
     // (Not while someone holds the lock: heap_page_prune_opt's conditional cleanup lock.)
     let Some(mut rf) = db.relfiles.of(table).try_write() else { return };
     if let Some(heap) = rf.heaps.get_mut(&table) {
-        let v = vis_for(&xids, table, ctx);
+        let v = vis_for(xids, table, ctx);
         let end = to.unwrap_or(heap.nblocks()).min(heap.nblocks());
         for b in from..end {
             heap.prune_opt(b, &v);
@@ -2677,7 +2677,7 @@ fn identity_kills(t: &Table, index: u32, key: &[u8], ctx: &ExecCtx) {
     let Some(k) = key.strip_prefix(&index_prefix(t.oid, 0)[..]) else { return };
     let hi = prefix_end(k);
     let xids = db.xids();
-    let v = vis_of(&xids, t, ctx);
+    let v = vis_of(xids, t, ctx);
     let dead = |rf: &RelFiles, first: bool| -> Option<Vec<(u32, usize)>> {
         let (heap, bt) = (rf.heaps.get(&t.oid)?, rf.btrees.get(&index)?);
         if heap.visibility_watch().is_some() {
@@ -2716,7 +2716,7 @@ pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Opti
         }
     }
     let xids = db.xids();
-    let v = vis_for(&xids, table, ctx);
+    let v = vis_for(xids, table, ctx);
     {
         let rf = db.relfiles.of(table).read();
         let heap = rf.heaps.get(&table)?;
@@ -2754,7 +2754,7 @@ pub fn index_scanned(
     ctx: &ExecCtx,
 ) -> Option<Vec<(Tid, bool)>> {
     let xids = ctx.sess.db.xids();
-    let v = vis_for(&xids, table, ctx);
+    let v = vis_for(xids, table, ctx);
     let ranges: Vec<_> = ranges.iter().map(|(lo, hi)| (lo.strip_prefix(prefix), hi.strip_prefix(prefix))).collect();
     mark_passed(&ctx.sess.db, table, index, &v, &ranges, entries)
 }
@@ -3037,8 +3037,8 @@ impl Kills {
         }
         let xids = self.db.xids();
         let v = match self.temp {
-            Some(xid) => Vis::temp(&xids, xid),
-            None => Vis::new(&xids),
+            Some(xid) => Vis::temp(xids, xid),
+            None => Vis::new(xids),
         };
         mark_passed(&self.db, self.table, self.index, &v, &[(lo.as_deref(), hi.as_deref())], false);
     }
@@ -3085,7 +3085,7 @@ pub fn trigger_pin(table: u32, key: &[u8], old_too: bool, ctx: &ExecCtx) -> Vec<
     let Some(heap) = rf.heaps.get_mut(&table) else {
         return Vec::new();
     };
-    let Some((tid, prev)) = heap.locate_with_prev(key, &Vis::new(&xids)) else {
+    let Some((tid, prev)) = heap.locate_with_prev(key, &Vis::new(xids)) else {
         return Vec::new();
     };
     let mut pins = vec![tid.0];
@@ -3488,7 +3488,7 @@ fn gin_model(
     let mut rows: Vec<((u32, u16), Vec<u8>, Vec<GinKey>)> = Vec::new();
     {
         let xids = ctx.sess.db.xids();
-        let v = Vis::new(&xids);
+        let v = Vis::new(xids);
         let rf = ctx.sess.db.relfiles.of(t.oid).read();
         let Some(heap) = rf.heaps.get(&t.oid) else {
             return Ok(None);
@@ -3695,7 +3695,7 @@ pub fn gist_log_version(table: u32, index: u32, ctx: &ExecCtx) -> Option<usize> 
 /// unchanged). The history's version after (None: it changed, nothing marked).
 pub fn gist_kill(table: u32, index: u32, version: usize, entries: &[u32], ctx: &ExecCtx) -> Option<usize> {
     let xids = ctx.sess.db.xids();
-    let v = vis_for(&xids, table, ctx);
+    let v = vis_for(xids, table, ctx);
     let mut rf = ctx.sess.db.relfiles.of(table).write();
     let RelFiles { heaps, gist_logs, .. } = &mut *rf;
     let (heap, log) = (heaps.get(&table)?, gist_logs.get_mut(&index)?);
@@ -3836,7 +3836,7 @@ fn gist_model(
     let mut rows: Vec<((u32, u16), Vec<u8>, Option<Key>, Tid)> = Vec::new();
     {
         let xids = ctx.sess.db.xids();
-        let v = Vis::new(&xids);
+        let v = Vis::new(xids);
         let rf = ctx.sess.db.relfiles.of(t.oid).read();
         let Some(heap) = rf.heaps.get(&t.oid) else {
             return Ok(None);
@@ -4035,7 +4035,7 @@ pub fn loaded(
     let mut tids = Vec::with_capacity(rows.len());
     for ((k, _), (len, exts)) in rows.iter().zip(layouts) {
         if !exts.is_empty() {
-            let saved = save_toast(heaps, btrees, tt, &Vis::new(&xids), t.toast, exts, xid, false);
+            let saved = save_toast(heaps, btrees, tt, &Vis::new(xids), t.toast, exts, xid, false);
             tt.rows.insert(k.clone(), saved);
         }
         tids.push(h.insert(k, len, xid, 0, &mut mode));
@@ -4048,7 +4048,7 @@ pub fn loaded(
 /// now (those it doesn't place after them, as they were), as a sequential scan reads them.
 pub fn in_heap_order<T>(t: &Table, rows: &mut Vec<(Vec<u8>, T)>, ctx: &ExecCtx) {
     let xids = ctx.sess.db.xids();
-    let v = Vis::new(&xids);
+    let v = Vis::new(xids);
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
     let locs: Vec<Option<Tid>> = {
@@ -4191,7 +4191,7 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
     let Some(heap) = rf.heaps.get_mut(&t.oid) else {
         return Ok(());
     };
-    let v = Vis::new(&xids);
+    let v = Vis::new(xids);
     let mut live = heap.live_rows(&v);
     if let Some(order) = order {
         let pos: HashMap<&[u8], usize> = order
@@ -4578,7 +4578,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     let Some(heap) = heaps.get_mut(&t.oid) else {
         return Ok(None);
     };
-    let v = vis_for(&xids, t.oid, ctx);
+    let v = vis_for(xids, t.oid, ctx);
     // VACUUM's TRUNCATE option, else the vacuum_truncate storage parameter (its toast.
     // one for the TOAST table).
     // (Else the vacuum_truncate setting.)
@@ -4891,7 +4891,7 @@ pub fn row_locations(
 ) -> Option<Vec<Option<(Tid, bool)>>> {
     heap_blocks(t, ctx).ok().flatten()?;
     let xids = ctx.sess.db.xids();
-    let v = Vis::new(&xids);
+    let v = Vis::new(xids);
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
     let rf = ctx.sess.db.relfiles.of(t.oid).read();
@@ -4917,7 +4917,7 @@ pub fn row_tids(t: &Table, rows: &[(Vec<u8>, bytes::Bytes)], ctx: &ExecCtx) -> O
     let h = rf.heaps.get(&t.oid)?;
     if h.unstamped || out.iter().any(Option::is_none) {
         let xids = ctx.sess.db.xids();
-        let v = Vis::new(&xids);
+        let v = Vis::new(xids);
         for (o, (k, _)) in out.iter_mut().zip(rows) {
             if o.is_none() || h.unstamped {
                 *o = h.locate(k, &v);
@@ -4957,7 +4957,7 @@ pub fn displaced_inserts(t: &Table, ctx: &ExecCtx) -> Option<Vec<(Vec<u8>, u64, 
 pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Option<Tid>>> {
     heap_blocks(t, ctx).ok().flatten()?;
     let xids = ctx.sess.db.xids();
-    let v = Vis::new(&xids);
+    let v = Vis::new(xids);
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
     let rf = ctx.sess.db.relfiles.of(t.oid).read();
@@ -5273,7 +5273,7 @@ impl CopyLoad {
         let xids = self.db.xids();
         let table = self.key.0;
         for mut rows in batches {
-            let v = Vis::new(&xids);
+            let v = Vis::new(xids);
             let mut rf = self.db.relfiles.of(self.key.0).write();
             let RelFiles { heaps, btrees, bulk, toast, gist_logs, .. } = &mut *rf;
             let mut single = InsertMode::single();
@@ -5766,7 +5766,7 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
         _ => return Ok(None),
     };
     let xids = ctx.sess.db.xids();
-    let v = heapsim::Vis::new(&xids);
+    let v = heapsim::Vis::new(xids);
     let rf = ctx.sess.db.relfiles.of(owner).read();
     Ok(match rf.heaps.get(&heap) {
         Some(h) => Some(h.tuple_stats(&v)),
@@ -5780,7 +5780,7 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
 pub fn dead_counts(t: &Table, ctx: &ExecCtx) -> Result<Option<(u64, u64)>> {
     fork_blocks(t.oid, Fork::Main, ctx)?;
     let xids = ctx.sess.db.xids();
-    let v = heapsim::Vis::new(&xids);
+    let v = heapsim::Vis::new(xids);
     let rf = ctx.sess.db.relfiles.of(t.oid).read();
     Ok(rf.heaps.get(&t.oid).map(|h| h.dead_counts(&v)))
 }
