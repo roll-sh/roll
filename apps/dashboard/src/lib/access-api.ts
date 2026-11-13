@@ -140,6 +140,21 @@ export interface Approval {
 /** Actions that destroy, ship, expose a credential or change who may do what: approve them with care. */
 export const RISKY: Action[] = ["delete", "deploy", "reveal", "admin"];
 
+/**
+ * A token's waiting requests a person may approve together: two or more, none risky and none with
+ * a body to review (those are read one by one, on their page).
+ */
+export function approvableTogether(pending: Approval[]): { grant_id: string; grant_name: string; ids: string[] }[] {
+  const by = new Map<string, { grant_id: string; grant_name: string; ids: string[] }>();
+  for (const a of pending) {
+    if (RISKY.includes(a.action) || (a.args !== null && a.args !== undefined)) continue;
+    const g = by.get(a.grant_id) ?? { grant_id: a.grant_id, grant_name: a.grant_name, ids: [] };
+    g.ids.push(a.id);
+    by.set(a.grant_id, g);
+  }
+  return [...by.values()].filter((g) => g.ids.length > 1);
+}
+
 export interface AuditEvent {
   id: string;
   at: number;
