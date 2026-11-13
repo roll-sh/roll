@@ -671,6 +671,12 @@ fn apps_create_action(b: &Value) -> Action {
     if b["source"]["kind"] == "upload" { Action::Write } else { Action::Deploy }
 }
 
+/// A service's settings: `write`, except `run.public`, which puts a web service on the internet
+/// or takes it off (its public names answer 404), production too, at once: `deploy`.
+fn apps_patch_action(b: &Value) -> Action {
+    if b["run"].get("public").is_some() { Action::Deploy } else { Action::Write }
+}
+
 fn agent_command_action(b: &Value) -> Action {
     let kind = b.get("type").and_then(Value::as_str).unwrap_or("");
     let raises = b.get("runtime_mode").is_some_and(|m| !m.is_null()) || b.get("interaction_mode").is_some_and(|m| !m.is_null());
@@ -1088,7 +1094,7 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     // A worker scaled on a stream group's lag has apps read that stream for it: read there too.
-    row("PATCH", "/v1/apps/services/{id}", "apps", W, one(PG, "service")).lends(Lend::Each(apps_scale)),
+    row("PATCH", "/v1/apps/services/{id}", "apps", Act::Body(apps_patch_action), one(PG, "service")).lends(Lend::Each(apps_scale)),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // `variables_from` copies another environment's values into this one: reveal there too.
     row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
@@ -1328,6 +1334,8 @@ mod tests {
         assert_eq!(f.row.action("POST", &[], None), Action::Reveal);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "public": false } })), Action::Deploy);
+        assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "min": 2 } })), Action::Write);
         assert_eq!(bulk_action(b"{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a\"}\n"), Action::Write);
         assert_eq!(bulk_action(b"{\"index\":{}}\n{\"t\":1}\n{\"delete\":{\"_id\":\"2\"}}\n"), Action::Delete);
         assert_eq!(bulk_action(b"{\"update\":{\"_id\":\"3\"}}\n{\"script\":{\"source\":\"ctx.op = 'delete'\"}}\n"), Action::Delete);
