@@ -395,7 +395,7 @@ impl Access {
         // workspace project (secrets' environments, previews' settings): their routes name it.
         let mut projects = if kind == "project" { vec![id.clone()] } else { catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default() };
         let project = (!projects.is_empty()).then(|| projects.remove(0));
-        Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), path: None }
+        Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), ..Default::default() }
     }
 }
 

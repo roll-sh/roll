@@ -288,7 +288,14 @@ function Pick({ product, chosen, known, onChange }: { product: string; chosen: s
             {id} ×
           </button>
         ))}
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Add by id" className={`${input} h-7 w-44 font-mono text-[11px]`} aria-label={`${productName(product)} resource ids`} />
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={product === "search" ? "cl_… or cl_…/logs-*" : "Add by id"}
+          title={product === "search" ? "A cluster, or some of its indices: cl_…/logs-* (only through their index routes)" : undefined}
+          className={`${input} h-7 w-44 font-mono text-[11px]`}
+          aria-label={`${productName(product)} resource ids`}
+        />
       </form>
     </div>
   );

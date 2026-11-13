@@ -119,6 +119,7 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
                 EnvFrom::Fixed(e) => r.environment = Some(e.into()),
                 EnvFrom::None => {}
             }
+            r.index = row.index.and_then(param);
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
                 r.path = Some(path.filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into()));
@@ -151,7 +152,11 @@ fn storage_account(row: &Row, query: Option<&str>, headers: &axum::http::HeaderM
 
 pub(crate) fn describe(t: &Target) -> Option<String> {
     match t {
-        Target::One(r) => r.id.clone(),
+        // Indices of a resource read as `cl_1/logs-*`.
+        Target::One(r) => r.id.clone().map(|id| match &r.index {
+            Some(ix) => format!("{id}/{ix}"),
+            None => id,
+        }),
         Target::Create { project: Some(p), .. } => Some(format!("new in {p}")),
         _ => None,
     }
@@ -431,11 +436,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 target,
                 bound.join("\n")
             ));
-            let (environment, scope_path) = match &target {
-                Target::One(r) => (asked_env.clone().or_else(|| r.environment.clone()), r.path.clone()),
-                _ => (None, None),
+            let (environment, scope_path, scope_index) = match &target {
+                Target::One(r) => (asked_env.clone().or_else(|| r.environment.clone()), r.path.clone(), r.index.clone()),
+                _ => (None, None, None),
             };
-            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path };
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(id) => approval_used = Some(id),
                 Err(resp) => return *resp,
@@ -622,14 +627,15 @@ struct Asked<'a> {
     request_hash: String,
     /// What it does, when its body isn't JSON (a push's ref updates).
     args: Option<Value>,
-    /// The environment and path the request is about.
+    /// The environment, path and indices the request is about.
     environment: Option<String>,
     scope_path: Option<String>,
+    scope_index: Option<String>,
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
 async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
-    let Asked { headers, path, body, request_hash, args, environment, scope_path } = req;
+    let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index } = req;
     let access = &ctx.access;
     let existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     let approval = match existing {
@@ -665,6 +671,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
                     request_hash,
                     environment: environment.as_deref(),
                     scope_path: scope_path.as_deref(),
+                    scope_index: scope_index.as_deref(),
                 })
             })
             .await
