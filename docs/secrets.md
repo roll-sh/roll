@@ -1300,16 +1300,17 @@ Reviewed again on 2026-11-13:
 Ranked:
 
 1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
-   prepared on `wip/secrets-on-mcp`. Also, on that branch:
-   - list `secrets` among MCP's products, so its tools aren't filtered out;
-   - map ephemeral environments to roll-access's `preview` environment class;
-   - get the catalogue rows reported to the MCP thread (identities, lease renew, exports, admin
-     listings) into place.
-   Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
+   ready on `wip/secrets-on-mcp`, which is merged with both branches and green. Every route this
+   router serves has a catalogue row there (imports decided per source, rotators, search), ephemeral
+   environments are roll-access's `preview` class (`environment_fn`), and `ask` grants are
+   honoured. Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
 2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+3. **Rotate a found key everywhere**: from "Find a key", a new value for every place it's set (one
+   change per environment, a change request where protected, linked places rotated by their
+   provider), so an organisation-wide key is replaced in one step.
+4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
