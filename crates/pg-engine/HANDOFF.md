@@ -9929,6 +9929,95 @@ decompressed (zstd) and decoded again each time, where pgrust copies an uncompre
        more CPU.
     4. q13 / q22 (the row path: LIKE, the probe, the merge; 219's for the merge).
 
+### Analytic path, round 2 (agent 226; BENCH.md "Analytic path, round 2")
+
+Per-query CPU against pgrust first (BENCH's table, lane C, the same settings on all three):
+the engine 37.1 s against pgrust's 18.0 at the round's start; the largest losses q18 (4.8 s),
+q13 (1.7), q21 (1.1), q17 (1.2), q10 (1.4), then the decode-bound scans (q01, q06, q12, q15)
+and the index-join queries (q03, q07, q08, q09, q20, q02: point lookups and block seeks).
+`perf record` of the base: `Pre::decode` (the column batch decode, `storage::cols::decode_cols`)
+30-48% of q01, q06, q10, q12, q15, q21 and 14% of q17; q18's subquery (GroupAggregate over
+lineitem's primary key, which PostgreSQL's plan runs below a parallel hash join) is 6 M point
+gets and the row path; q13 is the probe, the row path and LIKE. pgrust's q18 is a serial plan
+of its own planner (EXPLAIN differs), so its CPU there is one thread's.
+
+q01's phases after the round (l1: 1.54 s of CPU a run over 6.0 M rows, 257 ns a row; shares
+from `perf record` of c1; round 1's figures from agent 220's table):
+
+| phase | before round 1 (220's table) | after round 2 | pgrust |
+|---|---|---|---|
+| block read, fill | 42 | 39 (`Block::read`, `fill_batch`, `push_in`) | |
+| row decode to columns | 136 | 102 (`Pre::decode`) | |
+| filter | 19 | 12 (`VB::eval`, `Inst::at`) | |
+| numeric expressions | 116 | 33 (`Lanes::eval`) | |
+| aggregate transitions, groups, dispatch | 297 | 52 (`batch_run`) | |
+| all | 647 (273 after round 1: 1.64 s) | 257 | 177 (one JIT pipeline) |
+
+- **Column decode** (`storage::cols::decode_cols`): each needed column's slots are made once a
+  batch (a default in each, `ColData::fill_default`) and a row writes its own (`put_typed`), no
+  push per value; a numeric of up to 8 bytes with 8 bytes of the row from its start is one word
+  load, sign-extended (`num_bytes`: the 16-byte buffer and `memcpy` cost a store-forwarding
+  stall per value, 11% of q15's decode samples on one instruction); short strings' lengths and
+  numerics stepped over in place (`skip`); the batch's fields borrowed apart, `RowBatch::value_in`
+  inline. `Pre::decode` no longer lists the filter's passing rows (`live`) for every batch:
+  `fill_live` makes it where `aggregate` or `eval_nums` reads it (agent 220's q17 note). q01
+  -12%, q06 -15%, q12 -13%, q15 -15%, q10 -8%, q21 -10%, q17 -5% instructions. Test:
+  `storage::cols`'s `numerics_of_every_length` (every length 0-17 bytes, both signs, at the
+  row's end or not).
+- **LIKE of literals and %** (`sql::func::string::LikeSegs`): a pattern with no `_` and no
+  trailing escape is its literal runs: the head compared as a prefix, the tail as a suffix of
+  what is left, the runs between found in order with `memchr::memmem` finders built once with
+  the pattern (a first try with `str::find` gained nothing: its searcher is set up per call).
+  Valid UTF-8 matched by bytes is matched by characters (a run's bytes are whole characters).
+  Both the row kernel (`K::Like`) and the batch filter (`VB::Like`) use it. q13 -9%. Tests:
+  `compiled_like_matches_like_match` (every pattern of up to five of `a b é % _` against every
+  string of up to five of `a b é`, against the token matcher), golden `a226_like_segments`
+  (overlapping head and tail, empty runs, multibyte, escapes, NOT LIKE, NULLs; PostgreSQL 18.6).
+- **Index chunk fetches and sorted groups**: `IndexChunk` found each entry's fetched row in a
+  `HashMap<&[u8], Bytes>` (SipHash, grown per fetch of 256 keys: 7% of q18); it now searches the
+  sorted, deduplicated key list the fetch already made. `Partials::add_words` tries the last
+  row's group before the hash table (`wlast`; the key is compared, so a stale number is only a
+  miss): a sorted input's rows come a group at a time. q18 -12%; q13 +1.1-1.6% (its groups come
+  in probe order, every try a miss: under the 2% bar).
+- Tests: `parallel_scan`'s random aggregations also draw numbers about 2^62 (constants and
+  `b * 1000`) and LIKE filters of several runs; golden `a226_lane_bounds` (sums and products on
+  both sides of 2^62, an overflowing integer product).
+- Verified: release lib tests, golden (in-process, wire, shuffled), parallel_scan, query_spill,
+  big_tables; clippy 17 warnings, none in a changed file; the regress subset (create_misc,
+  create_index, aggregates, numeric, select_parallel, join, subselect, groupingsets,
+  partition_aggregate, window, select_distinct, union, select, strings): 5,663 / 5,664, none
+  newly differing. The verification train on `87fc55b14` (the pushed
+  head): release crate tests pass, clippy 20 warnings (none in a changed file), crash_random
+  seeds 1-30 x 4, the power stage (power_cut 4 passed, power crashes with and without async)
+  pass, debug crate tests pass, the full regression 51,148 / 51,150 (none newly differing),
+  isolation 1,647 / 1,648, pg_dump_tap 14,609 passed. No planner change: plans unchanged (all
+  22 result hashes equal PostgreSQL's in every pass).
+- Dropped:
+  - Lanes under 2^62 as i64s (`Lane::w`, i64 multiplies and scaled sums, widened only where a
+    bound passes 2^62): q01 instructions -1.0% (cycles -5.0 to -5.9% every round), under the
+    bar. `~/.cache/a226/patches/dropped-c4-narrow-lanes.*`.
+  - Rows walked by a plan of the declared types (runs of skipped fixed-size values stepped over
+    together, each taken column read by its kind, tags checked, the general walk for a row that
+    doesn't fit): q12 -8%, q10 -5.5%, q21 -4.7%, q06 -3.6% instructions, but q10's wall flat in
+    single-query pairs (0.690 -> 0.700, 2 of 5). `dropped-c6-typed-walk.*`.
+- Next (largest first):
+  1. q18: the subquery's index scan over lineitem's primary key reads the heap rows by point
+     gets, though the table is stored in that key's order: a chunk's sorted keys read as one
+     range of the store (merged against the wanted keys, falling back to point gets past a
+     density bound) would replace most of `get_versions` (22% of q18); then the IndexChunk as
+     a fill so the batch aggregation takes its rows. Index heap fetches: coordinate with agent
+     227.
+  2. Decode is still 40-48% of q01 / q06 / q15 (a tag dispatch per value up to the last column
+     read). The dropped typed walk is the next step for scans that skip many columns (q10, q12,
+     q21); for q01 / q06 / q15 the walk itself has to go: a per-block column directory (a
+     versioned format) or late columns (decode the filter's columns, the others for the rows
+     passing: q15 / q14 pass 1-4% of lineitem).
+  3. q13: the probe and the row path (the batch path stops at a probe whose rows all pass:
+     `worth` turns it off); a batch probe that groups by the join key without making rows.
+  4. q04 / q22 on the row path; q16's count(distinct) compares `Value`s.
+  5. Memory (lead 5 of the brief) not started: the engine 1,675 MB against PostgreSQL's 1,651
+     and pgrust's 1,871 at 2 GB caches.
+
 ## Point reads, round 4 (agent 221)
 
 BENCH.md "Point reads, round 4" has the measurements (lane A, two cores: prepared point

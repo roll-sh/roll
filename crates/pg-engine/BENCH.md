@@ -285,6 +285,94 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic path, round 2 (2026-11-13, agent 226)
+
+HANDOFF "Analytic path, round 2" has what changed and the phase study. **b1** is `66fb5dc38`
+(origin's head before the round's commits; `b0`, `a79309351`, was the base of the per-change
+gates), **l1** the round's commits on it (`25b06d0cd`, `5b26cef02`, `dd93493f1`, `87fc55b14`, the
+same tree). Dist builds (fat LTO, line tables) of one checkout, equal-length paths
+(`~/.cache/a226/bin`). Lane C: each server in its own container on CPUs 14,15,32,33 (`--memory
+8g`, host network), the client on 16,17,34,35, every pass under `flock ~/.cache/lane-c.lock`
+(shared with agents 224 and 225). Settings on all three servers:
+`max_parallel_workers_per_gather = 2`, `max_parallel_workers = 8`, a 2 GB cache (the engine
+`--cache-mb 2048`, PostgreSQL and pgrust `shared_buffers = 2GB`; pgrust's set with `-c` and
+ALTER SYSTEM, checked with SHOW after its restart). PostgreSQL 18.6 with the bench settings,
+pgrust `malisper/pgrust` 0.4-beta. TPC-H SF1 from `bench tpch-load --sf 1`, the engine's data
+directory restored before every start. A gate pass: a fresh engine, a warm-up pass, then per
+query three runs inside one `perf stat -e instructions:u,cycles:u` window (agent 220's
+`gpass.sh`). The host was at load 25-47 through the round (other sessions' unpinned builds at
+nice 19, some on the lane's hyperthread siblings): cycles moved by up to +-30% a pass, so the
+gates read instructions, and every target's wall time was checked in single-query runs (5 runs
+a pass, 3-5 alternating pairs, fresh engines).
+
+### TPC-H SF1, the round's final run (b1 and l1, three alternating rounds; PostgreSQL and pgrust, a pass per round; medians)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 2.75 | 0.23 | 0.53 | 0.19 | 0.38 | 0.52 | 0.46 | 0.24 | 1.66 | 0.77 | 0.10 | 0.74 | 0.87 | 0.22 | 0.38 | 0.34 | 0.92 | 3.94 | 0.07 | 0.11 | 0.66 | 0.12 | 16.18 |
+| pgrust s | 0.59 | 0.17 | 0.37 | 0.16 | 0.20 | 0.55 | 0.49 | 0.16 | 1.96 | 0.95 | 0.06 | 0.68 | 0.53 | 0.09 | 0.28 | 0.25 | 0.65 | 2.17 | 0.03 | 0.11 | 0.55 | 0.04 | 11.04 |
+| b1 s | 0.59 | 0.69 | 0.56 | 0.30 | 0.47 | 0.54 | 0.64 | 0.34 | 1.72 | 0.86 | 0.19 | 0.57 | 1.11 | 0.21 | 0.46 | 0.35 | 0.88 | 2.28 | 0.08 | 0.40 | 0.79 | 0.14 | 14.13 |
+| l1 s | 0.52 | 0.59 | 0.55 | 0.28 | 0.43 | 0.44 | 0.58 | 0.29 | 1.41 | 0.71 | 0.18 | 0.51 | 1.04 | 0.21 | 0.41 | 0.38 | 0.87 | 2.07 | 0.07 | 0.39 | 0.69 | 0.12 | 12.73 |
+| pg CPU, s | 8.11 | 0.37 | 1.46 | 0.54 | 1.12 | 1.38 | 1.35 | 0.62 | 4.29 | 2.01 | 0.10 | 2.14 | 2.34 | 0.53 | 1.08 | 0.78 | 1.04 | 10.11 | 0.20 | 0.11 | 1.91 | 0.37 | 41.96 |
+| pgrust CPU, s | 1.06 | 0.21 | 0.78 | 0.33 | 0.44 | 1.10 | 1.02 | 0.33 | 3.69 | 1.03 | 0.06 | 1.25 | 1.05 | 0.17 | 0.55 | 0.41 | 0.70 | 2.40 | 0.06 | 0.12 | 1.12 | 0.09 | 17.97 |
+| b1 CPU, s | 1.82 | 0.66 | 1.69 | 0.89 | 1.11 | 1.45 | 1.73 | 0.64 | 4.93 | 2.40 | 0.20 | 1.65 | 2.77 | 0.49 | 1.33 | 0.98 | 1.87 | 7.25 | 0.21 | 0.40 | 2.26 | 0.36 | 37.09 |
+| l1 CPU, s | 1.54 | 0.60 | 1.56 | 0.81 | 1.03 | 1.20 | 1.65 | 0.60 | 4.12 | 1.96 | 0.19 | 1.48 | 2.49 | 0.49 | 1.20 | 0.98 | 1.84 | 6.76 | 0.20 | 0.38 | 2.03 | 0.34 | 33.45 |
+
+- The engine: wall 14.13 -> 12.73 s (PostgreSQL 16.18, pgrust 11.04: 0.79x PostgreSQL's, 1.15x
+  pgrust's), CPU 37.09 -> 33.45 s (PostgreSQL 41.96, pgrust 17.97: 1.86x pgrust's). The host
+  was busier than in round 1 (PostgreSQL's sum 16.18 s against 14.13 then); the ratios are
+  what compares.
+- User instructions b1 -> l1, the 22 queries' sum: 171.2 -> 157.0 G (-8.29%), -8.23%, -7.74%;
+  cycles -7.62 / -6.20 / -8.11%. Per query every round: q01 -12.4, q06 -14.4..-14.5, q15 -14.6,
+  q12 -13.2, q18 -12.1..-12.3, q13 -9.3..-10.0, q21 -9.5..-9.8, q10 -8.4..-8.5, q17 -4.5..-5.0,
+  q05 -2.5..-3.1, q03 -2.3..-2.8, q14 -2.2..-3.3; none over +2% but q09 once (+6.8, -0.8 and
+  -0.2 the other rounds).
+- Peak memory (anon + shmem of each container, sampled; the largest of the passes):
+  PostgreSQL 1,651 MB, pgrust 1,871, b1 1,674, l1 1,675. Per query (VmHWM reset before each,
+  after a warm-up pass, two alternating pairs): b0 against c1 every query within 4 MB but q17
+  (24-30 MB lower) and q14 (1,668-1,680 against 1,690-1,692); b1 against l1 every query within
+  4 MB but q17 (9-24 MB lower) and q14 (1,686-1,720 against 1,675-1,702: q14 moves by 15-35 MB
+  between runs of one binary, as agent 219 found).
+- All 22 result hashes equal PostgreSQL's in every pass of every build.
+- OLTP smoke (point read, range read, short transaction; a fresh 100,000-row fixture, 8 clients,
+  10 s, b1 against l1, ten alternating pairs in two sets of five, the first b1 first, the second
+  l1 first; user instructions over a 7 s window inside each 10 s run; medians): point_select
+  45.7k against 46.5k instructions an operation (b1 44.9-48.6k, l1 46.0-48.3k), 75.8k against
+  73.7k ops/s (l1 behind in all five pairs of the first set, ahead in four of five of the
+  second); range_scan_100 351.4k against 350.3k, 25.7k against 24.2k ops/s; short_txn 296.0k
+  against 289.3k, 9.8k against 9.3k ops/s. No changed code is on these paths; the host was at
+  load 30-47. (A first try's window read the stat file of the run before when perf failed to
+  attach: discarded.)
+
+### The changes, gated (user instructions % per round against the build before; wall medians from single-query runs)
+
+| change | targets, instructions % | others over +2% | 22-query instructions | wall medians (pairs won) | kept |
+|---|---|---|---|---|---|
+| c1 column decode (against b0) | q01 -12.4 x3, q06 -14.5 x3, q12 -13.2 x3, q15 -14.6 x3, q21 -9.6/-9.5/-9.6, q10 -8.4/-8.4/-8.5 (q17 -5.4/-6.0/-4.7, q05 -3.2, q03 -2.2) | none | -5.02 / -4.92 / -5.23% | q01 0.792 -> 0.740 (3/3), q06 0.649 -> 0.617 (2/3), q10 1.129 -> 0.937 (3/3), q12 0.781 -> 0.656 (4/5), q15 0.655 -> 0.522 (2/3), q21 0.984 -> 0.821 (3/3) | yes |
+| c2 LIKE runs by `str::find` (against c1) | q13 +0.3 / +0.6 / -2.4 | none | -0.11 / +0.13 / -0.05% | - | replaced by c5 |
+| c3 index chunk keys searched, last group first (against c2) | q18 -12.2 / -11.9 / -12.1 | none (q13 +1.6 / +1.5 / +1.1) | -2.75 / -2.70 / -2.76% | q18 2.493 -> 2.247 (3/5) | yes |
+| c4 lanes under 2^62 as i64s (against c3) | q01 -1.0 x3 (cycles -5.1 / -5.9 / -5.0) | none | -0.11 / +0.02 / -0.07% | - | no: under the bar |
+| c5 LIKE runs by memchr finders (against c4) | q13 -9.3 / -9.7 / -8.7 | q02 +31.7 once | -0.56 / -0.63 / 0.00% | q13 1.249 -> 1.144 (3/5) | yes (with c2) |
+| c6 rows walked by a plan of the declared types (against c5) | q12 -7.9 / -8.0 / -8.1, q10 -5.5 x3 (q21 -4.7, q06 -3.6) | q17 +2.8 once | -1.16 / -1.43 / -1.36% | q12 0.561 -> 0.505 (4/5), q10 0.690 -> 0.700 (2/5) | no: q10's wall unclear |
+
+Dropped patches with their numbers: `~/.cache/a226/patches/dropped-c4-narrow-lanes.*`,
+`dropped-c6-typed-walk.*`.
+
+### Per-query CPU against pgrust, where the engine loses (the head; `perf record` of b0 / c1)
+
+| query | engine CPU s | pgrust | where the engine's time goes |
+|---|---|---|---|
+| q18 | 6.76 | 2.40 | the IN subquery's GroupAggregate over lineitem's primary key index: 6 M rows fetched by point gets a chunk at a time (`get_versions` 22%, block seeks), aggregated on the row path (`partial_row` 29%); pgrust plans it serially (its own planner) |
+| q13 | 2.49 | 1.05 | the orders scan's hash probe (`run_stages`, `lookup` 21%), the row path (`partial_row`, `Lazy`), the per-customer partial counts (`add_words` 9%); LIKE 8% before c5 |
+| q09 | 4.12 | 3.69 | index probes and seeks of the joins (`Block::seek` 14%, `find_block`, `get_with`) |
+| q10 | 1.96 | 1.03 | the lineitem decode (30% before c1), the probe, `Value` clones of the joined rows |
+| q21 | 2.03 | 1.12 | the lineitem decode (32% before c1), `Pre::fate`'s probe, the semi / anti joins' index scans |
+| q17 | 1.84 | 0.70 | the subplan's bitmap fetches per part (block reads and seeks 26%), the lineitem decode (14%) |
+| q03, q07, q08, q20, q02, q05 | | | point lookups and block seeks of index joins (12-14% in `Block::seek` alone for q07 / q08 / q20) |
+| q01, q06, q12, q15 | 1.54, 1.20, 1.48, 1.20 | 1.06, 1.10, 1.25, 0.55 | the column decode (40-48% after c1: a tag dispatch per value up to the last column read), q01's lanes and sums (33%) |
+| q04, q22 | 0.81, 0.34 | 0.33, 0.09 | the row path (`K::run` over `Lazy`, `LazyBuf::read`) |
+| q16 | 0.98 | 0.41 | `Value` comparisons of count(distinct)'s sort |
+
 ## Profile-guided build (2026-11-12, agent 225)
 
 `crates/pg-engine/tools/dist-pgo.sh` builds roll-engine profile-guided: the `dist` profile plus
