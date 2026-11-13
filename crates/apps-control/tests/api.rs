@@ -1488,3 +1488,37 @@ async fn an_h2c_app_gets_http2_and_its_trailers_pass() {
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", plain["id"].as_str().unwrap()), None).await;
     assert_eq!(visit(&w, &host(&env["url"]), "/").await.1["version"], "HTTP/1.1");
 }
+
+/// A preview roll previews turned feedback on for: its pages carry the button for a visitor who
+/// came in through its link, and the script comes from the preview's own host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
+    let w = world_with(|c| c.web_url = Some("https://roll.test".into())).await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let token = "t".repeat(32);
+    assert_eq!(call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"feedback": true}))).await.0, StatusCode::BAD_REQUEST, "previews only");
+    let base = format!("/v1/apps/services/{id}/environments/pv-abc");
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"ephemeral": true, "access": {"token": token}, "feedback": true}))).await;
+    assert_eq!((st, env["feedback"].clone()), (StatusCode::OK, json!(true)), "{env}");
+    let (_, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "pv-abc", d["id"].as_str().unwrap()).await;
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    let h = host(&env["url"]);
+    let get = |path: &'static str, accept: &'static str| {
+        let (public, h, token) = (w.public.clone(), h.clone(), token.clone());
+        async move {
+            let req = Request::builder().uri(path).header("host", &h).header("accept", accept).header("cookie", format!("roll_access_pv-abc={token}")).body(Body::empty()).unwrap();
+            let resp = public.oneshot(req).await.unwrap();
+            (resp.status(), String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (st, page) = get("/page", "text/html").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(page.ends_with(r#"<script src="/__roll/feedback.js" defer></script></body></html>"#), "{page}");
+    let (st, js) = get("/__roll/feedback.js", "*/*").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(js.contains("https://roll.test/dashboard/projects/") && js.contains("previews?preview=abc"), "the note goes to the preview in roll");
+    assert!(!get("/", "application/json").await.1.contains("feedback.js"), "an API call isn't a page");
+}
+
