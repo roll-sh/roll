@@ -67,7 +67,8 @@ const PROMPTS: &[Prompt] = &[
             format!(
                 "Call secrets_health for project {}. List what needs fixing, most urgent first (exposed, expired, \
                  missing, then weak, expiring, stale, unread), each with its key, environment and the fix. Ask me \
-                 before changing or rotating anything, and never show a value.",
+                 before changing or rotating anything, and never show a value. If it answers 423 kms_denied, the \
+                 project's owner revoked roll's customer-managed key: say so, and don't try to work around it.",
                 a("project")
             )
         },
