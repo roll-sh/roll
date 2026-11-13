@@ -123,6 +123,7 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
                 EnvFrom::None => {}
             }
             r.index = row.index.and_then(param);
+            r.filters_itself = row.filters_itself;
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
                 r.path = Some(path.filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into()));

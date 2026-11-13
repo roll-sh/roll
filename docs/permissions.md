@@ -143,6 +143,10 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
+- A route whose product filters its answer per environment and path itself, asking the caller's
+  `Grant` for each finding (secrets' `GET …/health` and `POST …/leaks`), is matched by rules limited
+  to some environments or paths too (`Row::filters_itself`): a token for staging gets staging's
+  findings, never production's, rather than a 403.
 - Linking another resource to an apps service (`PUT …/services/{id}/links/{kind}/{ref}`, or
   `links` in a new service's body) puts its address and password in the service's variables, where
   the service's code reads them: it also needs `reveal` on each linked resource (a `postgres` link
