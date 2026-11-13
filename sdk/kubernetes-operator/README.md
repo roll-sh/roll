@@ -28,4 +28,6 @@ cluster's service account issuer, its subject `system:serviceaccount:roll-system
 roll fetches the issuer's keys over public HTTPS, so the cluster's issuer must be published (EKS,
 GKE and AKS publish theirs); for a cluster whose issuer isn't, set `ROLL_TOKEN` to a roll token instead.
 
+Outside a cluster: `KUBE_API`, `KUBE_TOKEN` and `KUBE_CA_FILE` (the cluster's CA).
+
 Tests: `go test ./...` (a fake Kubernetes API and a fake rolld).

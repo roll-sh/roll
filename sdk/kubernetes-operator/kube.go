@@ -27,7 +27,20 @@ const serviceAccount = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 func kubeFromEnv() (*kube, error) {
 	if api := os.Getenv("KUBE_API"); api != "" {
-		return &kube{api: strings.TrimRight(api, "/"), token: os.Getenv("KUBE_TOKEN"), http: &http.Client{Timeout: 30 * time.Second}}, nil
+		// Outside a cluster: its CA from KUBE_CA_FILE, else the system's.
+		client := &http.Client{Timeout: 30 * time.Second}
+		if f := os.Getenv("KUBE_CA_FILE"); f != "" {
+			ca, err := os.ReadFile(f)
+			if err != nil {
+				return nil, err
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(ca) {
+				return nil, fmt.Errorf("KUBE_CA_FILE holds no certificate")
+			}
+			client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+		}
+		return &kube{api: strings.TrimRight(api, "/"), token: os.Getenv("KUBE_TOKEN"), http: client}, nil
 	}
 	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
 	if host == "" {
