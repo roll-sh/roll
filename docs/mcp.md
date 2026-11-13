@@ -163,6 +163,11 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 - Responses are JSON, or server-sent events when `Accept` has `text/event-stream` without
   `application/json`. Keep-alive comments come every 15 seconds while a call waits, for example on
   an approval.
+- **Progress:** a `tools/call` with `_meta.progressToken`, from a client that accepts
+  `text/event-stream`, is answered as a stream with a `notifications/progress` every 10 seconds
+  until the answer ("still running (it may be waiting for a person to approve it)"), so a client
+  that times out on silence keeps waiting for a person (checked with the TypeScript SDK's
+  `onprogress`). The call stays the request's: a client that goes away cancels it, as before.
 - Requests with an `Origin` header must come from the dashboard's or the API's origin (DNS
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
@@ -327,6 +332,7 @@ previews are listed once those products are on.
 | `secrets_reveal` | A secret's value. | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value` |
 | `secrets_set` | Create or change a secret's value. | `PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
 | `secrets_delete` | Delete a secret. | `DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{name}` |
+| `secrets_list_aws_roles` | A project's registered AWS roles for dynamic AWS keys (registering is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/aws-roles` |
 | `secrets_health` | What needs fixing in a project's secrets, by name, in the environments you may read (`code`: keys no repository mentions). | `GET /v1/secrets/projects/{project}/health` |
 | `secrets_findings` | Every project's secrets health findings you may read. | `GET /v1/secrets/findings` |
 | `secrets_find` | Where a key is set across the projects you may read. | `GET /v1/secrets/search` |
@@ -402,7 +408,9 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); read-only connections
+revoked as leaked, about to expire; only their own, never a secret); progress while a call waits
+(`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript
+SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only connections
 (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel);
 `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and
 you say so); prompts' arguments complete from what the connection may list (`completion/complete`,
