@@ -446,6 +446,19 @@ impl Store {
         Ok(v.and_then(|v| serde_json::from_str(&v).ok()))
     }
 
+    /// Claim `day` for a once-a-day job named `key`: true for the first caller of the day, on any
+    /// node (read and written in one transaction).
+    pub fn claim_day(&self, key: &str, day: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let last: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional()?;
+            if last.and_then(|v| v.parse::<i64>().ok()) == Some(day) {
+                return Ok::<_, Error>(false);
+            }
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, day.to_string()])?;
+            Ok(true)
+        })
+    }
+
     pub fn set_setting(&self, key: &str, value: &Value) -> Result<()> {
         let v = value.to_string();
         self.db.write(|c| {

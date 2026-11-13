@@ -441,6 +441,10 @@ impl roll_access::ApprovalChat for FakeChat {
         self.0.lock().unwrap().push(format!("update {install} {channel} {ts} {} {}", a.id, a.state));
         Box::pin(async { Ok(()) })
     }
+    fn notice(&self, install: String, channel: String, text: String) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        self.0.lock().unwrap().push(format!("notice {install} {channel} {text}"));
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// With approvals going to a chat channel, a new approval is posted there; a press from another
@@ -478,6 +482,12 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     seen(format!("update chi_a C9 1700.1 {id} approved")).await;
     let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
     assert_eq!((a["state"].as_str(), a["decided_by"].as_str()), (Some("approved"), Some("slack:U1")));
+
+    // Once a day, the tokens about to expire are posted there too.
+    d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "name": "ci-deploy", "expires_at": code_sql::now_ms() + 2 * 86_400_000 })).await;
+    assert!(d.access.expiry_digest().await.unwrap());
+    assert!(chat.0.lock().unwrap().iter().any(|l| l.starts_with("notice chi_a C9 One roll token expires within a week: ci-deploy (")), "{:?}", chat.0.lock().unwrap());
+    assert!(!d.access.expiry_digest().await.unwrap(), "once a day");
 }
 
 /// An MCP client known by its metadata document (MCP 2025-11-25: its client_id is the document's

@@ -342,6 +342,8 @@ Approvals can also go to a Slack or Discord channel, through roll code's chat op
   Connect guest, an install open to anyone), and not the install's member list, which the roll
   code owner manages rather than the operator. Anyone else is told so. `decided_by` is the
   person (`slack:U123`, `discord:123…`).
+- Once a day, the live tokens that expire within a week are posted there too (`expiry_digest`,
+  from the hourly maintenance loop; one node posts it, the day claimed in the store).
 - Posting is best effort: an approval lives in roll (the dashboard, the API, `roll mcp approvals`);
   chat is one more place to decide it.
 - Nothing about an approval's binding changes: it still runs exactly the request it was asked
