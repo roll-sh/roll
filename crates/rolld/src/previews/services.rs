@@ -172,6 +172,14 @@ impl roll_previews::ports::Apps for RollApps {
         Ok(s(&env["url"]))
     }
 
+    async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
+        // The live deployment's frozen run: `[app.previews.run]` and the environment's own size
+        // over the service's.
+        let (id, env) = self.find(preview, service).await.ok().flatten()?;
+        let e = self.api.get(&Self::env_path(&id, &env)).await.ok()?;
+        e["active"]["run"]["memory_mb"].as_u64().map(|m| m as u32)
+    }
+
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()> {
         let (id, env) = self.find(preview, service).await?.ok_or_else(|| anyhow::anyhow!("roll apps has no preview environment for {service}"))?;
         self.api.post(&format!("{}/wake", Self::env_path(&id, &env)), json!({})).await.map(|_| ())
@@ -235,6 +243,10 @@ impl Services {
 impl roll_previews::ports::Apps for Services {
     async fn catalog(&self, project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
         self.apps.catalog(project).await
+    }
+
+    async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
+        self.apps.memory_mb(preview, service).await
     }
 
     async fn deploy(&self, t: &roll_previews::ports::Target) -> anyhow::Result<Option<String>> {

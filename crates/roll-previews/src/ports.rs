@@ -290,6 +290,11 @@ pub trait Apps: Send + Sync {
         anyhow::bail!("this server can't run seed commands")
     }
     /// A PNG of the service's page as it first shows (`None`: this backend can't take one).
+    /// The memory the service's live deployment runs with in this preview (a backend's preview
+    /// settings and the environment's own over the service's). `None`: not known, the catalog's.
+    async fn memory_mb(&self, _preview: &str, _service: &str) -> Option<u32> {
+        None
+    }
     /// Ask the service for `path` (starting it if it sleeps): its status and the first line of
     /// what it said. `None`: this backend can't tell (a health check is then skipped).
     async fn probe(&self, _preview: &str, _service: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {

@@ -603,3 +603,17 @@ async fn a_family_of_branches_gets_its_own_variables() {
     e.engine.pass().await.unwrap();
     assert_eq!(var("chg_f1").as_deref(), Some("mine"));
 }
+
+/// A roll apps service's preview costs what its preview environment runs with (roll apps' own
+/// preview size), not the service's production size.
+#[tokio::test]
+async fn a_roll_apps_preview_costs_what_it_runs_with() {
+    let e = env(json!({ "enabled": true }));
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), memory_mb: 2048 }]);
+    *e.apps.memory.lock() = Some(256);
+    e.code.open(change("chg_m", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.memory_mb, 256);
+}

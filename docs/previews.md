@@ -873,8 +873,8 @@ Ranked by what a person notices first. Done so far:
    fail every link-access deploy.
 2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
-   second copy of the project's variables; and `catalog()` should read `[app.previews.run]` and
-   per-environment `run` overrides, not only the service's `memory_mb`.
+   second copy of the project's variables. (A preview's cost now uses the memory its live
+   deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
 3. **A visual change per push**: the screenshot at each head compared with the previous head's,
    and the share of pixels that changed in the pull request comment ("the page changed 12%",
    with both images), as Percy and Chromatic do for visual review, from screenshots roll already

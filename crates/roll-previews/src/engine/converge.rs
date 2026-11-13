@@ -344,7 +344,9 @@ impl Engine {
             if let Some(path) = &spec.health {
                 checks.push((spec.name.clone(), rev.clone(), path.clone()));
             }
-            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, spec.memory_mb, &|h| self.cfg.url(h))?;
+            // What it costs is what it runs with: a backend's preview size when it has one.
+            let memory_mb = if on_apps { self.apps.memory_mb(&r.id, &spec.name).await.unwrap_or(spec.memory_mb) } else { spec.memory_mb };
+            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url(h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
             // a reset's new URLs, changed overrides; its access): the runtime restarts it on its
             // next request, roll apps redeploys it.
