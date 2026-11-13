@@ -5,7 +5,49 @@
 //! double-quoted (Elasticsearch doesn't enable `MINIMIZE_QUOTES`), and keys are plain unless
 //! they would read back as something else (`"y"`, `"123"`, `"a: b"`).
 
-use crate::json::{Value, write::write_number};
+use crate::error::EsError;
+use crate::json::{Map, Number, Value, write::write_number};
+
+/// A YAML request body as Jackson's YAML parser reads it: mappings, sequences and scalars
+/// (`null`, booleans, integers, floats, strings); tags are dropped. `Ok(None)` for an empty
+/// body.
+pub fn read_yaml(body: &[u8]) -> Result<Option<Value>, EsError> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let v: serde_yaml_ng::Value = serde_yaml_ng::from_slice(body).map_err(|e| {
+        let (line, col) = e.location().map_or((0, 0), |l| (l.line(), l.column()));
+        EsError::x_content_parse(line, col, e.to_string())
+    })?;
+    Ok(Some(from_yaml(v)))
+}
+
+fn from_yaml(v: serde_yaml_ng::Value) -> Value {
+    use serde_yaml_ng::Value as Y;
+    match v {
+        Y::Null => Value::Null,
+        Y::Bool(b) => Value::Bool(b),
+        Y::Number(n) => Value::Num(match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => Number::Int(i),
+            (None, Some(u)) => Number::UInt(u),
+            _ => Number::Float(n.as_f64().unwrap_or(f64::NAN)),
+        }),
+        Y::String(s) => Value::Str(s),
+        Y::Sequence(a) => Value::Arr(a.into_iter().map(from_yaml).collect()),
+        Y::Mapping(m) => {
+            let mut out = Map::with_capacity(m.len());
+            for (k, v) in m {
+                let key = match from_yaml(k) {
+                    Value::Str(s) => s,
+                    other => other.to_es_string(),
+                };
+                out.insert(key, from_yaml(v));
+            }
+            Value::Obj(out)
+        }
+        Y::Tagged(t) => from_yaml(t.value),
+    }
+}
 
 pub fn write_yaml(out: &mut Vec<u8>, v: &Value) {
     out.extend_from_slice(b"---");

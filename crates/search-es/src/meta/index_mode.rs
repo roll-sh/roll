@@ -85,8 +85,38 @@ impl IndexMode {
         if self.is_strict_columnar() { &["SYNTHETIC", "COLUMNAR_STORED"] } else { &["DISABLED", "STORED", "SYNTHETIC"] }
     }
 
+    /// The `_source` mode an index keeps: `index.mapping.source.mode`, else the mode's default.
+    fn source_mode(self, settings: &Settings) -> String {
+        settings.get("index.mapping.source.mode").map(str::to_ascii_uppercase).unwrap_or_else(|| self.default_source_mode().to_string())
+    }
+
+    /// `index.recovery.use_synthetic_source`'s validator: recovering from synthetic `_source`
+    /// needs one, and strict columnar indices always do.
+    pub fn validate_recovery_source(self, settings: &Settings) -> EsResult<()> {
+        const KEY: &str = "index.recovery.use_synthetic_source";
+        match settings.get(KEY) {
+            Some("true") if self.default_source_mode() != "SYNTHETIC" => {
+                let mode = self.source_mode(settings);
+                if mode != "SYNTHETIC" {
+                    return Err(EsError::illegal_argument(format!(
+                        "The setting [{KEY}] is only permitted when [index.mapping.source.mode] is set to [SYNTHETIC]. Current mode: [{mode}]."
+                    )));
+                }
+            }
+            Some("false") if self.is_strict_columnar() => {
+                return Err(EsError::illegal_argument(format!(
+                    "The setting [{KEY}] must not be false when [index.mode] is set to [{}].",
+                    self.name().to_ascii_uppercase()
+                )));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// `validateWithOtherSettings` and the related setting validators.
     pub fn validate_settings(self, settings: &Settings) -> EsResult<()> {
+        self.validate_recovery_source(settings)?;
         let routing_path = settings.get_list("index.routing_path").unwrap_or_default();
         if let Some(mode) = settings.get("index.mapping.source.mode") {
             let up = mode.to_ascii_uppercase();
@@ -205,7 +235,7 @@ impl IndexMode {
             let e = EsError::illegal_argument(reason);
             EsError::mapper_parsing(format!("Failed to parse mapping: {}", e.reason())).caused_by(e)
         };
-        let source_mode = settings.get("index.mapping.source.mode").map(str::to_ascii_uppercase).unwrap_or_else(|| self.default_source_mode().to_string());
+        let source_mode = self.source_mode(settings);
         let synthesized = matches!(self, IndexMode::TimeSeries | IndexMode::Logsdb | IndexMode::Columnar | IndexMode::LogsdbColumnar);
         if synthesized && (mapping.source.enabled == Some(false) || source_mode == "DISABLED") {
             return Err(parse_failure(format!("_source can not be disabled in index using [{}] index mode", self.name())));
@@ -262,7 +292,7 @@ impl IndexMode {
     }
 
     /// Defaults of mode-dependent index settings (`include_defaults`).
-    pub fn setting_default(self, key: &str) -> Option<&'static str> {
+    pub fn setting_default(self, key: &str, settings: &Settings) -> Option<&'static str> {
         let logs = self.is_logs();
         let columnar = matches!(self, IndexMode::TimeSeries | IndexMode::Logsdb | IndexMode::Columnar | IndexMode::LogsdbColumnar);
         Some(match key {
@@ -331,7 +361,7 @@ impl IndexMode {
                 }
             }
             "index.recovery.use_synthetic_source" => {
-                if self.is_strict_columnar() {
+                if self.is_strict_columnar() || self.source_mode(settings) == "SYNTHETIC" {
                     "true"
                 } else {
                     "false"

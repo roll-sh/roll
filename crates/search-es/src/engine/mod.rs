@@ -18,6 +18,7 @@
 pub mod completion;
 pub mod convert;
 pub mod fields;
+pub mod pattern_text;
 pub mod ranges;
 pub mod shapes;
 pub mod synthetic;

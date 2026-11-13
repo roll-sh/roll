@@ -317,7 +317,7 @@ fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_te
             } else {
                 S::analyzed(&toks, *max_gaps, *ordered).map_err(index_err)?
             };
-            let src = fix(use_field, &fi, src);
+            let src = fix(use_field, &fi, confirm(ctx, &fi, src));
             apply_filter(ctx, f, src, filter.as_deref())?
         }
         D::AnyOf { intervals, filter } => {
@@ -338,14 +338,14 @@ fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_te
             let a = analyzer_for(ctx, &fi, analyzer.as_deref())?;
             let p = a.normalize(prefix);
             let mt = search_index::query::MultiTermQuery::prefix(fi.number, p.clone().into_bytes());
-            fix(use_field, &fi, S::multi_term(mt, 128, format!("{p}*")))
+            fix(use_field, &fi, confirm(ctx, &fi, S::multi_term(mt, 128, format!("{p}*"))))
         }
         D::Wildcard { pattern, analyzer, use_field, max_expansions } => {
             let fi = field_of(use_field)?;
             let a = analyzer_for(ctx, &fi, analyzer.as_deref())?;
             let p = a.normalize(pattern);
             let mt = search_index::query::MultiTermQuery::wildcard(fi.number, &p, false).map_err(index_err)?;
-            fix(use_field, &fi, S::multi_term(mt, max_expansions.map(|m| m.max(1) as usize).unwrap_or(128), p))
+            fix(use_field, &fi, confirm(ctx, &fi, S::multi_term(mt, max_expansions.map(|m| m.max(1) as usize).unwrap_or(128), p)))
         }
         // OpenSearch's regexp rule: the pattern as written (no normalization), its flags and
         // case sensitivity.
@@ -353,14 +353,14 @@ fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_te
             let fi = field_of(use_field)?;
             let mt = search_index::query::MultiTermQuery::regexp(fi.number, pattern, crate::query::term_level::regexp_flags::to_codec(*flags), *case_insensitive, 10000)
                 .map_err(index_err)?;
-            fix(use_field, &fi, S::multi_term(mt, max_expansions.map(|m| m as usize).unwrap_or(128), format!("/{pattern}/")))
+            fix(use_field, &fi, confirm(ctx, &fi, S::multi_term(mt, max_expansions.map(|m| m as usize).unwrap_or(128), format!("/{pattern}/"))))
         }
         D::Regexp { pattern, analyzer, use_field, .. } => {
             let fi = field_of(use_field)?;
             let a = analyzer_for(ctx, &fi, analyzer.as_deref())?;
             let p = a.normalize(pattern);
             let mt = search_index::query::MultiTermQuery::regexp(fi.number, &p, crate::query::term_level::regexp_flags::to_codec(crate::query::term_level::regexp_flags::LUCENE_ALL), false, 10000).map_err(index_err)?;
-            fix(use_field, &fi, S::multi_term(mt, 128, format!("/{p}/")))
+            fix(use_field, &fi, confirm(ctx, &fi, S::multi_term(mt, 128, format!("/{p}/"))))
         }
         D::Fuzzy { term, prefix_length, transpositions, fuzziness, analyzer, use_field } => {
             let fi = field_of(use_field)?;
@@ -368,15 +368,27 @@ fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_te
             let t = a.normalize(term);
             let edits = super::query::fuzzy_edits(fuzziness, &t);
             let mt = search_index::query::MultiTermQuery::fuzzy(fi.number, &t, edits, (*prefix_length).max(0) as usize, 128, *transpositions);
-            fix(use_field, &fi, S::multi_term(mt, 128, t))
+            fix(use_field, &fi, confirm(ctx, &fi, S::multi_term(mt, 128, t)))
         }
         D::Range { lower, upper, include_lower, include_upper, analyzer, use_field } => {
             let fi = field_of(use_field)?;
             let a = analyzer_for(ctx, &fi, analyzer.as_deref())?;
             let mt = search_index::query::MultiTermQuery::range(fi.number, Some(a.normalize(lower).into_bytes()), Some(a.normalize(upper).into_bytes()), *include_lower, *include_upper);
-            fix(use_field, &fi, S::multi_term(mt, 128, format!("{lower}..{upper}")))
+            fix(use_field, &fi, confirm(ctx, &fi, S::multi_term(mt, 128, format!("{lower}..{upper}"))))
         }
     })
+}
+
+/// `SourceIntervalsSource`: a leaf on a field without positions (`match_only_text`,
+/// `pattern_text` with `index_options: docs`) runs over each candidate's re-analyzed `_source`.
+fn confirm(ctx: &QueryCtx, f: &FieldInfo, s: search_index::query::IntervalsSource) -> search_index::query::IntervalsSource {
+    if f.kind != Kind::MatchOnlyText || f.has_positions() {
+        return s;
+    }
+    let Some(a) = f.analyzer.clone() else { return s };
+    let src = Arc::new(SourceText { table: ctx.table.clone(), path: f.name.clone() });
+    let spec = search_index::query::source_confirmed::SourceSpec::new(f.number, f.name.clone(), a, src);
+    search_index::query::IntervalsSource::source_confirmed(Arc::new(spec), s)
 }
 
 /// OpenSearch's `IntervalBuilder.combineSources` in `unordered_no_overlap` mode: the sources

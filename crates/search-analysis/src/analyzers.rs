@@ -90,6 +90,19 @@ pub(crate) fn standard(name: &str, stop: WordSet, max: usize) -> Result<Analyzer
     )
 }
 
+/// `pattern_text`'s default analyzer (`DelimiterAnalyzer`): tokens split on whitespace and
+/// `= ? : [ ]`, lowercased. It isn't an analyzer name mappings may refer to.
+pub fn pattern_text_delimiter() -> Analyzer {
+    static A: OnceLock<Analyzer> = OnceLock::new();
+    A.get_or_init(|| {
+        let items: Vec<String> = ["whitespace", "=", "?", ":", "[", "]"].iter().map(|s| s.to_string()).collect();
+        let g = Arc::new(tokenizer::char_group(&items).expect("fixed delimiters parse"));
+        builtin("delimiter", tokenizer_fn(move || Box::new(CharTokenizer::new(g.clone(), 255, false))), vec![lowercase()], vec![lowercase()])
+            .expect("the delimiter analyzer always builds")
+    })
+    .clone()
+}
+
 pub(crate) type AnalyzerBuilder = fn(&Ctx, &str, &Settings) -> Result<Analyzer>;
 
 /// Analyzer types (`"type": "…"` in `index.analysis.analyzer`).

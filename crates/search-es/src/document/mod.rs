@@ -656,6 +656,14 @@ impl<'m, 'p> Walker<'m, 'p> {
         {
             return Err(self.wrap(e, f, full));
         }
+        // `PatternTextFieldMapper`: one message per document.
+        if f.ty == "pattern_text" && token != Token::Null {
+            let seen = self.nested.last().map_or(&self.out.fields, |n| &n.fields);
+            if seen.iter().any(|x| *x.name == *full) {
+                let e = ValueError::from(EsError::illegal_argument(format!("Multiple values are not allowed for field [{full}].")));
+                return Err(self.wrap(e, f, full));
+            }
+        }
         // `GeoPointFieldMapper`: a `position` metric takes one point per document.
         if f.ty == "geo_point"
             && token != Token::Null

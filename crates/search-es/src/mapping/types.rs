@@ -167,6 +167,16 @@ fn default_freq_filter(_: &FieldMapper, _: &MappingCtx) -> Value {
 
 pub static MATCH_ONLY_TEXT: &[ParamDef] = &[META, TEXT_DOC_VALUES, INDEX];
 
+/// `pattern_text` (logsdb): a message indexed like `match_only_text` (`index_options: docs`
+/// unless `positions`) with the `delimiter` analyzer, plus a `<name>.template_id` keyword column
+/// unless `disable_templating`.
+pub static PATTERN_TEXT: &[ParamDef] = &[
+    META,
+    p("index_options", Enum(&["docs", "positions"]), Dv::Str("docs"), Fixed),
+    p("analyzer", Enum(&["delimiter", "standard"]), Dv::Str("delimiter"), Fixed),
+    p("disable_templating", Bool, FALSE, Fixed),
+];
+
 macro_rules! numeric {
     ($name:ident, $kind:expr) => {
         pub static $name: &[ParamDef] = &[
@@ -807,6 +817,7 @@ pub static TYPES: &[TypeDef] = &[
     def!("long", LONG, Family::Numeric).with_validate(validate_number),
     def!("long_range", RANGE, Family::Range).with_validate(validate_range),
     def!("match_only_text", MATCH_ONLY_TEXT, Family::Text),
+    TypeDef { in_multi_field: false, ..def!("pattern_text", PATTERN_TEXT, Family::Text) },
     TypeDef { multi_fields: false, in_multi_field: false, ..def!("percolator", META_ONLY, Family::Other) },
     def!("point", POINT, Family::Geo),
     TypeDef { multi_fields: false, ..def!("rank_feature", RANK_FEATURE, Family::Other) },
@@ -977,7 +988,6 @@ pub fn unsupported(name: &str) -> Option<&'static str> {
     match name {
         "semantic_text" => Some("semantic_text fields need an inference service, which roll search doesn't provide"),
         "rank_vectors" => Some("rank_vectors fields are not supported by roll search"),
-        "pattern_text" => Some("pattern_text fields are not supported by roll search"),
         _ => None,
     }
 }

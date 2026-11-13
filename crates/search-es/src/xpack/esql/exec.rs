@@ -585,6 +585,8 @@ impl Compiler<'_> {
                             || rt == DataType::Null
                             || (lt.is_numeric() && rt.is_numeric())
                             || (lt.is_string() && rt.is_string())
+                            || (matches!(lt, DataType::Date | DataType::DateNanos) && matches!(rt, DataType::Date | DataType::DateNanos | DataType::Keyword))
+                            || (lt == DataType::Keyword && rt == DataType::DateNanos)
                             || matches!((lt, rt), (DataType::Date, DataType::Keyword) | (DataType::Keyword, DataType::Date) | (DataType::Ip, DataType::Keyword) | (DataType::Keyword, DataType::Ip) | (DataType::Version, DataType::Keyword) | (DataType::Keyword, DataType::Version));
                         if !compatible {
                             return Err(verification(

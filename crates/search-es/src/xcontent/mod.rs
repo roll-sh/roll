@@ -198,8 +198,9 @@ pub fn parse_body(body: &[u8], ty: XContentType) -> Result<Option<Value>, EsErro
             }
             cbor::read_cbor(body).map(Some).map_err(EsError::parse)
         }
-        XContentType::Yaml | XContentType::Smile => Err(EsError::illegal_argument(format!(
-            "request body of type [{}] is not supported by roll search, send JSON or CBOR",
+        XContentType::Yaml => yaml::read_yaml(body),
+        XContentType::Smile => Err(EsError::illegal_argument(format!(
+            "request body of type [{}] is not supported by roll search, send JSON, YAML or CBOR",
             ty.mime()
         ))),
     }

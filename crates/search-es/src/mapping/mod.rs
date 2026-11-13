@@ -300,6 +300,12 @@ impl FieldMapper {
         self.def
     }
 
+    /// A `pattern_text` field that splits messages into templates (and so has a
+    /// `<name>.template_id` column).
+    pub fn templated(&self) -> bool {
+        self.ty == "pattern_text" && self.raw("disable_templating").and_then(Value::as_bool) != Some(true)
+    }
+
     pub fn is_set(&self, name: &str) -> bool {
         self.def.param_index(name).is_some_and(|i| self.values[i].is_some())
     }
@@ -987,7 +993,7 @@ impl ObjectMapper {
     }
 
     /// Parses the object parameters and `properties`. Unknown keys are left for the caller.
-    fn parse_into(&mut self, node: &Map, ctx: &MappingCtx, depth: usize, consumed: &mut Vec<String>) -> Result<(), EsError> {
+    fn parse_into(&mut self, node: &Map, ctx: &MappingCtx, depth: usize, root: bool, consumed: &mut Vec<String>) -> Result<(), EsError> {
         if ctx.opensearch() {
             // Read first: it decides how dotted names in `properties` are taken.
             if let Some(v) = node.get("disable_objects") {
@@ -1020,7 +1026,7 @@ impl ObjectMapper {
                 }
                 "properties" => match v {
                     Value::Arr(a) if a.is_empty() => {}
-                    Value::Obj(props) => self.parse_properties(props, ctx, depth)?,
+                    Value::Obj(props) => self.parse_properties(props, ctx, depth, root)?,
                     _ => return Err(EsError::parse("properties must be a map type")),
                 },
                 "include_in_all" => ctx.warn("[include_in_all] is deprecated, the _all field have been removed in this version"),
@@ -1031,7 +1037,9 @@ impl ObjectMapper {
         Ok(())
     }
 
-    fn parse_properties(&mut self, props: &Map, ctx: &MappingCtx, depth: usize) -> Result<(), EsError> {
+    /// `root`: the mapping's root object, whose dotted names stay literal in strict columnar
+    /// modes (their fields are flat; a `host` field and a `host.name` field coexist).
+    fn parse_properties(&mut self, props: &Map, ctx: &MappingCtx, depth: usize, root: bool) -> Result<(), EsError> {
         // Elasticsearch reads `properties` into a `HashMap`, so its fields are built in hash
         // order: that decides which error is reported first and which of two definitions of the
         // same field (`a.b` and `a: {properties: {b}}`) wins.
@@ -1055,7 +1063,7 @@ impl ObjectMapper {
                 None if node.len() == 1 && node.contains_key("enabled") => "object".into(),
                 None => return Err(EsError::mapper_parsing(format!("No type specified for field [{field_name}]"))),
             };
-            let (leaf, parents): (String, Vec<String>) = if !self.literal_dots() {
+            let (leaf, parents): (String, Vec<String>) = if !self.literal_dots() && !(root && ctx.columnar.is_some()) {
                 let parts: Vec<&str> = field_name.split('.').collect();
                 // Java's split drops trailing empty strings; only dots means nothing is left.
                 let mut parts: Vec<&str> = parts;
@@ -1356,7 +1364,7 @@ fn parse_mapper(name: &str, ty: &str, node: &Map, ctx: &MappingCtx, depth: usize
             // Subobjects can't be configured: `subobjects` is left as an unsupported parameter.
             let mut rest = node.clone();
             rest.shift_remove("subobjects");
-            o.parse_into(&rest, ctx, depth, &mut consumed)?;
+            o.parse_into(&rest, ctx, depth, false, &mut consumed)?;
             crate::stack::maybe_grow(|| o.flatten_subobjects_all());
             check_remaining(name, node, &consumed)?;
             o.inherit_dimensions();
@@ -1387,7 +1395,7 @@ fn parse_mapper(name: &str, ty: &str, node: &Map, ctx: &MappingCtx, depth: usize
             if ty == "object" && depth as i64 > ctx.depth_limit {
                 return Err(EsError::mapper_parsing(format!("Limit of mapping depth [{}] has been exceeded", ctx.depth_limit)));
             }
-            o.parse_into(node, ctx, depth, &mut consumed)?;
+            o.parse_into(node, ctx, depth, false, &mut consumed)?;
             check_remaining(name, node, &consumed)?;
             Ok(Mapper::Object(o))
         }
@@ -1955,7 +1963,7 @@ pub struct Mapping {
     routing_present: bool,
     pub meta: Option<Map>,
     pub data_stream_timestamp: Option<bool>,
-    /// `prefix_properties`: `dynamic`/`enabled` of object paths whose fields are flattened
+    /// `prefix_properties`: `dynamic`/`enabled`/`passthrough` of object paths whose fields are flattened
     /// (strict columnar modes), by dotted path.
     pub prefix_properties: BTreeMap<String, PrefixProps>,
 }
@@ -1965,11 +1973,17 @@ pub struct Mapping {
 pub struct PrefixProps {
     pub dynamic: Option<Dynamic>,
     pub enabled: Option<bool>,
+    /// A flattened `passthrough` object's `priority`: the prefix's fields also resolve without
+    /// it (the highest priority wins).
+    pub passthrough: Option<i64>,
 }
 
 impl PrefixProps {
     fn to_value(&self) -> Value {
         let mut m = Map::new();
+        if let Some(p) = self.passthrough {
+            m.insert("passthrough".into(), p.into());
+        }
         if let Some(d) = self.dynamic {
             m.insert("dynamic".into(), d.as_str().into());
         }
@@ -2009,6 +2023,14 @@ impl PrefixProps {
                             ));
                         }
                     })
+                }
+                "passthrough" => {
+                    let n = match v {
+                        Value::Num(n) if n.as_f64().fract() == 0.0 => n.as_i64(),
+                        Value::Str(s) => s.parse::<i64>().ok(),
+                        _ => None,
+                    };
+                    p.passthrough = Some(n.ok_or_else(|| EsError::mapper_parsing(format!("[prefix_properties.{path}.passthrough] must be an integer value")))?);
                 }
                 // Unknown parameters are dropped.
                 _ => {}
@@ -2130,7 +2152,7 @@ impl Mapping {
     pub fn parse(src: &Map, ctx: &MappingCtx) -> Result<Mapping, EsError> {
         let mut m = Mapping::empty();
         let mut consumed: Vec<String> = Vec::new();
-        m.root.parse_into(src, ctx, 0, &mut consumed)?;
+        m.root.parse_into(src, ctx, 0, true, &mut consumed)?;
         m.root.normalize_nested(None);
         for (k, v) in src {
             if consumed.contains(k) {
@@ -2291,8 +2313,8 @@ impl Mapping {
             sorted.sort_by(|a, b| a.0.cmp(b.0));
             return Err(EsError::mapper_parsing(format!("Root mapping definition has unsupported parameters: {}", remaining_text(&sorted))));
         }
-        if let Some(mode) = ctx.columnar {
-            m.columnarize(mode)?;
+        if ctx.columnar.is_some() {
+            m.columnarize()?;
         }
         if ctx.opensearch() {
             check_disable_objects(&m.root, "")?;
@@ -2304,9 +2326,9 @@ impl Mapping {
     /// the `dynamic`/`enabled` of each object move to `prefix_properties` (explicit
     /// `prefix_properties` win). Nested objects stay; inside them objects auto-flatten as under
     /// `subobjects: false`.
-    fn columnarize(&mut self, mode: &str) -> Result<(), EsError> {
+    fn columnarize(&mut self) -> Result<(), EsError> {
         if self.root.subobjects == Some(true) {
-            return Err(EsError::mapper_parsing(format!("subobjects [true] is not supported in {mode} mode")));
+            return Err(EsError::mapper_parsing("subobjects [true] is not supported in columnar mode"));
         }
         if self.root.dynamic == Some(Dynamic::Runtime) {
             return Err(EsError::mapper_parsing("dynamic [runtime] is not supported in strict columnar mode"));
@@ -2320,25 +2342,28 @@ impl Mapping {
             prefix: &str,
             flat: &mut BTreeMap<String, Mapper>,
             captured: &mut BTreeMap<String, PrefixProps>,
-            mode: &str,
         ) -> Result<(), EsError> {
             for (k, child) in children {
                 let path = if prefix.is_empty() { k } else { format!("{prefix}.{k}") };
                 match child {
                     Mapper::Object(mut o) if !o.is_nested() => {
                         if o.subobjects == Some(true) {
-                            return Err(EsError::mapper_parsing(format!("subobjects [true] is not supported in {mode} mode")));
+                            return Err(EsError::mapper_parsing("subobjects [true] is not supported in columnar mode"));
                         }
                         if o.dynamic == Some(Dynamic::Runtime) {
                             return Err(EsError::mapper_parsing("dynamic [runtime] is not supported in strict columnar mode"));
                         }
-                        if o.dynamic.is_some() || o.enabled.is_some() {
-                            captured.insert(path.clone(), PrefixProps { dynamic: o.dynamic, enabled: o.enabled });
+                        let passthrough = match o.kind {
+                            ObjectKind::PassThrough { priority, .. } => Some(priority),
+                            _ => None,
+                        };
+                        if o.dynamic.is_some() || o.enabled.is_some() || passthrough.is_some() {
+                            captured.insert(path.clone(), PrefixProps { dynamic: o.dynamic, enabled: o.enabled, passthrough });
                         }
                         // Fields declared inside a disabled object are dropped with it.
                         if o.enabled != Some(false) {
                             let children = std::mem::take(&mut o.children);
-                            crate::stack::maybe_grow(|| walk(children, &path, flat, captured, mode))?;
+                            crate::stack::maybe_grow(|| walk(children, &path, flat, captured))?;
                         }
                     }
                     Mapper::Object(mut o) => {
@@ -2387,6 +2412,12 @@ impl Mapping {
                             let children = std::mem::take(&mut c.children);
                             crate::stack::maybe_grow(|| go(children, &name, base, context, out))?;
                         }
+                        // The remaining objects are nested: one level only.
+                        Mapper::Object(_) => {
+                            return Err(EsError::mapper_parsing(format!(
+                                "nested field [{base}.{name}] is inside nested field [{base}]: columnar index modes support only a single level of nesting"
+                            )));
+                        }
                         other => {
                             out.insert(name, other);
                         }
@@ -2398,7 +2429,7 @@ impl Mapping {
             o.children = out;
             Ok(())
         }
-        walk(std::mem::take(&mut self.root.children), "", &mut flat, &mut captured, mode)?;
+        walk(std::mem::take(&mut self.root.children), "", &mut flat, &mut captured)?;
         self.root.children = flat;
         // Explicit `prefix_properties` override what objects declared.
         for (k, v) in std::mem::take(&mut self.prefix_properties) {
@@ -2480,6 +2511,9 @@ impl Mapping {
             }
             if v.enabled.is_some() {
                 e.enabled = v.enabled;
+            }
+            if v.passthrough.is_some() {
+                e.passthrough = v.passthrough;
             }
         }
         if incoming.data_stream_timestamp.is_some() {
@@ -2914,6 +2948,17 @@ impl MapperRef<'_> {
     }
 }
 
+/// `pattern_text`'s `<name>.template_id`: a keyword column (doc values only) of each message's
+/// template id, which the field writes itself (it isn't a multi-field in the mapping).
+pub(crate) fn template_id_mapper() -> &'static FieldMapper {
+    static M: std::sync::OnceLock<FieldMapper> = std::sync::OnceLock::new();
+    M.get_or_init(|| {
+        let mut f = FieldMapper::new("template_id", types::lookup("keyword").expect("keyword is a type"));
+        f.set("index", Value::Bool(false));
+        f
+    })
+}
+
 pub(crate) fn lookup_in<'a>(o: &'a ObjectMapper, path: &str) -> Option<MapperRef<'a>> {
     if let Some(c) = o.children.get(path) {
         return Some(match c {
@@ -2934,6 +2979,9 @@ pub(crate) fn lookup_in<'a>(o: &'a ObjectMapper, path: &str) -> Option<MapperRef
             Some(Mapper::Field(f)) => {
                 if let Some(mf) = f.fields.get(tail).or_else(|| f.props.get(tail)) {
                     return Some(MapperRef::Field(mf));
+                }
+                if tail == "template_id" && f.templated() {
+                    return Some(MapperRef::Field(template_id_mapper()));
                 }
             }
             _ => {}

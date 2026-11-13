@@ -170,7 +170,8 @@ fn cluster_bool(md: &crate::meta::Metadata, key: &str, default: bool) -> bool {
 }
 
 /// `LogsdbIndexModeSettingsProvider` for data stream backing indices in a logs mode: sort on
-/// `host.name` when it is (or can be added as) a keyword or numeric field with doc values.
+/// `host.name` when it is (or can be added as) a keyword or numeric field with doc values, and
+/// on `message.template_id` when asked to and `message` is a `pattern_text`.
 fn logsdb_backing_settings(settings: &mut Settings, mappings: &[Map]) -> EsResult<()> {
     if settings.contains("index.sort.field") {
         return Ok(());
@@ -186,7 +187,8 @@ fn logsdb_backing_settings(settings: &mut Settings, mappings: &[Map]) -> EsResul
     }
     let host_name = merged.lookup("host.name");
     let add_host = flag(settings, "index.logsdb.add_host_name_field")
-        || (host_name.is_none() && (merged.lookup("host").is_none() || !merged.root.subobjects_enabled()));
+        // Strict columnar modes keep fields flat: a `host` field doesn't stop `host.name`.
+        || (host_name.is_none() && (merged.lookup("host").is_none() || !merged.root.subobjects_enabled() || IndexMode::of(settings).is_strict_columnar()));
     let sortable = match host_name {
         Some(MapperRef::Field(f)) => {
             let numeric = matches!(f.ty, "long" | "integer" | "short" | "byte" | "double" | "float" | "half_float" | "scaled_float" | "unsigned_long");
@@ -200,6 +202,13 @@ fn logsdb_backing_settings(settings: &mut Settings, mappings: &[Map]) -> EsResul
             settings.set("index.logsdb.add_host_name_field", "true");
         }
         settings.set("index.logsdb.sort_on_host_name", "true");
+    }
+    // `index.logsdb.default_sort_on_message_template`: sort on the template ids of a
+    // `pattern_text` `message`.
+    if flag(settings, "index.logsdb.default_sort_on_message_template")
+        && matches!(merged.lookup("message"), Some(MapperRef::Field(f)) if f.templated())
+    {
+        settings.set("index.logsdb.sort_on_message_template", "true");
     }
     Ok(())
 }
@@ -423,6 +432,13 @@ fn create_index_unhooked(st: &mut ClusterState, provided_name: &str, name: &str,
         }
     }
     let mode = IndexMode::of(&settings);
+    // `cluster.columnar.enabled: false` stops new strict columnar indices (existing ones stay).
+    if mode.is_strict_columnar() && !cluster_bool(&st.metadata, "cluster.columnar.enabled", true) {
+        return Err(EsError::illegal_argument(format!(
+            "index mode [{}] is disabled: [cluster.columnar.enabled] is set to [false]",
+            mode.name()
+        )));
+    }
     mode.validate_settings(&settings)?;
     mode.provided_settings(&mut settings);
     crate::meta::index_sort::validate_settings(&settings)?;
@@ -437,6 +453,15 @@ fn create_index_unhooked(st: &mut ClusterState, provided_name: &str, name: &str,
     let mut sources = composed.mappings.clone();
     if let Some(default) = mode.default_mapping(&settings) {
         sources.insert(0, default);
+    }
+    if let Some(m) = &req.mappings
+        && mapping::unwrap_type(m).get("_source").and_then(|s| s.get("mode")).is_some()
+        && st.dialect == crate::cluster::Dialect::Elasticsearch
+    {
+        warnings.push(
+            "Configuring source mode in mappings is deprecated and will be removed in future versions. Use [index.mapping.source.mode] index setting instead."
+                .to_string(),
+        );
     }
     if let Some(m) = &req.mappings {
         if sources.is_empty() && backing.is_none() {

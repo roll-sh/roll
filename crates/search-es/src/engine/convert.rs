@@ -223,6 +223,10 @@ impl<'t> Writer<'t> {
                 if f.doc_values {
                     d.fields.push(IndexableField::DocValue { field: n, value: DocValue::SortedSet(s.as_bytes().to_vec().into()) });
                 }
+                if let Some(tn) = f.subfield("template_id") {
+                    let id = super::pattern_text::template_id(s);
+                    d.fields.push(IndexableField::DocValue { field: tn, value: DocValue::SortedSet(id.into_bytes().into()) });
+                }
                 if let Some(fdn) = f.subfield("fielddata")
                     && let Some(a) = &f.analyzer
                 {

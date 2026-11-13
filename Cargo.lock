@@ -7205,6 +7205,7 @@ dependencies = [
  "search-index",
  "search-painless",
  "serde_json",
+ "serde_yaml_ng",
  "sha1 0.10.7",
  "sha2 0.10.9",
  "tokio",

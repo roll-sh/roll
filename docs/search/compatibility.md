@@ -188,7 +188,7 @@ the discovery/store plugins.
 | `lang-expression` | `modules/lang-expression` | plain | 3 | 3 | 2 | 2 | 1 |
 | `lang-mustache` | `modules/lang-mustache` | plain | 21 | 21 | 18 | 18 | 3 |
 | `lang-painless` | `modules/lang-painless` | plain | 345 | 342 | 295 | 295 | 47 |
-| `mapper-extras` | `modules/mapper-extras` | plain | 143 | 143 | 124 | 124 | 19 |
+| `mapper-extras` | `modules/mapper-extras` | plain | 143 | 143 | 130 | 130 | 13 |
 | `parent-join` | `modules/parent-join` | plain | 27 | 24 | 24 | 24 | 0 |
 | `percolator` | `modules/percolator` | plain | 6 | 6 | 6 | 6 | 0 |
 | `rank-eval` | `modules/rank-eval` | plain | 8 | 8 | 7 | 7 | 1 |
@@ -213,7 +213,7 @@ the discovery/store plugins.
 | `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 3 | 3 | 18 |
 | `ilm` | `x-pack/plugin/ilm` | plain | 27 | 27 | 16 | 16 | 11 |
 | `kql` | `x-pack/plugin/kql` | plain | 34 | 34 | 0 | 0 | 34 |
-| `logsdb` | `x-pack/plugin/logsdb` | security | 236 | 234 | 136 | 136 | 98 |
+| `logsdb` | `x-pack/plugin/logsdb` | security | 236 | 234 | 225 | 225 | 9 |
 | `mapper-constant-keyword` | `x-pack/plugin/mapper-constant-keyword` | plain | 5 | 5 | 5 | 5 | 0 |
 | `mapper-unsigned-long` | `x-pack/plugin/mapper-unsigned-long` | plain | 34 | 34 | 22 | 22 | 12 |
 | `mapper-version` | `x-pack/plugin/mapper-version` | plain | 6 | 6 | 6 | 6 | 0 |
@@ -242,7 +242,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 3534 | 3495 | 2046 |
+| **total** | | | 6044 | 5541 | 3629 | 3590 | 1951 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -252,7 +252,7 @@ the discovery/store plugins.
 <!-- test-search: lang-expression >= 3 -->
 <!-- test-search: lang-mustache >= 18 -->
 <!-- test-search: lang-painless >= 337 -->
-<!-- test-search: mapper-extras >= 125 -->
+<!-- test-search: mapper-extras >= 130 -->
 <!-- test-search: parent-join >= 24 -->
 <!-- test-search: percolator >= 6 -->
 <!-- test-search: rank-eval >= 7 -->
@@ -269,7 +269,7 @@ the discovery/store plugins.
 <!-- test-search: fleet >= 21 -->
 <!-- test-search: ilm >= 16 -->
 <!-- test-search: kql >= 34 -->
-<!-- test-search: logsdb >= 136 -->
+<!-- test-search: logsdb >= 225 -->
 <!-- test-search: mapper-constant-keyword >= 5 -->
 <!-- test-search: mapper-unsigned-long >= 22 -->
 <!-- test-search: mapper-version >= 6 -->

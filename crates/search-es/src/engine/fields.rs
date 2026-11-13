@@ -108,7 +108,7 @@ impl Kind {
     pub fn of(ty: &str) -> Kind {
         match ty {
             "text" | "annotated_text" => Kind::Text,
-            "match_only_text" => Kind::MatchOnlyText,
+            "match_only_text" | "pattern_text" => Kind::MatchOnlyText,
             "search_as_you_type" => Kind::SearchAsYouType,
             "keyword" => Kind::Keyword,
             "constant_keyword" => Kind::ConstantKeyword,
@@ -249,6 +249,9 @@ pub struct FieldInfo {
     pub constant_value: Option<String>,
     /// A multi-field (or subfield) of another field: the parent's path.
     pub parent: Option<String>,
+    /// A `pattern_text`'s `<parent>.template_id`: its values are the template ids of the
+    /// parent's messages.
+    pub template_id: bool,
     /// `similarity` mapping parameter.
     pub similarity: Option<String>,
     /// Engine subfields of a field (aggregate metric `min`/`max`/…, join `#parent`).
@@ -515,6 +518,18 @@ impl FieldTable {
         // equal priorities).
         let mut pass = Vec::new();
         passthrough_leaves(&root, "", &mut pass);
+        // Strict columnar mappings keep a flattened pass-through object's priority in
+        // `prefix_properties`: every field under the prefix passes through.
+        let start = pass.len();
+        for (prefix, pp) in &mapping.prefix_properties {
+            let Some(priority) = pp.passthrough else { continue };
+            for f in t.fields.values().filter(|f| f.parent.is_none()) {
+                if let Some(rest) = f.name.strip_prefix(prefix.as_str()).and_then(|r| r.strip_prefix('.')) {
+                    pass.push((priority, rest.to_string(), f.name.clone()));
+                }
+            }
+        }
+        pass[start..].sort_by(|a, b| a.2.cmp(&b.2));
         pass.sort_by_key(|p| std::cmp::Reverse(p.0));
         for (_, name, target) in pass {
             t.aliases.entry(name).or_insert(target);
@@ -550,6 +565,10 @@ impl FieldTable {
                 }
                 Mapper::Field(f) => {
                     self.add_field(f, &path, nested, None, ctx, numbers, sims)?;
+                    if f.templated() {
+                        let tpath = format!("{path}.template_id");
+                        self.add_field(crate::mapping::template_id_mapper(), &tpath, nested, Some(&path), ctx, numbers, sims)?;
+                    }
                     for (mk, mf) in &f.fields {
                         let mpath = format!("{path}.{mk}");
                         self.add_field(mf, &mpath, nested, Some(&path), ctx, numbers, sims)?;
@@ -661,6 +680,7 @@ impl FieldTable {
             whitespace_analyzer: None,
             constant_value: None,
             parent: parent.map(str::to_string),
+            template_id: parent.is_some() && std::ptr::eq(f, crate::mapping::template_id_mapper()),
             similarity: f.effective("similarity", ctx).as_str().map(str::to_string),
             subfields: Vec::new(),
             vector_layouts: Vec::new(),
@@ -759,23 +779,36 @@ impl FieldTable {
                 }
             }
             Kind::MatchOnlyText => {
+                // `pattern_text`: the `delimiter` (or the built-in `standard`) analyzer, docs
+                // or positions, and its template ids in `<name>.template_id`.
+                let pattern = f.ty == "pattern_text";
                 // OpenSearch's `match_only_text` takes text's analyzers and `fielddata`
                 // (its definition has the parameters); Elasticsearch's is always standard.
-                let os = f.def().param_index("analyzer").is_some();
+                let os = !pattern && f.def().param_index("analyzer").is_some();
                 let a = match f.raw("analyzer").and_then(Value::as_str) {
+                    Some("standard") if pattern => search_analysis::Analysis::global().analyzer("standard").expect("standard is built in"),
+                    _ if pattern => search_analysis::pattern_text_delimiter(),
                     Some(n) if os => self.analyzer(n)?,
                     _ => self.analysis.default_analyzer(),
                 };
-                info.index_options = if index { IndexOptions::Docs } else { IndexOptions::None };
+                let opts = if pattern && f.effective("index_options", ctx).as_str() == Some("positions") {
+                    IndexOptions::DocsAndFreqsAndPositions
+                } else {
+                    IndexOptions::Docs
+                };
+                info.index_options = if index { opts } else { IndexOptions::None };
                 if index {
-                    fs = fs.indexed(IndexOptions::Docs, false);
+                    fs = fs.indexed(opts, false);
+                }
+                if f.templated() {
+                    info.subfields.push(("template_id".into(), numbers.of(&format!("{path}.template_id"))));
                 }
                 if doc_values {
                     fs = fs.with_doc_values(DocValuesType::SortedSet);
                 }
                 let sa = match f.raw("search_analyzer").and_then(Value::as_str) {
                     Some(n) if os => self.search_analyzer(n)?,
-                    _ if os && f.raw("analyzer").is_some() => a.clone(),
+                    _ if pattern || (os && f.raw("analyzer").is_some()) => a.clone(),
                     _ => self.analysis.default_search_analyzer().unwrap_or_else(|| a.clone()),
                 };
                 info.analyzer = Some(a.clone());

@@ -48,6 +48,7 @@ mod unicode;
 use std::sync::Arc;
 
 pub use analysis::Analysis;
+pub use analyzers::pattern_text_delimiter;
 pub use analyze::{AnalyzeLimits, AnalyzeRequest, NameOrDefinition};
 pub use analyzer::{Analyzer, CharFilteredText, Explain, ExplainToken, Normalizer, ShingleInfo, TokenList};
 pub use component::AnalysisMode;

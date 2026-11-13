@@ -805,6 +805,13 @@ fn span_node(ctx: &QueryCtx, q: &Query) -> EsResult<Option<search_index::query::
     Ok(Some(match q {
         Query::SpanTerm(t) => {
             let Some(f) = ctx.field(&t.field) else { return Ok(None) };
+            // `SpanTermQueryBuilder`: text indexed without positions can't run spans.
+            if f.kind.is_text() && f.index && !f.has_positions() {
+                return Err(EsError::illegal_argument(format!(
+                    "Span term query requires position data, but field {} was indexed without position data",
+                    t.field
+                )));
+            }
             let term = if f.kind.is_text() {
                 value_text(&t.value).into_bytes()
             } else if f.kind == Kind::Version {

@@ -145,6 +145,7 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
     };
     Ok(Some(match f.kind {
         Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType => Value::Str(text(v)),
+        Kind::Keyword if f.template_id => Value::Str(crate::engine::pattern_text::template_id(&text(v))),
         Kind::Keyword | Kind::Version | Kind::Wildcard | Kind::CountedKeyword => {
             let s = text(v);
             if f.ignore_above.is_some_and(|m| crate::document::exceeds_ignore_above(&s, m)) {

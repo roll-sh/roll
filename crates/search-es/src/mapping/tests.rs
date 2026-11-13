@@ -22,7 +22,7 @@ fn ctx_for(settings: Option<&Value>) -> MappingCtx {
 /// Types roll search rejects on purpose.
 fn skipped(case: &Value) -> bool {
     let s = case.to_json();
-    s.contains("semantic_text") || s.contains("pattern_text")
+    s.contains("semantic_text")
 }
 
 fn check_error(label: &str, got: EsError, expected: &Value) {
@@ -104,7 +104,7 @@ fn every_type_prints_like_elasticsearch() {
         parse(&std::fs::read(format!("{}/tests/fixtures/mapping_types_include_defaults.json", env!("CARGO_MANIFEST_DIR"))).unwrap()).unwrap().unwrap();
     let defaults = defaults_doc.pointer(&["types", "mappings"]).unwrap().as_object().unwrap();
     for (name, def) in props {
-        if matches!(name.as_str(), "pattern_text" | "alias") {
+        if name == "alias" {
             continue;
         }
         // Rebuild the input definition: the type plus what Elasticsearch printed.

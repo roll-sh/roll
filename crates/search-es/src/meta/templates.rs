@@ -589,6 +589,10 @@ pub fn validate_composable(md: &Metadata, name: &str, t: &ComposableTemplate, cr
     {
         return Err(e);
     }
+    // Setting validators fail the template's validation (one error, whatever the data stream).
+    if let Err(e) = mode.validate_recovery_source(&effective) {
+        return Err(EsError::invalid_index_template(name, &validation_text(&[e.reason().to_string()])));
+    }
     if let Err(e) = mode.validate_settings(&effective) {
         if mode == super::index_mode::IndexMode::TimeSeries {
             // Data stream templates are validated twice (as a template and as a data stream).

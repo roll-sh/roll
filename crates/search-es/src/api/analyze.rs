@@ -249,6 +249,10 @@ fn field_analyzer(analysis: &Analysis, mapping: &Mapping, ctx: &crate::mapping::
             None => Ok(Analysis::global().analyzer("keyword")),
         },
         "flattened" => Ok(Analysis::global().analyzer("keyword")),
+        "pattern_text" => match f.effective("analyzer", ctx).as_str() {
+            Some("standard") => Ok(Analysis::global().analyzer("standard")),
+            _ => Ok(Some(search_analysis::pattern_text_delimiter())),
+        },
         _ => Err(cant()),
     }
 }

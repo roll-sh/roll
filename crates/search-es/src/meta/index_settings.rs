@@ -745,7 +745,7 @@ pub fn defaults_for_in(d: Dialect, settings: &Settings) -> Settings {
         if settings.contains(def.key) {
             continue;
         }
-        if let Some(v) = mode.setting_default(def.key) {
+        if let Some(v) = mode.setting_default(def.key, settings) {
             out.set(def.key, v);
             continue;
         }
