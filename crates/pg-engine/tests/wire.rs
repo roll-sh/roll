@@ -4507,6 +4507,30 @@ fn protocol_cases() {
             query("show transaction_isolation; show transaction_read_only; show transaction_deferrable"),
             query("rollback"),
         ])),
+        // Errors planning raises (constant folding) fail the Bind (GetCachedPlan): the
+        // generic plan's, and a custom plan's that has the values in; a utility statement's
+        // query is planned at Execute, an expression analysis coerces fails the Parse.
+        c("plan_div0", |a| ext(a, &[], &[parse("", "select 1/0", &[]), bind("", "", &[], NONE, &[]), execute("", 0)])),
+        c("plan_div0_described", |a| ext(a, &[], &[parse("s", "select 1/0", &[]), describe(b'S', "s"), bind("", "s", &[], NONE, &[]), describe(b'P', ""), execute("", 0)])),
+        c("plan_div0_twice", |a| session(a, &[], &[
+            [parse("s", "select 1/0", &[]), bind("", "s", &[], NONE, &[]), execute("", 0), sync()].concat(),
+            [bind("", "s", &[], NONE, &[]), execute("", 0), sync()].concat(),
+        ])),
+        c("plan_div0_param", |a| ext(a, &[], &[parse("", "select $1::int / 0", &[]), bind("", "", &[], ONE, &[]), execute("", 0)])),
+        c("plan_div0_param_generic", |a| ext(a, &["set plan_cache_mode = force_generic_plan"], &[parse("", "select $1::int / 0", &[]), bind("", "", &[], ONE, &[]), execute("", 0)])),
+        c("plan_div0_generic", |a| ext(a, &["set plan_cache_mode = force_generic_plan"], &[parse("", "select 1/0", &[]), bind("", "", &[], NONE, &[]), execute("", 0)])),
+        c("plan_case_value", |a| ext(a, &[], &[parse("", "select case when $1::int > 1 then 1/0 else 0 end", &[]), bind("", "", &[], ONE, &[]), execute("", 0)])),
+        c("plan_case_generic", |a| ext(a, &["set plan_cache_mode = force_generic_plan"], &[parse("", "select case when $1::int > 1 then 1/0 else 0 end", &[]), bind("", "", &[], ONE, &[]), execute("", 0)])),
+        c("plan_div0_dml", |a| ext(a, &["create temp table pd(a int)"], &[parse("", "insert into pd values (1/0)", &[]), bind("", "", &[], NONE, &[]), execute("", 0)])),
+        c("plan_div0_function", |a| ext(a, &["create function pg_temp.f0() returns int language sql immutable as 'select 1/0'"], &[parse("", "select pg_temp.f0()", &[]), bind("", "", &[], NONE, &[]), execute("", 0)])),
+        c("plan_div0_utility", |a| ext(a, &[], &[parse("", "explain select 1/0", &[]), bind("", "", &[], NONE, &[]), execute("", 0)])),
+        c("plan_div0_volatile", |a| ext(a, &[], &[parse("", "select (random() * 0)::int / 0", &[]), bind("", "", &[], NONE, &[]), execute("", 0)])),
+        c("plan_div0_in_block", |a| session(a, &["begin"], &[[parse("", "select 1/0", &[]), bind("", "", &[], NONE, &[]), execute("", 0), sync()].concat(), query("rollback")])),
+        c("plan_generic_after_custom", |a| session(a, &[], &[
+            [parse("s", "select $1::int / $2::int", &[]), bind("", "s", &[], &[Some(b"1".as_slice()), Some(b"1".as_slice())], &[]), execute("", 0), sync()].concat(),
+            [bind("", "s", &[], &[Some(b"1".as_slice()), Some(b"0".as_slice())], &[]), execute("", 0), sync()].concat(),
+        ])),
+        c("plan_literal", |a| ext(a, &[], &[parse("", "select 'a'::int", &[]), bind("", "", &[], NONE, &[]), execute("", 0)])),
         // The startup packet's role; SET SESSION AUTHORIZATION's ParameterStatus order.
         c("role_setup", |a| session(a, &["create role pc_r1 login", "create role pc_su superuser login"], &[])),
         c("startup_role", |a| startup(a, &startup_packet(P30, &[("role", "pc_r1")], b"\0"))),

@@ -134,6 +134,21 @@ ib_ext_select_begin_iso	1 2 D:["1"] C:SELECT 1 1 2 E{S=ERROR|C=25001|M=SET TRANS
 ib_settxn_after_query	C:BEGIN T:0 D:["1"] C:SELECT 1 E{S=ERROR|C=25001|M=SET TRANSACTION [NOT] DEFERRABLE must be called before any query|F=guc.c|L=6825|R=call_bool_check_hook} ZE / C:ROLLBACK ZI / C:BEGIN C:SAVEPOINT E{S=ERROR|C=25001|M=SET TRANSACTION ISOLATION LEVEL must not be called in a subtransaction|F=guc.c|L=6977|R=call_enum_check_hook} ZE / C:ROLLBACK ZI
 ib_block_fail	C:BEGIN C:SET C:SAVEPOINT C:SET S:application_name=inner ZT / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} S:application_name=outer ZE / C:ROLLBACK T:0 D:["outer"] C:SHOW ZT / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK S:application_name= ZI
 ib_chain_after_error	C:BEGIN E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK ZT / T:0 D:["read committed"] C:SHOW T:0 D:["off"] C:SHOW T:0 D:["off"] C:SHOW ZT / C:ROLLBACK ZI
+plan_div0	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_described	1 t:0 T:0 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_twice	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_param	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_param_generic	1 2 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_generic	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_case_value	1 2 D:["0"] C:SELECT 1 ZI
+plan_case_generic	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_dml	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_function	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_utility	1 2 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_volatile	1 2 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_div0_in_block	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK ZI
+plan_generic_after_custom	1 2 D:["1"] C:SELECT 1 ZI / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
+plan_literal	E{S=ERROR|C=22P02|M=invalid input syntax for type integer: "a"|F=numutils.c|L=615|R=pg_strtoint32_safe} ZI
 role_setup	
 startup_role	R0 S:in_hot_standby=off S:integer_datetimes=on S:TimeZone S:IntervalStyle=postgres S:search_path="$user", public S:is_superuser=off S:application_name= S:default_transaction_read_only=off S:scram_iterations=4096 S:DateStyle=ISO, MDY S:standard_conforming_strings=on S:session_authorization=postgres S:client_encoding=UTF8 S:server_version S:server_encoding=UTF8 K:4 ZI
 startup_role_missing	R0 E{S=FATAL|C=22023|M=role "pc_nosuch" does not exist|F=guc.c|L=6936|R=call_string_check_hook} closed

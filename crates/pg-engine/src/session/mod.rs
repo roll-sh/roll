@@ -151,6 +151,9 @@ struct PlanUses {
     /// it, and their plan is the generic one whichever it chooses.
     uncosted: Vec<(Arc<BoundQuery>, Vec<Value>)>,
     unnamed: bool,
+    /// Whether a custom plan folds parameter values into constants that may fail
+    /// (`fold::param_folds` of the generic binding), found at the first Bind with values.
+    param_folds: Option<bool>,
 }
 
 /// RevalidateCachedQuery's error: a prepared statement whose result row the catalog changed
@@ -263,6 +266,8 @@ pub struct Portal {
     /// A SELECT suspended after an Execute's row count: its executor, which the next
     /// Execute runs on (PORTAL_ONE_SELECT runs as its rows are asked for).
     lazy: Option<cursor::Lazy>,
+    /// The plan the Bind made (GetCachedPlan), when it planned: the Execute runs it.
+    planned: Option<Arc<BoundQuery>>,
 }
 
 /// How far a portal's statement has run (its PortalStatus, and the rows PortalRun holds).
@@ -368,6 +373,11 @@ pub struct Session {
     /// An Execute ran since the last Sync: the extended protocol's transaction is open
     /// (start_xact_command) until the Sync ends it, or an error aborts it.
     extended: bool,
+    /// The statement's generic binding failed the last `describe` (an error planning would
+    /// raise, which analysis doesn't): a Bind plans it then (`bind_inner`).
+    generic_failed: bool,
+    /// The plan a portal's Bind made, for the `run_query` of its Execute.
+    portal_plan: Option<Arc<BoundQuery>>,
     /// The query string of the statements being run (pg_cursors / pg_prepared_statements
     /// show it whole).
     source: String,
@@ -534,6 +544,8 @@ impl Session {
             multi_stmt: false,
             pipelining: false,
             extended: false,
+            generic_failed: false,
+            portal_plan: None,
             ro_stack: Vec::new(),
             source: String::new(),
             txn_cmds: Vec::new(),
@@ -2127,28 +2139,33 @@ impl Session {
         fn own(p: &Prepared) -> Result<&Node> {
             p.stmt.as_ref().ok_or_else(|| Error::new(code::INTERNAL_ERROR, "a query without a tree"))
         }
-        // (A simple query's template's kept plan, run with its literals' values.)
-        let (mut bq, mut lit_vals) = match self.lit_plan_for(p, params) {
-            Some(kept) => {
-                // (Debug builds: the kept plan is the one the query plans to.)
-                #[cfg(debug_assertions)]
-                {
-                    let own = self.planned(p, own(p)?, params)?.0;
-                    assert!(litplan::same_plan(&own, &kept.0, &kept.0.params, &kept.1), "kept plan of {:?}", p.sql);
-                }
-                kept
-            }
-            None => match self.lit_values_plan(p, params) {
-                // (A plan that depends on the values: the template's analysis with them in.)
-                Some(bq) => (bq, Vec::new()),
-                None => {
-                    let bq = self.planned(p, own(p)?, params)?.0;
-                    if p.lit.is_some() && params.is_empty() {
-                        self.lit_learn(p, own(p)?, &bq);
+        // (A simple query's template's kept plan, run with its literals' values; or the plan
+        // a portal's Bind made.)
+        let (mut bq, mut lit_vals) = if let Some(bind) = self.portal_plan.take() {
+            (bind, Vec::new())
+        } else {
+            match self.lit_plan_for(p, params) {
+                Some(kept) => {
+                    // (Debug builds: the kept plan is the one the query plans to.)
+                    #[cfg(debug_assertions)]
+                    {
+                        let own = self.planned(p, own(p)?, params)?.0;
+                        assert!(litplan::same_plan(&own, &kept.0, &kept.0.params, &kept.1), "kept plan of {:?}", p.sql);
                     }
-                    (bq, Vec::new())
+                    kept
                 }
-            },
+                None => match self.lit_values_plan(p, params) {
+                    // (A plan that depends on the values: the template's analysis with them in.)
+                    Some(bq) => (bq, Vec::new()),
+                    None => {
+                        let bq = self.planned(p, own(p)?, params)?.0;
+                        if p.lit.is_some() && params.is_empty() {
+                            self.lit_learn(p, own(p)?, &bq);
+                        }
+                        (bq, Vec::new())
+                    }
+                },
+            }
         };
         self.pgss_planned(planning.elapsed());
         // Its relations are locked before it runs; a wait for a lock may end with another
@@ -2712,7 +2729,10 @@ impl Session {
                     Ok(b) => b.cols.clone(),
                     Err(e) if is_result_change(&e) => return Err(e),
 
-                    Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1.into(),
+                    Err(e) => {
+                        self.generic_failed = true;
+                        self.analyzed_params(stmt, &p.param_types, e)?.1.into()
+                    }
                 })),
                 Some(
                     NodeEnum::InsertStmt(_)
@@ -2722,9 +2742,11 @@ impl Session {
                 ) => {
                     let cols = match self.bound(p, stmt, &[]) {
                         Ok(b) => b.cols.clone(),
-                            Err(e) if is_result_change(&e) => return Err(e),
-
-                            Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1.into(),
+                        Err(e) if is_result_change(&e) => return Err(e),
+                        Err(e) => {
+                            self.generic_failed = true;
+                            self.analyzed_params(stmt, &p.param_types, e)?.1.into()
+                        }
                     };
                     Ok((!cols.is_empty()).then_some(cols))
                 }
@@ -2890,9 +2912,9 @@ impl Session {
         let mut values = Vec::with_capacity(params.len());
         // Parameters of a domain type: their input is domain_in / domain_recv, which checks
         // the domain's constraints here, whether or not the statement reads them.
-        let domains = {
+        let (domains, param_folds) = {
             let plans = p.plans.lock();
-            (!plans.param_oids.is_empty()).then(|| plans.param_oids.clone())
+            ((!plans.param_oids.is_empty()).then(|| plans.param_oids.clone()), plans.param_folds)
         };
         for (i, &raw) in params.iter().enumerate() {
             let f = match formats.len() {
@@ -2977,21 +2999,41 @@ impl Session {
         if trailing {
             return Err(Error::new(code::PROTOCOL_VIOLATION, "invalid message format"));
         }
+        self.generic_failed = false;
         let cols = self.describe(&p)?;
-        // PortalSetResultFormat
-        if let Some(cols) = &cols
-            && result_formats.len() > 1
-            && result_formats.len() != cols.len()
+        let generic_failed = std::mem::take(&mut self.generic_failed);
+        // PortalSetResultFormat's count check (after GetCachedPlan and PortalStart: an error
+        // planning the query or starting its executor comes first).
+        let mismatch = cols
+            .as_ref()
+            .is_some_and(|cols| result_formats.len() > 1 && result_formats.len() != cols.len());
+        // GetCachedPlan: a query is planned at its Bind, and what planning raises (a constant
+        // expression failing to fold, in the generic plan or in a custom one that has the
+        // values in) fails the Bind; the portal keeps the plan for its Execute. A statement
+        // whose generic binding stands and whose custom plans fold no value can't fail
+        // there: the Execute plans it, as it would have.
+        let folds = !values.is_empty()
+            && p.is_query()
+            && param_folds.unwrap_or_else(|| {
+                let f = p.bound.lock().as_ref().is_some_and(|b| crate::sql::binder::fold::param_folds(&b.3.plan));
+                p.plans.lock().param_folds = Some(f);
+                f
+            });
+        let mut planned = None;
+        if p.is_query()
+            && (mismatch || generic_failed || folds)
+            && let Some(stmt) = p.stmt.as_ref()
         {
-            // (After GetCachedPlan and PortalStart: an error planning the query or starting
-            // its executor comes first. The query is planned at Execute otherwise.)
-            if p.is_query()
-                && let Some(stmt) = p.stmt.as_ref()
-            {
-                self.ensure_txn();
-                let bq = self.planned(&p, stmt, &values)?.0;
+            self.ensure_txn();
+            let bq = self.planned(&p, stmt, &values)?.0;
+            if mismatch {
                 self.with_ctx(&values, |ctx| bq.check_perms(ctx))?;
             }
+            planned = Some(bq);
+        }
+        if let Some(cols) = &cols
+            && mismatch
+        {
             return Err(Error::new(
                 code::PROTOCOL_VIOLATION,
                 format!(
@@ -3017,6 +3059,7 @@ impl Session {
                 run: PortalRun::Ready,
                 cols,
                 lazy: None,
+                planned,
             },
         );
         Ok(())
@@ -3095,7 +3138,9 @@ impl Session {
         if max_rows > 0 && matches!(stmt.stmt.as_ref().and_then(inner), Some(NodeEnum::SelectStmt(_))) {
             self.fetch_limit = max_rows;
         }
+        self.portal_plan = pt.planned.take();
         let out = self.execute_with(&stmt, &params, max_rows);
+        self.portal_plan = None;
         self.fetch_limit = 0;
         pt.lazy = self.suspended.take();
         let out = match out {
