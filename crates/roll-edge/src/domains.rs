@@ -42,7 +42,8 @@ pub struct Limits {
     pub backoff: Duration,
     /// …up to this.
     pub backoff_max: Duration,
-    /// Active hostnames considered in one pass.
+    /// Active hostnames installed and ordered in one pass (one past it is never dropped, and the
+    /// next pass starts after it).
     pub max_domains: usize,
 }
 
@@ -91,6 +92,9 @@ pub struct DomainCerts {
     /// The installed certificate's expiry, by hostname.
     held: Mutex<HashMap<String, i64>>,
     failing: Mutex<HashMap<String, Failing>>,
+    /// Where the next pass starts in the active hostnames, when there are more than one pass
+    /// takes: passes take turns, so no hostname waits behind the same `max_domains` for ever.
+    window: Mutex<usize>,
 }
 
 impl DomainCerts {
@@ -99,12 +103,15 @@ impl DomainCerts {
     #[allow(clippy::too_many_arguments)]
     pub fn new(objects: Objects, sealer: Sealer, store: Arc<CertStore>, issuer: Arc<dyn Issuer>, singleton: Arc<dyn Singleton>, domains: Arc<dyn CustomDomains>, refuse: Vec<String>, limits: Limits) -> Self {
         let refuse = refuse.into_iter().map(|z| z.trim_matches('.').to_ascii_lowercase()).filter(|z| !z.is_empty()).collect();
-        Self { objects, sealer, store, issuer, singleton, domains, refuse, limits, held: Mutex::default(), failing: Mutex::default() }
+        Self { objects, sealer, store, issuer, singleton, domains, refuse, limits, held: Mutex::default(), failing: Mutex::default(), window: Mutex::default() }
     }
 
+    /// Every active hostname roll may hold a certificate for. Past `max_domains` this pass works
+    /// on only the first ones ([`Self::sync_once`]), but a hostname beyond them is still active:
+    /// its certificate stays installed and stored.
     async fn active(&self) -> anyhow::Result<BTreeSet<String>> {
         let hosts = self.domains.active().await?;
-        Ok(hosts.into_iter().map(|h| h.trim_end_matches('.').to_ascii_lowercase()).filter(|h| acceptable(h, &self.refuse)).take(self.limits.max_domains).collect())
+        Ok(hosts.into_iter().map(|h| h.trim_end_matches('.').to_ascii_lowercase()).filter(|h| acceptable(h, &self.refuse)).collect())
     }
 
     async fn load(&self, host: &str) -> anyhow::Result<Option<Parsed>> {
@@ -150,7 +157,13 @@ impl DomainCerts {
             }
         }
         let mut orders = 0;
-        for host in &active {
+        let start = {
+            let mut w = self.window.lock().unwrap();
+            let start = if *w >= active.len() { 0 } else { *w };
+            *w = start + self.limits.max_domains;
+            start
+        };
+        for host in active.iter().chain(active.iter()).skip(start).take(self.limits.max_domains.min(active.len())) {
             if !self.due(host) {
                 continue;
             }

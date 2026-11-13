@@ -79,6 +79,23 @@ pub fn registry_host(image: &str) -> Option<&str> {
     (!rest.is_empty() && (first.contains('.') || first.contains(':') || first == "localhost")).then_some(first)
 }
 
+/// A registry as one name, to compare: its host, lowercase, Docker Hub's names as `docker.io`
+/// (`https://index.docker.io/v1/`, `registry-1.docker.io`).
+pub fn registry_key(server: &str) -> String {
+    let s = server.trim();
+    let s = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")).unwrap_or(s);
+    let host = s.split('/').next().unwrap_or(s).to_ascii_lowercase();
+    match host.as_str() {
+        "" | "docker.io" | "index.docker.io" | "registry-1.docker.io" | "registry.hub.docker.com" => "docker.io".into(),
+        _ => host,
+    }
+}
+
+/// The registry an image is pulled from, as [`registry_key`].
+pub fn image_registry(image: &str) -> String {
+    registry_key(registry_host(image).unwrap_or("docker.io"))
+}
+
 /// A host on this machine or a private network: loopback, private, link-local, unique-local
 /// addresses and `localhost`.
 pub(crate) fn private_host(host: &str) -> bool {
@@ -89,13 +106,45 @@ pub(crate) fn private_host(host: &str) -> bool {
     name.parse().is_ok_and(private_ip)
 }
 
+/// Anything but a public unicast address: loopback, private, shared (CGNAT), link-local,
+/// `0/8`, the IETF block `192.0.0/24`, benchmarking, reserved `240/4`, broadcast, multicast,
+/// documentation; for IPv6 also unique-local, NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`),
+/// IPv4-compatible and -mapped addresses (judged by their IPv4 address).
 pub(crate) fn private_ip(ip: std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(a) => a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified() || a.octets()[0] == 100 && (a.octets()[1] & 0xc0) == 64,
-        std::net::IpAddr::V6(a) => match a.to_ipv4_mapped() {
-            Some(v4) => private_ip(v4.into()),
-            None => a.is_loopback() || a.is_unspecified() || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80,
-        },
+        std::net::IpAddr::V4(a) => {
+            let [o0, o1, o2, _] = a.octets();
+            a.is_loopback()
+                || a.is_private()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || a.is_broadcast()
+                || a.is_multicast()
+                || a.is_documentation()
+                || o0 == 0
+                || o0 >= 240
+                || (o0 == 100 && (o1 & 0xc0) == 64)
+                || (o0 == 192 && o1 == 0 && o2 == 0)
+                || (o0 == 198 && (o1 & 0xfe) == 18)
+        }
+        std::net::IpAddr::V6(a) => {
+            let seg = a.segments();
+            if let Some(v4) = a.to_ipv4_mapped() {
+                return private_ip(v4.into());
+            }
+            // NAT64 and IPv4-compatible addresses carry an IPv4 address in their last 32 bits.
+            let embedded = std::net::Ipv4Addr::new((seg[6] >> 8) as u8, seg[6] as u8, (seg[7] >> 8) as u8, seg[7] as u8);
+            if (seg[0] == 0x64 && seg[1] == 0xff9b && seg[2..6] == [0, 0, 0, 0]) || seg[..6] == [0, 0, 0, 0, 0, 0] {
+                return a.is_loopback() || a.is_unspecified() || private_ip(embedded.into());
+            }
+            a.is_loopback()
+                || a.is_unspecified()
+                || a.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00
+                || (seg[0] & 0xffc0) == 0xfe80
+                || seg[0] == 0x2002
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+        }
     }
 }
 
@@ -845,6 +894,19 @@ pub fn random(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_addresses_and_registries() {
+        for a in ["127.0.0.1", "10.1.2.3", "100.64.0.1", "0.1.2.3", "192.0.0.8", "198.18.0.1", "240.0.0.1", "224.0.0.1", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "::7f00:1", "2002:a00:1::", "ff02::1"] {
+            assert!(private_ip(a.parse().unwrap()), "{a}");
+        }
+        for a in ["1.1.1.1", "8.8.8.8", "2606:4700::1111", "64:ff9b::808:808"] {
+            assert!(!private_ip(a.parse().unwrap()), "{a}");
+        }
+        assert_eq!(registry_key("https://index.docker.io/v1/"), image_registry("nginx:1.27"));
+        assert_eq!(registry_key("GHCR.io"), image_registry("ghcr.io/acme/web:1"));
+        assert_ne!(registry_key("ghcr.io"), image_registry("evil.example/acme/web"));
+    }
 
     #[test]
     fn settings_are_checked_and_types_imply_their_rules() {

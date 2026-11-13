@@ -436,10 +436,16 @@ impl EnvLive {
         }
     }
 
-    /// An instance crashed: it's marked so (the next start makes a fresh one) and the crash is
-    /// counted. Three in ten minutes is a crash loop, said once in the environment's log.
+    /// An instance crashed: it's marked so (the next start makes a fresh one), stopped (a process
+    /// that never answered its health check would otherwise keep running unmetered, at its
+    /// start's boosted CPU), and the crash is counted. Three in ten minutes is a crash loop, said
+    /// once in the environment's log.
     fn crashed(&self, inst: &Inst, why: &str) {
         *inst.phase.lock() = Phase::Crashed;
+        let (runtime, name) = (self.runtime.clone(), inst.name.clone());
+        tokio::spawn(async move {
+            let _ = runtime.stop(&name, Duration::from_secs(2)).await;
+        });
         let entered = {
             let mut c = self.crashes.lock();
             let was = Self::looping(&c);

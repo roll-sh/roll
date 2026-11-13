@@ -508,7 +508,8 @@ async fn a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps() {
         assert!(!b.to_string().contains(s), "{s} in StartBuild");
     }
     let seen = w.fake.aws.lock().build_envs.values().next().cloned().unwrap();
-    assert_eq!(seen.get("NPM_TOKEN").map(String::as_str), Some("npm-s3cr3t-token"), "the build sees its variables: {seen:?}");
+    // Under `ROLL_BV_` names: no variable steers the build's shell, the AWS CLI or docker.
+    assert_eq!(seen.get("ROLL_BV_NPM_TOKEN").map(String::as_str), Some("npm-s3cr3t-token"), "the build sees its variables: {seen:?}");
     assert!(w.fake.aws.lock().secrets.is_empty(), "the build's secret is deleted");
     assert_eq!(w.fake.keys("apps/builds/"), Vec::<String>::new());
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{}/logs", d["id"].as_str().unwrap()), None).await;

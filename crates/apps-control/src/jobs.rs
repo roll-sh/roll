@@ -15,6 +15,9 @@ use tokio_util::sync::CancellationToken;
 /// A job's limit when the request names none, and the most it may name.
 const DEFAULT_TIMEOUT_S: u64 = 3600;
 const MAX_TIMEOUT_S: u64 = 24 * 3600;
+/// Jobs running at once in an environment, and on a node.
+const MAX_PER_ENV: usize = 5;
+const MAX_PER_NODE: usize = 50;
 
 impl Apps {
     pub async fn start_job(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Job> {
@@ -32,8 +35,16 @@ impl Apps {
         };
         let live = self.load_live(service, env).await?;
         let Some(tpl) = live.template() else { return Err(Error::Conflict(format!("nothing is deployed in {env} yet"))) };
+        let key = crate::env_key(service, env);
+        {
+            let running = self.running_jobs.lock();
+            if running.values().filter(|k| **k == key).count() >= MAX_PER_ENV || running.len() >= MAX_PER_NODE {
+                return Err(Error::Conflict(format!("at most {MAX_PER_ENV} jobs run at once in an environment; wait for one to end or cancel it")));
+            }
+        }
         let (sid, e, dep, cmd) = (service.to_string(), env.to_string(), tpl.deployment.clone(), command.to_string());
         let job = self.db(move |s| s.add_job(&sid, &e, &dep, &cmd)).await?;
+        self.running_jobs.lock().insert(job.id.clone(), key);
         let log = self.logs.sink(format!("job:{}", job.id), Stream::Stdout);
         log.stream(Stream::System).line(format!("$ {command}"));
         let cancel = CancellationToken::new();
@@ -53,12 +64,26 @@ impl Apps {
             };
             log.stream(Stream::System).line(format!("{} ({})", status.as_str(), code.map_or("no exit code".into(), |c| format!("exit {c}"))));
             this.cancels.lock().remove(&id);
+            this.running_jobs.lock().remove(&id);
             let id2 = id.clone();
             let _ = this.db(move |s| s.finish_job(&id2, status, code)).await;
             this.logs.flush().await;
             this.logs.retire(&format!("job:{id}"));
         });
         Ok(job)
+    }
+
+    /// Cancel the jobs running in an environment on this node (it's deleted, or another node
+    /// owns the service now): none keeps running with its variables.
+    pub(crate) fn cancel_jobs(&self, service: &str, env: &str) {
+        let key = crate::env_key(service, env);
+        let ids: Vec<String> = self.running_jobs.lock().iter().filter(|(_, k)| **k == key).map(|(id, _)| id.clone()).collect();
+        let cancels = self.cancels.lock();
+        for id in ids {
+            if let Some(t) = cancels.get(&id) {
+                t.cancel();
+            }
+        }
     }
 
     pub async fn job(self: &Arc<Self>, service: &str, env: &str, id: &str) -> Result<Job> {

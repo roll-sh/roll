@@ -138,6 +138,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const { data, state, refresh } = useService(id, envParam);
   const runner = useRunner(refresh);
   const [overview, setOverview] = useState<Overview | null>(null);
+  const [adding, setAdding] = useState(false);
   useEffect(() => {
     appsApi.overview().then(setOverview, () => {});
   }, []);
@@ -201,7 +202,6 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
   const asleep = st === "stopped" || st === "suspended";
   const localUrl = env?.port && typeof window !== "undefined" ? `http://${window.location.hostname}:${env.port}` : null;
   const deploy = () => runner.run("deploy", () => appsApi.deploy(service.id, envName));
-  const [adding, setAdding] = useState(false);
   const redeploy = () => runner.run("redeploy", () => appsApi.redeploy(service.id, envName));
   const upload = service.source.kind === "upload";
   const busy = runner.busy !== null;

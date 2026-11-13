@@ -181,6 +181,15 @@ fn strip_hop_by_hop(h: &mut axum::http::HeaderMap, keep_upgrade: bool) {
     }
 }
 
+/// `x-roll-*` in an app's answer: roll's own nodes read them (a forwarding node replays a
+/// request on `x-roll-code-unavailable`), so an app never sets them.
+fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
+    let ours: Vec<_> = h.keys().filter(|k| k.as_str().starts_with("x-roll-")).cloned().collect();
+    for k in ours {
+        h.remove(k);
+    }
+}
+
 /// The waking proxy on the owner: an instance (woken if need be), the request forwarded, the
 /// answer metered.
 async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> Response {
@@ -249,6 +258,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
         }
     };
     let status = resp.status().as_u16();
+    strip_roll_headers(resp.headers_mut());
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS
         && let Some(client_upgrade) = client_upgrade
     {

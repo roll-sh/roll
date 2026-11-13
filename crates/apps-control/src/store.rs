@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS notify_deliveries (
     at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS notify_due ON notify_deliveries (status, next_at);
+CREATE UNIQUE INDEX IF NOT EXISTS notify_once ON notify_deliveries (target, event);
 CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
@@ -322,6 +323,11 @@ pub struct Switch<'a> {
     pub epoch: Option<i64>,
     pub vars_hash: Option<&'a str>,
 }
+
+/// Custom domains a service may claim, and a project: one tenant never floods the shared
+/// certificate orders or the edge's pass over active hostnames.
+pub const MAX_DOMAINS_PER_SERVICE: i64 = 50;
+pub const MAX_DOMAINS_PER_PROJECT: i64 = 200;
 
 pub struct Store {
     db: Db,
@@ -613,10 +619,7 @@ impl Store {
                 c.execute("UPDATE deployments SET vars_hash = ? WHERE id = ?", params![h, to])?;
             }
             let revision: Option<String> = c.query_row("SELECT revision FROM deployments WHERE id = ?", [to], |r| r.get(0)).optional()?.flatten();
-            c.execute(
-                "INSERT INTO events (at, kind, service, env, deployment, data) VALUES (?, 'deploy.active', ?, ?, ?, ?)",
-                params![now, service, env, to, serde_json::json!({ "revision": revision, "replaced": from }).to_string()],
-            )?;
+            insert_event(c, now, "deploy.active", service, env, Some(to), &serde_json::json!({ "revision": revision, "replaced": from }))?;
             Ok(true)
         })
     }
@@ -633,10 +636,7 @@ impl Store {
                 return Ok(false);
             }
             let (service, env, revision): (String, String, Option<String>) = c.query_row("SELECT service, env, revision FROM deployments WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-            c.execute(
-                "INSERT INTO events (at, kind, service, env, deployment, data) VALUES (?, 'deploy.failed', ?, ?, ?, ?)",
-                params![now, service, env, id, serde_json::json!({ "revision": revision, "error": error }).to_string()],
-            )?;
+            insert_event(c, now, "deploy.failed", &service, &env, Some(id), &serde_json::json!({ "revision": revision, "error": error }))?;
             Ok(true)
         })
     }
@@ -685,29 +685,43 @@ impl Store {
 
     /// Queue `deliveries` (target, event seq, event kind) and move the notifier's cursor to
     /// `cursor`, in one transaction: an event is queued once, and never skipped.
-    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], cursor: i64) -> Result<()> {
+    /// Queue events' deliveries and move the notifier's cursor from `from` to `to`, in one
+    /// transaction, only if the cursor is still at `from` (another node that held the notifier
+    /// may have moved it): false when it wasn't. A (target, event) is queued once whatever runs.
+    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], from: i64, to: i64) -> Result<bool> {
         let now = self.now()?;
         self.db.write(|c| {
+            let at: Option<String> = c.query_row("SELECT value FROM state WHERE key = 'notify'", (), |r| r.get(0)).optional()?;
+            if at.and_then(|v| v.parse::<i64>().ok()) != Some(from) {
+                return Ok(false);
+            }
             for (target, event, kind) in deliveries {
                 c.execute(
-                    "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?)",
+                    "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?) \
+                     ON CONFLICT (target, event) DO NOTHING",
                     params![new_id("dlv"), target, event, kind, now, now],
                 )?;
             }
-            c.execute("DELETE FROM state WHERE key = 'notify'", ())?;
-            c.execute("INSERT INTO state (key, value) VALUES ('notify', ?)", [cursor.to_string()])?;
-            Ok(())
+            c.execute("UPDATE state SET value = ? WHERE key = 'notify'", [to.to_string()])?;
+            Ok(true)
         })
     }
 
-    /// Deliveries due now: (id, target, event seq, attempts so far).
-    pub fn due_deliveries(&self, limit: usize) -> Result<Vec<(String, String, i64, u32)>> {
+    /// Claim the deliveries due now for `claim_ms` (another node doesn't send them meanwhile;
+    /// a crash mid-send tries again when the claim lapses): (id, target, event seq, attempts so far).
+    pub fn due_deliveries(&self, limit: usize, claim_ms: i64) -> Result<Vec<(String, String, i64, u32)>> {
         let now = self.now()?;
-        Ok(self.db.query(
-            "SELECT id, target, event, attempts FROM notify_deliveries WHERE status = 'pending' AND next_at <= ? ORDER BY next_at LIMIT ?",
-            params![now, limit as i64],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u32)),
-        )?)
+        self.db.write(|c| {
+            let due: Vec<(String, String, i64, u32)> = c.query(
+                "SELECT id, target, event, attempts FROM notify_deliveries WHERE status = 'pending' AND next_at <= ? ORDER BY next_at LIMIT ?",
+                params![now, limit as i64],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u32)),
+            )?;
+            for (id, ..) in &due {
+                c.execute("UPDATE notify_deliveries SET next_at = ? WHERE id = ?", params![now + claim_ms, id])?;
+            }
+            Ok(due)
+        })
     }
 
     /// A try's outcome: `next_at` for another try, else delivered (no error) or failed.
@@ -755,24 +769,24 @@ impl Store {
     }
 
     pub fn last_event_seq(&self) -> Result<i64> {
+        if let Some(n) = self.get_state("events_seq")?.and_then(|v| v.parse().ok()) {
+            return Ok(n);
+        }
         Ok(self.db.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", (), |r| r.get(0))?)
     }
 
     /// An event no state change carries (a crash loop the reaper noticed).
     pub fn add_event(&self, kind: &str, service: &str, env: &str, deployment: Option<&str>, data: &serde_json::Value) -> Result<()> {
         let now = self.now()?;
-        self.db.execute("INSERT INTO events (at, kind, service, env, deployment, data) VALUES (?, ?, ?, ?, ?, ?)", params![now, kind, service, env, deployment, data.to_string()])?;
-        Ok(())
+        Ok(self.db.write(|c| insert_event(c, now, kind, service, env, deployment, data))?)
     }
 
-    /// Events after `after`, at most `limit`, only those a second old or more: a sequence number
-    /// is taken before its transaction commits, so a newer one can show up first; a second lets
-    /// the older ones land before a reader moves past them.
+    /// Events after `after`, at most `limit`. Sequence numbers come in commit order with no
+    /// gaps ([`insert_event`]), so a reader that moves past one never misses an earlier one.
     pub fn events(&self, after: i64, limit: usize) -> Result<Vec<Event>> {
-        let settled = self.now()? - 1000;
         Ok(self.db.query(
-            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE seq > ? AND at <= ? ORDER BY seq LIMIT ?",
-            params![after, settled, limit.clamp(1, 1000) as i64],
+            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+            params![after, limit.clamp(1, 1000) as i64],
             |r| {
                 let data: String = r.get(6)?;
                 Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })
@@ -1029,6 +1043,16 @@ impl Store {
                 || c.query_row("SELECT 1 FROM environments WHERE slug = ?", [host], |_| Ok(())).optional()?.is_some();
             if taken {
                 return Err(Error::Conflict(format!("{host} is already a domain of a service")));
+            }
+            // A tenant's domains are bounded: certificates and their orders are shared by all.
+            let per_service: i64 = c.query_row("SELECT COUNT(*) FROM domains WHERE service = ? AND kind = 'custom'", [service], |r| r.get(0))?;
+            let per_project: i64 = c.query_row(
+                "SELECT COUNT(*) FROM domains d JOIN services s ON s.id = d.service WHERE d.kind = 'custom' AND s.project = (SELECT project FROM services WHERE id = ?)",
+                [service],
+                |r| r.get(0),
+            )?;
+            if per_service >= MAX_DOMAINS_PER_SERVICE || per_project >= MAX_DOMAINS_PER_PROJECT {
+                return Err(Error::Conflict(format!("at most {MAX_DOMAINS_PER_SERVICE} custom domains a service and {MAX_DOMAINS_PER_PROJECT} a project")));
             }
             c.execute(
                 "INSERT INTO domains (hostname, service, env, kind, status, token, error, created_at, tls) VALUES (?, ?, ?, 'custom', 'pending', ?, NULL, ?, ?)",
@@ -1314,6 +1338,22 @@ fn job_row(r: &code_sql::Row<'_>) -> code_sql::Result<Job> {
         started_at: r.get(5)?,
         finished_at: r.get(6)?,
     })
+}
+
+/// Write an event in the caller's transaction. Its sequence number is the next of a counter in
+/// `state` updated in the same transaction, not an identity: an identity is taken before commit,
+/// so on Postgres a slow transaction could commit an older number after a reader moved past it.
+/// The counter row serializes the transactions that write events, so numbers commit in order.
+fn insert_event(c: &code_sql::Conn<'_>, now: i64, kind: &str, service: &str, env: &str, deployment: Option<&str>, data: &serde_json::Value) -> code_sql::Result<()> {
+    let at: Option<String> = c.query_row("SELECT value FROM state WHERE key = 'events_seq'", (), |r| r.get(0)).optional()?;
+    let seq = match at.and_then(|v| v.parse::<i64>().ok()) {
+        Some(n) => n + 1,
+        None => c.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", (), |r| r.get::<_, i64>(0))? + 1,
+    };
+    c.execute("DELETE FROM state WHERE key = 'events_seq'", ())?;
+    c.execute("INSERT INTO state (key, value) VALUES ('events_seq', ?)", [seq.to_string()])?;
+    c.execute("INSERT INTO events (seq, at, kind, service, env, deployment, data) VALUES (?, ?, ?, ?, ?, ?, ?)", params![seq, now, kind, service, env, deployment, data.to_string()])?;
+    Ok(())
 }
 
 #[cfg(test)]

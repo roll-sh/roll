@@ -99,9 +99,10 @@ pub struct AppsConfig {
     pub upload_max: usize,
     /// The dashboard (roll code's `web_url`): a private preview's 401 page links into it.
     pub web_url: Option<String>,
-    /// Notification targets may be private addresses and plain HTTP (local development and
-    /// tests only: `ROLL_APPS_NOTIFY_ALLOW_PRIVATE`).
-    pub notify_allow_private: bool,
+    /// URLs a tenant chooses may be private addresses and plain HTTP: notification targets, and
+    /// registries whose names resolve to one (local development and tests only:
+    /// `ROLL_APPS_ALLOW_PRIVATE`).
+    pub allow_private: bool,
 }
 
 impl AppsConfig {
@@ -119,7 +120,7 @@ impl AppsConfig {
             prices: Prices::default(),
             upload_max: 512 << 20,
             web_url: None,
-            notify_allow_private: false,
+            allow_private: false,
         }
     }
 }
@@ -147,6 +148,9 @@ pub struct Apps {
     lives: Mutex<HashMap<String, Arc<EnvLive>>>,
     queues: Mutex<HashMap<String, Arc<Notify>>>,
     cancels: Mutex<HashMap<String, CancellationToken>>,
+    /// Jobs running on this node: id → its environment (`env_key`). Bounded per environment and
+    /// per node, and canceled when the environment goes from this node.
+    running_jobs: Mutex<HashMap<String, String>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
     access: Mutex<HashMap<String, Option<Access>>>,
     /// Environments in a crash loop whose event is written (one per loop).
@@ -159,7 +163,7 @@ pub struct Apps {
     stop: CancellationToken,
 }
 
-fn env_key(service: &str, env: &str) -> String {
+pub(crate) fn env_key(service: &str, env: &str) -> String {
     format!("{service}/{env}")
 }
 
@@ -199,7 +203,7 @@ pub struct ResolvedVars {
 
 impl Apps {
     pub fn new(cfg: AppsConfig, store: Store, deps: Deps) -> Arc<Apps> {
-        let cfg_allow = cfg.notify_allow_private;
+        let cfg_allow = cfg.allow_private;
         let logs = LogHub::new(deps.objects.clone());
         Arc::new(Apps {
             cfg,
@@ -209,6 +213,7 @@ impl Apps {
             lives: Mutex::new(HashMap::new()),
             queues: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
+            running_jobs: Mutex::new(HashMap::new()),
             access: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
@@ -382,8 +387,10 @@ impl Apps {
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
         let Source::Image { image } = &svc.source else { return Err(Error::Conflict("only an image source pulls from a registry".into())) };
+        // A login goes only to the registry the image is pulled from (deploys check it again).
         let server = match text("server", 255)? {
-            Some(s) => s,
+            Some(s) if registry_key(&s) == image_registry(image) => s,
+            Some(s) => return Err(Error::BadRequest(format!("server {s} isn't {}, the registry source.image is pulled from", image_registry(image)))),
             None => registry_host(image).map(str::to_string).unwrap_or_else(|| "https://index.docker.io/v1/".into()),
         };
         let sid = service.to_string();
@@ -445,16 +452,30 @@ impl Apps {
             check_name("a service name", n)?;
             row.name = n.to_string();
         }
+        let mut forget_login = false;
         if let Some(s) = o.get("source") {
             let source: Source = serde_json::from_value(s.clone()).map_err(|e| Error::BadRequest(format!("source: {e}")))?;
             source.check()?;
+            // A registry login belongs to its registry: another one never receives it.
+            let registry = |s: &Source| match s {
+                Source::Image { image } => Some(image_registry(image)),
+                _ => None,
+            };
+            forget_login = registry(&row.source) != registry(&source);
             row.source = source;
         }
         row.build = merge(&row.build, o.get("build"), "build")?;
         row.build.check()?;
         row.run = row.run.merged(o.get("run"))?;
         let r = row.clone();
-        self.db(move |s| s.update_service(&r)).await?;
+        self.db(move |s| {
+            s.update_service(&r)?;
+            if forget_login {
+                s.delete_registry(&r.id)?;
+            }
+            Ok(())
+        })
+        .await?;
         self.service(id).await
     }
 
@@ -635,6 +656,7 @@ impl Apps {
     }
 
     async fn teardown_live(&self, service: &str, env: &str) {
+        self.cancel_jobs(service, env);
         let live = self.lives.lock().remove(&env_key(service, env));
         if let Some(l) = live {
             l.shutdown().await;
@@ -841,6 +863,16 @@ impl Apps {
         self.cfg.cname_target.clone().unwrap_or_else(|| format!("{slug}.{}", self.cfg.domain))
     }
 
+    /// The records a custom domain needs. A CNAME to an environment's own target proves the
+    /// hostname is its owner's; a shared target (`cname_target`, Cloudflare for SaaS) is every
+    /// tenant's, so there the TXT challenge proves it and the CNAME only routes ("both").
+    fn record(&self, host: &str) -> &'static str {
+        match record_for(host) {
+            "cname" if self.cfg.cname_target.is_some() => "both",
+            r => r,
+        }
+    }
+
     pub async fn domains(self: &Arc<Self>, service: &str, env: &str) -> Result<Vec<Domain>> {
         let (sid, e) = (service.to_string(), env.to_string());
         let row = self.db(move |s| s.environment(&sid, &e)).await?;
@@ -850,7 +882,7 @@ impl Apps {
         let issues = self.deps.tls.issues();
         for d in &mut custom {
             d.target = target.clone();
-            d.record = record_for(&d.hostname);
+            d.record = self.record(&d.hostname);
             if !issues {
                 (d.tls, d.tls_error) = (TlsStatus::None, None);
             }
@@ -886,7 +918,7 @@ impl Apps {
             (d.tls, d.tls_error) = (tls, tls_error);
         }
         d.target = self.target(&row.slug);
-        d.record = record_for(&d.hostname);
+        d.record = self.record(&d.hostname);
         Ok(d)
     }
 
@@ -934,8 +966,11 @@ impl Apps {
         let target = self.target(&row.slug);
         let cname_ok = self.deps.resolver.cname(&h).await.contains(&target);
         let txt_ok = self.deps.resolver.txt(&format!("_roll-challenge.{h}")).await.contains(&d.token);
-        let (status, error) = if cname_ok || txt_ok {
+        let shared = self.cfg.cname_target.is_some();
+        let (status, error) = if txt_ok || (cname_ok && !shared) {
             (DomainStatus::Active, None)
+        } else if shared {
+            (DomainStatus::Pending, Some(format!("no TXT _roll-challenge.{h} with the token yet (the CNAME to {target} routes it; the TXT record proves it's yours)")))
         } else {
             (DomainStatus::Pending, Some(format!("no CNAME to {target} and no TXT _roll-challenge.{h} with the token yet")))
         };
@@ -947,7 +982,7 @@ impl Apps {
         d.status = status;
         d.error = error;
         d.target = target;
-        d.record = record_for(&d.hostname);
+        d.record = self.record(&d.hostname);
         Ok(d)
     }
 

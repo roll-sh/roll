@@ -123,7 +123,9 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                 )}
                 {d.status !== "active" && (
                   <p className="text-[12px] text-subtle">
-                    Add the CNAME with your DNS provider, then Verify. At a zone's apex, where a CNAME isn't allowed, use your provider's ALIAS or flattening and add the TXT record. The certificate is issued once it resolves.
+                    {d.record === "both"
+                      ? "Add both records with your DNS provider, then Verify: the CNAME routes the domain to roll, the TXT record proves it's yours. The certificate is issued once they resolve."
+                      : "Add the CNAME with your DNS provider, then Verify. At a zone's apex, where a CNAME isn't allowed, use your provider's ALIAS or flattening and add the TXT record. The certificate is issued once it resolves."}
                   </p>
                 )}
               </li>

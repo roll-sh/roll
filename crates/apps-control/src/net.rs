@@ -32,7 +32,7 @@ pub fn literal_private(host: &str) -> bool {
 /// A client for tenant-chosen URLs: public addresses only (unless `allow_private`, local
 /// development and tests), no redirects, short timeouts.
 pub fn client(allow_private: bool, timeout: Duration) -> reqwest::Client {
-    let mut b = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(timeout).redirect(reqwest::redirect::Policy::none()).user_agent("roll-apps");
+    let mut b = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(timeout).redirect(reqwest::redirect::Policy::none()).no_proxy().user_agent("roll-apps");
     if !allow_private {
         b = b.dns_resolver(Arc::new(PublicOnly));
     }

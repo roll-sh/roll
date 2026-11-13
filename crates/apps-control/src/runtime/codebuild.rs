@@ -15,10 +15,12 @@
 //!   (`roll-apps/builds/<service>-<deployment>-<random>`, a JSON object of the values), and each
 //!   variable an environment override of type `SECRETS_MANAGER` naming `<secret>:<NAME>`.
 //!   CodeBuild resolves them inside the build; no value is in the `StartBuild` request, the
-//!   buildspec or the build's record. They're BuildKit secrets (`--secret id=K,env=K`) and, for
-//!   the tree's own Dockerfile, build arguments read from the environment (`--build-arg K`), as
-//!   on Docker. The secret is deleted (without recovery) when the build ends. Names CodeBuild or
-//!   the AWS CLI read (`CODEBUILD_*`, `AWS_*`) aren't passed, and the log says so.
+//!   buildspec or the build's record. The overrides are named `ROLL_BV_<NAME>`, so no variable
+//!   steers the build's shell, the AWS CLI or docker (`LD_PRELOAD`, `BASH_ENV`, `AWS_*`). They're
+//!   BuildKit secrets (`--secret id=K,env=ROLL_BV_K`) and, for the build arguments the tree's own
+//!   Dockerfile declares ([`super::build_args`]), set for the `docker` command alone
+//!   (`K="$ROLL_BV_K" docker … --build-arg K`). The secret is deleted (without recovery) when the
+//!   build ends.
 //! - `BatchGetBuilds` is polled until the build is done, its CloudWatch log followed into the
 //!   build's log; `job.timeout` is the build's timeout (and a local deadline), a cancel is
 //!   `StopBuild`.
@@ -57,36 +59,37 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Names CodeBuild or the AWS CLI in the build read themselves.
-fn reserved(name: &str) -> bool {
-    let n = name.to_ascii_uppercase();
-    n.starts_with("CODEBUILD_") || n.starts_with("AWS_")
+/// The build's environment name of a variable: nothing CodeBuild, its shell or a CLI reads.
+fn env_name(k: &str) -> String {
+    format!("ROLL_BV_{k}")
 }
 
 /// The buildspec of one build (YAML; each command a JSON string, which YAML reads as a quoted
 /// scalar).
-pub fn buildspec(registry: &str, repo_uri: &str, tag: &str, dockerfile: &str, names: &[String], own_dockerfile: bool, env_hash: &str) -> String {
+pub fn buildspec(registry: &str, repo_uri: &str, tag: &str, dockerfile: &str, names: &[String], own_args: Option<&[String]>, env_hash: &str) -> String {
+    let args = own_args.unwrap_or_default();
     let image = format!("{repo_uri}:{tag}");
     let cache = format!("{repo_uri}:{CACHE_TAG}");
-    let mut build = vec![
+    // Names are variable names (`[A-Za-z_][A-Za-z0-9_]*`), safe to write unquoted.
+    let mut build: Vec<String> = args.iter().map(|k| format!("{k}=\"${}\"", env_name(k))).collect();
+    build.extend(vec![
         "docker", "buildx", "build", "--progress", "plain", "--provenance", "false", "--file",
     ]
     .into_iter()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
+    .map(str::to_string));
     build.push(quote(dockerfile));
     build.extend(["--tag".into(), quote(&image), "--label".into(), quote(&format!("{}={tag}", super::LABEL))]);
     build.extend(["--cache-from".into(), quote(&format!("type=registry,ref={cache}"))]);
     build.extend(["--cache-to".into(), quote(&format!("type=registry,ref={cache},mode=max,image-manifest=true,oci-mediatypes=true"))]);
     for k in names {
         build.push("--secret".into());
-        build.push(quote(&format!("id={k},env={k}")));
-        if own_dockerfile {
-            build.push("--build-arg".into());
-            build.push(quote(k));
-        }
+        build.push(quote(&format!("id={k},env={}", env_name(k))));
     }
-    if !names.is_empty() && !own_dockerfile {
+    for k in args {
+        build.push("--build-arg".into());
+        build.push(quote(k));
+    }
+    if !names.is_empty() && own_args.is_none() {
         build.push("--build-arg".into());
         build.push(quote(&format!("ROLL_BUILD_ENV={env_hash}")));
     }
@@ -225,11 +228,12 @@ impl CodeBuild {
         let repo_uri = self.repository(&job.service).await?;
         let registry = repo_uri.split('/').next().unwrap_or(&repo_uri).to_string();
         let tag = job.deployment.strip_prefix("dep_").unwrap_or(&job.deployment);
-        let spec = buildspec(&registry, &repo_uri, tag, &job.dockerfile, names, job.own_dockerfile, &job.env_hash);
+        let args = super::build_args(job);
+        let spec = buildspec(&registry, &repo_uri, tag, &job.dockerfile, names, job.own_dockerfile.then_some(&args[..]), &job.env_hash);
         let env: Vec<EnvironmentVariable> = match secret {
             Some(s) => names
                 .iter()
-                .map(|k| EnvironmentVariable::builder().name(k).value(format!("{s}:{k}")).r#type(EnvironmentVariableType::SecretsManager).build())
+                .map(|k| EnvironmentVariable::builder().name(env_name(k)).value(format!("{s}:{k}")).r#type(EnvironmentVariableType::SecretsManager).build())
                 .collect::<Result<_, _>>()?,
             None => Vec::new(),
         };
@@ -305,11 +309,7 @@ impl Builder for CodeBuild {
         let svc = job.service.strip_prefix("svc_").unwrap_or(&job.service);
         let id = format!("{svc}-{}-{}", job.deployment.strip_prefix("dep_").unwrap_or(&job.deployment), crate::model::random(6));
         // The variables, sealed in a secret of this build's own.
-        let (skipped, vars): (Vec<_>, Vec<_>) = job.env.iter().partition(|(k, _)| reserved(k));
-        if !skipped.is_empty() {
-            let names: Vec<&str> = skipped.iter().map(|(k, _)| k.as_str()).collect();
-            log.stream(Stream::System).line(format!("not passed to the build (CodeBuild reads these itself): {}", names.join(", ")));
-        }
+        let vars = &job.env;
         let names: Vec<String> = vars.iter().map(|(k, _)| k.clone()).collect();
         let secret = if vars.is_empty() {
             None
@@ -369,14 +369,15 @@ mod tests {
 
     #[test]
     fn the_buildspec_names_variables_and_quotes_what_it_takes() {
-        let s = buildspec("1.dkr.ecr.us-east-1.amazonaws.com", "1.dkr.ecr.us-east-1.amazonaws.com/apps/web", "abc", "it's/Dockerfile", &["NPM_TOKEN".into()], false, "h1");
+        let s = buildspec("1.dkr.ecr.us-east-1.amazonaws.com", "1.dkr.ecr.us-east-1.amazonaws.com/apps/web", "abc", "it's/Dockerfile", &["NPM_TOKEN".into(), "LD_PRELOAD".into()], None, "h1");
         assert!(s.starts_with("version: 0.2\n"), "{s}");
         assert!(s.contains(r#"'it'\\''s/Dockerfile'"#), "{s}");
-        assert!(s.contains("--secret 'id=NPM_TOKEN,env=NPM_TOKEN'") && s.contains("'ROLL_BUILD_ENV=h1'") && !s.contains("--build-arg 'NPM_TOKEN'"), "{s}");
+        assert!(s.contains("--secret 'id=NPM_TOKEN,env=ROLL_BV_NPM_TOKEN'") && s.contains("'ROLL_BUILD_ENV=h1'") && !s.contains("--build-arg 'NPM_TOKEN'"), "{s}");
+        // No variable is ever the name of something the shell or a CLI reads.
+        assert!(s.contains("env=ROLL_BV_LD_PRELOAD") && !s.contains("LD_PRELOAD=") && !s.contains("env=LD_PRELOAD"), "{s}");
         assert!(s.contains("type=registry,ref=1.dkr.ecr.us-east-1.amazonaws.com/apps/web:buildcache,mode=max"), "{s}");
         assert!(s.contains("--tag '1.dkr.ecr.us-east-1.amazonaws.com/apps/web:abc'") && s.contains("--push ."), "{s}");
-        let own = buildspec("r", "r/apps/web", "abc", "Dockerfile", &["NPM_TOKEN".into()], true, "h1");
-        assert!(own.contains("--build-arg 'NPM_TOKEN'") && !own.contains("ROLL_BUILD_ENV"), "{own}");
-        assert!(reserved("AWS_REGION") && reserved("codebuild_x") && !reserved("NPM_TOKEN"));
+        let own = buildspec("r", "r/apps/web", "abc", "Dockerfile", &["NPM_TOKEN".into()], Some(&["NPM_TOKEN".into()]), "h1");
+        assert!(own.contains(r#"NPM_TOKEN=\"$ROLL_BV_NPM_TOKEN\" docker buildx build"#) && own.contains("--build-arg 'NPM_TOKEN'") && !own.contains("ROLL_BUILD_ENV"), "{own}");
     }
 }

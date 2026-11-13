@@ -118,6 +118,10 @@ struct World {
 }
 
 async fn world() -> World {
+    world_with(|_| {}).await
+}
+
+async fn world_with(setup: impl FnOnce(&mut AppsConfig)) -> World {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let project = ws.create("acme", "", None).unwrap().id;
@@ -133,7 +137,8 @@ async fn world() -> World {
     cfg.live.worker_grace = Duration::from_millis(20);
     cfg.live.probe_every = Duration::from_millis(2);
     cfg.live.drain = Duration::from_millis(50);
-    cfg.notify_allow_private = true;
+    cfg.allow_private = true;
+    setup(&mut cfg);
     let deps = Deps {
         runtime: fake.clone(),
         builder: fake.clone(),
@@ -375,6 +380,14 @@ async fn variables_are_sealed_masked_and_revealed_only_on_their_route() {
     assert_eq!(w.fake.pulled_as.lock().as_deref(), Some("bot"));
     let raw = std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap();
     assert!(!raw.windows(19).any(|x| x == b"ghp-registry-secret"));
+    // A login goes only to its own registry: never named for another, forgotten when the image
+    // moves to another registry (a write token can change the image, not see the password).
+    let (st, _) = call(&w.api, "PUT", &format!("/v1/apps/services/{sid}/registry"), Some(json!({"username": "bot", "password": "p", "server": "evil.example"}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (_, svc) = call(&w.api, "PATCH", &format!("/v1/apps/services/{sid}"), Some(json!({"source": {"kind": "image", "image": "nginx:1.28"}}))).await;
+    assert_eq!(svc["registry"]["username"], "bot", "same registry: {svc}");
+    let (_, svc) = call(&w.api, "PATCH", &format!("/v1/apps/services/{sid}"), Some(json!({"source": {"kind": "image", "image": "evil.example/x:1"}}))).await;
+    assert_eq!(svc["registry"], Value::Null, "{svc}");
     // A registry on this host or a private network isn't one dockerd is sent to.
     for image in ["127.0.0.1:5000/app", "localhost:5000/app", "10.0.0.5/app:1", "[::1]:5000/app"] {
         let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "priv", "source": {"kind": "image", "image": image} }))).await;
@@ -471,6 +484,23 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert!(w.tls.calls.lock().iter().all(|c| c.ends_with(" www.example.com")), "{:?}", w.tls.calls.lock());
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/www.example.com"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
+}
+
+/// Where every tenant's CNAME points at one target (Cloudflare for SaaS), a CNAME proves nothing:
+/// a hostname someone else already points there (or left pointing) needs its TXT challenge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shared_cname_target_takes_the_txt_challenge_as_proof() {
+    let w = world_with(|cfg| cfg.cname_target = Some("up.roll.test".into())).await;
+    let (svc, _) = image_service(&w, "www", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments/production/domains", svc["id"].as_str().unwrap());
+    let (_, d) = call(&w.api, "POST", &base, Some(json!({"hostname": "www.victim.com"}))).await;
+    assert_eq!((d["record"].as_str(), d["target"].as_str()), (Some("both"), Some("up.roll.test")), "{d}");
+    w.dns.add("www.victim.com", "CNAME", "up.roll.test");
+    let (_, v) = call(&w.api, "POST", &format!("{base}/www.victim.com/verify"), None).await;
+    assert_eq!(v["status"], "pending", "a CNAME to the shared target isn't proof: {v}");
+    w.dns.add("_roll-challenge.www.victim.com", "TXT", d["token"].as_str().unwrap());
+    let (_, v) = call(&w.api, "POST", &format!("{base}/www.victim.com/verify"), None).await;
+    assert_eq!(v["status"], "active", "{v}");
 }
 
 /// A claim nobody verifies expires (the hostname is free again, and gone from the certificate's
@@ -717,7 +747,10 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     mac.update(b".");
     mac.update(&raw);
     let want: String = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(h["x-roll-signature"].to_str().unwrap(), format!("sha256={want}"));
+    assert_eq!(h["x-roll-signature-256"].to_str().unwrap(), format!("sha256={want}"));
+    // Seconds at send time (a retry passes a receiver's replay window), and the delivery's id.
+    assert!((h["x-roll-timestamp"].to_str().unwrap().parse::<i64>().unwrap() - code_sql::now_ms() / 1000).abs() < 120);
+    assert!(h.contains_key("x-roll-delivery"));
     // The failing one is logged and waits to try again.
     let log = call(&w.api, "GET", &format!("{base}/{}/deliveries", down["id"].as_str().unwrap()), None).await.1;
     let first = &log.as_array().unwrap()[0];

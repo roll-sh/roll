@@ -150,8 +150,10 @@ pub struct BuildJob {
     pub cpu: f64,
     pub memory_mb: u32,
     pub timeout: Duration,
-    /// The environment's variables, for the build's steps: secrets in a generated Dockerfile,
-    /// build arguments and secrets for the tree's own. Never in argv, a layer or a log.
+    /// The environment's variables, for the build's steps: BuildKit secrets, and for the tree's
+    /// own Dockerfile also the build arguments it declares ([`build_args`]). Never in argv, a
+    /// layer or a log, and never in the environment of roll's own processes but as those
+    /// declared build arguments.
     pub env: Vec<(String, String)>,
     /// A hash of `env` (`ROLL_BUILD_ENV`): a changed value rebuilds the steps that read it.
     pub env_hash: String,
@@ -165,10 +167,49 @@ impl std::fmt::Debug for BuildJob {
     }
 }
 
-/// Names the `docker` CLI reads itself: as a build's variables they'd change how the CLI runs.
-pub fn docker_reads(name: &str) -> bool {
+/// Names that steer a process (the loader, Go's runtime, the shell, TLS trust, the docker CLI's
+/// own settings): never set in the environment of a process of roll's, so never a build argument.
+/// Every value still reaches the build as a BuildKit secret, which isn't an environment.
+pub fn steers_a_process(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
-    ["DOCKER_", "BUILDKIT_", "BUILDX_", "COMPOSE_"].iter().any(|p| n.starts_with(p)) || ["PATH", "HOME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"].contains(&n.as_str())
+    const PREFIXES: [&str; 11] = ["DOCKER_", "BUILDKIT_", "BUILDX_", "COMPOSE_", "LD_", "DYLD_", "GCONV_", "MALLOC_", "SSL_", "XDG_", "BASH_FUNC_"];
+    const NAMES: [&str; 30] = [
+        "PATH", "HOME", "USER", "SHELL", "TMPDIR", "ENV", "BASH_ENV", "IFS", "CDPATH", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+        "HOSTALIASES", "LOCPATH", "LOCALDOMAIN", "NLSPATH", "RES_OPTIONS", "TZDIR", "GODEBUG", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK", "GORACE", "GOFLAGS",
+    ];
+    PREFIXES.iter().any(|p| n.starts_with(p)) || NAMES.contains(&n.as_str())
+}
+
+/// The build arguments of a tree's own Dockerfile: the job's variables its `ARG` lines declare,
+/// minus names that steer a process. A generated Dockerfile takes none (it reads secrets).
+pub fn build_args(job: &BuildJob) -> Vec<String> {
+    if !job.own_dockerfile {
+        return Vec::new();
+    }
+    let text = match std::fs::File::open(job.context.join(&job.dockerfile)) {
+        Ok(f) => {
+            let mut buf = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::Read::take(f, 1 << 20), &mut buf);
+            buf
+        }
+        Err(_) => return Vec::new(),
+    };
+    let declared = declared_args(&text);
+    job.env.iter().map(|(k, _)| k).filter(|k| declared.contains(k.as_str()) && !steers_a_process(k)).cloned().collect()
+}
+
+/// The names a Dockerfile's `ARG` lines declare (`ARG A`, `ARG B=default C`).
+pub fn declared_args(dockerfile: &str) -> std::collections::HashSet<&str> {
+    dockerfile
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            (l.len() > 4 && l[..4].eq_ignore_ascii_case("ARG ")).then(|| &l[4..])
+        })
+        .flat_map(|rest| rest.split_whitespace())
+        .map(|t| t.split('=').next().unwrap_or(t))
+        .filter(|n| !n.is_empty() && n != &"\\")
+        .collect()
 }
 
 #[async_trait]
@@ -183,4 +224,40 @@ pub trait Builder: Send + Sync {
 /// A free TCP port on loopback (to publish an instance's port on).
 pub fn free_port() -> anyhow::Result<u16> {
     Ok(std::net::TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_declared_build_arguments_that_steer_nothing_reach_the_cli() {
+        let dir = std::env::temp_dir().join(format!("roll-apps-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Dockerfile"), "FROM x\narg NPM_TOKEN\nARG A=1 LD_PRELOAD\nRUN echo $UNDECLARED\n").unwrap();
+        let vars = ["NPM_TOKEN", "A", "LD_PRELOAD", "UNDECLARED"].map(|k| (k.to_string(), "v".to_string())).to_vec();
+        let mut job = BuildJob {
+            service: "svc".into(),
+            deployment: "dep".into(),
+            tag: "t".into(),
+            context: dir.clone(),
+            dockerfile: "Dockerfile".into(),
+            cpu: 1.0,
+            memory_mb: 512,
+            timeout: Duration::from_secs(60),
+            env: vars,
+            env_hash: String::new(),
+            own_dockerfile: true,
+        };
+        assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
+        job.own_dockerfile = false;
+        assert!(build_args(&job).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+        for n in ["BASH_ENV", "ld_preload", "GODEBUG", "DOCKER_HOST", "SSL_CERT_FILE", "PATH"] {
+            assert!(steers_a_process(n), "{n}");
+        }
+        for n in ["NPM_TOKEN", "GOOGLE_API_KEY", "LOCATION", "DATABASE_URL"] {
+            assert!(!steers_a_process(n), "{n}");
+        }
+    }
 }

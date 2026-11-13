@@ -480,6 +480,10 @@ async fn write_private(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()
     Ok(())
 }
 
+/// What the `docker` CLI of a build keeps of rolld's environment: how to reach the daemon and
+/// where its configuration is, nothing a build's variables could set.
+const CLI_ENV: [&str; 8] = ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "XDG_RUNTIME_DIR"];
+
 /// Builds with BuildKit on this host (`docker build`), at most `slots` at once: one tenant's
 /// burst of pushes queues instead of taking every CPU and all memory of the node.
 pub struct DockerBuilder {
@@ -510,20 +514,33 @@ impl Builder for DockerBuilder {
             }
         };
         let dockerfile = job.context.join(&job.dockerfile);
+        // Values never reach argv, and never the environment of the CLI but as the build
+        // arguments the tree's own Dockerfile declares: each is a BuildKit secret read from a
+        // file only rolld can read (a 0700 directory, removed when the build ends).
+        let secrets = tempfile::Builder::new().prefix("roll-apps-build-").tempdir().context("a directory for the build's secrets")?;
+        let args = super::build_args(job);
         let mut cmd = Command::new("docker");
+        cmd.env_clear();
+        for k in CLI_ENV {
+            if let Some(v) = std::env::var_os(k) {
+                cmd.env(k, v);
+            }
+        }
         cmd.env("DOCKER_BUILDKIT", "1")
             .args(["build", "--progress", "plain", "--file"])
             .arg(&dockerfile)
             .args(["--tag", &job.tag, "--label", &format!("{LABEL}={}", job.service), "--label", &format!("{LABEL}.deployment={}", job.deployment)])
             // Links (a database) are reached the way instances reach them.
             .args(["--add-host", "host.docker.internal:host-gateway"]);
-        // Values travel in the CLI's environment, never argv: `--secret id=K,env=K` and
-        // `--build-arg K` (no `=`) read them from there.
-        for (k, v) in &job.env {
-            cmd.env(k, v).arg("--secret").arg(format!("id={k},env={k}"));
-            if job.own_dockerfile {
-                cmd.arg("--build-arg").arg(k);
-            }
+        for (i, (k, v)) in job.env.iter().enumerate() {
+            let file = secrets.path().join(i.to_string());
+            write_private(&file, v.as_bytes()).await?;
+            cmd.arg("--secret").arg(format!("id={k},src={}", file.display()));
+        }
+        // `--build-arg K` (no `=`) reads the value from the CLI's environment.
+        for k in &args {
+            let v = job.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str()).unwrap_or_default();
+            cmd.env(k, v).arg("--build-arg").arg(k);
         }
         if !job.env.is_empty() && !job.own_dockerfile {
             cmd.arg("--build-arg").arg(format!("ROLL_BUILD_ENV={}", job.env_hash));

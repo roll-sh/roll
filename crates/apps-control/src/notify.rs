@@ -71,19 +71,19 @@ impl Apps {
         if url.len() > 2048 {
             return bad("at most 2048 characters");
         }
-        if u.scheme() != "https" && !(self.cfg.notify_allow_private && u.scheme() == "http") {
+        if u.scheme() != "https" && !(self.cfg.allow_private && u.scheme() == "http") {
             return bad("https only");
         }
         let Some(host) = u.host_str().map(str::to_ascii_lowercase) else { return bad("no host") };
-        if !self.cfg.notify_allow_private && crate::net::literal_private(&host) {
+        if !self.cfg.allow_private && crate::net::literal_private(&host) {
             return bad("a private address");
         }
         match kind {
             "webhook" => {}
             "slack" if host == "hooks.slack.com" => {}
             "discord" if (host == "discord.com" || host == "discordapp.com") && u.path().starts_with("/api/webhooks/") => {}
-            "slack" if !self.cfg.notify_allow_private => return bad("a Slack incoming webhook is on hooks.slack.com"),
-            "discord" if !self.cfg.notify_allow_private => return bad("a Discord webhook is https://discord.com/api/webhooks/…"),
+            "slack" if !self.cfg.allow_private => return bad("a Slack incoming webhook is on hooks.slack.com"),
+            "discord" if !self.cfg.allow_private => return bad("a Discord webhook is https://discord.com/api/webhooks/…"),
             "slack" | "discord" => {}
             _ => return Err(Error::BadRequest("kind is webhook, slack or discord".into())),
         }
@@ -116,7 +116,8 @@ impl Apps {
             return Err(Error::NotFound(format!("no notification target {id}")));
         };
         let e = Event { seq: 0, at: code_sql::now_ms(), kind: "test".into(), service: String::new(), environment: String::new(), deployment: None, data: json!({}) };
-        let (code, error) = self.send(&t, &url, secret.as_deref(), &e, "test", "this is a test from roll apps").await;
+        let delivery = format!("test_{}", crate::model::random(12));
+        let (code, error) = self.send(&t, &url, secret.as_deref(), &delivery, &e, "test", "this is a test from roll apps").await;
         Ok(json!({ "ok": error.is_none(), "code": code, "error": error }))
     }
 
@@ -158,25 +159,45 @@ impl Apps {
                 }
             }
         }
-        if let Err(e) = self.db(move |s| s.queue_deliveries(&queued, last)).await {
-            tracing::warn!(error = %e, "apps: queueing notifications failed; tried again");
+        match self.db(move |s| s.queue_deliveries(&queued, cursor, last)).await {
+            Ok(true) => {}
+            Ok(false) => tracing::info!("apps: another node moved the notifications cursor; reading from there"),
+            Err(e) => tracing::warn!(error = %e, "apps: queueing notifications failed; tried again"),
         }
     }
 
+    /// What's due, a few at a time (one slow target doesn't hold up the others), each try's
+    /// outcome recorded with its next try.
     async fn deliver_due(self: &Arc<Self>) {
-        let Ok(due) = self.db(|s| s.due_deliveries(50)).await else { return };
-        for (id, target, seq, attempts) in due {
+        use futures::StreamExt;
+        // Claimed for longer than a try takes (10 s, eight at a time over at most 50).
+        let Ok(due) = self.db(|s| s.due_deliveries(50, 120_000)).await else { return };
+        futures::stream::iter(due).for_each_concurrent(8, |(id, target, seq, attempts)| async move {
+            let retry = |error: Option<&str>| error.and_then(|_| RETRY_S.get(attempts as usize)).map(|s| code_sql::now_ms() + s * 1000);
             let t = target.clone();
-            let Ok(Some((t, url, secret))) = self.db(move |s| s.target_secrets(&t)).await else { continue };
+            let (t, url, secret) = match self.db(move |s| s.target_secrets(&t)).await {
+                Ok(Some(x)) => x,
+                Ok(None) => {
+                    let _ = self.db(move |s| s.finish_delivery(&id, None, Some("the target is gone"), None)).await;
+                    return;
+                }
+                Err(e) => {
+                    let why = format!("reading the target: {e}");
+                    let next = retry(Some(&why));
+                    let _ = self.db(move |s| s.finish_delivery(&id, None, Some(&why), next)).await;
+                    return;
+                }
+            };
             let Ok(Some(e)) = self.db(move |s| s.event(seq)).await else {
                 let _ = self.db(move |s| s.finish_delivery(&id, None, Some("the event is gone"), None)).await;
-                continue;
+                return;
             };
             let (title, text) = self.describe(&e).await;
-            let (code, error) = self.send(&t, &url, secret.as_deref(), &e, &title, &text).await;
-            let next = error.as_ref().and_then(|_| RETRY_S.get(attempts as usize)).map(|s| code_sql::now_ms() + s * 1000);
+            let (code, error) = self.send(&t, &url, secret.as_deref(), &id, &e, &title, &text).await;
+            let next = retry(error.as_deref());
             let _ = self.db(move |s| s.finish_delivery(&id, code, error.as_deref(), next)).await;
-        }
+        })
+        .await;
     }
 
     /// An event for a person: a title and a line.
@@ -194,7 +215,10 @@ impl Apps {
     }
 
     /// One try: the status code and, when it didn't work, why.
-    async fn send(&self, t: &NotifyTarget, url: &str, secret: Option<&str>, e: &Event, title: &str, text: &str) -> (Option<u16>, Option<String>) {
+    /// A webhook is signed as roll code's are (`code_control::review::apps::signature`): the
+    /// send time in seconds, so a retry passes a receiver's replay window, and the delivery's id.
+    #[allow(clippy::too_many_arguments)]
+    async fn send(&self, t: &NotifyTarget, url: &str, secret: Option<&str>, delivery: &str, e: &Event, title: &str, text: &str) -> (Option<u16>, Option<String>) {
         let link = self.cfg.web_url.as_ref().filter(|_| !e.service.is_empty()).map(|w| format!("{w}/dashboard/apps/{}?env={}", e.service, e.environment));
         let body = match t.kind.as_str() {
             "slack" => json!({ "text": format!("*{title}*\n{text}{}", link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) }),
@@ -206,12 +230,12 @@ impl Apps {
         if let Some(s) = secret {
             use hmac::Mac;
             let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(s.as_bytes()).expect("any key");
-            let ts = e.at.to_string();
+            let ts = (code_sql::now_ms() / 1000).to_string();
             mac.update(ts.as_bytes());
             mac.update(b".");
             mac.update(&bytes);
             let sig = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
-            req = req.header("x-roll-event", &e.kind).header("x-roll-timestamp", ts).header("x-roll-signature", format!("sha256={sig}"));
+            req = req.header("x-roll-event", &e.kind).header("x-roll-delivery", delivery).header("x-roll-timestamp", ts).header("x-roll-signature-256", format!("sha256={sig}"));
         }
         match req.body(bytes).send().await {
             Ok(res) if res.status().is_success() => (Some(res.status().as_u16()), None),

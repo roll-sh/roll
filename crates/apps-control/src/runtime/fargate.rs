@@ -184,6 +184,7 @@ impl Fargate {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .user_agent("roll-apps");
         if cfg.registry.is_none() {
             registry = registry.dns_resolver(Arc::new(crate::net::PublicOnly));

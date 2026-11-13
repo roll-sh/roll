@@ -725,7 +725,12 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             if !json_out {
                 println!("Added {}. Point it at roll:", s(&v["hostname"]));
                 println!("  CNAME  {}  →  {}", s(&v["hostname"]), s(&v["target"]));
-                println!("or, for an apex domain, keep its records and add:");
+                if v["record"] == "both" {
+                    // The CNAME target is every tenant's: the TXT record proves the domain is yours.
+                    println!("and prove it's yours:");
+                } else {
+                    println!("or, for an apex domain, keep its records and add:");
+                }
                 println!("  TXT    _roll-challenge.{}  \"{}\"", s(&v["hostname"]), s(&v["token"]));
                 println!("roll checks every minute; `roll domains verify {}` checks now.", s(&v["hostname"]));
                 return Ok(());

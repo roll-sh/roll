@@ -8,7 +8,7 @@
 use crate::live::Template;
 use crate::logs::{LogSink, Stream};
 use crate::model::*;
-use crate::runtime::{BuildJob, InstanceSpec, docker_reads};
+use crate::runtime::{BuildJob, InstanceSpec};
 use crate::store::{EnvRow, NewDeployment, ServiceRow, Switch};
 use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
@@ -319,7 +319,13 @@ impl Apps {
             Some(img) => {
                 self.db(move |s| s.set_status(&id, &[DeployStatus::Queued], DeployStatus::Building, None)).await?;
                 let sid = svc.id.clone();
-                let login = self.db(move |s| s.registry_login(&sid)).await?.map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
+                self.check_registry(img).await?;
+                // The login goes only to the registry it's for, whatever the image names now.
+                let login = self
+                    .db(move |s| s.registry_login(&sid))
+                    .await?
+                    .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(img))
+                    .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
                 let pinned = self.deps.runtime.pull(img, log, login.as_ref()).await?;
                 log.line(format!("pinned {pinned}"));
                 let (id, p) = (d.id.clone(), pinned.clone());
@@ -375,7 +381,12 @@ impl Apps {
         let (sid, e, from, to, vh) = (svc.id.clone(), env.name.clone(), env.active.clone(), d.id.clone(), vars_hash.clone());
         // Epochs only grow on a backend that outlives the process; the in-memory one starts
         // again at 1, and a fence kept in the store would then refuse every later switch.
-        let epoch = Some(&self.deps.cluster).filter(|c| c.backend_name() != "memory").and_then(|c| c.epoch(&crate::lease_key(&svc.id)));
+        // A node whose lease lapsed mid-rollout has no epoch: it isn't the owner any more and
+        // never switches (the node that took the service over does).
+        let epoch = match Some(&self.deps.cluster).filter(|c| c.backend_name() != "memory") {
+            Some(c) => Some(c.epoch(&crate::lease_key(&svc.id)).ok_or_else(|| anyhow::anyhow!("this node no longer holds the service; the node that took it over deploys"))?),
+            None => None,
+        };
         let ready = (!made.is_empty()).then_some(took.as_millis() as i64);
         let switched = self
             .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh) }))
@@ -430,6 +441,23 @@ impl Apps {
 
     /// Build the deployment's tree into an image: the tree from its source, the plan from
     /// `apps-build`, the Dockerfile written in when the plan made one.
+    /// An image's registry, by name, must be a public address: dockerd resolves it itself, and
+    /// speaks plain HTTP to loopback (`127.0.0.1.nip.io:5000/x` passes [`Source::check`]).
+    async fn check_registry(&self, image: &str) -> anyhow::Result<()> {
+        let Some(host) = registry_host(image) else { return Ok(()) };
+        if self.cfg.allow_private {
+            return Ok(());
+        }
+        let name = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
+        let name = name.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(addrs) = tokio::net::lookup_host((name, 443)).await
+            && addrs.into_iter().any(|a| private_ip(a.ip()))
+        {
+            anyhow::bail!("{host} resolves to a private address, which isn't a registry roll pulls from");
+        }
+        Ok(())
+    }
+
     async fn build(self: &Arc<Self>, svc: &ServiceRow, d: &Deployment, log: &LogSink, cancel: CancellationToken) -> anyhow::Result<(String, Run)> {
         let began = Instant::now();
         let dir = self.cfg.home.join("apps").join("builds").join(&d.id);
@@ -491,11 +519,6 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
         let mut build_env = self.resolve_vars(svc, &env_row, &d.id).await?.vars;
-        let skipped: Vec<String> = build_env.iter().filter(|(k, _)| docker_reads(k)).map(|(k, _)| k.clone()).collect();
-        if !skipped.is_empty() {
-            log.line(format!("not passed to the build (the docker CLI reads them itself): {}", skipped.join(", ")));
-        }
-        build_env.retain(|(k, _)| !docker_reads(k));
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
         build_env.sort();
