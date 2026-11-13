@@ -222,6 +222,13 @@ say "migrate the preview's Postgres branch, push: the next head's schema changes
 if [ -n "$PG_BRANCH" ]; then
   PG_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
   api POST "/v1/endpoints/$PG_EP/query" '{"sql":"CREATE TABLE preview_only (id int PRIMARY KEY, note text NOT NULL DEFAULT '"'"'x'"'"')"}' >/dev/null
+  # The preview's code tries to get the superuser to run it (a function shadowing one the schema
+  # diff calls, pg_get_indexdef(oid), the database's search_path pointed at it): the diff runs as the branch's role
+  # with only the catalog's names, so the role stays what it is.
+  APP_DB2=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+  APP_ROLE=$(echo "$APP_DB2" | sed -E 's#^postgres://([^:]+):.*#\1#')
+  PLANTED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB2" -Atc "CREATE FUNCTION public.pg_get_indexdef(oid) RETURNS text LANGUAGE plpgsql AS \$f\$ BEGIN EXECUTE 'ALTER ROLE $APP_ROLE SUPERUSER'; RETURN 'x'; END \$f\$; ALTER DATABASE main SET search_path = public, pg_catalog" 2>&1 | tail -1 || true)
+  [ "$PLANTED" = "ALTER DATABASE" ] || { echo "the hostile function should have been planted: $PLANTED"; exit 1; }
   api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"New page, again","files":{"index.html":{"content":"preview of change 1, again"}}}' >/dev/null
   SCHEMA=""
   for _ in $(seq 1 120); do
@@ -230,6 +237,8 @@ if [ -n "$PG_BRANCH" ]; then
     sleep 0.5
   done
   case "$SCHEMA" in *"+ table public.preview_only"*) ;; *) echo "the schema changes should name the new table: $SCHEMA"; exit 1;; esac
+  ESCALATED=$(api POST "/v1/endpoints/$PG_EP/query" "{\"sql\":\"SELECT rolsuper FROM pg_roles WHERE rolname = '$APP_ROLE'\"}" | jq_ "d['results'][0]['rows'][0][0]")
+  [ "$ESCALATED" = f ] || { echo "the branch's role became a superuser ($ESCALATED)"; exit 1; }
   say "$SCHEMA"
 fi
 

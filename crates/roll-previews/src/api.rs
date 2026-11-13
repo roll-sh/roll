@@ -173,7 +173,7 @@ async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<
     };
     let shot = blocking(e, move |e| if e.store.screenshot_link_ok(&id, exp, &sig)? { e.store.screenshot(&id) } else { Ok(None) }).await?;
     match shot.filter(|(_, png)| !png.is_empty()) {
-        Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=3600")], png).into_response()),
+        Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400, immutable")], png).into_response()),
         None => Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
     }
 }

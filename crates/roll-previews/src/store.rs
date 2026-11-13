@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS screenshots (
     preview_id TEXT PRIMARY KEY,
     head TEXT NOT NULL,
     png TEXT NOT NULL,
-    at INTEGER NOT NULL
+    at INTEGER NOT NULL,
+    tried TEXT
 );
 CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
@@ -218,6 +219,8 @@ pub struct ResourceRow {
 }
 
 pub struct Store {
+    /// The screenshot links' key, once read (`signing_key`).
+    signing: std::sync::OnceLock<Vec<u8>>,
     db: Db,
     rates: Rates,
 }
@@ -341,6 +344,9 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
+        if !db.has_column("screenshots", "tried")? {
+            db.add_column("screenshots", "tried", "TEXT")?;
+        }
         if !db.has_column("resources", "mask_digest")? {
             db.add_column("resources", "mask_digest", "TEXT")?;
         }
@@ -352,7 +358,7 @@ impl Store {
                 db.add_column("previews", col, "TEXT")?;
             }
         }
-        Ok(Store { db, rates: Rates::default() })
+        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new() })
     }
 
     pub fn now_ms(&self) -> Result<i64> {
@@ -847,9 +853,9 @@ impl Store {
         })
     }
 
-    /// The head the preview's screenshot was taken at.
+    /// The head a screenshot was last tried at (taken or not).
     pub fn screenshot_head(&self, id: &str) -> Result<Option<String>> {
-        Ok(self.db.read(|c| c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?)
+        Ok(self.db.read(|c| c.query_row("SELECT tried FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
     pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8]) -> Result<()> {
@@ -857,8 +863,21 @@ impl Store {
         let (b64, now) = (base64::engine::general_purpose::STANDARD.encode(png), self.now_ms()?);
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO screenshots (preview_id, head, png, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at",
-                params![id, head, b64, now],
+                "INSERT INTO screenshots (preview_id, head, png, at, tried) VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried",
+                params![id, head, b64, now, head],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A screenshot was tried at `head` and not taken: not tried again there, and the last one
+    /// taken (another head's) stays.
+    pub fn set_screenshot_tried(&self, id: &str, head: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO screenshots (preview_id, head, png, at, tried) VALUES (?, '', '', 0, ?) ON CONFLICT (preview_id) DO UPDATE SET tried = excluded.tried",
+                params![id, head],
             )?;
             Ok::<_, Error>(())
         })
@@ -873,6 +892,9 @@ impl Store {
 
     /// The key screenshot links are signed with: made once, the same on every node.
     fn signing_key(&self) -> Result<Vec<u8>> {
+        if let Some(k) = self.signing.get() {
+            return Ok(k.clone());
+        }
         let mut raw = [0u8; 32];
         getrandom::fill(&mut raw).expect("system randomness");
         let fresh = hex::encode(raw);
@@ -881,7 +903,8 @@ impl Store {
             Ok::<_, Error>(())
         })?;
         let v: String = self.db.read(|c| c.query_row("SELECT value FROM keys WHERE name = 'screenshots'", (), |r| r.get(0)))?;
-        hex::decode(v).map_err(|e| Error::Internal(format!("the screenshot key: {e}")))
+        let key = hex::decode(v).map_err(|e| Error::Internal(format!("the screenshot key: {e}")))?;
+        Ok(self.signing.get_or_init(|| key).clone())
     }
 
     /// A link to the preview's screenshot anyone can open until it expires (30 days after it was
@@ -893,11 +916,20 @@ impl Store {
         Ok(Some((exp, hex::encode(self.link_mac(id, exp)?.finalize().into_bytes()))))
     }
 
-    /// Whether `sig` is the screenshot link's signature for `exp` and it hasn't expired.
+    /// Whether `sig` is the screenshot link's signature for `exp`, it hasn't expired, it's for the
+    /// screenshot there is now (a link names one screenshot: `exp` is 30 days after it was taken),
+    /// and the preview is still public and live.
     pub fn screenshot_link_ok(&self, id: &str, exp: i64, sig: &str) -> Result<bool> {
         use hmac::Mac;
         let Ok(sig) = hex::decode(sig) else { return Ok(false) };
-        Ok(exp > self.now_ms()? && self.link_mac(id, exp)?.verify_slice(&sig).is_ok())
+        if exp <= self.now_ms()? || self.link_mac(id, exp)?.verify_slice(&sig).is_err() {
+            return Ok(false);
+        }
+        if self.screenshot_at(id)? != Some(exp - SCREENSHOT_LINK_MS) {
+            return Ok(false);
+        }
+        let Ok(row) = self.row(id) else { return Ok(false) };
+        Ok(row.desired == Desired::Active && self.settings(&row.project_id)?.access == crate::settings::Access::Public)
     }
 
     fn link_mac(&self, id: &str, exp: i64) -> Result<hmac::Hmac<sha2::Sha256>> {
@@ -1104,25 +1136,33 @@ pub fn month_start(now_ms: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    /// The pull request comment's screenshot link opens it until it expires; a link anyone
-    /// changed (another preview, a later expiry, a guessed signature) doesn't.
+    /// The pull request comment's screenshot link opens that screenshot of a public preview
+    /// until it expires; a link anyone changed (another preview, a later expiry, a guessed
+    /// signature), an older screenshot's link, or a preview gone private doesn't.
     #[test]
     fn a_screenshot_link_is_signed_and_expires() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap();
-        assert_eq!(store.screenshot_link("pv_a").unwrap(), None, "no screenshot, no link");
-        store.set_screenshot("pv_a", "cs_1", b"\x89PNG...").unwrap();
-        let (exp, sig) = store.screenshot_link("pv_a").unwrap().unwrap();
-        assert!(store.screenshot_link_ok("pv_a", exp, &sig).unwrap());
-        assert!(!store.screenshot_link_ok("pv_b", exp, &sig).unwrap(), "another preview");
-        assert!(!store.screenshot_link_ok("pv_a", exp + 1, &sig).unwrap(), "a moved expiry");
-        assert!(!store.screenshot_link_ok("pv_a", exp, &"0".repeat(64)).unwrap(), "a guess");
+        let (_dir, store) = store();
+        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
+        let (row, _) = store.create(&new("chg_shot")).unwrap();
+        let id = row.id.as_str();
+        assert_eq!(store.screenshot_link(id).unwrap(), None, "no screenshot, no link");
+        store.set_screenshot(id, "cs_1", b"\x89PNG...").unwrap();
+        let (exp, sig) = store.screenshot_link(id).unwrap().unwrap();
+        assert!(store.screenshot_link_ok(id, exp, &sig).unwrap());
+        assert!(!store.screenshot_link_ok("pv_other", exp, &sig).unwrap(), "another preview");
+        assert!(!store.screenshot_link_ok(id, exp + 1, &sig).unwrap(), "a moved expiry");
+        assert!(!store.screenshot_link_ok(id, exp, &"0".repeat(64)).unwrap(), "a guess");
         let past = store.now_ms().unwrap() - 1;
         let stale = hex::encode({
             use hmac::Mac;
-            store.link_mac("pv_a", past).unwrap().finalize().into_bytes()
+            store.link_mac(id, past).unwrap().finalize().into_bytes()
         });
-        assert!(!store.screenshot_link_ok("pv_a", past, &stale).unwrap(), "expired");
+        assert!(!store.screenshot_link_ok(id, past, &stale).unwrap(), "expired");
+        // A failed try keeps the screenshot (and its link); a private preview's link is dead.
+        store.set_screenshot_tried(id, "cs_2").unwrap();
+        assert!(store.screenshot_link_ok(id, exp, &sig).unwrap(), "a failed try keeps the last one");
+        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Link, ..Default::default() }).unwrap();
+        assert!(!store.screenshot_link_ok(id, exp, &sig).unwrap(), "gone private");
     }
 
     use super::*;

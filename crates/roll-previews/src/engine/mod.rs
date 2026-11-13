@@ -82,6 +82,13 @@ pub struct Engine {
     /// In a cluster: requests that act on running services go to the reconciler's node.
     pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
     usage_read: Mutex<HashMap<String, i64>>,
+    /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
+    shots_wanted: Mutex<std::collections::HashSet<String>>,
+    /// One screenshot at a time.
+    shooting: Arc<tokio::sync::Semaphore>,
+    /// When a service's deploy was first found still going (`StillDeploying`): one that never
+    /// finishes fails after [`DEPLOY_WAIT_MS`].
+    deploying_since: Mutex<HashMap<(String, String), i64>>,
     /// The unresolved secrets last told per preview (each set once in its activity).
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
     /// One pass at a time.
@@ -131,6 +138,9 @@ impl Engine {
             cluster: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
             secrets_told: Mutex::new(HashMap::new()),
+            shots_wanted: Mutex::new(std::collections::HashSet::new()),
+            shooting: Arc::new(tokio::sync::Semaphore::new(1)),
+            deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
         })
     }
@@ -220,6 +230,29 @@ impl Engine {
             });
         }
         while set.join_next().await.is_some() {}
+        // Screenshots asked for by those converges, one at a time, off the pass: a slow service
+        // or a first pull of the browser image holds nothing else up.
+        let wanted: Vec<String> = self.shots_wanted.lock().drain().collect();
+        for id in wanted {
+            let this = self.clone();
+            let gate = self.shooting.clone();
+            tokio::spawn(async move {
+                let Ok(_one) = gate.acquire_owned().await else { return };
+                let Ok(r) = this.store.row(&id) else { return };
+                let Ok(s) = this.store.settings(&r.project_id) else { return };
+                // Still wanted: ready, the rules still ask, not taken at this head meanwhile.
+                if r.state != State::Ready || !s.github.screenshot || this.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.head.as_str()) {
+                    return;
+                }
+                if this.take_screenshot(&r).await {
+                    // The change and its pull request comment show the new one now, not at the
+                    // preview's next converge.
+                    if let Ok(row) = this.store.row(&id) {
+                        this.report(row).await;
+                    }
+                }
+            });
+        }
         Ok(())
     }
 }
@@ -240,6 +273,10 @@ impl Engine {
         Ok(got.values)
     }
 }
+
+/// How long a deploy may stay "still going" before the preview fails (a build queue that never
+/// moves, say).
+const DEPLOY_WAIT_MS: i64 = 20 * 60_000;
 
 /// How soon a converge comes back to a deploy that wasn't live yet.
 const DEPLOY_POLL_MS: i64 = 10_000;

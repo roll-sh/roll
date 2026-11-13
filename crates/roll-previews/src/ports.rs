@@ -77,6 +77,12 @@ pub trait Brancher: Send + Sync {
         Ok(())
     }
 
+    /// Credentials for a branch that has none recorded (one made before the product handed any
+    /// out): `None` from products whose branches need none.
+    async fn credentials(&self, _parent: &str, _branch: &str, _name: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+
     /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
     /// `None` from products without a schema to compare.
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {

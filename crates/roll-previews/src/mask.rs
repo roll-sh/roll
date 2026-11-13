@@ -42,19 +42,34 @@ pub fn postgres(columns: &BTreeMap<String, String>, salt: &str) -> Result<Plan, 
         };
         tables.entry((schema.to_string(), table.to_string())).or_default().push(format!("{c} = {value}"));
     }
-    // Literals as written whatever the database says; no trigger (an audit log's copy of OLD, a
-    // notification) runs for the rewrite.
-    let mut update = String::from("BEGIN;\nSET LOCAL standard_conforming_strings = on;\nSET LOCAL session_replication_role = replica;\n");
+    // Only the catalog's own names resolve (nothing the branch's role made can stand in for a
+    // function this runs as the superuser), literals read as written, and no trigger of the masked
+    // tables runs for the rewrite (an audit log's copy of OLD, a notification): each table's user
+    // triggers are switched off and then put back exactly as they were (`ALWAYS`, `REPLICA` and
+    // disabled ones too; `session_replication_role` would let those fire).
+    let mut update = String::from("BEGIN;\nSET LOCAL search_path = pg_catalog, pg_temp;\nSET LOCAL standard_conforming_strings = on;\n");
+    let rels: Vec<String> = tables.keys().map(|(schema, table)| format!("{}::regclass", literal(&format!("{}.{}", ident(schema), ident(table))))).collect();
+    update.push_str(&format!(
+        "CREATE TEMP TABLE roll_triggers ON COMMIT DROP AS SELECT tgrelid::regclass::text AS rel, tgname, tgenabled FROM pg_catalog.pg_trigger WHERE NOT tgisinternal AND tgrelid IN ({});\n",
+        rels.join(", ")
+    ));
+    update.push_str("DO $roll$ DECLARE r record; BEGIN FOR r IN SELECT DISTINCT rel FROM roll_triggers LOOP EXECUTE pg_catalog.format('ALTER TABLE %s DISABLE TRIGGER USER', r.rel); END LOOP; END $roll$;\n");
     let mut after = Vec::new();
     for ((schema, table), sets) in &tables {
         let t = format!("{}.{}", ident(schema), ident(table));
         update.push_str(&format!("UPDATE {t} SET {};\n", sets.join(", ")));
+        // Maintenance runs as the table's owner, with a safe search_path (PostgreSQL 17+).
         after.push(format!("VACUUM (FULL, ANALYZE) {t}"));
     }
+    update.push_str(
+        "DO $roll$ DECLARE r record; BEGIN FOR r IN SELECT * FROM roll_triggers LOOP EXECUTE pg_catalog.format('ALTER TABLE %s %s TRIGGER %I', r.rel, \
+         CASE r.tgenabled WHEN 'A' THEN 'ENABLE ALWAYS' WHEN 'R' THEN 'ENABLE REPLICA' WHEN 'D' THEN 'DISABLE' ELSE 'ENABLE' END, r.tgname); END LOOP; END $roll$;\n",
+    );
     update.push_str("COMMIT;");
+    // A materialized view refreshes as its owner (the branch's role), never as the superuser.
     after.push(
-        "DO $$ DECLARE v record; BEGIN FOR v IN SELECT schemaname, matviewname FROM pg_matviews WHERE ispopulated LOOP \
-         EXECUTE format('REFRESH MATERIALIZED VIEW %I.%I', v.schemaname, v.matviewname); END LOOP; END $$"
+        "SET search_path = pg_catalog, pg_temp; DO $roll$ DECLARE v record; BEGIN FOR v IN SELECT schemaname, matviewname FROM pg_catalog.pg_matviews WHERE ispopulated LOOP \
+         EXECUTE pg_catalog.format('REFRESH MATERIALIZED VIEW %I.%I', v.schemaname, v.matviewname); END LOOP; END $roll$"
             .into(),
     );
     after.push("CHECKPOINT".into());
@@ -93,7 +108,9 @@ mod tests {
         .collect();
         let p = super::postgres(&cols, "s4lt").unwrap();
         assert!(p.update.starts_with("BEGIN;\n") && p.update.ends_with("COMMIT;"), "{}", p.update);
-        assert!(p.update.contains("SET LOCAL session_replication_role = replica"), "no trigger copies the old values: {}", p.update);
+        assert!(p.update.contains("SET LOCAL search_path = pg_catalog, pg_temp"), "only the catalog's names: {}", p.update);
+        assert!(p.update.contains("DISABLE TRIGGER USER") && p.update.contains("ENABLE ALWAYS"), "triggers off, then back as they were: {}", p.update);
+        assert!(!p.update.contains("session_replication_role"), "REPLICA triggers would fire: {}", p.update);
         assert!(p.update.contains("md5('s4lt' || \"email\"::text)"), "salted: {}", p.update);
         assert!(p.update.contains(r#"UPDATE "public"."users" SET "email" = CASE WHEN "email" IS NULL"#), "{}", p.update);
         assert!(p.update.contains(r#""name" = 'it''s; DROP TABLE users; --'"#), "a value stays one literal: {}", p.update);

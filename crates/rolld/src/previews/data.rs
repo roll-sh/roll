@@ -83,6 +83,11 @@ impl Brancher for Postgres {
         self.0.delete(&format!("/v1/projects/{}/branches/{}", seg(parent), seg(branch))).await
     }
 
+    /// A branch from before branch roles: its role, made now.
+    async fn credentials(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<String>> {
+        self.app_role(parent, branch, name).await.map(Some)
+    }
+
     /// The branch's endpoint, signed in as the branch's own role (never the project's superuser).
     async fn connect(&self, parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
@@ -124,19 +129,24 @@ impl Brancher for Postgres {
     }
 
     /// The parent branch's schema and this one's, from the catalog of each endpoint's `main`
-    /// database (`SCHEMA_SQL`). Reading the parent's starts its compute if it sleeps.
+    /// database (`SCHEMA_SQL`). Reading the parent's starts its compute if it sleeps. The branch is
+    /// read as its own role (its code could have planted functions a superuser's query would
+    /// call), the parent as the superuser, both with only the catalog's names in reach.
     async fn schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
         let branches = p["branches"].as_array().cloned().unwrap_or_default();
         let b = branches.iter().find(|b| b["id"] == branch).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
         let from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
-        let lines = |ep: Option<String>| async move {
+        let lines = |ep: Option<String>, role: Option<String>| async move {
             let ep = ep.ok_or_else(|| anyhow::anyhow!("a Postgres branch without an endpoint"))?;
-            let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": SCHEMA_SQL })).await?;
-            let rows = v["results"][0]["rows"].as_array().cloned().unwrap_or_default();
+            let set_role = role.map(|r| format!("SET ROLE \"{}\"; ", r.replace('"', "\"\""))).unwrap_or_default();
+            let sql = format!("{set_role}SET search_path = pg_catalog, pg_temp; {SCHEMA_SQL}");
+            let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": sql })).await?;
+            let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
             anyhow::Ok(rows.iter().filter_map(|r| r[0].as_str().map(str::to_string)).collect::<Vec<_>>())
         };
-        Ok(Some((lines(s(&from["endpoint"]["id"])).await?, lines(s(&b["endpoint"]["id"])).await?)))
+        let role = s(&b["name"]).map(|n| n.replace('-', "_"));
+        Ok(Some((lines(s(&from["endpoint"]["id"]), None).await?, lines(s(&b["endpoint"]["id"]), role).await?)))
     }
 
     /// A branch's own bytes (its local data directory, else its objects), at Postgres's rates.
@@ -170,7 +180,7 @@ impl Postgres {
         anyhow::ensure!(!b["parent_id"].is_null(), "refusing to make a preview role on {branch}: it isn't a branch of {parent}");
         let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
         let quote = |v: &str| format!("'{}'", v.replace('\'', "''"));
-        let sql = ROLE_SQL.replace("{role}", &quote(&role)).replace("{password}", &quote(&password));
+        let sql = format!("SET search_path = pg_catalog, pg_temp; {}", ROLE_SQL.replace("{role}", &quote(&role)).replace("{password}", &quote(&password)));
         self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": sql })).await?;
         Ok(json!({ "user": role, "password": password }).to_string())
     }

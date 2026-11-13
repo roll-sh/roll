@@ -107,25 +107,28 @@ impl Engine {
         let mut reset_any = false;
         let mut problems: Vec<String> = Vec::new();
         let reset_of = |x: &ResourceRow| x.r#ref.is_some() && (reset_due || asked.iter().any(|a| a == "*" || *a == format!("{}:{}", x.kind.as_str(), x.parent)));
-        // A masked Postgres resource is reset by branching it again (a new endpoint, masked before
-        // any service is pointed at it), not in place, where anything still connected would read
-        // the unmasked rows until the mask commits.
-        for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres && reset_of(x) && mask_digest(&s, x) != mask_digest(&Settings::default(), x)) {
-            self.delete_branch(&r.id, &res, &name).await?;
-            self.store.drop_resource(&r.id, res.kind, &res.parent)?;
-            self.store.log(&r.id, &format!("postgres:{} is masked: reset by branching it again", res.parent))?;
-            reset_any = true;
-        }
-        self.store.want_resources(&r.id, &wanted)?;
-        // Rules that changed reach branches already masked: masked again, nothing serving meanwhile.
+        // A masked Postgres resource is reset, or masked with changed rules, by branching it again
+        // (a new endpoint, masked before any service is pointed at it), never rewritten in place:
+        // anything still connected would read the unmasked rows until the mask commits, and the
+        // preview's code may have left triggers or functions in it that a superuser's rewrite runs.
         let mut remask = false;
         for res in self.store.resources(&r.id)? {
-            if res.r#ref.is_some() && res.state == ResourceState::Ready && self.store.mask_digest(&r.id, res.kind, &res.parent)?.unwrap_or_default() != mask_digest(&s, &res) {
+            let masked = mask_digest(&s, &res) != mask_digest(&Settings::default(), &res);
+            let rules_moved = res.r#ref.is_some() && res.state == ResourceState::Ready && self.store.mask_digest(&r.id, res.kind, &res.parent)?.unwrap_or_default() != mask_digest(&s, &res);
+            if res.kind == Kind::Postgres && ((masked && reset_of(&res)) || rules_moved) {
+                self.delete_branch(&r.id, &res, &name).await?;
+                self.store.drop_resource(&r.id, res.kind, &res.parent)?;
+                self.store.log(&r.id, &format!("postgres:{} is masked: branched again", res.parent))?;
+                reset_any = true;
+                remask = true;
+            } else if rules_moved {
+                // A read policy (NoSQL): changed in place, nothing serving meanwhile.
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Pending)?;
                 self.store.log(&r.id, &format!("{}:{}: the masking rules changed: masking again", res.kind.as_str(), res.parent))?;
                 remask = true;
             }
         }
+        self.store.want_resources(&r.id, &wanted)?;
         // Nothing serves data while it's replaced (and until its seed and masks have run again).
         let resetting = remask || self.store.resources(&r.id)?.iter().any(reset_of);
         if resetting {
@@ -186,6 +189,14 @@ impl Engine {
                         x.state = ResourceState::Ready;
                         x.error = None;
                     })?;
+                }
+                // Recorded without credentials (from before its product handed any out): get them,
+                // so its services never need the product's own.
+                Some(branch) if res.kept.is_none() => {
+                    if let Some(kept) = b.credentials(&res.parent, branch, &name).await.map_err(|e| anyhow::anyhow!("credentials for {key}: {e:#}"))? {
+                        self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.kept = Some(kept.clone()))?;
+                        self.store.log(&r.id, &format!("{key} has credentials of its own now"))?;
+                    }
                 }
                 Some(_) => {}
             }
@@ -347,6 +358,7 @@ impl Engine {
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 match self.apps.deploy(&t).await {
                     Ok(url) => {
+                        self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
                         if let Some(url) = url {
                             self.store.set_service_url(&r.id, &spec.name, &url)?;
                         }
@@ -357,6 +369,14 @@ impl Engine {
                     }
                     // Accepted, not live yet: no slot waits on a build; come back and ask again.
                     Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
+                        let now = self.store.now_ms()?;
+                        let since = *self.deploying_since.lock().entry((r.id.clone(), spec.name.clone())).or_insert(now);
+                        if now - since > DEPLOY_WAIT_MS {
+                            self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
+                            let msg = format!("{e:#}, for over {} minutes", DEPLOY_WAIT_MS / 60_000);
+                            self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
+                            anyhow::bail!("deploying {}: {msg}", spec.name);
+                        }
                         self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                         still_deploying = true;
                     }
@@ -396,29 +416,35 @@ impl Engine {
         }
         let ready = row.state == State::Ready;
         self.report(row).await;
-        // 6. A screenshot of the first service, once per head (best effort; it wakes the service).
+        // 6. A screenshot of the first service, once per head (best effort; it wakes the service):
+        // taken after the pass, never in a converge slot.
         if ready && s.github.screenshot && self.store.screenshot_head(&r.id)?.as_deref() != Some(r.head.as_str()) {
-            self.take_screenshot(r).await;
+            self.shots_wanted.lock().insert(r.id.clone());
         }
         Ok(())
     }
 
     /// The project's column masks for a fresh branch, if it has any for this resource.
-    async fn take_screenshot(&self, r: &Row) {
-        let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return };
+    /// The first service's screenshot at `r`'s head: `true` when one was kept. Not taken (a
+    /// backend that can't, a failure) is remembered for the head, and the last one taken stays.
+    pub(super) async fn take_screenshot(&self, r: &Row) -> bool {
+        let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return false };
         match self.apps.screenshot(&r.id, &first.name).await {
             Ok(Some(png)) => {
-                if self.store.set_screenshot(&r.id, &r.head, &png).is_ok() {
+                let kept = self.store.set_screenshot(&r.id, &r.head, &png).is_ok();
+                if kept {
                     let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
                 }
+                kept
             }
-            // This backend can't: don't ask again at this head.
             Ok(None) => {
-                let _ = self.store.set_screenshot(&r.id, &r.head, &[]);
+                let _ = self.store.set_screenshot_tried(&r.id, &r.head);
+                false
             }
             Err(e) => {
                 let _ = self.store.log(&r.id, &format!("couldn't take a screenshot of {}: {e:#}", first.name));
-                let _ = self.store.set_screenshot(&r.id, &r.head, &[]);
+                let _ = self.store.set_screenshot_tried(&r.id, &r.head);
+                false
             }
         }
     }

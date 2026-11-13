@@ -265,8 +265,18 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     s.masking.insert("postgres:prj_db".into(), [("public.users.email".to_string(), "email".to_string()), ("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
     e.engine.store.put_settings(&e.project, &s).unwrap();
     e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    let made = e.pg.made.load(Ordering::SeqCst);
     e.engine.pass().await.unwrap();
     assert_eq!(e.pg.masks.lock().len(), 2, "the changed rules were applied");
+    // Never rewritten in place (its code may have left triggers a superuser's UPDATE would run):
+    // a new branch, masked before it's Ready.
+    assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 1, "branched again for the new rules");
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // A reset of a masked branch branches it again too.
+    e.engine.reset(&p.id, vec!["postgres:prj_db".into()]).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 2);
+    assert_eq!(e.pg.masks.lock().len(), 3);
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 

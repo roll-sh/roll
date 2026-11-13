@@ -185,12 +185,17 @@ fn print_preview(p: &Value) {
 /// timeout is an error (exit 1); a passing failure (the reconciler retries) or an API hiccup
 /// isn't.
 async fn wait(api: &Api, as_json: bool, preview: Option<String>, change: Option<String>, service: Option<String>, timeout: u64) -> anyhow::Result<()> {
+    if preview.is_none() && change.is_none() {
+        bail!("say which preview, or --change");
+    }
     let started = std::time::Instant::now();
     let deadline = started + std::time::Duration::from_secs(timeout);
     let (mut told, mut failing_since, mut last) = (String::new(), None::<std::time::Instant>, String::new());
     loop {
         let found = match look(api, preview.as_deref(), change.as_deref()).await {
             Ok(f) => f,
+            // A preview that isn't there won't come back; anything else may pass.
+            Err(e) if format!("{e:#}").contains("no preview") => bail!("{e:#}"),
             Err(e) => {
                 last = format!("{e:#}");
                 None

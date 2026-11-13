@@ -320,14 +320,21 @@ logged and read again on the next converge; it never fails the preview.
     per-run salt and the value), `email` (`user-<12 hex>@example.invalid`, from the same salted
     hash, so within a branch the same input gives the same output and joins on it still match),
     `fixed:<value>`. One transaction rewrites every masked column, with names and values quoted
-    whatever they hold, `standard_conforming_strings` on, and the tables' triggers off
-    (`session_replication_role = replica`), so no audit trigger copies the old values into
-    another table and nothing fires outward. Then each masked table's `VACUUM (FULL, ANALYZE)`,
-    every materialized view refreshed, and a checkpoint.
-    - A masked branch is never reset in place: it's branched again (a new endpoint, masked before
-      any service is pointed at it), so nothing still connected reads the unmasked rows.
-    - Rules that change reach open previews: a branch masked with other rules is masked again,
-      its services asleep meanwhile.
+    whatever they hold, `search_path` pinned to `pg_catalog, pg_temp`, `standard_conforming_strings`
+    on, and the masked tables' user triggers switched off and then put back exactly as they were
+    (`ALWAYS` and `REPLICA` ones included), so no audit trigger copies the old values into
+    another table and nothing fires outward. Then each masked table's `VACUUM (FULL, ANALYZE)`
+    (maintenance runs as the table's owner with a safe `search_path`), every materialized view
+    refreshed (as its owner), and a checkpoint.
+    - A masked branch is never rewritten once the preview's code has run in it: a reset, or rules
+      that change, branch it again (a new endpoint, masked before any service is pointed at it).
+      So nothing still connected reads the unmasked rows, and nothing the preview's code left in
+      it (a trigger, a function) runs inside a superuser's rewrite.
+    - Every statement roll runs as the superuser on a branch pins `search_path` to
+      `pg_catalog, pg_temp`, and the schema diff reads the branch as the branch's own role:
+      functions the preview's code planted (a `public.format`, a database-wide `search_path`)
+      never run with the superuser's rights. Measured: a planted `public.format` that would
+      make the role a superuser leaves it as it was.
     - A mask that fails (a rule a column's type can't take) fails the preview and is retried;
       nothing serves the branch meanwhile. Large tables can take long: a mask request has the
       adapter's 600 s budget.
@@ -626,6 +633,12 @@ type Settings = {
     30 days after the screenshot, under a key the previews store makes once; a public route,
     because GitHub fetches images without credentials; anything but a valid link is 403). A
     private preview's comment doesn't, since whoever reads the pull request could then see it.
+    Screenshots are taken after the reconciler's pass, one at a time, so a slow service or the
+    first pull of the browser image (pulled once, when first needed) holds nothing else up; the
+    browser container has no capabilities, no new privileges and a read-only root. A failed try
+    is remembered for its head and the last screenshot stays. A link names one screenshot (its
+    expiry is 30 days after it was taken) and works only while the preview is live and public,
+    so a project that turns private takes its old comments' images down at once.
     It wakes the service once per push, so it's off by default.
 - **Dashboard**: a Previews tab on each project, with the list, status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each

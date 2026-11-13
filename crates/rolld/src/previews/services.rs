@@ -10,7 +10,7 @@ use std::sync::Arc;
 // ── Services: roll apps' catalog when the project has one, else roll.toml containers ──
 
 /// How long one converge waits for a roll apps build and rollout before coming back later.
-const DEPLOY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+const DEPLOY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// roll apps (docs/apps/) over this node's API: a preview is an ephemeral environment
 /// `pv-<id>` of each of the project's services, deployed at the change's commit. roll apps

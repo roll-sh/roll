@@ -607,22 +607,32 @@ impl Apps for Runtime {
             return Ok(None);
         }
         let Some(host) = self.store.services(preview)?.into_iter().find(|s| s.name == service).map(|s| s.host) else { return Ok(None) };
+        // The browser image once, in the background task screenshots run in (a cold pull isn't
+        // bounded by the screenshot's 90 s).
+        if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
+            code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
+        }
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
-        match me.ready(preview, service, self.cfg.start_timeout).await {
+        match me.ready(preview, service, self.cfg.wait).await {
             Ok(_) => {}
             Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
             Err(_) => anyhow::bail!("the service didn't start in time"),
         }
         let name = container_name(&host);
-        let ports = code_preview::docker::docker(&["inspect", "-f", "{{range $p, $_ := .NetworkSettings.Ports}}{{$p}} {{end}}", &name]).await?;
+        // The port the runtime published (the service's own), not whatever else its image exposes.
+        let ports = code_preview::docker::docker(&["inspect", "-f", "{{range $p, $_ := .HostConfig.PortBindings}}{{$p}} {{end}}", &name]).await?;
         let port = ports.split_whitespace().next().and_then(|p| p.split('/').next()).ok_or_else(|| anyhow::anyhow!("the service publishes no port"))?.to_string();
         let shot = format!("roll-previews-shot-{host}");
         let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
+        // Cleaned up with the runtime's own containers after a crash.
+        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
         if let Some(l) = code_preview::docker::home_label() {
             args.extend(["--label".into(), l]);
         }
+        // The page is the preview's code: no capabilities, no new privileges, nothing written but /tmp.
+        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
         args.extend(code_preview::docker::limits(1024, 1.0));
-        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into()]);
+        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
         args.extend([self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), format!("{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png", self.cfg.screenshot_command)]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = match tokio::time::timeout(Duration::from_secs(90), code_preview::docker::docker(&argv)).await {
