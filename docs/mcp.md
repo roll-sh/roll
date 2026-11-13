@@ -188,6 +188,13 @@ Two resources an agent can read before it acts (`resources/list`, `resources/rea
 `roll://access/me` is read from `GET /v1/access` through the gated router with the caller's token,
 as a tool is, so it says what the gate decides and the read is in the audit log.
 
+One template (`resources/templates/list`), listed when the connection may list workspace projects:
+`roll://projects/{project}` is a project and every resource on its canvas (kind and id, names
+quoted), read from `GET /v1/workspace/projects/{project}` the same way, for a client to attach
+before acting on a project. Its id completes like a prompt's (`completion/complete` with
+`ref/resource`); an id that isn't letters, digits, `_` and `-` is "resource not found", so a URI
+never reaches another route.
+
 ## Prompts
 
 roll's workflows as prompts a client offers as slash commands (`prompts/list`, `prompts/get`;
@@ -385,24 +392,20 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Resource templates for what an agent reads before it acts** (`resources/templates/list`):
-   `roll://projects/{project}` (a workspace project's canvas and what each resource is) and
-   `roll://tokens/{id}` (a token in words), read through the gate like `roll://access/me`, so a
-   client can attach context without a tool call; arguments completed like prompts' (in progress).
-2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
    (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
    project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
-3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-4. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: progress while a call waits (`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel); `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and you say so); prompts' arguments complete from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
+Done lately: a project's page as a resource template (`roll://projects/{project}`, read through the gate, its id completed); progress while a call waits (`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel); `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and you say so); prompts' arguments complete from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
 #28 and search #29 pass rolld's route test); a preview's share link is reveal (`previews_share`);
 search's index mapping, settings, refresh and analyze as MCP tools; the ninth review's findings
 (apps settings that change what production runs, its source, build, start and pre-deploy commands,

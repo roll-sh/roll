@@ -8,6 +8,9 @@ use roll_auth::scope::{Resources, Rule, Selector};
 use serde_json::{Value, json};
 
 pub const GUIDE: &str = "roll://guide";
+/// A workspace project and what's on its canvas (`resources/templates/list`).
+pub const PROJECT_TEMPLATE: &str = "roll://projects/{project}";
+const PROJECT_PREFIX: &str = "roll://projects/";
 pub const ME: &str = "roll://access/me";
 /// The route `roll://access/me` reads.
 pub const ME_ROUTE: &str = "/v1/access";
@@ -29,6 +32,50 @@ pub fn list() -> Value {
             "mimeType": "text/markdown",
         },
     ])
+}
+
+/// The templates for a connection with `tools`: a project's page only with the workspace's list.
+pub fn templates(tools: &[String]) -> Value {
+    let mut out = Vec::new();
+    if tools.iter().any(|t| t == "workspace_list_projects") {
+        out.push(json!({
+            "uriTemplate": PROJECT_TEMPLATE,
+            "name": "project",
+            "title": "A workspace project",
+            "description": "A project and every resource on its canvas (kind and id), to attach before acting on it.",
+            "mimeType": "text/markdown",
+        }));
+    }
+    json!(out)
+}
+
+/// The project id `uri` names (`roll://projects/prj_…`), when it's one: letters, digits, `_` and
+/// `-` only, so it can't reach another route.
+pub fn project_of(uri: &str) -> Option<&str> {
+    let id = uri.strip_prefix(PROJECT_PREFIX)?;
+    (!id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')).then_some(id)
+}
+
+/// `roll://projects/{project}` from `GET /v1/workspace/projects/{project}`: words first, the JSON
+/// after. Names are the tenant's, so they're quoted.
+pub fn project(uri: &str, answer: &Value) -> Value {
+    let mut text = format!("Workspace project {} ({}).", lit(answer["name"].as_str().unwrap_or("")), answer["id"].as_str().unwrap_or(""));
+    if let Some(d) = answer["description"].as_str().filter(|d| !d.is_empty()) {
+        text.push_str(&format!(" Its description: {}.", lit(d)));
+    }
+    let resources = answer["resources"].as_array().cloned().unwrap_or_default();
+    if resources.is_empty() {
+        text.push_str("\n\nNothing is on its canvas yet.\n");
+    } else {
+        text.push_str("\n\nOn its canvas (kind, then the id tools take):\n\n");
+        for r in &resources {
+            text.push_str(&format!("- {} {}\n", r["kind"].as_str().unwrap_or("?"), lit(r["ref"].as_str().unwrap_or(""))));
+        }
+    }
+    json!({ "contents": [
+        { "uri": uri, "mimeType": "text/markdown", "text": text },
+        { "uri": uri, "mimeType": "application/json", "text": answer.to_string() },
+    ] })
 }
 
 pub fn guide() -> Value {

@@ -223,6 +223,17 @@ async fn prompt_arguments_complete_from_what_it_may_read() {
     // A Postgres project completes from Postgres's own list, not the workspace's.
     let pg = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/prompt", "name": "try_migration_on_branch" }, "argument": { "name": "project", "value": "" } })).await;
     assert_eq!(pg["completion"]["values"], json!(["pa"]), "{pg}");
+    // A project's page (a resource template): listed, read through the gate, its id completed.
+    let templates = d.rpc(OPERATOR, "resources/templates/list", json!({})).await;
+    assert_eq!(templates["resourceTemplates"][0]["uriTemplate"], "roll://projects/{project}", "{templates}");
+    let (_, _, made) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
+    let uri = format!("roll://projects/{}", made["id"].as_str().unwrap());
+    let page = d.rpc(OPERATOR, "resources/read", json!({ "uri": uri })).await;
+    assert!(page["contents"][0]["text"].as_str().unwrap().contains("\"shop\""), "{page}");
+    let sneaky = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": "roll://projects/../../v1/access/tokens" } }))).await.2;
+    assert_eq!(sneaky["error"]["code"], -32002, "an id that isn't one reaches no route: {sneaky}");
+    let ids = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://projects/{project}" }, "argument": { "name": "project", "value": "sh" } })).await;
+    assert!(ids["completion"]["values"].as_array().unwrap().iter().any(|v| v == "shop"), "{ids}");
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
     let none = d.rpc(&reader, "completion/complete", ask("")).await;
     assert_eq!(none["completion"]["values"], json!([]), "{none}");
