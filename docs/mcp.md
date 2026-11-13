@@ -300,7 +300,7 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **A fourth security review** (in progress) of `ask_otherwise`, `variables_from`, the gates and users' own
+1. **A fourth security review** (fixed; see the PR) of `ask_otherwise`, `variables_from`, the gates and users' own
    tokens' latest changes.
 2. **Blocked on sibling PRs reaching main:** wire previews', search's, apps' and secrets' lookups
    and environment resolvers; secrets' `Grant` swap; one sink module with secrets; apps' deploys

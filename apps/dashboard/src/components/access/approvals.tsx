@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, productName, REMEMBER, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -83,7 +83,7 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
       setBusy(null);
     }
   };
-  const destructive = a.action === "delete" || a.action === "deploy";
+  const destructive = RISKY.includes(a.action);
   return (
     <article className={`rise rounded-xl border bg-panel p-5 ${focused ? "border-accent/60" : "border-line"}`}>
       <div className="flex flex-wrap items-start gap-3">

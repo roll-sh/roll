@@ -916,9 +916,12 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/domains/{host}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
-    // A shell (a WebSocket's GET) and its screen run commands where the service runs: deploy* too.
-    row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
-    row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    // A shell runs any command where the service runs, with its variables (`env` prints them all):
+    // admin in every environment, as an agent's shell is. Its WebSocket, sessions, keys and screen.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/shell", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("GET", "/v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     // Waking a sleeping environment and checking a domain change nothing a person sees.
     row("POST", "/v1/apps/services/{id}/environments/{env}/wake", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1161,6 +1164,8 @@ mod tests {
         assert_eq!(git_push(b"0000", Some("main")), Push::Bad);
         assert_eq!(git_push(pkt(&format!("{z} {a}")).as_bytes(), Some("main")), Push::Bad);
         assert_eq!(action("POST", "/v1/previews/projects/{p}/bypass", "/v1/previews/projects/prj_a/bypass"), Some(Action::Reveal));
+        // An apps shell runs any command with the environment's variables: admin, outside production too.
+        assert_eq!(action("POST", "/v1/apps/services/{s}/environments/{e}/shell/sessions/{sh}/keys", "/v1/apps/services/s/environments/staging/shell/sessions/x/keys"), Some(Action::Admin));
         // Secrets' identities mint tokens; renewing a lease extends a credential.
         assert_eq!(action("GET", "/v1/secrets/projects/{p}/identities", "x"), Some(Action::Admin));
         assert_eq!(action("POST", "/v1/secrets/projects/{p}/leases/{l}/renew", "x"), Some(Action::Reveal));
