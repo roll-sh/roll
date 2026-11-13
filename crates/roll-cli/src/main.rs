@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 mod nosql;
 mod queues;
+mod preview;
 mod storage;
 mod redis;
 mod apps;
@@ -87,6 +88,10 @@ enum Cmd {
     /// S3-compatible object storage.
     #[command(subcommand, alias = "s3")]
     Storage(storage::Storage),
+    /// Preview environments: every service and a branch of every data resource of a project,
+    /// per change or pull request.
+    #[command(subcommand, alias = "previews")]
+    Preview(preview::Preview),
 }
 
 #[derive(Subcommand)]
@@ -198,6 +203,29 @@ struct Api {
 }
 
 impl Api {
+    /// A GET whose body is read as it comes (server-sent events): the response, once its
+    /// status is a success.
+    async fn open_stream(&self, path: &str) -> anyhow::Result<reqwest::Response> {
+        let mut req = self.http.get(format!("{}{path}", self.base));
+        if let Some(k) = &self.key {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            match value["error"].as_str() {
+                Some(e) => bail!("{e}"),
+                None => bail!("{status}"),
+            }
+        }
+        Ok(res)
+    }
+
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method, format!("{}{path}", self.base));
         if let Some(k) = &self.key {
@@ -397,6 +425,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
+        Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

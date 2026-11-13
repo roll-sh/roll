@@ -163,6 +163,7 @@ pub fn router(b: Arc<Broker>) -> Router {
         .route("/v1/kafka", get(info))
         .route("/v1/streams", get(list_streams).post(create_stream))
         .route("/v1/streams/{s}", get(get_stream).patch(update_stream).delete(delete_stream))
+        .route("/v1/streams/{s}/branches", post(branch_stream))
         .route("/v1/streams/{s}/keys", get(list_keys).post(create_key))
         .route("/v1/streams/{s}/keys/{username}", delete(delete_key))
         .route("/v1/streams/{s}/topics", get(list_topics).post(create_topic))
@@ -510,7 +511,36 @@ async fn get_stream(State(api): S, Path(key): Path<String>) -> ApiResult<Json<Va
     let mut v = stream_view(&api, &s);
     v["topic_list"] = Value::Array(s.topics().iter().map(|t| topic_summary(t)).collect());
     v["keys"] = Value::Array(api.b.store.credentials(&s.id).map_err(KafkaError::internal)?.iter().map(key_view).collect());
+    lineage(&api, &s, &mut v)?;
     Ok(Json(v))
+}
+
+/// What a stream was branched from (`branch_of`, or null) and its bytes in object storage,
+/// split into its own and what it shares with a parent or branches (`storage`).
+fn lineage(api: &Api, s: &Stream, v: &mut Value) -> ApiResult<()> {
+    let b = &api.b.store;
+    v["branch_of"] = match b.branch_of(&s.id).map_err(KafkaError::internal)? {
+        Some((parent, at)) => json!({ "stream": parent, "created_at": at }),
+        None => Value::Null,
+    };
+    v["storage"] = json!(b.remote_bytes_of(&s.id).map_err(KafkaError::internal)?);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct CreateBranch {
+    name: String,
+}
+
+/// `POST /v1/streams/{s}/branches`: a new stream with `s`'s topics, records (shared, not
+/// copied) and committed offsets. Its first key's secret is in the answer, once.
+async fn branch_stream(State(api): S, Path(key): Path<String>, Json(req): Json<CreateBranch>) -> ApiResult<(StatusCode, Json<Value>)> {
+    let parent = stream_of(&api, &key)?;
+    let (s, cred, secret) = api.b.branch_stream(&parent, &req.name).await?;
+    let mut v = stream_view(&api, &s);
+    v["connect"] = connect_view(&api, &s, &cred.username, &secret);
+    lineage(&api, &s, &mut v)?;
+    Ok((StatusCode::CREATED, Json(v)))
 }
 
 #[derive(Deserialize)]
@@ -766,24 +796,27 @@ async fn usage(State(api): S, Path(key): Path<String>, Query(q): Query<UsageQuer
     let since = now() - hours * 3600;
     let rows = api.b.store.usage_since(&s.id, since).map_err(KafkaError::internal)?;
     let storage = api.b.store.storage_since(&s.id, since).map_err(KafkaError::internal)?;
+    let remote = api.b.store.remote_bytes_of(&s.id).map_err(KafkaError::internal)?;
     Ok(Json(json!({
         "stream": s.id,
         "hours": hours,
         "usage": rows,
         "storage": storage,
-        "estimate": estimate(&api.b.config.pricing, &rows, &storage, hours),
+        "remote": remote,
+        "estimate": estimate(&api.b.config.pricing, &rows, &storage, remote.own_bytes, hours),
     })))
 }
 
-/// Project the window onto a 730-hour month.
-fn estimate(p: &crate::config::Pricing, rows: &[crate::store::UsageRow], storage: &[crate::store::StorageSample], hours: i64) -> Value {
+/// Project the window onto a 730-hour month. Object storage is billed for the stream's own
+/// bytes: a branch doesn't pay for what it shares with its parent.
+fn estimate(p: &crate::config::Pricing, rows: &[crate::store::UsageRow], storage: &[crate::store::StorageSample], own_bytes: i64, hours: i64) -> Value {
     const GB: f64 = 1e9;
     let scale = 730.0 / hours as f64;
     let sum = |f: fn(&crate::store::UsageRow) -> i64| rows.iter().map(f).sum::<i64>() as f64 * scale;
     let (bytes_in, bytes_out) = (sum(|r| r.bytes_in), sum(|r| r.bytes_out));
     let (puts, gets) = (sum(|r| r.puts), sum(|r| r.gets));
     let last = storage.last();
-    let remote_gb = last.map(|s| s.remote_bytes as f64 / GB).unwrap_or(0.0);
+    let remote_gb = own_bytes as f64 / GB;
     let local_gb = last.map(|s| s.local_bytes as f64 / GB).unwrap_or(0.0);
     let s3 = remote_gb * p.usd_per_gb_month_s3;
     let local = local_gb * p.usd_per_gb_month_local;

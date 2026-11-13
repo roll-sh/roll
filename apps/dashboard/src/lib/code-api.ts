@@ -323,6 +323,27 @@ export interface Preview {
   redis: { db_id: string } | null;
   error: string | null;
   created_at: number;
+  /** A preview environment of the change's workspace project (roll previews, docs/previews.md). */
+  environment?: PreviewEnvironment;
+}
+
+/** roll previews' `Preview` as a change shows it (`PreviewEnvironment` in code-control's model.rs). */
+export interface PreviewEnvironment {
+  /** `pv_…`. */
+  id: string;
+  slug: string;
+  state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
+  services: { name: string; url: string; state: string }[];
+  resources: { kind: string; parent: string; ref: string | null }[];
+  sleeping_usd_month: number;
+  active_usd_hour: number;
+  /** The preview on the dashboard (its project's Previews tab). */
+  dashboard_url: string | null;
+  github: { comment: boolean; status: boolean; deployment: boolean };
+  /** The changeset the preview runs. */
+  head?: string;
+  /** What the change did to the Postgres schema (`+ …`, `- …`). */
+  schema_changes?: string[];
 }
 
 export interface Change {
@@ -839,7 +860,7 @@ export interface Blame {
 
 // ── webhooks and commit statuses ──
 
-export const WEBHOOK_EVENTS = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push"] as const;
+export const WEBHOOK_EVENTS = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push", "budget"] as const;
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
 export interface Webhook {
@@ -1109,6 +1130,8 @@ export interface CodeEvents {
   review: Review;
   thread: Thread;
   push: PushEvent;
+  /** A workspace project's previews passed a share of their monthly budget (roll previews). */
+  budget: { budget: { project: string; project_name: string; percent: number; spent_usd_month: number; max_usd_month: number }; dashboard_url: string | null };
 }
 
 // ── client ──
@@ -1407,7 +1430,7 @@ export const isNotFound = (e: unknown) => e instanceof ApiError && e.status === 
 
 export type EventHandlers = { [K in keyof CodeEvents]?: (data: CodeEvents[K]) => void } & { open?: (open: boolean) => void };
 
-const EVENT_KINDS: (keyof CodeEvents)[] = ["landed", "change", "work", "check", "preview", "queue", "review", "thread", "push"];
+const EVENT_KINDS: (keyof CodeEvents)[] = ["landed", "change", "work", "check", "preview", "queue", "review", "thread", "push", "budget"];
 
 /** Route one raw event to its handler; unknown kinds and bad JSON are dropped. */
 export function dispatchEvent(handlers: EventHandlers, kind: string, data: string) {

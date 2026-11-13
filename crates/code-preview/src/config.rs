@@ -59,6 +59,9 @@ pub struct CheckSpec {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewSpec {
+    /// The service's name in a roll preview environment (docs/previews.md, "Services"); the
+    /// repo's name when not set.
+    pub name: Option<String>,
     pub image: String,
     pub run: String,
     pub port: u16,
@@ -101,6 +104,7 @@ struct RawCheck {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPreview {
+    name: Option<String>,
     image: String,
     run: String,
     port: u16,
@@ -174,7 +178,14 @@ impl RollToml {
                 {
                     return Err(format!("{FILE} {at}: redis must be a roll Redis database id (rdb_…)"));
                 }
+                let label = |n: &str| {
+                    (1..=20).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !n.starts_with('-') && !n.ends_with('-')
+                };
+                if p.name.as_deref().is_some_and(|n| !label(n)) {
+                    return Err(format!("{FILE} {at}: name is 1-20 characters of a-z, 0-9 and -"));
+                }
                 Some(PreviewSpec {
+                    name: p.name,
                     image: image(at, p.image)?,
                     run: run(at, p.run)?,
                     port: p.port,
