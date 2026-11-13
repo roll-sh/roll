@@ -619,7 +619,10 @@ activity(preview_id TEXT NOT NULL, at INTEGER NOT NULL, seq INTEGER NOT NULL, me
 
 ## HTTP contract
 
-Bodies are JSON. Every error is `{"error": string}`.
+Bodies are JSON. Every error is `{"error": string}`. A signed-in person who isn't an admin sees
+only the previews of their own workspace projects (as the workspace scopes them): another
+owner's preview or project is a 404. Tokens (their scopes are roll MCP's catalog), the operator
+and admins see every project.
 
 | Route | Body | Answer |
 | --- | --- | --- |
@@ -826,6 +829,8 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- main merged in (roll MCP and accounts), and the previews API scoped to a signed-in person's own
+  projects;
 - a seventh review and its fixes (health checks never hold a converge slot; a start notices a
   stop while it boots, and a stop keeps a start asked for after it; the feedback tag streams in,
   only on page loads, with the path but never the query; warming skips slept previews and other

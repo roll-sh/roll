@@ -24,6 +24,7 @@ hyper-util.workspace = true
 parking_lot.workspace = true
 roll-cluster.workspace = true
 roll-workspace.workspace = true
+roll-auth.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -33,3 +34,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tower.workspace = true

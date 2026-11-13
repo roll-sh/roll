@@ -502,3 +502,40 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     e.engine.pass().await.unwrap();
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8d".into())));
 }
+
+/// A signed-in person sees only their own projects' previews (as the workspace's projects); a
+/// token, the operator and admins see all.
+#[tokio::test]
+async fn a_signed_in_person_sees_only_their_own_projects_previews() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_o", 2));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_o").unwrap().unwrap();
+    let call = |who: Option<(&str, bool)>, path: String| {
+        let router = roll_previews::api::router(e.engine.clone());
+        let who = who.map(|(user, admin)| roll_auth::SignedIn { user: user.into(), handle: user.into(), admin, code_owner: None, session: "ses_1".into() });
+        async move {
+            let mut req = axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap();
+            if let Some(w) = who {
+                req.extensions_mut().insert(w);
+            }
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status().as_u16();
+            let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+            (status, String::from_utf8_lossy(&body).to_string())
+        }
+    };
+    // Someone else's (the operator's project): not there for them.
+    let other = Some(("usr_b", false));
+    assert_eq!(call(other, "/v1/previews".into()).await, (200, "[]".to_string()));
+    assert_eq!(call(other, format!("/v1/previews/{}", p.id)).await.0, 404);
+    assert_eq!(call(other, format!("/v1/previews/{}/env", p.id)).await.0, 404);
+    assert_eq!(call(other, format!("/v1/previews/projects/{}/settings", e.project)).await.0, 404);
+    // Their own project's: there.
+    let mine = e.ws.create("usr_b", "mine", "", None).unwrap();
+    assert_eq!(call(other, format!("/v1/previews/projects/{}/settings", mine.id)).await.0, 200);
+    // A token (no signed-in person) and an admin see it.
+    assert_eq!(call(None, format!("/v1/previews/{}", p.id)).await.0, 200);
+    assert_eq!(call(Some(("usr_c", true)), format!("/v1/previews/{}", p.id)).await.0, 200);
+}

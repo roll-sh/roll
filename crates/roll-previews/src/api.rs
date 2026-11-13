@@ -41,7 +41,53 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
         .route("/v1/previews/projects/{project}/bypass", get(bypass).post(rotate_bypass).delete(delete_bypass))
+        .route_layer(axum::middleware::from_fn_with_state(engine.clone(), scoped))
         .with_state(engine)
+}
+
+/// The projects a signed-in person who isn't an admin may see previews of: their own, as the
+/// workspace API scopes them. `None`: every project (tokens, the operator, admins).
+#[derive(Clone)]
+struct Visible(Option<std::collections::HashSet<String>>);
+
+impl Visible {
+    fn sees(&self, project: &str) -> bool {
+        self.0.as_ref().is_none_or(|p| p.contains(project))
+    }
+}
+
+/// Another owner's preview or project is a 404 to a signed-in person (as the workspace's own
+/// projects are), so they can't learn it exists. The screenshot's signed link stays public.
+async fn scoped(AxState(e): S, mut req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let who = req.extensions().get::<roll_auth::SignedIn>().filter(|u| !u.admin).map(|u| u.user.clone());
+    let visible = match who {
+        None => Visible(None),
+        Some(user) => {
+            let e2 = e.clone();
+            match blocking(e2, move |e| e.projects_of(&user)).await {
+                Ok(ids) => Visible(Some(ids)),
+                Err(err) => return err.into_response(),
+            }
+        }
+    };
+    let path = req.uri().path().to_string();
+    let rest: Vec<&str> = path.trim_start_matches("/v1/previews").trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let project = match rest.as_slice() {
+        ["projects", project, ..] => Some(project.to_string()),
+        [_, "screenshot.png"] => None,
+        [id, ..] => match e.store.row(id) {
+            Ok(r) => Some(r.project_id),
+            Err(_) => None,
+        },
+        [] => None,
+    };
+    if let Some(p) = project
+        && !visible.sees(&p)
+    {
+        return Error::NotFound("no such preview or project".into()).into_response();
+    }
+    req.extensions_mut().insert(visible);
+    next.run(req).await
 }
 
 /// Run on the preview's holder (`preview:<id>`), which runs its services, forwarding if need be.
@@ -96,14 +142,17 @@ struct ListQuery {
     state: Option<String>,
 }
 
-async fn list(AxState(e): S, Query(q): Query<ListQuery>) -> crate::Result<Json<Vec<Preview>>> {
+async fn list(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, Query(q): Query<ListQuery>) -> crate::Result<Json<Vec<Preview>>> {
     let state = q.state.as_deref().map(State::parse).transpose()?;
     blocking(e, move |e| {
         if let Some(p) = &q.project {
+            if !visible.sees(p) {
+                return Err(Error::NotFound("no such preview or project".into()));
+            }
             e.workspace_project(p)?;
         }
         let rows = e.store.rows(q.project.as_deref())?;
-        rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s)).map(|r| e.store.view(r)).collect::<crate::Result<Vec<_>>>()
+        rows.into_iter().filter(|r| visible.sees(&r.project_id) && state.is_none_or(|s| r.state == s)).map(|r| e.store.view(r)).collect::<crate::Result<Vec<_>>>()
     })
     .await
     .map(Json)
@@ -118,12 +167,16 @@ struct CreateBody {
     change: Option<String>,
 }
 
-async fn create(AxState(e): S, b: Bytes) -> crate::Result<Response> {
+async fn create(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Response> {
     let b: CreateBody = body(&b)?;
     if b.branch.is_some() == b.change.is_some() {
         return Err(Error::BadRequest("give one of branch or change".into()));
     }
-    let (p, made) = e.create(&b.project, &b.repo, b.branch.as_deref(), b.change.as_deref(), "operator").await?;
+    if !visible.sees(&b.project) {
+        return Err(Error::NotFound("no such preview or project".into()));
+    }
+    let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
+    let (p, made) = e.create(&b.project, &b.repo, b.branch.as_deref(), b.change.as_deref(), &by).await?;
     let status = if made { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(p)).into_response())
 }
