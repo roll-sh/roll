@@ -48,6 +48,12 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
       <p className="font-mono text-[11px] text-subtle tabular-nums">
         {money(env.sleeping_usd_month)}/mo asleep · {money(env.active_usd_hour)}/h active
       </p>
+      {env.page_health && (env.page_health.errors > 0 || env.page_health.failed > 0) && (
+        <p className="break-words text-[12px] text-danger">
+          While its first page loaded: {[env.page_health.errors > 0 ? `${env.page_health.errors} ${env.page_health.errors === 1 ? "error" : "errors"}` : "", env.page_health.failed > 0 ? `${env.page_health.failed} failed ${env.page_health.failed === 1 ? "request" : "requests"}` : ""].filter(Boolean).join(", ")}
+          {env.page_health.first_error ? ` (${env.page_health.first_error})` : ""}
+        </p>
+      )}
       {env.page_speed && (
         <p className="font-mono text-[11px] text-subtle tabular-nums">
           load {env.page_speed.load_ms < 1000 ? `${env.page_speed.load_ms} ms` : `${(env.page_speed.load_ms / 1000).toFixed(1)} s`}

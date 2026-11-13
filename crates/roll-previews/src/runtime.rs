@@ -871,7 +871,7 @@ impl Apps for Runtime {
         let (b64, speed) = out.split_once('\n').unwrap_or((out.as_str(), ""));
         let png = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
-        Ok(Some(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed) }))
+        Ok(Some(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed) }))
     }
 
     async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {

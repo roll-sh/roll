@@ -377,7 +377,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -970,6 +970,18 @@ impl Store {
         })
     }
 
+    /// What went wrong while the latest screenshot's page loaded (after `set_screenshot`).
+    pub fn set_page_health(&self, id: &str, health: Option<&crate::PageHealth>) -> Result<()> {
+        let health = health.and_then(|h| serde_json::to_string(h).ok());
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ? WHERE preview_id = ?", params![health, id])?))?;
+        Ok(())
+    }
+
+    pub fn page_health(&self, id: &str) -> Result<Option<crate::PageHealth>> {
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row("SELECT health FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
     /// How fast the page loaded at the latest screenshot, and at the one before.
     pub fn page_speed(&self, id: &str) -> Result<Option<crate::PageSpeedView>> {
         let row: Option<(Option<String>, Option<String>)> = self.db.read(|c| c.query_row("SELECT speed, prev_speed FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
@@ -1274,6 +1286,7 @@ impl Store {
         let screenshot_at = self.screenshot_at(&r.id)?;
         let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0 });
         let page_speed = self.page_speed(&r.id)?;
+        let page_health = self.page_health(&r.id)?;
         let screenshot_link = self.screenshot_link(&r.id)?;
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
@@ -1317,6 +1330,7 @@ impl Store {
             screenshot_at,
             visual_change,
             page_speed,
+            page_health,
             screenshot_link,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,

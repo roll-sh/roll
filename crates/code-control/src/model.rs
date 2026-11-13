@@ -308,6 +308,17 @@ pub struct PreviewEnvironment {
     /// How fast the first service's page loaded at this head (and its load at the head before).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_speed: Option<PreviewPageSpeed>,
+    /// What went wrong while that page loaded (the page's own words: untrusted, one line each).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_health: Option<PreviewPageHealth>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewPageHealth {
+    pub errors: u32,
+    pub first_error: Option<String>,
+    pub failed: u32,
+    pub first_failed: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

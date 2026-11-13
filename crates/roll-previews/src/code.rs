@@ -115,6 +115,7 @@ impl CodeSource {
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
                 expires_at: p.goes_at,
+                page_health: p.page_health.as_ref().map(|h| code_control::model::PreviewPageHealth { errors: h.errors, first_error: h.first_error.clone(), failed: h.failed, first_failed: h.first_failed.clone() }),
                 page_speed: p.page_speed.as_ref().map(|v| code_control::model::PreviewPageSpeed {
                     ttfb_ms: v.now.ttfb_ms,
                     fcp_ms: v.now.fcp_ms,

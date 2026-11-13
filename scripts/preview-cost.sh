@@ -316,7 +316,9 @@ until_head "$DOCS_HEAD"
 RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
 [ "$(bare "$RUNS")" = "$(bare "$BUILD")" ] || { echo "a docs-only push should keep the services on $BUILD, not $RUNS"; exit 1; }
 WAITED2=$(ROLL_API_URL="http://$API" "$ROLL_CLI" preview wait --change "$CHG" --timeout 30) || { echo "roll preview wait should pass for the docs-only head"; exit 1; }
-api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Code","files":{"index.html":{"content":"preview of change 1, third"},"docs/setup.md":{"content":"how to run it"}}}' >/dev/null
+# This one's page logs an error, which its screenshot's load must catch.
+THIRD='preview of change 1, third<script>console.error(\"boom\")</script>'
+api POST "/v1/code/changes/$CHG/revise" "{\"base\":\"main\",\"message\":\"Code\",\"files\":{\"index.html\":{\"content\":\"$THIRD\"},\"docs/setup.md\":{\"content\":\"how to run it\"}}}" >/dev/null
 CODE_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
 until_head "$CODE_HEAD"
 for _ in $(seq 1 120); do
@@ -331,7 +333,7 @@ for _ in $(seq 1 60); do
 done
 [ "$WARM" = yes ] || { echo "the service should be woken after the push, before any visit"; exit 1; }
 PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
-[ "$PAGE" = "preview of change 1, third" ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
+[ "$PAGE" = 'preview of change 1, third<script>console.error("boom")</script>' ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
 KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"
 # The push before stays reachable at a URL of its own, on the same data (Vercel's per-push URLs).
 EARLIER_URL=$(api GET "/v1/previews/$PV" | jq_ "((d.get('earlier') or [{}])[0]).get('share_url') or ''")
@@ -355,6 +357,14 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ -n "$VISUAL" ] || { echo "the preview should say how much its page changed since the push before"; exit 1; }
+# What went wrong while the page loaded: its console.error, caught by the screenshot's browser.
+HEALTH=""
+for _ in $(seq 1 120); do
+  HEALTH=$(api GET "/v1/previews/$PV" | jq_ "('%s error(s), first: %s; %s failed' % (d['page_health']['errors'], d['page_health']['first_error'], d['page_health']['failed'])) if (d.get('page_health') or {}).get('errors') else ''")
+  case "$HEALTH" in *boom*) break;; esac
+  sleep 0.5
+done
+case "$HEALTH" in *boom*) ;; *) echo "the page's console.error should be caught: $(api GET "/v1/previews/$PV" | jq_ "d.get('page_health')")"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?previous=1")" = image/png ] || { echo "the screenshot before should be there"; exit 1; }
 
 say "[skip preview] in the title removes the preview; without it, a new one comes"
@@ -410,6 +420,7 @@ cat <<EOF
 | ignore_paths: docs/ | $KEPT |
 | \`[skip preview]\` in the title, then without it | removed, then a new preview |
 | A share link (1 hour): in through it / revoked | 200 / 401 |
+| What went wrong while the page loaded (a push whose page logs an error) | $HEALTH |
 | The page's change since the push before (screenshots) | $VISUAL |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |

@@ -354,6 +354,8 @@ export interface PreviewEnvironment {
   visual_change?: { since: string; percent: number };
   /** How fast that page loaded (timed with its screenshot), and its load at the head before. */
   page_speed?: { ttfb_ms: number; fcp_ms: number | null; load_ms: number; bytes: number; before_load_ms: number | null };
+  /** What went wrong while that page loaded (the page's own words). */
+  page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null };
 }
 
 export interface Change {

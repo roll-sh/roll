@@ -1,6 +1,7 @@
 // roll previews' screenshot and page speed (docs/previews.md, "Surfaces"): one load of the
 // page in the headless Chromium shell, driven over the DevTools protocol on a pipe (no port).
-// Writes the PNG to $OUT and the timings to $OUT.json. The page is the preview's code: what it
+// Writes the PNG to $OUT, and to $OUT.json the timings and what went wrong while it loaded
+// (uncaught exceptions, console errors, failed or 4xx/5xx requests). The page is the preview's code: what it
 // reports about itself is bounded by roll, never trusted for more than showing.
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -49,10 +50,22 @@ const SPEED = `JSON.stringify((() => {
   const bytes = [n, ...performance.getEntriesByType("resource")].reduce((s, e) => s + (e.transferSize || 0), 0);
   return { ttfb_ms: Math.round(n.responseStart || 0), fcp_ms: fcp ? Math.round(fcp.startTime) : null, load_ms: Math.round(n.loadEventEnd || n.duration || 0), bytes };
 })())`;
+const errors = [];
+const failed = [];
+const keep = (list, text) => list.length < 50 && list.push(String(text).slice(0, 300));
+listeners.add((m) => {
+  const p = m.params || {};
+  if (m.method === "Runtime.exceptionThrown") keep(errors, p.exceptionDetails?.exception?.description || p.exceptionDetails?.text || "an uncaught exception");
+  else if (m.method === "Runtime.consoleAPICalled" && p.type === "error") keep(errors, (p.args || []).map((a) => a.value ?? a.description ?? "").join(" "));
+  else if (m.method === "Network.responseReceived" && p.response?.status >= 400) keep(failed, `${p.response.status} ${p.response.url}`);
+  else if (m.method === "Network.loadingFailed" && !p.canceled) keep(failed, `${p.errorText} ${p.requestId}`);
+});
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
   await send("Page.enable", {}, sessionId);
+  await send("Runtime.enable", {}, sessionId);
+  await send("Network.enable", {}, sessionId);
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);
@@ -60,7 +73,13 @@ const SPEED = `JSON.stringify((() => {
   const speed = await send("Runtime.evaluate", { expression: SPEED, returnByValue: true }, sessionId).catch(() => null);
   const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
   fs.writeFileSync(process.env.OUT, Buffer.from(shot.data, "base64"));
-  if (speed && typeof speed.result?.value === "string") fs.writeFileSync(process.env.OUT + ".json", speed.result.value);
+  let report = {};
+  try {
+    report = JSON.parse(speed?.result?.value || "{}");
+  } catch {}
+  report.errors = errors;
+  report.failed = failed;
+  fs.writeFileSync(process.env.OUT + ".json", JSON.stringify(report));
   chrome.kill();
   process.exit(0);
 })().catch((e) => {

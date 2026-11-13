@@ -81,6 +81,8 @@ export interface Preview {
   visual_change?: { since: string; percent: number } | null;
   /** How fast its first page loaded at this head (timed with the screenshot), and at the one before. */
   page_speed?: { now: PageSpeed; before: PageSpeed | null } | null;
+  /** What went wrong while that page loaded (the page's own words: shown as text only). */
+  page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null } | null;
   /** Earlier pushes of the change's services, still reachable on the same data (newest first). */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number }[];
   /** When its screenshot was taken (`screenshot` below), if it has one. */

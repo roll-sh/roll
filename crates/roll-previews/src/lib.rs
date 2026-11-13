@@ -214,6 +214,8 @@ pub struct Preview {
     pub visual_change: Option<VisualChange>,
     /// How fast the first service's page loaded at this head, and at the head before.
     pub page_speed: Option<PageSpeedView>,
+    /// What went wrong while that page loaded (at the latest screenshot's head).
+    pub page_health: Option<PageHealth>,
     /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
     /// API answers.
     #[serde(skip)]
@@ -249,6 +251,34 @@ pub struct Service {
     pub memory_mb: i64,
     /// `url` with the access token, when one is needed.
     pub share_url: Option<String>,
+}
+
+/// What went wrong while the page loaded for its screenshot: uncaught exceptions and console
+/// errors, requests that failed or answered 4xx/5xx. The page's own words, so one line each,
+/// bounded, and only ever shown.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct PageHealth {
+    pub errors: u32,
+    pub first_error: Option<String>,
+    pub failed: u32,
+    pub first_failed: Option<String>,
+}
+
+impl PageHealth {
+    /// From what the browser wrote (`errors` and `failed` lists), if it wrote them.
+    pub fn parse(json: &str) -> Option<PageHealth> {
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            errors: Vec<String>,
+            failed: Vec<String>,
+        }
+        let r: Raw = serde_json::from_str(json.trim()).ok()?;
+        let line = |s: &String| -> String {
+            let one: String = s.lines().next().unwrap_or("").chars().filter(|c| !c.is_control() && *c != '`').take(200).collect();
+            one.trim().to_string()
+        };
+        Some(PageHealth { errors: r.errors.len().min(50) as u32, first_error: r.errors.first().map(line), failed: r.failed.len().min(50) as u32, first_failed: r.failed.first().map(line) })
+    }
 }
 
 /// The page's speed at the latest screenshot's head, and at the one before (to compare).
@@ -444,6 +474,10 @@ mod tests {
         assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":null,"load_ms":1200,"bytes":0}"#).unwrap().fcp_ms, None);
         assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":99999999,"bytes":0}"#), None, "a page that lies past 10 minutes");
         assert_eq!(PageSpeed::parse("<html>"), None);
+        // What went wrong: counted, the first of each kept to one printable line.
+        let h = PageHealth::parse(r#"{"ttfb_ms":1,"fcp_ms":null,"load_ms":2,"bytes":0,"errors":["TypeError: x is undefined\n    at app.js:3","`second`"],"failed":["500 http://127.0.0.1/api/cart"]}"#).unwrap();
+        assert_eq!((h.errors, h.first_error.as_deref(), h.failed, h.first_failed.as_deref()), (2, Some("TypeError: x is undefined"), 1, Some("500 http://127.0.0.1/api/cart")));
+        assert_eq!(PageHealth::parse(r#"{"ttfb_ms":1,"load_ms":2,"bytes":0}"#), None, "an operator's own command that times nothing");
         assert_eq!(PageSpeed::parse(""), None);
     }
 

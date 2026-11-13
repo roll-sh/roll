@@ -288,6 +288,22 @@ fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static
     }
 }
 
+/// The comment's line on what went wrong while the first page loaded. The page's own words go
+/// in code spans they can't leave.
+fn health_line(h: &crate::model::PreviewPageHealth) -> String {
+    let quote = |s: &Option<String>| s.as_deref().map(|t| t.replace('`', "").replace('\n', " ").chars().take(200).collect::<String>()).filter(|t| !t.trim().is_empty());
+    let mut parts = Vec::new();
+    if h.errors > 0 {
+        let first = quote(&h.first_error).map(|t| format!(" (first: `{t}`)")).unwrap_or_default();
+        parts.push(format!("{} {}{first}", h.errors, if h.errors == 1 { "error" } else { "errors" }));
+    }
+    if h.failed > 0 {
+        let first = quote(&h.first_failed).map(|t| format!(" (first: `{t}`)")).unwrap_or_default();
+        parts.push(format!("{} failed {}{first}", h.failed, if h.failed == 1 { "request" } else { "requests" }));
+    }
+    if parts.is_empty() { "Its first page loaded without errors.\n\n".into() } else { format!("**While its first page loaded:** {}.\n\n", parts.join("; ")) }
+}
+
 /// The comment's line on how fast the first page loaded, and how that moved since the push before.
 fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
     let t = |ms: u32| if ms < 1000 { format!("{ms} ms") } else { format!("{:.1} s", ms as f64 / 1000.0) };
@@ -379,6 +395,9 @@ fn preview_comment(c: &Change) -> String {
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
                 e.sleeping_usd_month, e.active_usd_hour
             ));
+            if let Some(line) = e.page_health.as_ref().map(health_line) {
+                out.push_str(&line);
+            }
             if let Some(line) = e.page_speed.as_ref().map(speed_line) {
                 out.push_str(&line);
             }
@@ -444,6 +463,7 @@ mod preview_tests {
             earlier: Vec::new(),
             visual_change: None,
             page_speed: None,
+            page_health: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));
@@ -466,5 +486,8 @@ mod preview_tests {
         let sp = |load_ms, before| crate::model::PreviewPageSpeed { ttfb_ms: 40, fcp_ms: Some(380), load_ms, bytes: 312_000, before_load_ms: before };
         assert_eq!(speed_line(&sp(1200, Some(900))), "Its first page loads in 1.2 s (+300 ms since the push before), first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
         assert_eq!(speed_line(&sp(800, None)), "Its first page loads in 800 ms, first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
+        let h = |errors, failed| crate::model::PreviewPageHealth { errors, first_error: Some("TypeError: `x` is undefined".into()), failed, first_failed: Some("500 http://x/api".into()) };
+        assert_eq!(health_line(&h(2, 1)), "**While its first page loaded:** 2 errors (first: `TypeError: x is undefined`); 1 failed request (first: `500 http://x/api`).\n\n");
+        assert_eq!(health_line(&h(0, 0)), "Its first page loaded without errors.\n\n");
     }
 }

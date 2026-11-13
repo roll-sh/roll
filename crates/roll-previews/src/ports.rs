@@ -137,6 +137,7 @@ pub struct ServiceSpec {
 pub struct Shot {
     pub png: Vec<u8>,
     pub speed: Option<crate::PageSpeed>,
+    pub health: Option<crate::PageHealth>,
 }
 
 /// roll code, as previews read it and report to it.

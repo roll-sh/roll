@@ -762,6 +762,11 @@ type Settings = {
     head before's to compare; "Its first page loads in 1.2 s (+300 ms since the push before)" in
     the comment). The page reports this about itself, so it's bounded (10 minutes, 10 GiB) and
     only ever shown. An operator's own screenshot command only has to write the PNG.
+    The same session catches what went wrong while the page loaded: uncaught exceptions,
+    `console.error`s, and requests that failed or answered 4xx/5xx (`page_health`, counts and the
+    first of each, one bounded line each because they're the page's own words; "**While its
+    first page loaded:** 2 errors (first: `TypeError: …`); 1 failed request" in the comment), so a
+    broken page that still looks right in its screenshot shows.
     For a `public` preview the pull request comment shows it through a signed link
     (`/v1/previews/{id}/screenshot.png?exp=…&sig=…`: HMAC-SHA256 of the preview and the expiry,
     30 days after the screenshot, under a key the previews store makes once; a public route,
@@ -864,6 +869,7 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- what went wrong while the page loaded (exceptions, console errors, failed requests);
 - expiring share links for people outside the team (revocable, shown once);
 - page speed per push (timed with the screenshot, compared with the push before);
 - the page's feedback listed by its button (who, what, its element outlined; roll apps' proxy

@@ -230,6 +230,21 @@ export function PreviewSheet({
             )}
 
             {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} /> : null}
+            {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (
+              <div className="mt-1.5 space-y-0.5 text-[11.5px] text-danger">
+                {p.page_health.errors > 0 && (
+                  <p className="break-words">
+                    {p.page_health.errors} {p.page_health.errors === 1 ? "error" : "errors"} while it loaded{p.page_health.first_error ? `: ${p.page_health.first_error}` : ""}
+                  </p>
+                )}
+                {p.page_health.failed > 0 && (
+                  <p className="break-words">
+                    {p.page_health.failed} failed {p.page_health.failed === 1 ? "request" : "requests"}
+                    {p.page_health.first_failed ? `: ${p.page_health.first_failed}` : ""}
+                  </p>
+                )}
+              </div>
+            )}
             {p.page_speed && (
               <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="Timed by the browser that took the screenshot">
                 load {duration(p.page_speed.now.load_ms)}
