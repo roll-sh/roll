@@ -4,7 +4,7 @@ import type { PreviewEnvironment } from "@/lib/code-api";
 import type { PreviewKind } from "@/lib/previews-api";
 import { PREVIEW_KIND_ICON } from "../workspace/preview-sheet";
 import { host, money, STATE_LABEL, StateDot } from "../workspace/previews-common";
-import { a11yWords, previewsApi } from "@/lib/previews-api";
+import { a11yWords, previewsApi, thanMain } from "@/lib/previews-api";
 import { errorText } from "../workspace/previews-common";
 
 /**
@@ -64,6 +64,7 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           {env.page_speed.before_load_ms != null && env.page_speed.before_load_ms !== env.page_speed.load_ms
             ? ` (${env.page_speed.load_ms > env.page_speed.before_load_ms ? "+" : "−"}${Math.abs(env.page_speed.load_ms - env.page_speed.before_load_ms)} ms since the push before)`
             : ""}
+          {env.base_change && thanMain(env.page_speed.load_ms, env.base_change.load_ms, env.base_change.branch) ? ` · ${thanMain(env.page_speed.load_ms, env.base_change.load_ms, env.base_change.branch)}` : ""}
         </p>
       )}
       {env.visual_change && (

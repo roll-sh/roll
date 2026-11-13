@@ -80,7 +80,7 @@ export interface Preview {
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null } | null;
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null } | null;
   /** The project's other pages (`github.pages`) at the latest screenshot. */
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
@@ -350,3 +350,12 @@ export const isProduction = (env: string) => ["production", "prod", "live"].incl
 
 /** The URL to open: with the access token when the preview is private. */
 export const openUrl = (x: { url: string | null; share_url?: string | null }) => x.share_url ?? x.url ?? undefined;
+
+/** How a load compares with the default branch's, past the noise (100 ms and a tenth): "300 ms slower than main"; the comment says the same. */
+export function thanMain(now: number, main: number | null | undefined, branch: string): string | null {
+  if (main == null) return null;
+  const d = now - main;
+  if (Math.abs(d) < 100 || Math.abs(d) * 10 < main) return null;
+  const t = Math.abs(d) < 1000 ? `${Math.abs(d)} ms` : `${(Math.abs(d) / 1000).toFixed(1)} s`;
+  return `${t} ${d > 0 ? "slower" : "faster"} than ${branch}`;
+}

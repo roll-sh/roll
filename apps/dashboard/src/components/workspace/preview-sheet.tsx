@@ -1,7 +1,7 @@
 import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { a11yWords, duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { a11yWords, duration, followLogs, openUrl, previewsApi, screenshotUrl, resourceId, thanMain, type PageCheck, type Preview, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, type PreviewFeedback } from "./preview-feedback";
@@ -279,6 +279,7 @@ export function PreviewSheet({
                   : ""}
                 {p.page_speed.now.fcp_ms != null ? ` · first paint ${duration(p.page_speed.now.fcp_ms)}` : ""} · {formatBytes(p.page_speed.now.bytes)} · first byte{" "}
                 {duration(p.page_speed.now.ttfb_ms)}
+                {p.base_change && thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch) ? ` · ${thanMain(p.page_speed.now.load_ms, p.base_change.load_ms, p.base_change.branch)}` : ""}
               </p>
             )}
 
@@ -580,7 +581,7 @@ function Screenshot({
   at: number;
   change?: { since: string; percent: number; phone_percent?: number | null } | null;
   phone?: boolean;
-  base?: { branch: string; percent: number; phone_percent: number | null; head?: string | null } | null;
+  base?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null } | null;
   pages?: PageCheck[];
 }) {
   // Which page: the first (`/`) or another of the project's (desktop only).

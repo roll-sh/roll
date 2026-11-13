@@ -358,7 +358,7 @@ export interface PreviewEnvironment {
   /** What went wrong while that page loaded (the page's own words). */
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null };
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null };
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null };
   /** The project's other pages (`github.pages`): errors while each loaded, change since the push before, against the default branch. */
   pages?: { path: string; errors: number; percent: number | null; base_percent: number | null }[];
   /** The `roll/visual` review (the project's `visual_review`); `required`: it keeps the change from landing too. */

@@ -406,6 +406,9 @@ curl -sS -o "$HOME_DIR/diff.png" "http://$API/v1/previews/$PV/screenshot?diff=ba
 DIFF=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print('PNG' if b[:4]==b'\x89PNG' else 'not a PNG: ' + b[:200].decode('utf-8','replace'))" "$HOME_DIR/diff.png")
 [ "$DIFF" = PNG ] || { echo "the diff against main should be a PNG: $DIFF"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?diff=previous")" = image/png ] || { echo "the diff against the push before should be a PNG"; exit 1; }
+# Main's load where it was compared comes along (to say "300 ms slower than main").
+MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
+case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
 # The other page, taken in the same session and compared with main's.
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
 case "$PAGES" in "/pricing: "[1-9]*" error(s), "*"% against main") ;; *) echo "/pricing should be taken, with its 404, and compared with main's: $PAGES"; exit 1;; esac
@@ -486,7 +489,7 @@ cat <<EOF
 | What went wrong while the page loaded (a push whose page logs an error) | $HEALTH |
 | The page's change since the push before (screenshots) | $VISUAL |
 | The phone-width screenshot | $PHONE |
-| The change's page against main's preview | $BASE |
+| The change's page against main's preview | $BASE (main loads in $MAIN_LOAD ms) |
 | Another page (\`github.pages\`) | $PAGES |
 | Visual review (required): the change's page against main's, then accepted | changed (blockers $BLOCKED), then $REVIEW |
 | Accessibility of the test page (it has no lang and no title) | $A11Y |

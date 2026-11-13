@@ -374,6 +374,13 @@ fn byte_words(b: u64) -> String {
     if b >= 1 << 20 { format!("{:.1} MB", b as f64 / (1 << 20) as f64) } else { format!("{} KB", b.div_ceil(1024)) }
 }
 
+/// How a load compares with the default branch's, when the difference is more than noise (100 ms
+/// and a tenth): "300 ms slower than main".
+fn than_main(now: u32, main: u32, branch: &str) -> Option<String> {
+    let d = now as i64 - main as i64;
+    (d.unsigned_abs() >= 100 && d.unsigned_abs() * 10 >= main as u64).then(|| format!("{} {} than {branch}", ms_words(d.unsigned_abs() as u32), if d > 0 { "slower" } else { "faster" }))
+}
+
 /// What of the speed budget the first page is over (empty: within it).
 fn over_budget(b: &crate::model::PreviewSpeedBudget, s: &crate::model::PreviewPageSpeed) -> Vec<String> {
     let mut over = Vec::new();
@@ -471,7 +478,15 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
     }
     if let Some(s) = &e.page_speed {
         let over = e.speed_budget.as_ref().map(|b| over_budget(b, s)).unwrap_or_default();
-        summary.push(if over.is_empty() { format!("loads in {}", ms_words(s.load_ms)) } else { format!("loads in {}, over its budget", ms_words(s.load_ms)) });
+        let mut part = format!("loads in {}", ms_words(s.load_ms));
+        if !over.is_empty() {
+            part.push_str(", over its budget");
+        }
+        let main = e.base_change.as_ref().and_then(|b| Some((branch_name(&b.branch), b.load_ms?)));
+        if let Some(words) = main.as_ref().and_then(|(branch, ms)| than_main(s.load_ms, *ms, branch)) {
+            part.push_str(&format!(", {words}"));
+        }
+        summary.push(part);
         details.push_str(&speed_line(s));
     }
     (!summary.is_empty()).then(|| format!("<details><summary>Page checks: {}</summary>\n\n{details}</details>\n\n", summary.join(" · ")))
@@ -678,7 +693,7 @@ mod preview_tests {
         let a = crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img src=`x`>"), issue("buttons", 1, "<button></button>")], lang: false, title: true };
         assert_eq!(a11y_line(&a), "**Accessibility:** 3 images without alt text (first: `<img src=x>`); 1 button without a name (first: `<button></button>`); no page language.\n\n");
         assert_eq!(a11y_line(&crate::model::PreviewPageA11y { issues: vec![], lang: true, title: true }), "No accessibility problems found on its first page.\n\n");
-        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0) };
+        let b = crate::model::PreviewBaseChange { branch: "main`x".into(), percent: 8.04, phone_percent: Some(0.0), load_ms: None };
         assert_eq!(base_line(&b), "Against `mainx`, the page differs by 8.0%, at a phone's width the same.\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
@@ -701,6 +716,12 @@ mod preview_tests {
         timed.speed_budget = Some(crate::model::PreviewSpeedBudget { load_ms: 1000, bytes: 100_000 });
         assert_eq!(speed_status(&timed), Some(("failure", "Loads in 1.2 s, 305 KB: over its budget (1.0 s load, 98 KB)".into())));
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, over its budget</summary>"));
+        // Against main's load where it was compared: only a difference past the noise counts.
+        timed.speed_budget = None;
+        timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900) });
+        assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
+        assert_eq!(than_main(1000, 950, "main"), None, "noise");
+        assert_eq!(than_main(500, 900, "main").as_deref(), Some("400 ms faster than main"));
         let comment = page_checks(&e).unwrap();
         assert!(comment.contains(" · 2 more pages, most changed /pricing by 40.0%, 1 error on them · "), "{comment}");
         assert!(comment.contains("`/pricing`: changed 40.0% since the push before, differs from `mainx` by 2.0%, 1 error while it loaded.\n\n`/about`: unchanged since the push before."), "{comment}");

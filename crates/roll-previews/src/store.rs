@@ -251,6 +251,9 @@ struct Shots {
     png: String,
     phone: Option<String>,
     pages: std::collections::BTreeMap<String, String>,
+    /// How the page loaded and what it missed, as stored (`PageSpeed`, `PageA11y` JSON).
+    speed: Option<String>,
+    a11y: Option<String>,
 }
 
 /// Who made a baseline (`created_by`).
@@ -423,9 +426,14 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
+            }
+        }
+        for col in ["speed", "a11y"] {
+            if !db.has_column("base_history", col)? {
+                db.add_column("base_history", col, "TEXT")?;
             }
         }
         if !db.has_column("resources", "mask_digest")? {
@@ -1069,9 +1077,9 @@ impl Store {
         let now = self.now_ms()?;
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at) VALUES (?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT (preview_id, head) DO UPDATE SET png = excluded.png, phone_png = excluded.phone_png, pages = excluded.pages, at = excluded.at",
-                params![id, head, shots.png, shots.phone, pages, now],
+                "INSERT INTO base_history (preview_id, head, png, phone_png, pages, at, speed, a11y) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, head) DO UPDATE SET png = excluded.png, phone_png = excluded.phone_png, pages = excluded.pages, at = excluded.at, speed = excluded.speed, a11y = excluded.a11y",
+                params![id, head, shots.png, shots.phone, pages, now, shots.speed, shots.a11y],
             )?;
             let old: Vec<String> = c.query(&format!("SELECT head FROM base_history WHERE preview_id = ? ORDER BY at DESC LIMIT -1 OFFSET {BASE_HISTORY}"), [id], |r| r.get(0))?;
             for h in &old {
@@ -1083,17 +1091,21 @@ impl Store {
 
     /// A preview's latest screenshots, base64: desktop, phone, and its other pages by path.
     fn latest_shots(&self, id: &str) -> Result<Option<Shots>> {
-        let row: Option<(String, String, Option<String>)> = self.db.read(|c| c.query_row("SELECT head, png, phone_png FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
-        let Some((head, png, phone)) = row else { return Ok(None) };
+        type Raw = (String, String, Option<String>, Option<String>, Option<String>);
+        let row: Option<Raw> =
+            self.db.read(|c| c.query_row("SELECT head, png, phone_png, speed, a11y FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional())?;
+        let Some((head, png, phone, speed, a11y)) = row else { return Ok(None) };
         let pages: Vec<(String, String)> = self.db.read(|c| c.query("SELECT path, png FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))))?;
-        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().collect() }))
+        Ok(Some(Shots { head, png, phone, pages: pages.into_iter().collect(), speed, a11y }))
     }
 
     /// Baseline `id`'s screenshots at `head`, from its history.
     fn shots_at(&self, id: &str, head: &str) -> Result<Option<Shots>> {
-        let row: Option<(String, Option<String>, String)> =
-            self.db.read(|c| c.query_row("SELECT png, phone_png, pages FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
-        Ok(row.map(|(png, phone, pages)| Shots { head: head.to_string(), png, phone, pages: serde_json::from_str(&pages).unwrap_or_default() }))
+        type Raw = (String, Option<String>, String, Option<String>, Option<String>);
+        let row: Option<Raw> = self.db.read(|c| {
+            c.query_row("SELECT png, phone_png, pages, speed, a11y FROM base_history WHERE preview_id = ? AND head = ?", [id, head], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()
+        })?;
+        Ok(row.map(|(png, phone, pages, speed, a11y)| Shots { head: head.to_string(), png, phone, pages: serde_json::from_str(&pages).unwrap_or_default(), speed, a11y }))
     }
 
     /// Compare preview `id`'s latest screenshots (desktop, phone, other pages) with preview
@@ -1121,8 +1133,8 @@ impl Store {
         let page_bps: Vec<(String, Option<i64>)> = ours.pages.iter().map(|(path, png)| (path.clone(), bp(Some(png), theirs.pages.get(path)))).collect();
         self.db.write(|c| {
             c.execute(
-                "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ? WHERE preview_id = ?",
-                params![base, branch, change, phone, theirs.head, id],
+                "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, id],
             )?;
             for (path, bp) in &page_bps {
                 c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
@@ -1155,11 +1167,24 @@ impl Store {
     /// How much the page differs from the default branch's preview (its branch, basis points
     /// at both widths), that preview, and the head of it compared with.
     pub fn base_change(&self, id: &str) -> Result<Option<BaseRow>> {
-        type Raw = (Option<String>, Option<String>, Option<i64>, Option<i64>, Option<String>);
+        type Raw = (Option<String>, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<String>);
         let row: Option<Raw> = self.db.read(|c| {
-            c.query_row("SELECT base_preview, base_branch, base_change_bp, base_phone_bp, base_head FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()
+            c.query_row("SELECT base_preview, base_branch, base_change_bp, base_phone_bp, base_head, base_speed, base_a11y FROM screenshots WHERE preview_id = ?", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
+            .optional()
         })?;
-        Ok(row.and_then(|(p, b, bp, phone, head)| Some(BaseRow { preview: p?, branch: b?, change_bp: bp?, phone_bp: phone, head })))
+        Ok(row.and_then(|(p, b, bp, phone, head, speed, a11y)| {
+            Some(BaseRow {
+                preview: p?,
+                branch: b?,
+                change_bp: bp?,
+                phone_bp: phone,
+                head,
+                speed: speed.and_then(|s| serde_json::from_str(&s).ok()),
+                a11y: a11y.and_then(|s| serde_json::from_str(&s).ok()),
+            })
+        }))
     }
 
     /// Keep the other pages a screenshot at `head` took (`github.pages`), each with the one it
@@ -1595,7 +1620,7 @@ impl Store {
         let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
         let pages = self.page_checks(&r.id)?;
         let baseline = r.is_baseline();
-        let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange { branch: b.branch, percent: b.change_bp as f64 / 100.0, phone_percent: b.phone_bp.map(|p| p as f64 / 100.0), head: b.head });
+        let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange { branch: b.branch, percent: b.change_bp as f64 / 100.0, phone_percent: b.phone_bp.map(|p| p as f64 / 100.0), head: b.head, load_ms: b.speed.map(|s| s.load_ms) });
         let visual_review = self.visual_review(&r, base_change.as_ref(), &pages)?;
         let page_speed = self.page_speed(&r.id)?;
         let page_health = self.page_health(&r.id)?;
@@ -1685,6 +1710,9 @@ pub struct BaseRow {
     pub branch: String,
     /// The head of it compared with (`None`: compared before roll kept it).
     pub head: Option<String>,
+    /// How its first page loaded there, and what it missed (to say what the change added).
+    pub speed: Option<crate::PageSpeed>,
+    pub a11y: Option<crate::PageA11y>,
     pub change_bp: i64,
     pub phone_bp: Option<i64>,
 }
@@ -1750,16 +1778,19 @@ mod tests {
         store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
         store.keep_base_history(&main.id, "cs_m").unwrap();
         store.compare_with_base(id, &main.id, "main", None).unwrap();
-        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()) }));
+        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None }));
         // Main moves on (to what the change's page looks like): a change that left it at cs_m is
         // still compared with cs_m's, and shown that one.
-        store.set_screenshot(&main.id, "cs_m2", &png(3), None, Some(&png(5))).unwrap();
+        store.set_screenshot(&main.id, "cs_m2", &png(3), Some(&speed(700)), Some(&png(5))).unwrap();
         store.keep_base_history(&main.id, "cs_m2").unwrap();
         store.compare_with_base(id, &main.id, "main", Some("cs_m")).unwrap();
         assert_eq!(store.base_change(id).unwrap().map(|b| (b.change_bp, b.head)), Some((2000, Some("cs_m".into()))));
         assert_eq!(store.base_screenshot(id, false, None).unwrap(), Some(png(1)));
         store.compare_with_base(id, &main.id, "main", Some("cs_gone")).unwrap();
         assert_eq!(store.base_change(id).unwrap().map(|b| (b.change_bp, b.head)), Some((0, Some("cs_m2".into()))), "not kept: the latest");
+        // Its load there comes along (to say "slower than main"), from the history too.
+        store.compare_with_base(id, &main.id, "main", Some("cs_m2")).unwrap();
+        assert_eq!(store.base_change(id).unwrap().and_then(|b| b.speed).map(|s| s.load_ms), Some(700));
         // Taken again at the same head: what came before stays.
         store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100)), Some(&png(5))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
