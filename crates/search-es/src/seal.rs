@@ -126,4 +126,31 @@ mod tests {
         assert_eq!(b.open("watch password", body), None);
         assert!(Sealer::from_secret("short").is_none());
     }
+
+    /// What a cluster with a key stores is sealed, and still works where it's used: a watch's
+    /// password and `Authorization` header, a connector secret.
+    #[tokio::test]
+    async fn stored_secrets_are_sealed() {
+        use crate::cluster::{ClusterConfig, MemoryStore};
+        let mut cfg = ClusterConfig::new("c");
+        cfg.sealer = Sealer::from_secret("0123456789abcdef0123456789abcdef-k");
+        let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+        let call = |method: &str, uri: &str, body: &str| {
+            let req = if body.is_empty() { crate::EsRequest::new(method, uri) } else { crate::EsRequest::json(method, uri, body.to_string()) };
+            crate::rest::handle(&c, req)
+        };
+        let watch = r#"{"trigger":{"schedule":{"interval":"1h"}},"input":{"http":{"request":{"url":"http://h.example/x","auth":{"basic":{"username":"u","password":"pw-1"}},"headers":{"Authorization":"Bearer tok-2"}}}},"actions":{}}"#;
+        assert_eq!(call("PUT", "/_watcher/watch/w?active=false", watch).await.status, 201);
+        let r = call("POST", "/_connector/_secret", r#"{"value":"conn-3"}"#).await;
+        let id = crate::json::parse(&r.body).unwrap().unwrap().get("id").and_then(crate::json::Value::as_str).unwrap().to_string();
+        let state = format!("{:?}", c.state().metadata.xpack);
+        for secret in ["pw-1", "tok-2", "conn-3"] {
+            assert!(!state.contains(secret), "{secret} stored in the clear");
+        }
+        assert!(state.contains(PREFIX));
+        let got = call("GET", &format!("/_connector/_secret/{id}"), "").await;
+        assert!(String::from_utf8_lossy(&got.body).contains("conn-3"));
+        let shown = call("GET", "/_watcher/watch/w", "").await;
+        assert!(!String::from_utf8_lossy(&shown.body).contains(PREFIX), "redacted, not sealed text");
+    }
 }
