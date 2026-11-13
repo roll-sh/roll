@@ -6567,6 +6567,7 @@ dependencies = [
  "clap",
  "code-chat",
  "code-control",
+ "code-preview",
  "code-sql",
  "futures",
  "getrandom 0.4.3",
@@ -6585,6 +6586,7 @@ dependencies = [
  "roll-access",
  "roll-auth",
  "roll-fetch",
+ "roll-previews",
  "roll-workspace",
  "rustls-pemfile",
  "rustyline",
@@ -6707,6 +6709,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-previews"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-control",
+ "code-preview",
+ "code-sql",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "hmac 0.12.1",
+ "hyper 1.12.0",
+ "hyper-util",
+ "parking_lot",
+ "roll-auth",
+ "roll-cluster",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "roll-workspace"
 version = "0.1.0"
 dependencies = [
@@ -6746,6 +6780,7 @@ dependencies = [
  "code-store",
  "futures",
  "futures-util",
+ "getrandom 0.4.3",
  "http-body 1.1.0",
  "kafka-protocol",
  "lapin",
@@ -6787,6 +6822,7 @@ dependencies = [
  "roll-edge",
  "roll-mcp",
  "roll-net",
+ "roll-previews",
  "roll-workspace",
  "s3-api",
  "s3-control",

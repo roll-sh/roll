@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
@@ -319,6 +319,143 @@ impl DockerDriver {
         .map(drop)
     }
 
+    /// Consistent copy of a running compute's data directory into `dest` by the file system:
+    /// `cp --reflink=auto` between `pg_backup_start` and `pg_backup_stop` (the low-level backup
+    /// API), then the WAL up to the stop and its `backup_label`. On XFS or btrfs the copy shares
+    /// every block with the parent (instant, nothing written); on other file systems it's a
+    /// plain copy, as fast as the disk. The branch replays the WAL from the backup's start on
+    /// its first start.
+    pub async fn online_clone(&self, source_endpoint: &str, password: &str, src: &Path, dest: &Path, pg_version: u32) -> anyhow::Result<()> {
+        let (mount, pgdata) = mount_and_pgdata(src, pg_version);
+        let rel = pgdata.strip_prefix(mount).unwrap_or("").trim_start_matches('/').to_string();
+        let pw = format!("PGPASSWORD={password}");
+        let name = container_name(source_endpoint);
+        // One session holds the backup from start to stop.
+        let mut psql = Command::new("docker")
+            .args(["exec", "-i", "-e", &pw, &name, "psql", "-h", "127.0.0.1", "-U", "roll", "-d", "postgres", "-qAtX", "-v", "ON_ERROR_STOP=1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdin = psql.stdin.take().context("psql's stdin")?;
+        let mut out = BufReader::new(psql.stdout.take().context("psql's stdout")?).lines();
+        // A temporary slot, reserved now, holds every WAL segment from here until this session
+        // ends (after the WAL is copied): a checkpoint during the copy can't recycle the start.
+        let slot = crate::ids::new_id("roll_clone");
+        stdin.write_all(format!("SELECT 1 FROM pg_create_physical_replication_slot('{slot}', true, true);\n").as_bytes()).await?;
+        stdin.write_all(b"SELECT pg_backup_start('roll-branch', true);\n").await?;
+        stdin.flush().await?;
+        // The slot's line, then pg_backup_start's.
+        let _ = tokio::time::timeout(Duration::from_secs(120), out.next_line()).await.context("making the slot timed out")??;
+        let started = tokio::time::timeout(Duration::from_secs(120), out.next_line()).await.context("pg_backup_start timed out")??;
+        if started.is_none() {
+            let mut err = String::new();
+            if let Some(mut e) = psql.stderr.take() {
+                let _ = e.read_to_string(&mut err).await;
+            }
+            bail!("pg_backup_start: {}", err.trim());
+        }
+        let copied = clone_live(src, dest).await;
+        stdin.write_all(b"SELECT labelfile FROM pg_backup_stop(false);\nSELECT 'roll-end';\n").await?;
+        stdin.flush().await?;
+        let mut label = String::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(120), out.next_line()).await.context("pg_backup_stop timed out")?? {
+                Some(l) if l == "roll-end" => break,
+                Some(l) => {
+                    label.push_str(&l);
+                    label.push('\n');
+                }
+                None => bail!("psql ended before pg_backup_stop answered"),
+            }
+        }
+        let (src_pg, dest_pg) = (src.join(&rel), dest.join(&rel));
+        // The WAL written while the copy ran, up to the backup's end, copied while the slot still
+        // holds it; then the session (and its temporary slot) ends.
+        let wal = match &copied {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(dest_pg.join("pg_wal"));
+                clone_live(&src_pg.join("pg_wal"), &dest_pg.join("pg_wal")).await
+            }
+            Err(_) => Ok(()),
+        };
+        drop(stdin);
+        let _ = psql.wait().await;
+        copied?;
+        wal?;
+        // The backup starts in this segment: without it the branch can never start.
+        let start_file = label
+            .lines()
+            .find_map(|l| l.strip_prefix("START WAL LOCATION:"))
+            .and_then(|l| l.split("(file ").nth(1))
+            .map(|f| f.trim_end_matches(')').trim().to_string())
+            .context("backup_label has no start segment")?;
+        if !dest_pg.join("pg_wal").join(&start_file).exists() {
+            bail!("the copy lacks WAL segment {start_file}, where the backup starts");
+        }
+        std::fs::write(dest_pg.join("backup_label"), label.trim_end_matches('\n').to_string() + "\n")?;
+        // Not the parent's: its process, its replication slots, its statistics' scratch.
+        for f in ["postmaster.pid", "postmaster.opts"] {
+            let _ = std::fs::remove_file(dest_pg.join(f));
+        }
+        for d in ["pg_replslot", "pg_stat_tmp"] {
+            if let Ok(entries) = std::fs::read_dir(dest_pg.join(d)) {
+                for e in entries.flatten() {
+                    let _ = if e.path().is_dir() { std::fs::remove_dir_all(e.path()) } else { std::fs::remove_file(e.path()) };
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Empty a stopped cluster's data directory of every row, offline: a throwaway server with no
+    /// network on `dir` truncates every user table and unlogged table, empties materialized views,
+    /// unlinks large objects and drops user mappings (foreign tables can't reach anywhere), in
+    /// every database but `template0`; then checkpoints, stops, and removes the WAL from before
+    /// the checkpoint. Nothing that serves the branch, and no history, ever sees the rows.
+    pub async fn empty_offline(&self, dir: &Path, pg_version: u32, image: &str) -> anyhow::Result<()> {
+        const SQL: &str = "DO $$ DECLARE r record; BEGIN \
+            FOR r IN SELECT format('%I.%I', n.nspname, c.relname) AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE c.relkind IN ('r', 'p') AND c.relpersistence <> 't' AND NOT c.relispartition \
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' \
+            LOOP EXECUTE 'TRUNCATE TABLE ' || r.t || ' RESTART IDENTITY CASCADE'; END LOOP; \
+            FOR r IN SELECT format('%I.%I', n.nspname, c.relname) AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE c.relkind = 'm' LOOP EXECUTE 'REFRESH MATERIALIZED VIEW ' || r.t || ' WITH NO DATA'; END LOOP; \
+            FOR r IN SELECT format('FOR %s SERVER %I', CASE WHEN m.umuser = 0 THEN 'PUBLIC' ELSE quote_ident(a.rolname) END, s.srvname) AS t \
+              FROM pg_user_mapping m JOIN pg_foreign_server s ON s.oid = m.umserver LEFT JOIN pg_authid a ON a.oid = m.umuser \
+            LOOP EXECUTE 'DROP USER MAPPING ' || r.t; END LOOP; \
+            PERFORM lo_unlink(oid) FROM pg_largeobject_metadata; END $$";
+        const SCRIPT: &str = r#"set -eu
+pg_ctl -D "$PGDATA" -l /tmp/log -o "-c listen_addresses= -c unix_socket_directories=/tmp -c archive_mode=off -c max_wal_senders=0 -c wal_level=minimal" -w start || { cat /tmp/log; exit 1; }
+P="psql -h /tmp -U roll -qAtX -v ON_ERROR_STOP=1"
+$P -d postgres -c "SELECT datname FROM pg_database WHERE datname <> 'template0' AND NOT datallowconn" > /tmp/closed
+while IFS= read -r db; do $P -d postgres -c "ALTER DATABASE \"$db\" ALLOW_CONNECTIONS true"; done < /tmp/closed
+$P -d postgres -c "SELECT datname FROM pg_database WHERE datname <> 'template0'" > /tmp/dbs
+while IFS= read -r db; do $P -d "$db" -c "$ROLL_EMPTY_SQL"; done < /tmp/dbs
+while IFS= read -r db; do $P -d postgres -c "ALTER DATABASE \"$db\" ALLOW_CONNECTIONS false"; done < /tmp/closed
+$P -d postgres -c CHECKPOINT
+pg_ctl -D "$PGDATA" -m fast -w stop
+REDO=$(pg_controldata -D "$PGDATA" | sed -n "s/^Latest checkpoint's REDO WAL file: *//p")
+[ -n "$REDO" ]
+pg_archivecleanup "$PGDATA/pg_wal" "$REDO"
+"#;
+        let (mount, pgdata) = mount_and_pgdata(dir, pg_version);
+        let volume = format!("{}:{mount}", dir.display());
+        let name = format!("roll-pgempty-{}", crate::ids::new_id("x").trim_start_matches("x_"));
+        let env_sql = format!("ROLL_EMPTY_SQL={SQL}");
+        let env_pgdata = format!("PGDATA={pgdata}");
+        let out = docker(&[
+            "run", "--rm", "--name", &name, "--user", &self.user, "--network", "none", "--label", &self.home_label, "-v", &volume,
+            "-e", &env_pgdata, "-e", &env_sql, "--entrypoint", "sh", image, "-c", SCRIPT,
+        ])
+        .await;
+        if out.is_err() {
+            let _ = docker(&["rm", "-f", &name]).await;
+        }
+        out.map(drop)
+    }
+
     /// Online base image of a running compute, streamed to object storage (zstd tar of PGDATA).
     /// Recovery from it needs the WAL archived from `start` onward.
     pub async fn basebackup_upload(
@@ -486,6 +623,25 @@ pub async fn clone_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
         bail!("cp: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(())
+}
+
+/// [`clone_dir`] of a directory a running server writes to: a file that vanishes during the
+/// copy (a WAL temp file, a statistics file) is fine, as it is for `pg_basebackup`; the WAL
+/// replay from the backup's start makes the copy consistent.
+async fn clone_live(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let out = Command::new("cp").args(["-a", "--reflink=auto"]).arg(src).arg(dest).output().await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let real: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty() && !l.contains("No such file or directory")).collect();
+    if real.is_empty() && dest.exists() {
+        return Ok(());
+    }
+    bail!("cp: {}", err.trim())
 }
 
 /// Logical size of a directory tree.

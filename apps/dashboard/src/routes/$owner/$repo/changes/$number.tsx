@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { createServerFn } from "@tanstack/react-start";
 import { Database, ExternalLink, GitMergeConflict, MemoryStick } from "lucide-react";
 import { DiffViewer } from "@/components/code/diff";
+import { PreviewEnvironmentView } from "@/components/code/preview-environment";
 import { ReviewStatusView, ReviewTimeline } from "@/components/code/review";
 import { SearchForm } from "@/components/code/search";
 import { BlockerList, ChangeStateBadge, CheckIcon, ChecksSummary, GitHubMark, QueuePill } from "@/components/code/shared";
@@ -204,6 +205,10 @@ function Aside({ repo, change: c, status, checks }: { repo: string; change: Chan
         <h2 className="text-[13px] font-semibold">Preview</h2>
         {!p ? (
           <p className="mt-2 text-[12px] text-subtle">No preview for this change.</p>
+        ) : p.environment ? (
+          <div className="mt-2">
+            <PreviewEnvironmentView env={p.environment} compact />
+          </div>
         ) : (
           <div className="mt-2 space-y-2">
             <p className="flex items-center gap-2 text-[12px] text-muted">

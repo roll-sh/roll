@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+getrandom.workspace = true
 apps-control.workspace = true
 async-trait.workspace = true
 code-store.workspace = true
@@ -54,6 +55,7 @@ reqwest = { workspace = true, features = ["rustls"] }
 roll-accounts.workspace = true
 roll-auth.workspace = true
 roll-workspace.workspace = true
+roll-previews.workspace = true
 roll-access.workspace = true
 roll-mcp.workspace = true
 s3-api.workspace = true

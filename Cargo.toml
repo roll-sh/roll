@@ -149,6 +149,7 @@ roll-cluster = { path = "crates/roll-cluster" }
 roll-accounts = { path = "crates/roll-accounts" }
 roll-auth = { path = "crates/roll-auth" }
 roll-workspace = { path = "crates/roll-workspace" }
+roll-previews = { path = "crates/roll-previews" }
 apps-build = { path = "crates/apps-build" }
 apps-control = { path = "crates/apps-control" }
 roll-access = { path = "crates/roll-access" }

@@ -129,6 +129,8 @@ pub struct PullRequest {
     pub html_url: Option<String>,
     #[serde(default)]
     pub user: Option<User>,
+    #[serde(default)]
+    pub labels: Vec<Label>,
     pub head: PrRef,
     pub base: PrRef,
     #[serde(default)]

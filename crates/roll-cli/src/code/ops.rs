@@ -18,7 +18,7 @@ pub enum WebhooksCmd {
         repo: String,
         url: String,
         /// Events (repeat, or `*` for all): landed, change, review, thread, check, queue, work,
-        /// preview, push. Default: landed.
+        /// preview, push, budget. Default: landed.
         #[arg(long = "event")]
         events: Vec<String>,
         /// Your own signing secret (16–200 characters) instead of a generated one.
