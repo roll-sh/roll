@@ -56,6 +56,8 @@ pub struct AppConfig {
     pub health_path: Option<String>,
     /// Path patterns a push must touch to deploy ([`Build::watch`]).
     pub watch: Option<Vec<String>>,
+    /// A single-page app ([`Build::spa`]).
+    pub spa: Option<bool>,
     /// Run settings ([`Run`]'s fields, as the API's `run`), but `volume`.
     pub run: Option<toml::Table>,
     /// Per environment, the same keys again (no `environments` in them), applied last.
@@ -180,6 +182,10 @@ impl AppConfig {
         if let Some(w) = &self.watch {
             set("watch", &w.join(", "));
             b.watch = Some(w.clone());
+        }
+        if let Some(v) = self.spa {
+            set("spa", &v.to_string());
+            b.spa = Some(v);
         }
         if let Some(t) = &self.run {
             let patch = serde_json::to_value(t).map_err(|e| Error::BadRequest(format!("roll.toml: {e}")))?;

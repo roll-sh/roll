@@ -211,6 +211,12 @@ every deployment is immutable with instant rollback.
   tab is the same shell over HTTP sessions (a browser can't send the token on a WebSocket): the
   screen over SSE with its scrollback, keys and resizes as POSTs, at most 8 open per
   environment, closed on leaving the page or after 10 idle minutes.
+- **Single-page apps**: a static build (served by busybox httpd) whose `package.json` has a
+  client-side router (`react-router-dom`, `@tanstack/react-router`, `vue-router`, …) is a
+  single-page app (`Plan.spa`): roll's proxy answers a GET for a page (HTML, no file extension)
+  that the app 404s with its `/index.html` and a 200, so deep links work (Vercel's and Render's
+  rewrite). A missing file (`/logo.png`) stays a 404. `build.spa` or `roll.toml` `[app] spa`
+  forces it either way.
 - **JS workspace monorepos**: a service whose root directory (`apps/web`) is a package of a
   pnpm, npm or yarn workspace at the repo's root (`pnpm-workspace.yaml`, or `workspaces` in the
   root `package.json`) builds with the whole repo as its context, as Vercel and Railway build
@@ -782,7 +788,7 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **SPA fallback** for static sites (client-side routes deep-link), then www↔apex redirects.
+1. **www↔apex redirects** for custom domains (Render adds one itself), and redirect rules.
 2. **First five minutes**: templates (a service and its database), linking a database in New
    service, link lines on the canvas.
 3. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).

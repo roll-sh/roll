@@ -25,6 +25,9 @@ pub struct Template {
     pub deployment: String,
     pub spec: InstanceSpec,
     pub run: Run,
+    /// A single-page app (its plan says so): the proxy answers a page path the app has no file
+    /// for with `/index.html`.
+    pub spa: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1054,6 +1057,7 @@ mod tests {
                 registry: None,
             },
             run,
+            spa: false,
         })
     }
 

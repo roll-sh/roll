@@ -261,6 +261,10 @@ pub struct Build {
     /// from the repo's root, as CODEOWNERS): a monorepo's other apps don't redeploy this one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watch: Option<Vec<String>>,
+    /// A single-page app (a page path with no file answers index.html), whatever the plan
+    /// detected; unset: detected (a static build with a client-side router).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spa: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,6 +303,7 @@ impl Build {
             install: self.install.clone(),
             build: self.build.clone(),
             start: self.start.clone(),
+            spa: self.spa,
             build_env: Vec::new(),
         }
     }

@@ -50,6 +50,8 @@ pub struct Overrides {
     pub install: Option<String>,
     pub build: Option<String>,
     pub start: Option<String>,
+    /// A single-page app, whatever the detection says (`None`: detected).
+    pub spa: Option<bool>,
     /// Names of the variables the build sees (the service's, at deploy time): each install and
     /// build step mounts them as BuildKit secrets, so they're in its environment but never in a
     /// layer, the image's history or the cache's keys. `ROLL_BUILD_ENV` (a hash of the values)
@@ -82,6 +84,10 @@ pub struct Plan {
     /// What builds the image: the tree's own, or the generated one.
     pub dockerfile: String,
     pub notes: Vec<String>,
+    /// A single-page app: a static site with a client-side router, so a page path the server
+    /// has no file for answers `index.html` (roll's proxy does it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spa: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -138,7 +144,23 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     ];
     for detect in PROVIDERS {
         if let Some(draft) = detect(tree, &o)? {
-            return Ok(draft.finish(&o));
+            let mut p = draft.finish(&o);
+            // Served as files (busybox httpd) and routed in the browser: a single-page app.
+            match o.spa {
+                Some(v) => {
+                    p.spa = v;
+                    p.notes.push(format!("spa is set in the service: {}", if v { "a page path with no file answers index.html" } else { "unknown paths are 404s" }));
+                }
+                None => {
+                    if p.start.as_deref() == Some(static_site::START)
+                        && let Some(router) = node::client_router(tree)
+                    {
+                        p.spa = true;
+                        p.notes.push(format!("{router} in dependencies: a single-page app, so a page path with no file answers index.html"));
+                    }
+                }
+            }
+            return Ok(p);
         }
     }
     Err(Error::NothingDetected)
@@ -158,6 +180,7 @@ impl Overrides {
             install: clean(&self.install),
             build: clean(&self.build),
             start: clean(&self.start),
+            spa: self.spa,
             build_env: self.build_env.clone(),
         }
     }
@@ -218,6 +241,7 @@ impl Draft {
             port: DEFAULT_PORT,
             dockerfile,
             notes,
+            spa: false,
         }
     }
 }

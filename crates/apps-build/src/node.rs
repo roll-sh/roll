@@ -753,3 +753,10 @@ pub fn workspace_app(tree: &dyn Tree, dir: &str) -> Option<WorkspaceApp> {
     let start = has("start").then(|| format!("cd {dir} && exec {} run start", if berry { "yarn" } else { "npm" }));
     Some(WorkspaceApp { build, start, note: format!("{dir} is the package {name} of a {manager} workspace: built from the repo's root, installed once there") })
 }
+
+/// A client-side router in `package.json`'s dependencies (the app routes in the browser).
+pub(crate) fn client_router(tree: &dyn Tree) -> Option<&'static str> {
+    let pkg: Value = serde_json::from_slice(&tree.read("package.json")?).ok()?;
+    const ROUTERS: [&str; 9] = ["react-router-dom", "react-router", "@tanstack/react-router", "vue-router", "@solidjs/router", "svelte-routing", "wouter", "preact-router", "@reach/router"];
+    ROUTERS.into_iter().find(|r| ["dependencies", "devDependencies"].iter().any(|k| pkg[k].get(r).is_some()))
+}

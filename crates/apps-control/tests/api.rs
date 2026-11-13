@@ -612,6 +612,22 @@ async fn roll_toml_sets_run_settings_per_environment() {
     assert_eq!(up(&w), 1, "a redeploy keeps what roll.toml set");
 }
 
+/// A static build with a client-side router is a single-page app: a page path it has no file for
+/// answers its index.html; an asset that's missing stays a 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_single_page_apps_deep_links_answer_its_index() {
+    let w = world().await;
+    w.code.push("e7e7e7e7e7e7", "spa", &[("package.json", r#"{"name":"site","scripts":{"build":"vite build"},"devDependencies":{"vite":"5.0.0"},"dependencies":{"react-router-dom":"6.0.0"}}"#)]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "spa", "source": {"kind": "repo", "repo": "acme/site"}, "variables": {"FAKE_MISSING": "/dashboard"} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["plan"]["spa"].as_bool()), (Some("active"), Some(true)), "{d}");
+    let host = host(&svc["environments"][0]["url"]);
+    let (st, body) = visit(&w, &host, "/dashboard/settings").await;
+    assert_eq!((st, body["path"].as_str()), (StatusCode::OK, Some("/index.html")), "a deep link is the app's index");
+    assert_eq!(visit(&w, &host, "/dashboard/logo.png").await.0, StatusCode::NOT_FOUND, "a missing file stays missing");
+}
+
 /// A deploy reports on its commit; an environment that waits for CI deploys a push only once its
 /// checks pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

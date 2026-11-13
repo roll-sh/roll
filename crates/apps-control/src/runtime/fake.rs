@@ -3,7 +3,8 @@
 //! A fake instance answers every request with JSON naming its instance, deployment and the
 //! path, plus the variables listed in `FAKE_ECHO` (comma-separated). Settings through its
 //! variables: `FAKE_UNHEALTHY=1` answers 500 on every path, `FAKE_BOOT_MS` delays its first
-//! answer, `FAKE_SLOW_MS` delays every answer (requests pile up), `FAKE_EXIT=<code>` makes it a
+//! answer, `FAKE_SLOW_MS` delays every answer (requests pile up), `FAKE_MISSING=<prefix>` answers
+//! 404 for paths under it, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
 
@@ -113,6 +114,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     let unhealthy = var(&spec, "FAKE_UNHEALTHY") == Some("1");
     let boot = var(&spec, "FAKE_BOOT_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
     let slow = var(&spec, "FAKE_SLOW_MS").and_then(|v| v.parse().ok()).map(Duration::from_millis);
+    let missing = var(&spec, "FAKE_MISSING").map(str::to_string);
     let echo: Vec<(String, String)> = var(&spec, "FAKE_ECHO")
         .map(|names| names.split(',').filter_map(|n| var(&spec, n).map(|v| (n.to_string(), v.to_string()))).collect())
         .unwrap_or_default();
@@ -122,8 +124,11 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
     let (name, dep) = (spec.name.clone(), spec.deployment.clone());
     let app = axum::Router::new().fallback(move |req: Request| {
-        let (name, dep, echo, sick) = (name.clone(), dep.clone(), echo.clone(), sick.clone());
+        let (name, dep, echo, sick, missing) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone());
         async move {
+            if missing.as_deref().is_some_and(|m| req.uri().path().starts_with(m)) {
+                return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "path": req.uri().path() })));
+            }
             if let Some(s) = slow {
                 tokio::time::sleep(s).await;
             }

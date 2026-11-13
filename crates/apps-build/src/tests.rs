@@ -638,3 +638,16 @@ fn an_app_in_a_js_workspace_builds_from_the_repo_root() {
     let npm = [("package.json", r#"{"workspaces":["apps/*"]}"#), ("package-lock.json", "{}"), ("apps/api/package.json", r#"{"name":"api","scripts":{"build":"tsc"}}"#)];
     assert_eq!(crate::workspace_app(&tree(&npm), "apps/api").unwrap().build.as_deref(), Some("npm run build --workspace apps/api"));
 }
+
+#[test]
+fn a_static_build_with_a_client_router_is_a_single_page_app() {
+    let vite = |deps: &str| {
+        detect(&[(
+            "package.json",
+            &format!(r#"{{"scripts":{{"build":"vite build"}},"devDependencies":{{"vite":"5.0.0"}},"dependencies":{{{deps}}}}}"#),
+        )])
+    };
+    let spa = vite(r#""react":"18.0.0","react-router-dom":"6.0.0""#);
+    assert!(spa.spa && spa.notes.iter().any(|n| n.contains("react-router-dom")), "{:?}", spa.notes);
+    assert!(!vite(r#""react":"18.0.0""#).spa, "no router: unknown paths are 404s");
+}

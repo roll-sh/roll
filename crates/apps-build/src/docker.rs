@@ -47,6 +47,7 @@ pub(crate) fn plan(tree: &dyn Tree, o: &Overrides) -> Result<Plan, Error> {
         port,
         dockerfile,
         notes,
+        spa: false,
     })
 }
 

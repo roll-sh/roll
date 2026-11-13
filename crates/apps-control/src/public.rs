@@ -231,6 +231,13 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
     let Ok(uri) = format!("http://{}{pq}", lease.addr).parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "bad request").into_response();
     };
+    // A single-page app's page path (a GET for HTML, no file extension) that the app has no
+    // file for answers its `index.html` instead: Vercel's and Render's SPA rewrite.
+    let spa_page = live.template().is_some_and(|t| t.spa)
+        && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && !req.uri().path().rsplit('/').next().unwrap_or("").contains('.')
+        && req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_none_or(|a| a.contains("text/html") || a.contains("*/*"));
+    let spa_retry = spa_page.then(|| (req.method().clone(), req.headers().clone()));
     let upgrade = is_upgrade(req.headers());
     let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
     let host = req.headers().get(header::HOST).cloned();
@@ -278,6 +285,23 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
             return page(StatusCode::BAD_GATEWAY, "The service didn't answer", "It closed the connection before it answered. Try again in a moment.");
         }
     };
+    if resp.status() == StatusCode::NOT_FOUND
+        && let Some((method, headers)) = spa_retry
+        && let Ok(uri) = format!("http://{}/index.html", lease.addr).parse::<Uri>()
+    {
+        let mut again = axum::http::Request::builder().method(method).uri(uri).body(Body::empty()).expect("a request");
+        *again.headers_mut() = headers;
+        strip_hop_by_hop(again.headers_mut(), false);
+        let ours: Vec<HeaderName> = again.headers().keys().filter(|k| k.as_str().starts_with("x-roll-")).cloned().collect();
+        for k in ours {
+            again.headers_mut().remove(k);
+        }
+        if let Ok(r) = apps.client.request(again).await
+            && r.status().is_success()
+        {
+            resp = r;
+        }
+    }
     let status = resp.status().as_u16();
     strip_roll_headers(resp.headers_mut());
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS

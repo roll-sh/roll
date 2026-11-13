@@ -441,6 +441,11 @@ impl Apps {
         let mut dep = d.clone();
         dep.image = Some(image);
         dep.run = run;
+        // The plan the build just stored (a single-page app, say).
+        let did = d.id.clone();
+        if let Ok(stored) = self.db(move |s| s.deployment(&did)).await {
+            dep.plan = stored.plan;
+        }
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
         if let Some(cmd) = tpl.run.pre_deploy.clone() {
             self.step(&d.id, "pre_deploy").await;
@@ -753,7 +758,8 @@ impl Apps {
             idle_stop_s: (run.kind == RunType::Web && run.min_instances == 0).then(|| run.sleep_after_s.max(60) + 300),
             registry,
         };
-        Ok(Template { deployment: dep.id.clone(), spec, run })
+        let spa = dep.plan.as_ref().is_some_and(|p| p["spa"] == true);
+        Ok(Template { deployment: dep.id.clone(), spec, run, spa })
     }
 
     // ── the owner's background work ──

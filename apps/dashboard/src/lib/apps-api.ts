@@ -37,6 +37,8 @@ export interface Build {
   start?: string;
   /** A push deploys only when it changes a path these match (gitignore-style, from the repo's root). */
   watch?: string[];
+  /** A single-page app (a page path with no file answers index.html); unset: detected. */
+  spa?: boolean;
 }
 
 export type ServiceType = "web" | "worker" | "cron";
@@ -214,6 +216,8 @@ export interface Plan {
   port: number;
   dockerfile: string;
   notes: string[];
+  /** A single-page app: the proxy answers a page path with no file with index.html. */
+  spa?: boolean;
 }
 
 export type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };
