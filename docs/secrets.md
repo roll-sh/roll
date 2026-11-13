@@ -1270,7 +1270,8 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 
 Done and in PR #20:
 - the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
-- rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search), and
+- rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search: checked
+  live against a real roll search cluster), and
   rotators for values outside roll;
 - `roll secrets`, `roll secrets setup` and `roll run [--watch]`;
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
@@ -1309,8 +1310,13 @@ Ranked:
    honoured. Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
-   real cluster.
+2. **Merge with roll search** (#22), whichever merges second. Checked live on a branch with both
+   (2026-11-13): a key linked to a cluster's `api_key` gets the cluster's own API key (200 with it,
+   401 without), rotating issues a new one while the old works through the grace period and fails
+   once its retired lease is revoked, and a `dynamic` link's key dies with its lease. The merge
+   conflicts are additive: CI's matrix (`secrets` and `search` rows), roll-cli's test dependencies,
+   rolld's `main.rs` (search's router, then workspace and secrets) and `DbBudget` (both `search`
+   and `secrets`, with secrets' extra reserved connection).
 3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
 4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
