@@ -40,6 +40,10 @@ pub struct Settings {
     pub max_usd_month: f64,
     pub secrets: SecretsRule,
     pub env: BTreeMap<String, String>,
+    /// Variables for a family of branches (Vercel's per-branch preview variables): a branch glob
+    /// → `{name: value}`, over `env` and under a preview's own. Every glob that matches a
+    /// preview's branch applies, in the globs' order.
+    pub env_for: BTreeMap<String, BTreeMap<String, String>>,
     pub github: GithubRule,
     /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
     /// its access token once and then a cookie; `public` is anyone who can reach the domain.
@@ -137,6 +141,7 @@ impl Default for Settings {
             max_usd_month: 0.0,
             secrets: SecretsRule::default(),
             env: BTreeMap::new(),
+            env_for: BTreeMap::new(),
             github: GithubRule::default(),
             access: Access::Link,
             feedback: true,
@@ -265,7 +270,13 @@ impl Settings {
         if self.env.len() > MAX_ENV {
             return bad(format!("env: at most {MAX_ENV} variables"));
         }
-        for (k, v) in &self.env {
+        if self.env_for.len() > MAX_BRANCH_GLOBS || self.env_for.keys().any(|g| g.is_empty() || g.len() > 200) {
+            return bad(format!("env_for: at most {MAX_BRANCH_GLOBS} branch globs of 1–200 characters"));
+        }
+        if self.env_for.values().map(BTreeMap::len).sum::<usize>() > MAX_ENV {
+            return bad(format!("env_for: at most {MAX_ENV} variables in all"));
+        }
+        for (k, v) in self.env.iter().chain(self.env_for.values().flatten()) {
             let name_ok = !k.is_empty()
                 && k.len() <= 128
                 && k.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
@@ -299,9 +310,9 @@ fn merge(into: &mut Value, patch: &Value) {
         (Value::Object(a), Value::Object(b)) => {
             for (k, v) in b {
                 match a.get_mut(k) {
-                    // `resources`, `env` and `masking` are maps: a patch replaces them whole, so
-                    // a key can be removed.
-                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "masking") => merge(slot, v),
+                    // `resources`, `env`, `env_for` and `masking` are maps: a patch replaces them
+                    // whole, so a key can be removed.
+                    Some(slot) if v.is_object() && !matches!(k.as_str(), "resources" | "env" | "env_for" | "masking") => merge(slot, v),
                     _ => {
                         a.insert(k.clone(), v.clone());
                     }
@@ -326,6 +337,11 @@ mod tests {
         assert_eq!(p.secrets.base, "production");
         assert!(Settings::default().patched(&json!({ "nope": 1 })).is_err());
         assert!(Settings::default().patched(&json!({ "env": { "ROLL_X": "1" } })).is_err());
+        // Per-branch variables: checked like `env`, and replaced whole (a removed one goes).
+        assert!(Settings::default().patched(&json!({ "env_for": { "feat/*": { "ROLL_X": "1" } } })).is_err());
+        let two = Settings::default().patched(&json!({ "env_for": { "feat/*": { "A": "1", "B": "2" } } })).unwrap();
+        let one = two.patched(&json!({ "env_for": { "feat/*": { "A": "1" } } })).unwrap();
+        assert_eq!(one.env_for["feat/*"].len(), 1);
         let r = Settings::default().patched(&json!({ "resources": { "redis:rdb_1": "skip", "nosql:n1": "schema" } })).unwrap();
         assert_eq!(r.mode_of(Kind::Redis, "rdb_1"), None);
         assert_eq!(r.mode_of(Kind::Nosql, "n1"), Some(Mode::Schema));
