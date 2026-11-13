@@ -153,7 +153,9 @@ async fn handle(State(m): State<Mcp>, ext: Extensions, headers: HeaderMap, body:
         (true, Some(ip)) => Some(ip),
         _ => ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip()),
     };
-    let ctx = Arc::new(Ctx { m, headers, principal, ip });
+    // A user's own token (the gate signed them in): only the products their account reaches.
+    let as_user = ext.get::<roll_auth::SignedIn>().is_some_and(|u| !u.admin);
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user });
     if wants_sse(&ctx.headers) {
         let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {
             futures::stream::iter(responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))))
@@ -178,13 +180,16 @@ struct Ctx {
     headers: HeaderMap,
     principal: Principal,
     ip: Option<std::net::IpAddr>,
+    /// A signed-in user's own token: tools only for what their account reaches.
+    as_user: bool,
 }
 
 impl Ctx {
     /// Whether the caller might use a tool for this product and these actions at all.
     fn may(&self, product: &str, actions: &[Action]) -> bool {
         let on = product == "access" || product == "workspace" || self.m.config.products.iter().any(|p| p == product);
-        on && match &self.principal {
+        let reached = !self.as_user || product == "access" || roll_access::USER_REACH.contains(&product);
+        on && reached && match &self.principal {
             Principal::Operator => true,
             Principal::Grant(g) => actions.iter().any(|a| g.scope.may(product, *a)),
         }

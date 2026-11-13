@@ -278,9 +278,13 @@ Ranked; the top item is in progress. A watchdog reads this list.
    - apps' services to their projects;
    - secrets' `Grant` swap and `roll_auth::Grants` for its syncs.
    - secrets' audit sinks and access's (same wire contract already): one delivery module.
-2. **Users' own tokens (with accounts, #18):** a signed-in user who isn't an admin makes tokens for
-   what they can reach (their roll code owner, agents and workspace projects), and their grants
-   act as them, not as the operator. Built on `integrate/mcp-accounts` (both branches merged).
+2. **Users' own tokens** (in progress, branch `feature/mcp-user-tokens` on top of
+   `integrate/mcp-accounts`; its PR waits for #18 and #19): a signed-in non-admin's tokens and
+   OAuth connections act as them (docs/permissions.md, "Users' own tokens"). Done: the evaluator,
+   the API, roll code and git as the user, approvals they decide, the builder and consent, a test
+   per behaviour and the rolld auth matrix end to end, MCP `tools/list` limited to what they
+   reach, and a live run (invite, email sign-in, a token minted with the session, MCP, disable).
+   Left: open its PR once #18 and #19 are on main.
 3. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 4. **Finer resources:** storage buckets in another account, apps' deploys by id.
