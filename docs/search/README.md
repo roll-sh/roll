@@ -110,7 +110,11 @@ field): those are read as the caller, as Elasticsearch authorizes them. A docume
 pipeline moves (`_index`, `reroute`) is authorized again where it lands. ES|QL and SQL read as their client:
 their field resolution and searches carry its credentials (wildcards expand to the indices it
 may read, a lookup join's index is checked like `FROM`'s), and where its roles restrict
-documents or fields the direct shard reads give way to searches, which apply them. They answer with Elasticsearch's own status and body, and pass the query string through
+documents or fields the direct shard reads give way to searches, which apply them. Field
+level security covers every read path a field's content or name can come out of: `_source`
+(hits, gets, inner hits), `fields`, scripts' `params._source` and `doc` (script fields, runtime
+fields, sort scripts), term vectors, field caps and mappings (`control.rs`
+`field_security_hides_a_field_on_every_read_path`, 22 requests and 3 listings). They answer with Elasticsearch's own status and body, and pass the query string through
 (`refresh`, `routing`, `size`, …). A write names exactly one index; a name starting with `_` is
 refused (those are Elasticsearch's own APIs: use the console). Bodies may be up to the cluster's
 `max_body_mb`.
@@ -207,28 +211,21 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Field level security everywhere a field's content can come out.** Role `field_security`
-   hides fields from queries, aggregations, sorts, `fields` and `_source`, but not yet from
-   highlighting, runtime fields and scripts (which read `_source` and doc values), term vectors,
-   `field_caps`, `get_mapping`, `explain`, suggesters, inner hits' sources and ES|QL columns.
-   The first ones leak a hidden field's content, not only its name. Elasticsearch filters all of
-   them through the same `FieldPermissions`: route every read through `dls::FieldFilter`, and a
-   test per read path in one table (role, request, what must not appear).
-2. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall is 11.1 s at the
+1. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall is 11.1 s at the
    SIGKILL (redis, nosql and tasks ~10 s in the same run): a dead owner's lease expires before
    another node loads its clusters. Measure where the time goes (lease TTL, detection, load from
    S3) and cut it, keeping fencing by ownership markers.
-3. **Integration with the stacked branches** once the stacking agent's merge of previews (#21,
+2. **Integration with the stacked branches** once the stacking agent's merge of previews (#21,
    #23), apps and secrets (#20) lands on this branch: run previews' search brancher against the
    current branch API (`own_bytes`, branch delete), secrets' search link provider (keys routes),
    and apps' bindings of a `search` resource end to end (`ELASTICSEARCH_URL`, the cluster's
    hostname); the fleet test with every product on.
-4. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
+3. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
    both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is): a full
    rerun of every Rally track with variance for all three targets; one allocator policy (rolld's
    against search-dev's purge governor, by a matched benchmark); `terms_enum`'s per-request
    overhead.
-5. **Compatibility gaps** from the extended suites (4,699+ of the 5,541 Elasticsearch passes),
+4. **Compatibility gaps** from the extended suites (4,699+ of the 5,541 Elasticsearch passes),
    largest first: platinum's machine learning (278, a product decision: anomaly detection and
    trained models), rollup (52), security's last 13, watcher (43 of 89), ES|QL's last 5
    (TOP_SNIPPETS, CATEGORIZE, approximation, `unsigned_long` past `i64::MAX`). `logsdb`'s last 9 are
@@ -236,11 +233,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    last 5 (`geo_bounds` on geo_point runtime fields, ip terms tie order, highlighting runtime
    fields); downsample's last one (allocation filtering). In the opensearch dialect, count
    `auto_date_histogram` from the points tree as OpenSearch does.
-6. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
+5. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
    (#18) seeing only the clusters and indices their access allows; checked against Elastic
    Cloud's and OpenSearch Dashboards' consoles.
-7. **Metering on the fleet**: a cluster that moves mid-interval is metered once; job wakes billed
+6. **Metering on the fleet**: a cluster that moves mid-interval is metered once; job wakes billed
    as loaded time are visible in usage.
-8. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`); measure it once
+7. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`); measure it once
    main's cache exists. `search-store`'s `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once`
    failed once on the loaded host (it passes alone): find what it races on.

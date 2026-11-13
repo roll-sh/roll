@@ -391,6 +391,10 @@ pub struct FieldTable {
     /// `copy_to` targets and the fields copying into them (`MappingLookup.sourcePaths`):
     /// the fields API reads a target's values from its sources.
     pub copy_sources: HashMap<String, Vec<String>>,
+    /// Under field level security, the fields of `_source` the reader may see: whatever reads
+    /// a document's source through this table (scripts' `params._source`, inner hits) leaves
+    /// the others out. `None` for every unrestricted reader.
+    pub source_filter: Option<Arc<crate::xpack::security::dls::FieldFilter>>,
 }
 
 impl std::fmt::Debug for FieldTable {
@@ -456,6 +460,20 @@ impl FieldTable {
             key: self.key,
             has_vectors: self.has_vectors,
             copy_sources: self.copy_sources.clone(),
+            source_filter: self.source_filter.clone(),
+        }
+    }
+
+    /// [`FieldTable::filtered`] by a role's field permissions, which also filter `_source`.
+    pub fn restricted(&self, f: &crate::xpack::security::dls::FieldFilter) -> FieldTable {
+        FieldTable { source_filter: Some(Arc::new(f.clone())), ..self.filtered(|n| f.allows(n)) }
+    }
+
+    /// A document's `_source` as this table's reader may see it.
+    pub fn visible_source(&self, v: crate::json::Value) -> crate::json::Value {
+        match &self.source_filter {
+            Some(f) => f.filter_source(v),
+            None => v,
         }
     }
 
@@ -518,6 +536,7 @@ impl FieldTable {
             key: (0, 0, 0),
             has_vectors: false,
             copy_sources: HashMap::new(),
+            source_filter: None,
         };
         let s = &mut t.schema;
         s.add_field(FieldSchema::new(SOURCE_FIELD, "_source")).map_err(internal)?;

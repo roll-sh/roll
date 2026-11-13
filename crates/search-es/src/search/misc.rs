@@ -512,7 +512,11 @@ fn termvectors_one(ctx: &Ctx, index: &str, id: Option<&str>, doc: Option<&Value>
     let idx = crate::api::document::single_index(ctx, index)?;
     let st = ctx.state();
     let engine = ctx.cluster.engine.index(ctx.cluster, &st, &idx)?;
-    let table = engine.table();
+    // Under field level security the fields the reader may not see have no vectors.
+    let table = match crate::xpack::security::dls::ReadSecurity::of(ctx).and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name)) {
+        Some(f) => std::sync::Arc::new(engine.table().restricted(&f)),
+        None => engine.table(),
+    };
     let routing = opts.get("routing").map(|v| v.to_es_string());
     if doc.is_none()
         && let Some(id) = id
