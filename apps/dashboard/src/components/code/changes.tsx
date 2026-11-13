@@ -325,7 +325,7 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
         const project = ws.projects.find((p) => p.resources.some((x) => x.kind === "repo" && x.ref === r.full_name));
         const fixIn = (b: Blocker) =>
           project && b.key ? (
-            <Link href={`/dashboard/projects/${project.id}/secrets?env=${encodeURIComponent(b.environments?.[0] ?? "")}&key=${encodeURIComponent(b.key)}`} className="mt-1 inline-block text-[12px] text-accent hover:underline">
+            <Link href={`/dashboard/projects/${project.id}/secrets?${b.environments?.length ? `env=${encodeURIComponent(b.environments[0])}&` : ""}key=${encodeURIComponent(b.key)}`} className="mt-1 inline-block text-[12px] text-accent hover:underline">
               {b.kind === "secret_leak" ? `Rotate ${b.key} in roll secrets` : `Add ${b.key} in roll secrets`}
             </Link>
           ) : null;

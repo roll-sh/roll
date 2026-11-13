@@ -582,8 +582,12 @@ async fn a_change_that_adds_a_secrets_value_is_blocked_until_it_is_removed() {
     let c = a.ok("POST", &format!("/v1/code/changes/{}/revise", id(&c)), Some(json!({ "message": "config", "files": { "config.js": { "content": "const stripe = process.env.STRIPE_KEY;\nconst dsn = process.env.SENTRY_DSN;\n" } } }))).await;
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(leak(&c), None);
-    // A variable it starts reading that an environment lacks: a notice, never a blocker.
-    assert_eq!(c["notices"], json!([{ "kind": "secret_missing", "message": "reads SENTRY_DSN, which production doesn't set in roll secrets", "key": "SENTRY_DSN", "environments": ["production"] }]));
+    // A variable it starts reading that an environment lacks: a notice, never a blocker. Not on a
+    // public repo, where anyone could guess names in a diff to learn what roll secrets holds.
+    assert_eq!(c["notices"], Value::Null);
+    a.ok("PATCH", P, Some(json!({ "visibility": "private" }))).await;
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(c["notices"], json!([{ "kind": "secret_missing", "message": "reads SENTRY_DSN, which isn't set in every roll secrets environment", "key": "SENTRY_DSN" }]));
     assert!(!c["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "secret_missing"));
 
     // A value that landed before (here, before roll secrets was on): a scan says where, not what.

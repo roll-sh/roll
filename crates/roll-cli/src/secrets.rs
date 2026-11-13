@@ -1652,7 +1652,8 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
 async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map<String, Value>> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let need = |k: &str| env(k).with_context(|| format!("set {k}"));
-    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+    // No redirects: a token never follows one to another host.
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
     let get = |req: reqwest::RequestBuilder, what: String| async move {
         let res = req.send().await.with_context(|| what.clone())?;
         let status = res.status();
