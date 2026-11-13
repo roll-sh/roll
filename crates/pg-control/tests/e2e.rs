@@ -131,6 +131,15 @@ impl Harness {
         Ok(client)
     }
 
+    /// Connect as another role (a branch's own) through the proxy.
+    async fn connect_as(&self, user: &str, password: &str, endpoint: &str) -> Result<Client, tokio_postgres::Error> {
+        let mut cfg = tokio_postgres::Config::new();
+        cfg.host("127.0.0.1").port(self.proxy_port).user(user).password(password).dbname("main").options(format!("endpoint={endpoint}"));
+        let (client, conn) = cfg.connect(NoTls).await?;
+        tokio::spawn(conn);
+        Ok(client)
+    }
+
     /// Connect through the proxy, as any client would.
     async fn connect(&self, db: &Db, endpoint: &str) -> Client {
         self.try_connect(&db.project.password, Some(endpoint)).await.unwrap_or_else(|e| panic!("connect {endpoint}: {e:?}"))
@@ -466,6 +475,18 @@ async fn branches_are_isolated_copies() {
     assert_eq!(count(&d, "SELECT count(*) FROM t").await, 501);
     assert_eq!(count(&c, "SELECT count(*) FROM t").await, 400);
 
+    // A role of the branch's own (`app_role`, what previews hand their code): it owns and
+    // migrates the app's tables, but isn't the superuser (no WAL, no files), and the parent's
+    // endpoint doesn't know it.
+    let dev = h.control.ensure_app_role(&db.project.id, &dev.id).await.unwrap();
+    let password = dev.app_password.clone().unwrap();
+    let a = h.connect_as(&dev.id, &password, &dev_ep.id).await.unwrap();
+    a.batch_execute("CREATE TABLE app_made (id int); ALTER TABLE t ADD COLUMN app_note text").await.unwrap();
+    let denied = a.query("SELECT pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn()))", &[]).await.unwrap_err();
+    assert_eq!(sql_state(&denied), Some(&SqlState::INSUFFICIENT_PRIVILEGE), "{denied:?}");
+    assert!(h.connect_as(&dev.id, &password, &db.ep.id).await.is_err(), "the parent's endpoint doesn't know it");
+    drop(a);
+
     // A reset (roll previews) brings back the parent's current state on the same endpoint, so
     // the connection string doesn't change; the branch's own history starts again.
     drop(d);
@@ -474,6 +495,7 @@ async fn branches_are_isolated_copies() {
     let d = h.connect(&db, &dev_ep.id).await;
     assert_eq!(count(&d, "SELECT count(*) FROM t").await, 400, "the parent's rows, not the branch's old ones");
     d.batch_execute("INSERT INTO t VALUES (100002, 'after reset')").await.unwrap();
+    assert!(h.connect_as(&dev.id, &password, &dev_ep.id).await.is_ok(), "its role, same password, after the reset");
     h.wait_for_base(&dev.id).await;
     assert!(h.control.reset_branch(&db.project.id, "main", false).await.is_err(), "the root branch has no parent");
 

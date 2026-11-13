@@ -44,6 +44,10 @@ pub struct Branch {
     /// is swapped in when complete, so a path is never reused.
     #[serde(skip)]
     pub data_dir: Option<String>,
+    /// The password of the branch's own role (named as the branch's id), when it has one
+    /// (`roles.rs`). Never serialized: it's in `app_connection_uri`.
+    #[serde(skip)]
+    pub app_password: Option<String>,
 }
 
 impl Branch {
@@ -202,6 +206,9 @@ CREATE INDEX base_images_branch ON base_images (branch_id, created_at);
 ALTER TABLE branches ADD COLUMN data_dir TEXT;
 ALTER TABLE endpoints ADD COLUMN data_dir TEXT;
 "#,
+    r#"
+ALTER TABLE branches ADD COLUMN app_password TEXT;
+"#,
 ];
 
 fn project_row(r: &Row) -> rusqlite::Result<Project> {
@@ -227,6 +234,7 @@ fn branch_row(r: &Row) -> rusqlite::Result<Branch> {
         pending_recovery: r.get(6)?,
         parent_at: r.get(7)?,
         data_dir: r.get(8)?,
+        app_password: r.get(9)?,
     })
 }
 
@@ -265,7 +273,7 @@ fn base_row(r: &Row) -> rusqlite::Result<BaseImage> {
 
 const PROJECT_COLS: &str = "id, name, pg_version, region, password, created_at, history_retention_s";
 const BRANCH_COLS: &str =
-    "id, project_id, name, parent_id, created_at, local_state, pending_recovery, parent_at, data_dir";
+    "id, project_id, name, parent_id, created_at, local_state, pending_recovery, parent_at, data_dir, app_password";
 const ENDPOINT_COLS: &str = "id, project_id, branch_id, kind, state, min_cu, max_cu, cu, suspend_timeout_s, host_port, \
      last_active, created_at, data_dir";
 const BASE_COLS: &str = "id, branch_id, kind, key, timeline, start_lsn, end_lsn, flush_lsn, created_at, bytes";
@@ -340,7 +348,7 @@ impl Store {
     pub fn insert_branch(&self, b: &Branch) -> anyhow::Result<()> {
         self.with(|c| {
             c.execute(
-                &format!("INSERT INTO branches ({BRANCH_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"),
+                &format!("INSERT INTO branches ({BRANCH_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
                 params![
                     b.id,
                     b.project_id,
@@ -353,7 +361,8 @@ impl Store {
                     },
                     b.pending_recovery,
                     b.parent_at,
-                    b.data_dir
+                    b.data_dir,
+                    b.app_password
                 ],
             )
             .map(drop)
@@ -398,6 +407,10 @@ impl Store {
             LocalState::Evicted => "evicted",
         };
         self.with(|c| c.execute("UPDATE branches SET local_state = ?2 WHERE id = ?1", params![id, s]).map(drop))
+    }
+
+    pub fn set_app_password(&self, id: &str, password: &str) -> anyhow::Result<()> {
+        self.with(|c| c.execute("UPDATE branches SET app_password = ?2 WHERE id = ?1", params![id, password]).map(drop))
     }
 
     pub fn set_branch_data_dir(&self, id: &str, name: &str) -> anyhow::Result<()> {
@@ -725,6 +738,7 @@ mod tests {
             pending_recovery: false,
             parent_at: None,
             data_dir: None,
+            app_password: None,
         }
     }
 

@@ -440,6 +440,11 @@ impl Control {
         let _ = std::fs::remove_dir_all(&old);
         let _ = std::fs::remove_dir_all(self.config.spool_dir(&branch.id));
         drop(held);
+        // The parent's data has no role of the branch's: made again, same password, so its
+        // `app_connection_uri` keeps working.
+        if branch.app_password.is_some() {
+            return self.ensure_app_role(project_id, &branch.id).await;
+        }
         self.branch_in(project_id, &branch.id)
     }
 

@@ -96,6 +96,38 @@ impl Control {
         }
     }
 
+    /// The connection string of a branch's own role, when it has one (`roles.rs`).
+    pub fn app_connection_uri(&self, branch: &Branch, endpoint_id: &str) -> Option<String> {
+        let password = branch.app_password.as_ref()?;
+        Some(match &self.config.public_domain {
+            Some(domain) => format!("postgres://{}:{password}@{endpoint_id}.{domain}:{}/main?sslmode=require", branch.id, self.config.public_port),
+            None => format!(
+                "postgres://{}:{password}@{}:{}/main?options=endpoint%3D{endpoint_id}&sslmode=disable",
+                branch.id, self.config.public_host, self.config.public_port
+            ),
+        })
+    }
+
+    /// Give a branch a role of its own (idempotent: the same password once it has one), made on
+    /// the branch's compute; again after anything that replaces its data (a reset).
+    pub async fn ensure_app_role(self: &Arc<Self>, project_id: &str, branch_id: &str) -> Result<Branch> {
+        let branch = self.branch_in(project_id, branch_id)?;
+        if branch.parent_id.is_none() {
+            return Err(ControlError::Invalid("the root branch keeps the project's role; give a branch one".into()));
+        }
+        let password = match &branch.app_password {
+            Some(p) => p.clone(),
+            None => {
+                let p = crate::ids::new_password();
+                self.store.set_app_password(&branch.id, &p)?;
+                p
+            }
+        };
+        let ep = self.store.endpoint_for_branch(&branch.id)?.ok_or_else(|| ControlError::NotFound("primary endpoint".into()))?;
+        self.query(&ep.id, &crate::roles::role_sql(&branch.id, &password)).await?;
+        self.branch_in(project_id, &branch.id)
+    }
+
     pub(crate) fn project_or_404(&self, id: &str) -> Result<Project> {
         self.store.project(id)?.ok_or_else(|| ControlError::NotFound(format!("project {id}")))
     }
@@ -310,6 +342,7 @@ impl Control {
             pending_recovery: false,
             parent_at: None,
             data_dir: None,
+            app_password: None,
         };
         self.store.insert_branch(&branch)?;
         let ep = self.insert_endpoint(&project.id, &branch.id, READ_WRITE)?;
@@ -404,6 +437,7 @@ impl Control {
                 _ => None,
             },
             data_dir: None,
+            app_password: None,
         };
         let dest = self.config.data_path(branch.dir_name());
         {

@@ -34,35 +34,38 @@ impl Brancher for Postgres {
     }
 
     /// `Mode::Schema`: branched, then every user table emptied (`schema_only`). Either way the
-    /// branch gets a role of its own for the preview's code ([`Postgres::app_role`]).
+    /// branch gets a role of its own for the preview's code (pg-control's `app_role`).
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
-        let id = match self.find(parent, name).await? {
+        let (id, has_role) = match self.find(parent, name).await? {
             Some(b) => {
                 let id = s(&b["id"]).unwrap_or_default();
                 // From before a crash: it may still hold rows, so empty it again (idempotent).
                 if mode == Mode::Schema {
                     self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(&id)), json!({ "schema_only": true })).await?;
                 }
-                id
+                (id, false)
             }
-            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema })).await {
-                Ok(v) => s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?,
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "schema_only": mode == Mode::Schema, "app_role": true })).await {
+                Ok(v) => (s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?, v["app_connection_uri"].is_string()),
                 Err(e) if conflict_is_ours(&e) => {
                     let b = self.find(parent, name).await?.ok_or(e)?;
-                    s(&b["id"]).unwrap_or_default()
+                    (s(&b["id"]).unwrap_or_default(), false)
                 }
                 Err(e) => return Err(e),
             },
         };
-        let kept = self.app_role(parent, &id, name).await?;
-        Ok(Branched { r#ref: id, kept: Some(kept) })
+        // A branch found again (a crash) gets its role now (idempotent).
+        if !has_role {
+            self.0.post(&format!("/v1/projects/{}/branches/{}/app-role", seg(parent), seg(&id)), json!({})).await?;
+        }
+        Ok(Branched { r#ref: id, kept: Some(APP_ROLE.into()) })
     }
 
-    /// In place: same branch and endpoint. The parent's data replaces the branch's, roles
-    /// included, so the branch's own role is made again (a new password).
+    /// In place: same branch, endpoint and `DATABASE_URL` (pg-control makes the branch's role
+    /// again, same password).
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         match self.0.post(&format!("/v1/projects/{}/branches/{}/reset", seg(parent), seg(branch)), json!({ "schema_only": mode == Mode::Schema })).await {
-            Ok(_) => Ok(Branched { r#ref: branch.to_string(), kept: Some(self.app_role(parent, branch, name).await?) }),
+            Ok(_) => Ok(Branched { r#ref: branch.to_string(), kept: Some(APP_ROLE.into()) }),
             // Gone (or an older node without the route): branch again.
             Err(e) if is_404(&e) => {
                 self.delete(parent, branch, name).await?;
@@ -84,18 +87,17 @@ impl Brancher for Postgres {
     }
 
     /// A branch from before branch roles: its role, made now.
-    async fn credentials(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<String>> {
-        self.app_role(parent, branch, name).await.map(Some)
+    async fn credentials(&self, parent: &str, branch: &str, _name: &str) -> anyhow::Result<Option<String>> {
+        self.0.post(&format!("/v1/projects/{}/branches/{}/app-role", seg(parent), seg(branch)), json!({})).await?;
+        Ok(Some(APP_ROLE.into()))
     }
 
     /// The branch's endpoint, signed in as the branch's own role (never the project's superuser).
-    async fn connect(&self, parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
+    async fn connect(&self, parent: &str, branch: &str, _kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
         let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
-        let uri = s(&b["connection_uri"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
-        let role: Value = kept.and_then(|k| serde_json::from_str(k).ok()).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no role of its own: reset it"))?;
-        let (Some(user), Some(password)) = (role["user"].as_str(), role["password"].as_str()) else { anyhow::bail!("Postgres branch {branch}'s role is incomplete: reset it") };
-        Ok(vec![("DATABASE_URL".into(), with_userinfo(&uri, user, password)?)])
+        let uri = s(&b["app_connection_uri"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no role of its own yet"))?;
+        Ok(vec![("DATABASE_URL".into(), uri)])
     }
 
     /// Evict the branch: its local data directory goes to object storage (a base backup); the
@@ -145,7 +147,8 @@ impl Brancher for Postgres {
             let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
             anyhow::Ok(rows.iter().filter_map(|r| r[0].as_str().map(str::to_string)).collect::<Vec<_>>())
         };
-        let role = s(&b["name"]).map(|n| n.replace('-', "_"));
+        // pg-control names a branch's role after the branch.
+        let role = b["app_connection_uri"].is_string().then(|| s(&b["id"])).flatten();
         Ok(Some((lines(s(&from["endpoint"]["id"]), None).await?, lines(s(&b["endpoint"]["id"]), role).await?)))
     }
 
@@ -163,74 +166,8 @@ impl Brancher for Postgres {
     }
 }
 
-impl Postgres {
-    /// A role of the branch's own for the preview's code (`pv_<id>`, a fresh password): it owns
-    /// the app's database, schemas and objects (so migrations work), but isn't a superuser and
-    /// holds none of the roles that read files, so neither the WAL (the pages from before a
-    /// mask) nor another database is in reach. It exists only on the branch: the parent's
-    /// endpoint doesn't know it. Made again on a retry (`ALTER ROLE`, a new password).
-    async fn app_role(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<String> {
-        let role = name.replace('-', "_");
-        let mut raw = [0u8; 24];
-        getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("randomness: {e}"))?;
-        const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-        let password: String = raw.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect();
-        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
-        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
-        anyhow::ensure!(!b["parent_id"].is_null(), "refusing to make a preview role on {branch}: it isn't a branch of {parent}");
-        let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
-        let quote = |v: &str| format!("'{}'", v.replace('\'', "''"));
-        let sql = format!("SET search_path = pg_catalog, pg_temp; {}", ROLE_SQL.replace("{role}", &quote(&role)).replace("{password}", &quote(&password)));
-        self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": sql })).await?;
-        Ok(json!({ "user": role, "password": password }).to_string())
-    }
-}
-
-/// `uri` signed in as `user` / `password` instead of whoever it names.
-fn with_userinfo(uri: &str, user: &str, password: &str) -> anyhow::Result<String> {
-    let (scheme, rest) = uri.split_once("://").ok_or_else(|| anyhow::anyhow!("not a Postgres URL"))?;
-    let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
-    Ok(format!("{scheme}://{}:{}@{host}", seg(user), seg(password)))
-}
-
-/// Makes (or re-passwords) a branch's own role and gives it the app's objects: `{role}` and
-/// `{password}` are quoted literals. Extension members, the system schemas, and sequences owned
-/// by a column (they follow their table) are left as they are.
-const ROLE_SQL: &str = r#"DO $roll$
-DECLARE
-  r record;
-  me oid := (SELECT oid FROM pg_roles WHERE rolname = current_user);
-  role text := {role};
-  pw text := {password};
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role) THEN
-    EXECUTE format('ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role, pw);
-  ELSE
-    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', role, pw);
-  END IF;
-  EXECUTE format('ALTER DATABASE %I OWNER TO %I', current_database(), role);
-  FOR r IN SELECT n.nspname FROM pg_namespace n WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema' AND n.nspowner = me
-           AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e') LOOP
-    EXECUTE format('ALTER SCHEMA %I OWNER TO %I', r.nspname, role);
-  END LOOP;
-  FOR r IN SELECT c.oid::regclass AS name, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-           WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND c.relowner = me
-             AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND (d.deptype = 'e' OR (c.relkind = 'S' AND d.deptype IN ('a', 'i')))) LOOP
-    EXECUTE format('ALTER %s %s OWNER TO %I', CASE r.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END, r.name, role);
-  END LOOP;
-  FOR r IN SELECT p.oid::regprocedure AS name FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-           WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema' AND p.proowner = me
-             AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') LOOP
-    EXECUTE format('ALTER ROUTINE %s OWNER TO %I', r.name, role);
-  END LOOP;
-  FOR r IN SELECT t.oid::regtype AS name FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-           WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema' AND t.typowner = me
-             AND (t.typtype IN ('e', 'd', 'r') OR (t.typtype = 'c' AND (SELECT relkind FROM pg_class WHERE oid = t.typrelid) = 'c'))
-             AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e') LOOP
-    EXECUTE format('ALTER TYPE %s OWNER TO %I', r.name, role);
-  END LOOP;
-END
-$roll$;"#;
+/// What a Postgres branch's `kept` says: it has a role of its own (pg-control's `app_role`).
+const APP_ROLE: &str = r#"{"app_role":true}"#;
 
 /// One line per object in the user's schemas, for `roll_previews::schema::diff`: tables, views,
 /// sequences, columns (type, nullability, default), indexes, constraints, enums, functions and

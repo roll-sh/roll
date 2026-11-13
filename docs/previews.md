@@ -339,14 +339,17 @@ logged and read again on the next converge; it never fails the preview.
       nothing serves the branch meanwhile. Large tables can take long: a mask request has the
       adapter's 600 s budget.
     - **The preview's code never signs in as the superuser.** Each branch gets a role of its own
-      (`pv_<id>`, its own password, kept like a show-once credential and never returned): it owns
-      the app's database, schemas and objects, so migrations and seeds work, but it isn't a
-      superuser and holds none of the roles that read files or other sessions' statistics. So
-      it can't read the branch's WAL (where the pages from before the rewrite are), files, or
-      another database, and the parent's endpoint doesn't know it (the role is made on the
-      branch, after the branch point). The preview's `DATABASE_URL` is that role's; masking,
-      the schema diff and resets run as the superuser through rolld's own query route, which a
-      preview's code has no token for. The `VACUUM (FULL, ANALYZE)` after the rewrite also
+      from pg-control (`POST /v1/projects/{id}/branches {app_role: true}`, or
+      `…/branches/{branch}/app-role` for one that has none; named as the branch, its own
+      password; the branch then answers with an `app_connection_uri`): it owns the app's
+      database, schemas and objects, so migrations and seeds work, but it isn't a superuser and
+      holds none of the roles that read files or other sessions' statistics. So it can't read the
+      branch's WAL (where the pages from before the rewrite are), files, or another database, and
+      the parent's endpoint doesn't know it (the role is made on the branch, after the branch
+      point, and made again, same password, after an in-place reset). The preview's
+      `DATABASE_URL` is that role's; masking, the schema diff and resets run as the superuser
+      through rolld's own query route, which a preview's code has no token for.
+      `crates/pg-control/tests/e2e.rs` (`branches_are_isolated_copies`) checks it. The `VACUUM (FULL, ANALYZE)` after the rewrite also
       clears TOAST and recomputes the statistics the role can read for its own tables. Measured:
       the role reads and migrates its data, `pg_read_binary_file` and `pg_ls_waldir` are denied,
       and the parent's endpoint refuses it.
@@ -456,7 +459,7 @@ Postgres role, the schema diff after a migration, a pushed log line, and `roll p
 | The bucket branch: parent's bytes / its own after writing 1 MiB / objects it sees | 20 MiB / 1 MiB / 21 |
 | The Postgres branch's data directory (a full copy on ext4; the parent's: 80–94 MiB) | 62–80 MiB |
 | Postgres `users.email` in the branch / in the parent (rule `email`) | `user-c58bca0f6be4@example.invalid` / `ada@example.com` |
-| The service's Postgres role / reading the WAL with it | `pv_<id>` / permission denied |
+| The service's Postgres role / reading the WAL with it | the branch's own (`br_<id>`) / permission denied |
 | First request (cold start of the service's container, image cached) | 3.6–5.1 s (13.6 under the heaviest load) |
 | Next request (warm) | 13–27 ms |
 | The service's container while running | 12–30 MiB of 128 MiB, 0.01% CPU |
@@ -708,6 +711,8 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- branch roles in pg-control (`app_role`, `app_connection_uri`, kept across in-place resets) with
+  its e2e test, which previews use;
 - a fifth adversarial review and its fixes (the superuser never runs what a preview's code
   planted: pinned `search_path`, the schema diff as the branch's role, no in-place rewrite after
   preview code ran, triggers restored exactly; screenshots off the reconciler's pass; links bound
@@ -720,18 +725,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Branch roles in pg-control, with its e2e test**: `POST /v1/projects/{id}/branches
-   {app_role: true}` makes the branch's own role (today `rolld`'s previews adapter does it through
-   the query route) and the branch answers with an `app_connection_uri`; an in-place reset keeps
-   it working. Then any branch, not only a preview's, can be handed to code without the
-   superuser, and `crates/pg-control/tests/e2e.rs` checks that the role migrates, is refused the
-   WAL and files, and is unknown on the parent (only `scripts/preview-cost.sh` checks it today).
-2. **A look at the Previews tab and sheet as they are now** (schema changes, logs, keep,
+1. **A look at the Previews tab and sheet as they are now** (schema changes, logs, keep,
    screenshots and masking were added one by one): a pass for density, order and empty states,
    from screenshots of the real thing.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

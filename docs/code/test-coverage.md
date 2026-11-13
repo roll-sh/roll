@@ -1100,6 +1100,7 @@ otherwise. The module docs give the client retry policy and exactly what is asse
 | `roll preview` settings (by project name, nested `--set`, production refused), create from a branch, ls, rm, `wait` failing on a timeout or a deleted preview | `roll-cli/tests/preview.rs::settings_create_list_and_remove_a_branch_preview` |
 | roll previews: a screenshot of the first service at a head (a headless browser in the service container's network) | `scripts/preview-cost.sh` (manual: needs Docker and the browser image) |
 | roll previews: the screenshot's signed link opens it until it expires, and not for another preview, a moved expiry or a guess | `roll-previews/src/store.rs::a_screenshot_link_is_signed_and_expires` |
+| Postgres branch roles (`app_role`): the branch's role migrates, is refused the WAL, is unknown on the parent, and survives an in-place reset | `pg-control/tests/e2e.rs::branches_are_isolated_copies` (`pnpm test:pg`) |
 | roll previews end to end against every product (a real rolld and Docker), and what a preview costs | `scripts/preview-cost.sh` (manual) |
 
 ## control.db on SQLite and Postgres (`code-control/tests/concurrency.rs`, `code-sql/tests/backends.rs`)

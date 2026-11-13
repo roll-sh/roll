@@ -165,7 +165,7 @@ T4=$(now_ms); curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/"; T
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
-case "$APP_DB" in postgres://pv_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%:*}…"; exit 1;; esac
+case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
