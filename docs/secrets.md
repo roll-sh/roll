@@ -1590,16 +1590,13 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **Customer-managed keys per project** (BYOK): a project's data key sealed by a KMS key in the
-   customer's own AWS account (cross-account, grants they can revoke), as Infisical's external KMS;
-   revoking it makes the project's values unreadable to roll at once.
-2. **A Helm chart for the operator** (#36), the way most clusters install one.
-3. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+1. **A Helm chart for the operator** (#36), the way most clusters install one.
+2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    and the deploy notice when apps reads secrets (#31), refreshed once those land.
-4. **Products say who owns a resource**, so a person's project can link their own databases,
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
    Waits on products serving signed-in people (today they're the operator's).
-5. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
+4. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
    a project has members besides its owner.
 
 Open pull requests after this one:
@@ -1618,6 +1615,7 @@ Open pull requests after this one:
 - **#35, `roll run --fallback`** (after #20): an encrypted copy of the last values, used through an
   outage.
 - **#36, a Kubernetes operator** (after #32): RollSecrets pulled with the cluster's own identity.
+- **#37, customer-managed keys** (after #20): a project's data key wrapped by the customer's KMS key.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
