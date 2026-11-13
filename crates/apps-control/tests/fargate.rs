@@ -539,8 +539,16 @@ async fn a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps() {
     }
     assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new(), "environment files go once the task runs");
 
-    // Idle: the task stops (Fargate can't freeze one), and nothing runs.
+    // Running, it's metered by its size (Fargate can't say what it uses, and bills by size).
     let live = w.apps.live(&id, "production");
+    live.tick().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    live.tick().await;
+    let (_, m) = call(&w.api, "GET", &format!("{base}/metrics?minutes=5"), None).await;
+    let cpu: f64 = m["cpu"].as_array().unwrap().iter().filter_map(Value::as_f64).sum();
+    assert!(cpu > 0.0, "a running task is metered: {m}");
+
+    // Idle: the task stops (Fargate can't freeze one), and nothing runs.
     live.backdate(Duration::from_secs(601));
     live.tick().await;
     assert_eq!(live.state(), InstanceState::Stopped);

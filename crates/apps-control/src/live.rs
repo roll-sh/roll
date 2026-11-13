@@ -678,13 +678,23 @@ impl EnvLive {
                 continue;
             }
             up += 1;
-            if let Some(u) = self.runtime.usage(&i.name).await {
-                let mut seen = i.cpu_seen.lock();
-                if let Some(prev) = *seen {
-                    cpu += u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+            match self.runtime.usage(&i.name).await {
+                Some(u) => {
+                    let mut seen = i.cpu_seen.lock();
+                    if let Some(prev) = *seen {
+                        cpu += u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                    }
+                    *seen = Some(u.cpu_ns);
+                    mem += u.memory_bytes;
                 }
-                *seen = Some(u.cpu_ns);
-                mem += u.memory_bytes;
+                // A runtime that can't say what an instance uses (Fargate, which bills by size ×
+                // time) meters what it was given: its CPU for the interval and its memory.
+                None => {
+                    if let Some(tpl) = self.template() {
+                        cpu += tpl.run.cpu * elapsed;
+                        mem += (tpl.run.memory_mb as u64) << 20;
+                    }
+                }
             }
         }
         if up > 0 || elapsed > 0.0 {
