@@ -9777,7 +9777,36 @@ release the session thread's stack below its idle depth when a session has been 
 (crash_random and the power stage build `--profile dist` with that profile: the engine runs in the
 test process). The release and debug crate tests don't use a built binary (and a fat-LTO build
 of every test binary would take hours): they stay as they are. `TRAIN_NO_CHECKOUT=1` tests the
-checkout as it is. The train on the PGO build: see "Agent 218's stack under PGO" below.
+checkout as it is. Run on agent 218's stack built PGO (`15339e22e`, profile and binary of that
+commit): crash_random, power_cut, the power stage with and without async commits all pass with
+`--profile dist` + the profile; regress against the PGO binary 0 newly differing units, isolation
+1647/1648 (the baseline), pg_dump_tap 14609 passed, 0 failed. The release and debug crate tests
+failed only `wire_waits`'s safe-snapshot case, a bug of that base (`a79309351`: a SET before
+BEGIN ... DEFERRABLE in one query lost the DEFERRABLE) fixed upstream by `24792655d`; the stack
+with that commit passes it. PGO changed no behaviour the train checks.
+
+**How performance agents gate from now on.** Gate candidates on **plain dist**, as before
+(instructions or user cycles per operation, matched pairs: it is the cheap build, 17-19 minutes),
+and confirm on PGO:
+
+- **Every round's landed stack** (or every few landed changes) gets a PGO confirmation before the
+  round's report: base and stack, each `tools/dist-pgo.sh` from its own checkout (its own profile,
+  the same training), 3-5 pairs on the workload the round targets. ~45 minutes of builds a side
+  with `PGO_CLIENT` given; 2 slots.
+- **Changes that move function boundaries or inlining** (`#[inline]` / `#[inline(never)]`,
+  splitting or merging hot functions, generics that change monomorphisation, large stack frames
+  on hot paths) are gated on PGO directly: plain dist does not predict them. Measured: keeping
+  the wire handlers out of line cost point reads +0.3% instructions in plain dist but +1.8% under
+  PGO (1 client); a stack-size inlining cap was free in plain dist terms and cost range reads 9%.
+- **Data-structure and algorithm changes** predict well: agent 218's 10-step stack measured
+  -4.4% (8 clients) and -7.4% (32 clients) user cycles per transaction in plain dist and -5.4% and
+  -8.5% under PGO on the same commits (each with its own profile), every pair in the same
+  direction. Per-step PGO deltas were not measured (ten PGO pipelines); the stack's sum moved
+  together.
+- Never compare a PGO build of one commit against a plain build of another, and never reuse one
+  commit's profile for another commit's comparison arm: functions whose code changed lose their
+  counts and come out cold, which biases against the changed side.
+- A new benchmark class goes into `tools/pgo-train.sh` in the same change (see above).
 
 ## Analytic path against pgrust (agent 220)
 
