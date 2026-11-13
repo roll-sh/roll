@@ -77,6 +77,8 @@ function targetSummary(s: Sync): string {
   if (s.kind === "gitlab") return `${str("project")} · ${str("environment_scope") || "*"}`;
   if (s.kind === "render") return str("service");
   if (s.kind === "netlify") return `${str("site")} · ${str("context") || "all"}`;
+  if (s.kind === "fly") return str("app");
+  if (s.kind === "railway") return `${str("project")} · ${str("environment")}${str("service") ? ` · ${str("service")}` : ""}`;
   if (str("url")) {
     try {
       return new URL(str("url")).host;
@@ -182,7 +184,7 @@ function SigningSecret({ id, secret, onDone }: { id: string; secret: string; onD
           Done
         </button>
       </div>
-      <p className="mt-2 font-mono text-[11px] text-subtle">X-Roll-Signature: sha256=HMAC(secret, &quot;&lt;X-Roll-Timestamp&gt;.&lt;body&gt;&quot;)</p>
+      <p className="mt-2 font-mono text-[11px] text-subtle">X-Roll-Signature-256: sha256=HMAC(secret, &quot;&lt;X-Roll-Timestamp&gt;.&lt;body&gt;&quot;)</p>
     </div>
   );
 }

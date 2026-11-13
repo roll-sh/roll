@@ -150,6 +150,8 @@ export type Token = {
   created_by: string;
   last_used_at: number | null;
   prefix: string;
+  /** Client addresses (CIDRs) it works from; null: any. */
+  allowed_ips: string[] | null;
 };
 /** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
@@ -177,9 +179,11 @@ export type Identity = {
   created_by: string;
   last_used_at: number | null;
   last_subject: string | null;
+  /** Client addresses (CIDRs) a login works from; null: any. */
+  allowed_ips: string[] | null;
 };
-export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number };
-export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
+export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[] };
+export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
 export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number };

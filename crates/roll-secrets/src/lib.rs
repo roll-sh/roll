@@ -357,6 +357,9 @@ impl Secrets {
         db.add_column("environments", "reminded_at", "INTEGER")?;
         // An ephemeral environment running vetted code may read a protected base (envs.rs).
         db.add_column("environments", "trusted", "INTEGER")?;
+        // Client addresses tokens and identities work from (tokens.rs).
+        db.add_column("tokens", "allowed_ips", "TEXT")?;
+        db.add_column("identities", "allowed_ips", "TEXT")?;
         db.ensure_schema(notices::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
     }

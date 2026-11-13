@@ -397,6 +397,9 @@ pub enum Tokens {
         /// Days until it expires.
         #[arg(long)]
         ttl_days: Option<i64>,
+        /// Only from this address or CIDR (repeatable).
+        #[arg(long = "allow-ip")]
+        allow_ips: Vec<String>,
     },
     Revoke { id: String },
 }
@@ -496,6 +499,9 @@ pub enum Identities {
         /// How long a login's token lasts, 5–60 minutes (default 15).
         #[arg(long)]
         ttl_minutes: Option<i64>,
+        /// Only log in (and use the token) from this address or CIDR (repeatable).
+        #[arg(long = "allow-ip")]
+        allow_ips: Vec<String>,
     },
     /// Delete an identity; the tokens it gave out stop working.
     Rm { id: String },
@@ -842,7 +848,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<20} envs {}  paths {}  {}  used {}", s(&t["id"]), s(&t["name"]), list(&t["environments"]), list(&t["paths"]), list(&t["actions"]), t["last_used_at"].as_i64().map(ago).unwrap_or_else(|| "never".into()));
                 }
             }
-            Tokens::Create { name, envs, paths, actions, ttl_days } => {
+            Tokens::Create { name, envs, paths, actions, ttl_days, allow_ips } => {
                 let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
                 let mut body = json!({ "name": name, "actions": actions });
                 if !envs.is_empty() {
@@ -853,6 +859,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 if let Some(d) = ttl_days {
                     body["ttl_days"] = json!(d);
+                }
+                if !allow_ips.is_empty() {
+                    body["allowed_ips"] = json!(allow_ips);
                 }
                 let v = c.call(Method::POST, &format!("{}/tokens", c.base()), Some(body)).await?;
                 if json_out {
@@ -986,7 +995,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes } => {
+            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips } => {
                 let (issuer, subject) = match (github, issuer, subject) {
                     (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
                     (None, Some(i), Some(s)) => (i, s),
@@ -1007,6 +1016,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 if let Some(m) = ttl_minutes {
                     body["ttl_minutes"] = json!(m);
+                }
+                if !allow_ips.is_empty() {
+                    body["allowed_ips"] = json!(allow_ips);
                 }
                 let v = c.call(Method::POST, &format!("{}/identities", c.base()), Some(body)).await?;
                 if json_out {

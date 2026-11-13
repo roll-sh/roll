@@ -31,24 +31,38 @@ impl Api {
         let _ = self.0.set(router);
     }
 
-    /// Call a product's route as the operator. Runs on the store's blocking threads.
-    fn call(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<Json> {
+    /// Call a product's route as the operator: its status and JSON answer, whatever the status.
+    /// Runs on the store's blocking threads.
+    fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
         let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
-        let mut req = Request::builder().method(method.clone()).uri(path).header("content-type", "application/json");
+        let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json");
         req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
         let req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| Error::Internal(e.to_string()))?;
         tokio::runtime::Handle::current().block_on(async move {
             let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
             let status = resp.status();
             let bytes = resp.into_body().collect().await.map_err(|e| Error::Link(e.to_string()))?.to_bytes();
-            let v: Json = if bytes.is_empty() { Json::Null } else { serde_json::from_slice(&bytes).unwrap_or(Json::Null) };
-            if !status.is_success() {
-                // Product errors name resources, not credentials.
-                let why = v.get("error").and_then(Json::as_str).unwrap_or(status.as_str()).to_string();
-                return Err(Error::Link(format!("{method} {}: {why}", path.split('?').next().unwrap_or(path))));
-            }
-            Ok(v)
+            Ok((status, if bytes.is_empty() { Json::Null } else { serde_json::from_slice(&bytes).unwrap_or(Json::Null) }))
         })
+    }
+
+    /// Call a product's route as the operator; a status other than 2xx is an error naming it.
+    fn call(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<Json> {
+        let (status, v) = self.call_status(method.clone(), path, body)?;
+        if !status.is_success() {
+            // Product errors name resources, not credentials.
+            let why = v.get("error").and_then(Json::as_str).unwrap_or(status.as_str()).to_string();
+            return Err(Error::Link(format!("{method} {}: {} {why}", path.split('?').next().unwrap_or(path), status.as_u16())));
+        }
+        Ok(v)
+    }
+
+    /// Delete a product's resource; one that's already gone (404) is done.
+    fn delete_gone(&self, path: &str) -> roll_secrets::Result<()> {
+        match self.call_status(Method::DELETE, path, None)? {
+            (s, _) if s.is_success() || s == axum::http::StatusCode::NOT_FOUND => Ok(()),
+            (s, v) => Err(Error::Link(format!("DELETE {}: {} {}", path.split('?').next().unwrap_or(path), s.as_u16(), v.get("error").and_then(Json::as_str).unwrap_or(s.as_str())))),
+        }
     }
 }
 
@@ -414,10 +428,7 @@ impl LinkProvider for Stream {
     }
     fn revoke(&self, r#ref: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(u) = h["username"].as_str() else { return Ok(()) };
-        match self.0.call(Method::DELETE, &format!("/v1/streams/{}/keys/{}", enc(r#ref), enc(u)), None) {
-            Err(Error::Link(m)) if m.contains("404") || m.contains("no ") => Ok(()),
-            r => r.map(|_| ()),
-        }
+        self.0.delete_gone(&format!("/v1/streams/{}/keys/{}", enc(r#ref), enc(u)))
     }
 }
 
@@ -455,10 +466,7 @@ impl LinkProvider for Bucket {
     }
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(id) = h["id"].as_str() else { return Ok(()) };
-        match self.0.call(Method::DELETE, &format!("/v1/storage/keys/{}", enc(id)), None) {
-            Err(Error::Link(m)) if m.contains("no such") || m.contains("404") => Ok(()),
-            r => r.map(|_| ()),
-        }
+        self.0.delete_gone(&format!("/v1/storage/keys/{}", enc(id)))
     }
 }
 
@@ -546,10 +554,7 @@ impl LinkProvider for Search {
     }
     fn revoke(&self, r#ref: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(id) = h["id"].as_str() else { return Ok(()) };
-        match self.0.call(Method::DELETE, &format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id)), None) {
-            Err(Error::Link(m)) if m.contains("404") || m.contains("no ") => Ok(()),
-            r => r.map(|_| ()),
-        }
+        self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id)))
     }
 }
 

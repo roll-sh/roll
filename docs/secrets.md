@@ -177,8 +177,9 @@ environment is a first-class kind, built to be cheap:
 - It carries **labels** (`{"change": "chg_42", "pr": "117"}`, keys and values of `[a-z0-9_.-]`, up
   to 16) and an optional **expiry**. It is deleted when it expires (its leases are revoked first),
   and `DELETE …/environments?label=pr=117` deletes every environment with that label in one call.
-- One call creates the environment together with its first secrets and links, typically links to
-  the preview's branched resources: the preview's Postgres branch, its Redis branch.
+- One call creates the environment together with its first secrets and links. roll previews
+  writes its branched resources' addresses (the preview's Postgres branch, its Redis branch) as
+  plain values: a branch is the preview's own resource, not a link to a parent on the canvas.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
 - **Ensuring one** is a single idempotent call, `PUT …/environments/{env}` with what it should be
@@ -595,8 +596,8 @@ open it.
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
-they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Cloudflare
-Workers, AWS Parameter Store, a Kubernetes Secret, an endpoint
+they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
+Railway, Cloudflare Workers, AWS Parameter Store, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -701,7 +702,7 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
   it.
 
-### `render` and `netlify`
+### `render`, `netlify`, `fly` and `railway`
 
 - **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
   environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
@@ -711,7 +712,17 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   changed key sets that context's value (or creates the variable with it), a removed key deletes
   the variable.
 
-Like Vercel's, they use the platforms' fixed API hosts.
+- **`fly`**, `{app, token_key}`: a Fly.io app's secrets through Fly's GraphQL API, as flyctl sends
+  them (`setSecrets` for changed keys, `unsetSecrets` for removed ones; a macaroon deploy token goes
+  as `FlyV1 …`, anything else as `Bearer …`). Setting secrets makes a release, as `fly secrets set`
+  does.
+- **`railway`**, `{project, environment, service?, token_key, token_kind?}`: a Railway service's
+  variables in one environment (the environment's shared variables without `service`), through its
+  public GraphQL API (`variableCollectionUpsert`, `variableDelete`). The token is a project token
+  (`Project-Access-Token`) by default, or an account token with `token_kind: "account"`.
+
+Like Vercel's, they use the platforms' fixed API hosts, and a GraphQL answer's `errors` fail the
+push by code, never with a value.
 
 ### `gitlab`
 
@@ -747,8 +758,12 @@ once in the answer, and stored sealed with the project's data key. Every request
 ```
 X-Roll-Sync: syn_…
 X-Roll-Timestamp: <unix seconds>
-X-Roll-Signature: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>
+X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>
+X-Roll-Delivery: dlv_<32 hex>   (the same on every retry of this delivery)
 ```
+
+It's the scheme of every roll webhook (roll code's, roll-access's audit sinks), so one receiver
+verifies them all.
 
 - `webhook` body: `{sync, project, environment, path, digest, at, changed, removed, context,
   sealed}`. `sealed` is a `roll-seal-v1` box (see "Runtime resolve") to `recipient` of the JSON
@@ -815,6 +830,11 @@ pub trait Authority: Send + Sync {
 The built-in authority accepts the operator (`roll_auth::Operator`, or any request when rolld has no
 operator token) and **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
 environments (or all), a list of path prefixes (or all), the actions above and an optional expiry.
+A token can be pinned to client addresses (`allowed_ips`: up to 20 addresses or CIDRs, IPv4 or
+IPv6): from anywhere else it's refused (403), checked on every request against the connection's
+peer address (or `X-Forwarded-For` where rolld trusts it), as Infisical's trusted IPs and Doppler's
+IP restrictions do. An identity can be pinned the same way: a login from elsewhere is refused, and
+the token it gets carries the same list. `roll secrets tokens create … --allow-ip 203.0.113.0/24`.
 Tokens are stored as SHA-256 hashes, looked up on every request and never cached. When roll-access
 lands, its evaluator replaces the built-in authority, the `rlst_` tokens migrate to its scoped tokens,
 and the routes stay the same.
@@ -909,8 +929,8 @@ days.
   answers up to 10,000 rows as a file.
 - **Streaming to a SIEM**: an audit sink (`POST …/audit/sinks {url, from_start?}`, `admin`) is a
   public HTTPS URL that receives the project's new rows in order, in batches of up to 200:
-  `{sink, project, events: AuditEntry[]}`, signed like syncs (`X-Roll-Sink`, `X-Roll-Timestamp`,
-  `X-Roll-Signature: sha256=HMAC(secret, "ts.body")`; the `whsec_…` secret is shown once and kept
+  `{sink, project, events: AuditEntry[]}`, signed like syncs and every roll webhook (`X-Roll-Sink`, `X-Roll-Timestamp`,
+  `X-Roll-Signature-256: sha256=HMAC(secret, "ts.body")`, `X-Roll-Delivery`; the `whsec_…` secret is shown once and kept
   sealed). Each sink keeps a cursor; the sweeper claims a sink in a write before delivering, so no
   two nodes send one batch, and a failed batch is sent again 5 minutes later. Deliveries go through
   the same `PublicOnly` client as syncs. At most 10 sinks a project.
@@ -1058,10 +1078,10 @@ type Compare = { from: string; to: string; path: string; rows: { key: string; st
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
-type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null };
-type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number };
-type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string };
-type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
+type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null };
+type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[] };
+type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
+type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
 type Sync = {
   id: string; environment: string; path: string; kind: string; target: Record<string, unknown>;
@@ -1134,11 +1154,14 @@ Done and in PR #20:
 - leaked secrets don't land, plus scans of a repo's default branch and history;
 - required and typed keys; insights and rotation reminders;
 - one-time sharing, and sharing across projects;
-- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Cloudflare Workers, AWS Parameter Store,
-  Kubernetes, sealed webhooks and deploy notifications;
-- audit sinks, purge and retention, workload identities (OIDC logins for CI);
+- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
+  Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
+- audit sinks, purge and retention, workload identities (OIDC logins for CI), tokens and
+  identities pinned to client addresses;
 - the dashboard's Secrets surface;
-- the fixes from three security reviews and a phone-width pass.
+- the fixes from three security reviews and a phone-width pass;
+- every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
+  roll-access's catalogue is checked against.
 
 Reviewed again on 2026-11-13:
 - against Infisical, Doppler, Vault, Vercel and 1Password Developer;
@@ -1156,14 +1179,8 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Errors from in-process product calls carry the HTTP status.** rolld's `Api` (link providers,
-   syncs) reads a status, not "404" or "no " in an error's text.
-3. **One table of every secrets route and its action**, generated from the router and checked by a
-   test against roll-access's `classify`, so a catch-all row can't hide a misclassified route.
-4. **Fly.io and Railway syncs**, checked against their own clients' sources. Fly is GraphQL
-   `setSecrets`/`unsetSecrets` `{appId, secrets: [{key, value}]}` / `{appId, keys}`.
-5. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-6. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-7. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

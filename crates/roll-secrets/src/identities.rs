@@ -85,6 +85,8 @@ pub struct Identity {
     pub last_used_at: Option<i64>,
     /// The `sub` of the last login.
     pub last_subject: Option<String>,
+    /// The client addresses (CIDRs) a login, and the token it gets, work from; `None`: any.
+    pub allowed_ips: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +102,8 @@ pub struct NewIdentity {
     pub paths: Option<Vec<String>>,
     pub actions: Vec<Action>,
     pub ttl_minutes: Option<i64>,
+    #[serde(default)]
+    pub allowed_ips: Option<Vec<String>>,
 }
 
 /// What a login gets: the token (shown once) and when it ends.
@@ -111,7 +115,7 @@ pub struct Login {
     pub identity: String,
 }
 
-const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject";
+const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips";
 
 fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String)> {
     Ok((
@@ -130,6 +134,7 @@ fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String)> {
             created_by: r.get(12)?,
             last_used_at: r.get(13)?,
             last_subject: r.get(14)?,
+            allowed_ips: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
         },
         r.get(1)?,
     ))
@@ -183,7 +188,7 @@ impl Secrets {
         let (environments, paths, actions) = tokens::scope(project, n.environments, n.paths, n.actions, caller)?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None };
+        let i = Identity { id: names::new_id("idn", 12), name, issuer, audience, subject, claims: n.claims, environments, paths, actions, ttl_minutes: ttl, created_at: now, created_by: caller.principal.clone(), last_used_at: None, last_subject: None, allowed_ips: tokens::allowed(n.allowed_ips)? };
         self.db.write(|c| {
             let count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= IDENTITIES_MAX {
@@ -195,8 +200,8 @@ impl Secrets {
                 }
             }
             c.execute(
-                &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)"),
-                params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by],
+                &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)"),
+                params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by, i.allowed_ips.as_ref().map(json)],
             )?;
             audit::record(c, project, caller, "identity.create", None, None, &[], &format!("created identity {} for {} ({})", i.name, i.issuer, i.subject), now)
         })?;
@@ -228,6 +233,11 @@ impl Secrets {
         let deliver = self.deliver.clone().ok_or_else(|| Error::NotFound("workload identities aren't on this server".into()))?;
         let found = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [identity], identity_row).optional())?;
         let (i, project) = found.ok_or_else(denied)?;
+        if let Some(list) = &i.allowed_ips
+            && !tokens::ip_allowed(list, ip.as_deref())
+        {
+            return Err(Error::Forbidden(format!("identity {} doesn't log in from this address", i.name)));
+        }
         let jwt = Jwt::parse(token)?;
         let now = self.db.now_ms()?;
         self.oidc.verify(deliver.as_ref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
@@ -241,7 +251,7 @@ impl Secrets {
         self.project(&project)?;
         let expires_at = now + i.ttl_minutes * 60_000;
         let principal = format!("identity:{}", i.id);
-        let (t, secret) = tokens::new_token(i.name.clone(), i.environments.clone(), i.paths.clone(), i.actions.clone(), Some(expires_at), now, &principal);
+        let (t, secret) = tokens::new_token(i.name.clone(), i.environments.clone(), i.paths.clone(), i.actions.clone(), Some(expires_at), i.allowed_ips.clone(), now, &principal);
         let caller = Caller { principal, grants: std::sync::Arc::new(crate::access::Everything), ip };
         self.db.write(|c| {
             // Deleted meanwhile: no token.

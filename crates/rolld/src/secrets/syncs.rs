@@ -36,6 +36,8 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::Cloudflare(http.clone())));
     s.register(Arc::new(platforms::Render(http.clone())));
     s.register(Arc::new(platforms::Netlify(http.clone())));
+    s.register(Arc::new(platforms::Fly(http.clone())));
+    s.register(Arc::new(platforms::Railway(http.clone())));
     s.register(Arc::new(platforms::Ssm(http)));
     s.register(Arc::new(platforms::Kubernetes { allow_private }));
     s.register(Arc::new(platforms::GitLab { allow_private }));
@@ -61,6 +63,12 @@ fn target<const N: usize>(kind: &str, t: &Json, names: [(&str, bool); N]) -> Res
         };
     }
     Ok(out)
+}
+
+/// A delivery id from what makes a request the same request: `dlv_` and 32 hex characters.
+fn delivery_id(of: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("dlv_{}", Sha256::digest(of.as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect::<String>())
 }
 
 /// Run a future from the store's blocking threads.
@@ -210,13 +218,16 @@ impl Hooks {
     /// POST `body`, signed with the sync's secret.
     fn post(&self, url: &url::Url, p: &Push<'_>, body: &Json) -> Result<()> {
         let secret = p.secret.ok_or_else(|| Error::Internal("a signed sync has no secret".into()))?;
-        self.post_signed(url, ("x-roll-sync", p.sync), secret, body)
+        // The same push (sync, digest) is the same delivery, however often it's retried.
+        let delivery = delivery_id(&format!("{}:{}", p.sync, p.digest));
+        self.post_signed(url, ("x-roll-sync", p.sync), &delivery, secret, body)
     }
 
-    /// POST `body` with `X-Roll-Timestamp` and `X-Roll-Signature: sha256=HMAC(secret, "ts.body")`,
-    /// and `who` as a header naming the sender. Any 2xx is success; the answer is read up to
-    /// [`ANSWER_MAX`] and dropped.
-    fn post_signed(&self, url: &url::Url, who: (&str, &str), secret: &Value, body: &Json) -> Result<()> {
+    /// POST `body` signed as every roll webhook is (roll code's, roll-access's): `X-Roll-Timestamp`,
+    /// `X-Roll-Signature-256: sha256=HMAC(secret, "ts.body")` and `X-Roll-Delivery` (the same on
+    /// every retry, for receivers that dedupe), and `who` naming the sender. Any 2xx is success;
+    /// the answer is read up to [`ANSWER_MAX`] and dropped.
+    fn post_signed(&self, url: &url::Url, who: (&str, &str), delivery: &str, secret: &Value, body: &Json) -> Result<()> {
         use hmac::Mac as _;
         let host = url.host_str().unwrap_or_default().to_string();
         let body = serde_json::to_vec(body).expect("JSON");
@@ -233,7 +244,8 @@ impl Hooks {
                 .header("content-type", "application/json")
                 .header(who.0, who.1)
                 .header("x-roll-timestamp", &ts)
-                .header("x-roll-signature", format!("sha256={sig}"))
+                .header("x-roll-signature-256", format!("sha256={sig}"))
+                .header("x-roll-delivery", delivery)
                 .body(body)
                 .send()
                 .await
@@ -271,7 +283,9 @@ impl roll_secrets::Deliver for AuditDeliver {
 
     fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()> {
         let u = self.0.url(url)?;
-        self.0.post_signed(&u, ("x-roll-sink", id), secret, body)
+        // A retried batch (or notice) is the same body: the same delivery.
+        let delivery = delivery_id(&format!("{id}:{body}"));
+        self.0.post_signed(&u, ("x-roll-sink", id), &delivery, secret, body)
     }
 
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
