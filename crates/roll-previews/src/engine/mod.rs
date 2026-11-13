@@ -115,6 +115,8 @@ pub struct Engine {
     shots_wanted: Mutex<std::collections::HashSet<String>>,
     /// One screenshot at a time.
     shooting: Arc<tokio::sync::Semaphore>,
+    /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
+    warm_wanted: Mutex<Vec<(String, String)>>,
     /// When a service's deploy was first found still going (`StillDeploying`): one that never
     /// finishes fails after [`DEPLOY_WAIT_MS`].
     deploying_since: Mutex<HashMap<(String, String), i64>>,
@@ -174,6 +176,7 @@ impl Engine {
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
             shooting: Arc::new(tokio::sync::Semaphore::new(1)),
+            warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
         })
@@ -264,6 +267,19 @@ impl Engine {
             });
         }
         while set.join_next().await.is_some() {}
+        // Services those converges deployed at a new head, woken so their first visit is warm (a
+        // few at a time, off the pass).
+        let warm: Vec<(String, String)> = std::mem::take(&mut *self.warm_wanted.lock());
+        let waking = Arc::new(tokio::sync::Semaphore::new(4));
+        for (id, svc) in warm {
+            let (apps, gate) = (self.apps.clone(), waking.clone());
+            tokio::spawn(async move {
+                let Ok(_one) = gate.acquire_owned().await else { return };
+                if let Err(e) = apps.wake(&id, &svc).await {
+                    warn!(preview = %id, service = %svc, error = %e, "previews: warming a service after a push");
+                }
+            });
+        }
         // Screenshots asked for by those converges, one at a time, off the pass: a slow service
         // or a first pull of the browser image holds nothing else up.
         let wanted: Vec<String> = self.shots_wanted.lock().drain().collect();

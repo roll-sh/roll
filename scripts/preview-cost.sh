@@ -302,6 +302,13 @@ for _ in $(seq 1 120); do
   [ "$(api GET "/v1/previews/$PV" | jq_ "not d.get('runs') and d['state'] in ('ready', 'sleeping')")" = True ] && break
   sleep 0.5
 done
+# Warm after the push: its container is up before anyone visits.
+WARM=no
+for _ in $(seq 1 60); do
+  [ "$(docker ps -q --filter "name=^$CONTAINER\$" | wc -l)" = 1 ] && { WARM=yes; break; }
+  sleep 0.5
+done
+[ "$WARM" = yes ] || { echo "the service should be woken after the push, before any visit"; exit 1; }
 PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
 [ "$PAGE" = "preview of change 1, third" ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
 KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"

@@ -447,3 +447,26 @@ async fn a_service_with_a_health_path_is_ready_only_once_it_answers_well() {
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
+
+#[tokio::test]
+async fn a_new_head_s_services_are_woken_so_the_first_visit_is_warm() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_w", 6));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_w").unwrap().unwrap();
+    // The wakes run after the pass, on their own tasks.
+    let woken = || async {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        e.apps.woken.lock().iter().filter(|(id, _)| *id == p.id).map(|(_, s)| s.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(woken().await, vec!["web".to_string()], "the change's own service, not the other repo's");
+    // Off: a push leaves it asleep.
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "warm": false })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.code.edit("chg_w", |c| c.head = "cs_6b".into());
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(woken().await.len(), 1);
+}

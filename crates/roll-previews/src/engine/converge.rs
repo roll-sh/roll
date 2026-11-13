@@ -331,6 +331,7 @@ impl Engine {
         let mut keep: Vec<String> = Vec::new();
         let mut still_deploying = false;
         let mut checks: Vec<(String, String, String)> = Vec::new();
+        let mut deployed: Vec<String> = Vec::new();
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -375,6 +376,9 @@ impl Engine {
                         // A new deploy is checked again, even at the same revision.
                         self.store.set_healthy(&r.id, &spec.name, "")?;
                         self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
+                        if repo == r.repo {
+                            deployed.push(spec.name.clone());
+                        }
                     }
                     // Accepted, not live yet: no slot waits on a build; come back and ask again.
                     Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
@@ -451,6 +455,11 @@ impl Engine {
         }
         let ready = row.state == State::Ready;
         self.report(row).await;
+        // 5b. Warm: the change's own services just deployed are woken after the pass, so the first
+        // visit after a push doesn't wait for a cold start.
+        if ready && s.warm && r.change_id.is_some() {
+            self.warm_wanted.lock().extend(deployed.into_iter().map(|svc| (r.id.clone(), svc)));
+        }
         // 6. A screenshot of the first service, once per head (best effort; it wakes the service):
         // taken after the pass, never in a converge slot.
         if ready && s.github.screenshot && self.store.screenshot_head(&r.id)?.as_deref() != Some(r.build()) {

@@ -160,6 +160,8 @@ pub type Vars = Vec<(String, String)>;
 #[derive(Default)]
 pub struct FakeApps {
     pub deployed: Mutex<HashMap<(String, String), String>>,
+    /// Services woken (warmed after a push, or asked to wake).
+    pub woken: Mutex<Vec<(String, String)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// The variables each service was last deployed with.
@@ -199,7 +201,8 @@ impl Apps for FakeApps {
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         Ok(self.answers.lock().clone())
     }
-    async fn wake(&self, _: &str, _: &str) -> anyhow::Result<()> {
+    async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()> {
+        self.woken.lock().push((preview.to_string(), service.to_string()));
         Ok(())
     }
     async fn sleep(&self, _: &str, _: &str) {}

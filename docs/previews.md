@@ -96,6 +96,10 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     preview stands for the new head (its status, comment and `roll preview wait`) and says which
     one it `runs`. `paths` alone never skips a deploy: another service of the repo may run what
     it leaves out. The next push that touches anything else, measured from what runs, redeploys.
+- **Warm after a push**: once a new head is deployed, the change's own services are woken (after
+  the pass, a few at a time), so the first visit, usually the pull request comment's link,
+  doesn't wait for a cold start; they sleep again after `sleep_after` unused. About $0.002 a push
+  here; `warm: false` turns it off.
 - **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) stops. A
   request to any URL of the preview wakes it. The request is held for up to 60 s; after that the
   visitor gets a "starting" page that refreshes. Data products sleep on their own and wake on
@@ -680,6 +684,7 @@ type Settings = {
   github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean };   // all true but screenshot
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
+  warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
   masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}
@@ -786,6 +791,7 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
+- services warmed as soon as a push is deployed (`warm`);
 - a health check before "ready" (`roll.toml` `health`), and the start/stop race it found live
   (a sleep removing the container a start was making; a request stopping a fresh start);
 - a feedback button on a preview's pages for people who came in through roll, posting on the

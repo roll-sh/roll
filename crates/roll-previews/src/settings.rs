@@ -47,6 +47,9 @@ pub struct Settings {
     /// A feedback button on the pages of people who came in through roll (link access): it pins a
     /// note to an element and posts it on the change, from roll.
     pub feedback: bool,
+    /// Wake the change's services as soon as a new head is deployed, so the first visit (often
+    /// the pull request comment's link) doesn't wait for a cold start.
+    pub warm: bool,
     /// A command run once on the preview's fresh data (after branching, and after each reset)
     /// before its services deploy: anonymise, migrate, load fixtures.
     pub seed: Option<Seed>,
@@ -137,6 +140,7 @@ impl Default for Settings {
             github: GithubRule::default(),
             access: Access::Link,
             feedback: true,
+            warm: true,
             seed: None,
             release: None,
             masking: BTreeMap::new(),
