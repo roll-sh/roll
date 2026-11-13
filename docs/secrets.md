@@ -58,12 +58,12 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    roll secrets promote --from staging --to production STRIPE_KEY
    roll secrets envs protect production --approvals 1
    ```
-6. **CI and services** get a scoped token for one project, some environments, some folders and
-   only the actions they need, with an expiry:
+6. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
+   project: some environments, some folders and only the actions they need, with an expiry:
 
    ```
    roll secrets tokens create ci --for-env staging --action read --action reveal --ttl-days 90
-   ROLL_TOKEN=rlst_… roll run -e staging -- make test
+   ROLL_TOKEN=rlt_… roll run -e staging -- make test
    ```
 
    Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
@@ -1148,17 +1148,20 @@ It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_
 `rlo_…` OAuth connections: `ask` inside the product is a no), or one of the project's own tokens.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
-token), signed-in people on their own projects (below), roll-access's grants, and its own **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
-environments (or all), a list of path prefixes (or all), the actions above and an optional expiry.
-A token can be pinned to client addresses (`allowed_ips`: up to 20 addresses or CIDRs, IPv4 or
-IPv6): from anywhere else it's refused (403), checked on every request against the connection's
-peer address (or `X-Forwarded-For` where rolld trusts it), as Infisical's trusted IPs and Doppler's
-IP restrictions do. An identity can be pinned the same way: a login from elsewhere is refused, and
-the token it gets carries the same list. `roll secrets tokens create … --allow-ip 203.0.113.0/24`.
-Tokens are stored as SHA-256 hashes, looked up on every request and never cached. roll-access's
-scoped tokens (`rlt_…`) and OAuth connections (`rlo_…`) reach secrets too: rolld's gate classifies
-the request, and secrets asks the same `Grant` for every second check (`GrantGrants`). The `rlst_`
-tokens are to become roll-access's (Next).
+token), signed-in people on their own projects (below), and roll-access's grants: there is one
+permission system (docs/permissions.md). A token for CI or a service is a roll token (`rlt_…`)
+with one rule on the project's secrets (environments or all, folder prefixes or all, the actions
+above), an optional expiry and client addresses (up to 20 addresses or CIDRs; from anywhere else
+it's refused), made through `POST /v1/access/tokens`: `roll secrets tokens create … --allow-ip
+203.0.113.0/24`, or the project's Access tab, which lists them from `GET
+/v1/access/tokens?product=secrets&resource=<project>` (one at a time: the list also holds tokens
+made in the access builder, so nothing here revokes them in bulk). roll-access stores them hashed,
+looks them up on every request and never caches them; OAuth connections (`rlo_…`) reach secrets
+the same way. rolld's gate classifies each request, and secrets asks the same `Grant` for every
+second check (`GrantGrants`); a read of the project as a whole (its environments' names, health,
+findings) takes part for a rule limited to some environments or folders, answering only what it
+reaches. An identity can be pinned to client addresses too: a login from elsewhere is refused, and
+the token it gets carries the same list.
 
 #### People (signed-in accounts)
 
@@ -1194,7 +1197,7 @@ code owner (`ada/…`).
 ### Workload identities (OIDC)
 
 A CI job or a cluster logs in with its own short-lived OpenID Connect token instead of holding a
-`rlst_` token, as Infisical's OIDC auth, Doppler's identities and Vault's JWT auth do: nothing
+long-lived token, as Infisical's OIDC auth, Doppler's identities and Vault's JWT auth do: nothing
 long-lived sits in a CI system's settings, and a leaked log or fork can't reuse a login past its
 minutes.
 
@@ -1218,10 +1221,13 @@ minutes.
   checks the signature against the issuer's keys (RS256 or ES256; its discovery document's
   `jwks_uri`, fetched over the guarded client: HTTPS, public addresses, no redirects, bounded reads;
   cached an hour, fetched again early for a new key id, kept a day if the issuer is down), `iss`,
-  `aud`, `exp` and `nbf` (60 s leeway), the subject and the claims, then mints an `rlst_` token
-  with the identity's scope for its TTL. The token is looked up on every request like any other;
-  its principal is `identity:<id>`, so the audit log names the identity, and the login itself is
-  `identity.login` with the token's `sub`. Deleting the identity revokes every token it gave out.
+  `aud`, `exp` and `nbf` (60 s leeway), the subject and the claims; then roll-access mints a
+  `workload` token (`Access::mint_workload`: the identity's scope and client addresses for its
+  TTL, owned by whoever made the identity, refused once they can't sign in; 409 past 1,000 live
+  per owner). The token is looked up on every request like any other; secrets remembers which
+  login got it (`identity_logins`), so its requests are `identity:<id>` in the audit log, and the
+  login itself is `identity.login` with the token's `sub` and its id. Deleting the identity
+  revokes every token it gave out.
   An OIDC token can be exchanged more than once while it lives (as with Vault): each login is
   audited.
 - **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
@@ -1385,9 +1391,6 @@ isn't in the workspace is 404.
 | `GET /leases` | | `Lease[]` |
 | `DELETE /leases/{id}` | | 204 |
 | `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (`reveal` on its environment) |
-| `GET /tokens` | | `Token[]` |
-| `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |
-| `DELETE /tokens/{id}` | | 204 |
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
@@ -1585,13 +1588,13 @@ Reviewed again on 2026-11-13 (evening): against Doppler, Infisical, Vault and 1P
 and across the five branches. The core is level with them (environments, versions, references,
 approvals, dynamic secrets and rotation, OIDC identities, syncs, scanning, audit sinks). The gaps
 that matter: two permission systems; roll apps deploys without project secrets (`NoSecrets`); no
-time-boxed access requests; no runtime SDK (Doppler's and Infisical's fetch secrets in process);
+time-boxed access requests; a runtime client only for TypeScript;
 no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **One permission system** (agreed with roll MCP, 2026-11-13; built on #25's head, which holds
-   #24, on `feature/roll-secrets-access`). `rlst_` goes outright: it never reached main. New tokens
+1. **One permission system** (agreed with roll MCP, 2026-11-13): done on
+   `feature/roll-secrets-access` (#20 + #25), to land after both. `rlst_` goes outright: it never reached main. New tokens
    are roll-access grants made through `POST /v1/access/tokens` with one rule (`secrets ×
    {project} × environments × paths × actions`, `ip_allow`, expiry), passing the request's own
    extensions; `roll secrets tokens` and the dashboard call it. A project's tokens are `GET
@@ -1608,9 +1611,10 @@ Ranked (work that can start now):
 3. **Access requests through roll-access's "ask"**: a person asks for time-boxed `reveal` on a
    protected environment, and an approver grants it for minutes (the approval names the
    environment and folder).
-4. **A runtime SDK** (`@roll/secrets` for Node and the edge, then Go and Python): fetch an
-   environment's values with a token or a workload identity, cache them in memory for a short
-   TTL, refresh on change through the existing event stream; no value on disk.
+4. **Runtime clients beyond TypeScript.** `@roll/secrets` (packages/secrets) already fetches an
+   environment's values with a token, opens sealed exports, watches the digest and renews dynamic
+   leases. Go and Python clients with the same surface (and a workload identity's login built in),
+   as Doppler's and Infisical's SDKs have.
 5. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
 6. **A Terraform provider** (`roll_secret`, `roll_secrets_environment`, data sources for values),

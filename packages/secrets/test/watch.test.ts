@@ -16,7 +16,7 @@ test("watch follows the digest, keeps values that don't resolve, renews leases a
   const fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const u = new URL(String(url));
     calls.push(`${init?.method} ${u.pathname}`);
-    assert.equal((init?.headers as Record<string, string>).authorization, "Bearer rlst_test");
+    assert.equal((init?.headers as Record<string, string>).authorization, "Bearer rlt_test");
     if (u.pathname === "/v1/secrets/whoami") return json({ principal: "token:tok_1", project: "prj_1" });
     if (u.pathname.endsWith("/digest")) return json({ digest });
     if (u.pathname.endsWith("/values")) return json(served);
@@ -24,7 +24,7 @@ test("watch follows the digest, keeps values that don't resolve, renews leases a
     return new Response(JSON.stringify({ error: "no" }), { status: 404 });
   }) as typeof globalThis.fetch;
 
-  const client = createClient({ api: "http://rolld.test/", token: "rlst_test", fetch });
+  const client = createClient({ api: "http://rolld.test/", token: "rlt_test", fetch });
   const seen: Values[] = [];
   const errors: unknown[] = [];
   const stop = client.watch("staging", { intervalMs: 5, renewMs: 15, onChange: (v) => void seen.push(v), onError: (e) => errors.push(e) });

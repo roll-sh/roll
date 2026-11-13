@@ -46,6 +46,28 @@ async fn ok(api: &str, env: &[(&str, &str)], args: &[&str], stdin: Option<&str>)
     o.stdout
 }
 
+/// roll-access as far as `roll secrets tokens` and `ROLL_TOKEN` see it: `POST /v1/access/tokens`
+/// keeps the rules it's given, and the gate puts a known token's grant on the request.
+type Tokens = Arc<std::sync::Mutex<std::collections::BTreeMap<String, roll_auth::Grant>>>;
+
+async fn create_token(axum::extract::State(tokens): axum::extract::State<Tokens>, axum::Json(b): axum::Json<serde_json::Value>) -> axum::Json<serde_json::Value> {
+    let rules: Vec<roll_auth::scope::Rule> = serde_json::from_value(b["rules"].clone()).unwrap();
+    let mut t = tokens.lock().unwrap();
+    let (secret, id) = (format!("rlt_cli{}", t.len()), format!("tok_{}", t.len()));
+    let name = b["name"].as_str().unwrap().to_string();
+    t.insert(secret.clone(), roll_auth::Grant { ask_otherwise: false, user: None, id: id.clone().into(), name: name.clone().into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(rules)) });
+    axum::Json(serde_json::json!({ "grant": { "id": id, "name": name }, "token": secret }))
+}
+
+async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Some(t) = roll_auth::bearer(req.headers()).map(str::to_string) {
+        let Some(g) = tokens.lock().unwrap().get(&t).cloned() else { return axum::http::StatusCode::UNAUTHORIZED.into_response() };
+        req.extensions_mut().insert(g);
+    }
+    next.run(req).await
+}
+
 #[tokio::test]
 async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
     let dir = tempfile::tempdir().unwrap();
@@ -64,12 +86,15 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
         deliver: None,
         grants: None,
         people: None,
+        workloads: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let projects = ws.clone();
-    let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets));
+    let tokens = Tokens::default();
+    let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
+    let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
     let at = ["secrets", "-p", "shop", "-e", "production"];
@@ -83,7 +108,8 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let out = ok(&api, &[("PORT", "6000")], &["run", "-p", "shop", "-e", "production", "--", "sh", "-c", "echo $DATABASE_URL $PORT"], None).await;
     assert_eq!(out.trim(), "postgres://app:s3cret@db.internal:5432/shop 6000");
 
-    // A scoped token implies its project and reaches only its environments.
+    // A token made for the project (a roll-access grant with one rule) implies its project and
+    // reaches only its environments.
     let token = ok(&api, &[], &["secrets", "-p", "shop", "tokens", "create", "ci", "--for-env", "production"], None).await;
     let t = [("ROLL_TOKEN", token.trim())];
     assert_eq!(ok(&api, &t, &["run", "-e", "production", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");

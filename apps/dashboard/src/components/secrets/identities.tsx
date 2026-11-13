@@ -23,7 +23,7 @@ function workflow(id: string, env: string): string {
 
 /**
  * Workload identities (docs/secrets.md, "Workload identities"): CI jobs and clusters log in with
- * their own OIDC token for a short-lived token, so no `rlst_` token sits in a CI system.
+ * their own OIDC token for a short-lived roll token, so no long-lived token sits in a CI system.
  */
 export function Identities() {
   const { api, standard } = useSecrets();

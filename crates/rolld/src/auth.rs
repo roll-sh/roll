@@ -66,12 +66,12 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/storage/console/signin", access: Access::Public("storage sign-in: checks the IAM user's password and MFA") },
     Rule { route: "/v1/storage/console/session", access: Access::Product("storage: who a console session is, for that session's token only") },
     Rule { route: "/v1/storage", access: Access::Credential("a storage console session") },
-    // roll secrets: the operator, a signed-in person on their own projects, or a secrets token
-    // (`rlst_…`) scoped to a project's environments and folders, checked on every request
-    // (docs/secrets.md, "Access").
-    Rule { route: "/v1/secrets", access: Access::UserOrCredential("a secrets token (rlst_…)") },
+    // roll secrets: the operator, a signed-in person on their own projects, or a roll token with
+    // a rule on a project's environments and folders, checked on every request (docs/secrets.md,
+    // "Access").
+    Rule { route: "/v1/secrets", access: Access::UserOrCredential("a roll token (rlt_…), decided by roll-access") },
     // The deployment key's state is about the whole server: never a person's session.
-    Rule { route: "/v1/secrets/health", access: Access::Credential("a secrets token (rlst_…); the operator's answer") },
+    Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },

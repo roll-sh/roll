@@ -1,5 +1,6 @@
 import { Check, Copy, KeyRound, Plus, Send } from "lucide-react";
 import { useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { ACTIONS, type Action, type NewToken } from "@/lib/secrets-api";
 import { CodeLeaks } from "./code-leaks";
 import { Identities } from "./identities";
@@ -15,7 +16,7 @@ const ACTION_HELP: Record<Action, string> = {
   admin: "rename, reorder, protection, review requests",
 };
 
-/** Scoped tokens (`rlst_…`, for CI and services: `ROLL_TOKEN=… roll run …`), workload identities (OIDC logins), the leases of dynamic credentials, and one-time shares. */
+/** Tokens for this project (roll-access's `rlt_…`, for CI and services: `ROLL_TOKEN=… roll run …`), workload identities (OIDC logins), the leases of dynamic credentials, and one-time shares. */
 export function AccessView() {
   return (
     <div className="mx-auto max-w-4xl space-y-8 px-4 py-5">
@@ -89,7 +90,7 @@ function Tokens() {
       )}
       <ErrorNote error={error ?? tokens.error} onDismiss={error ? () => setError(null) : undefined} className="mb-3" />
       {tokens.data && tokens.data.length === 0 && !creating ? (
-        <Teach title="No tokens yet" cli={[`ROLL_TOKEN=rlst_… roll run -p ${project.name} --env production -- <cmd>`]}>
+        <Teach title="No tokens yet" cli={[`ROLL_TOKEN=rlt_… roll run -p ${project.name} --env production -- <cmd>`]}>
           A token lets CI or a service read this project's secrets without your sign-in, limited to the environments, folders and actions you pick.
         </Teach>
       ) : (
@@ -103,7 +104,9 @@ function Tokens() {
                   <KeyRound className="size-3.5 text-muted" />
                   <span className="min-w-0 leading-tight">
                     <span className="block text-[12.5px] font-medium">{t.name}</span>
-                    <span className="block font-mono text-[10.5px] text-subtle">{t.prefix}…</span>
+                    <Link to="/dashboard/access/tokens/$id" params={{ id: t.id }} className="block font-mono text-[10.5px] text-subtle hover:text-fg">
+                      {t.id}
+                    </Link>
                   </span>
                   <span className="flex flex-wrap gap-1 text-[10.5px]">
                     {t.actions.map((a) => (
@@ -127,7 +130,7 @@ function Tokens() {
           </div>
         )
       )}
-      {active.length > 0 && <p className="mt-2 text-[11px] text-subtle">Tokens are looked up on every request: revoking one takes effect at once.</p>}
+      {active.length > 0 && <p className="mt-2 text-[11px] text-subtle">These are roll tokens with a rule on this project: open one for its activity, or to change what it reaches. Revoking takes effect at once.</p>}
     </Section>
   );
 }

@@ -8,7 +8,9 @@
  */
 
 import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, Finding, ProjectFindings, SyncPreview, FileDiff } from "@roll/secrets/types";
+import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
+import { grantFor, tokenOf } from "./secrets-tokens";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
@@ -169,9 +171,11 @@ export function secretsApi(project: string) {
     /** Pushes a dynamic lease's expiry out by its link's TTL (or `ttl_minutes`). */
     renewLease: (id: string, ttl_minutes?: number) => req<Lease>("POST", `${P}/leases/${enc(id)}/renew`, ttl_minutes ? { ttl_minutes } : {}),
 
-    tokens: () => req<Token[]>("GET", `${P}/tokens`),
-    createToken: (t: NewToken) => req<Token & { token: string }>("POST", `${P}/tokens`, t),
-    revokeToken: (id: string) => req<null>("DELETE", `${P}/tokens/${enc(id)}`),
+    /** The project's tokens: roll-access's, with a rule on this project's secrets (live ones). */
+    tokens: () => req<Grant[]>("GET", `/v1/access/tokens${qs({ product: "secrets", resource: project })}`).then((gs) => gs.filter((g) => !g.revoked_at).map((g) => tokenOf(g, project))),
+    /** The token is in the answer this once. */
+    createToken: (t: NewToken) => req<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", grantFor(project, t)).then((r) => ({ ...tokenOf(r.grant, project), token: r.token })),
+    revokeToken: (id: string) => req<unknown>("DELETE", `/v1/access/tokens/${enc(id)}`),
     required: () => req<Required[]>("GET", `${P}/required`),
     setRequired: (list: Required[]) => req<Required[]>("PUT", `${P}/required`, list),
     identities: () => req<Identity[]>("GET", `${P}/identities`),
