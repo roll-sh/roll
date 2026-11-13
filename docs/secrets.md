@@ -662,8 +662,8 @@ that follow from it:
 - **Protected environments.** Changing their imports needs `admin` (it changes what they resolve to
   without a change). Checks and sandboxes resolve as a consumer that may not touch any protected
   environment, so none reaches them through a reference, an import or a base either.
-- **Folders.** A caller limited to some folders sees only their changes, change items, requests and
-  audit rows; leases name no folder, so it sees none.
+- **Folders.** A caller limited to some folders sees only their changes, change items, requests,
+  audit rows and the leases of their secrets.
 - **Fingerprints** are shown only to a caller who may reveal the value: a writer could otherwise
   test guesses against values it can't read. The grid's and compare's statuses still say whether
   two environments match, to a caller who can read both.
@@ -685,6 +685,51 @@ environments (or all), a list of path prefixes (or all), the actions above and a
 Tokens are stored as SHA-256 hashes, looked up on every request and never cached. When roll-access
 lands, its evaluator replaces the built-in authority, the `rlst_` tokens migrate to its scoped tokens,
 and the routes stay the same.
+
+### Workload identities (OIDC)
+
+A CI job or a cluster logs in with its own short-lived OpenID Connect token instead of holding a
+`rlst_` token, as Infisical's OIDC auth, Doppler's identities and Vault's JWT auth do: nothing
+long-lived sits in a CI system's settings, and a leaked log or fork can't reuse a login past its
+minutes.
+
+- **An identity** (`…/identities`, admin) names an `issuer` (the token's `iss`), an `audience`
+  (`aud`, default `roll` from the CLI), a `subject` (`sub`, or a pattern of it where `*` stands for
+  any run of characters), up to ten other `claims` that must match (`ref`, `environment`,
+  `repository_owner_id`…), and the scope of what a login gets: environments, folders and actions
+  like a token's (never more than its creator has) for `ttl_minutes`, 5–60 (default 15).
+- **Shared issuers.** GitHub Actions (`https://token.actions.githubusercontent.com`) and GitLab
+  (`https://gitlab.com`) sign for every repo they host, so an identity of theirs must name one repo
+  in its subject (`repo:acme/web:…`, `project_path:group/project:…`): `repo:*` would let anyone's
+  workflow in. Narrow further with claims (`ref=refs/heads/main`, or GitHub's `environment`).
+- **Login.** `POST /v1/secrets/login {identity, token}` (public: the token is the credential)
+  checks the signature against the issuer's keys (RS256 or ES256; its discovery document's
+  `jwks_uri`, fetched over the guarded client: HTTPS, public addresses, no redirects, bounded reads;
+  cached an hour, fetched again early for a new key id, kept a day if the issuer is down), `iss`,
+  `aud`, `exp` and `nbf` (60 s leeway), the subject and the claims, then mints an `rlst_` token
+  with the identity's scope for its TTL. The token is looked up on every request like any other;
+  its principal is `identity:<id>`, so the audit log names the identity, and the login itself is
+  `identity.login` with the token's `sub`. Deleting the identity revokes every token it gave out.
+  An OIDC token can be exchanged more than once while it lives (as with Vault): each login is
+  audited.
+- **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
+  in by themselves, with the token from `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes
+  projected service account token) or GitHub Actions' own endpoint (`permissions: id-token: write`;
+  audience `ROLL_OIDC_AUDIENCE`, default `roll`):
+
+  ```sh
+  roll secrets identities add deploy --github acme/web --claim ref=refs/heads/main --for-env production
+  ```
+
+  ```yaml
+  permissions: { id-token: write, contents: read }
+  env: { ROLL_API_URL: https://roll.example.com, ROLL_IDENTITY: idn_… }
+  steps:
+    - run: roll run --env production -- ./deploy.sh
+  ```
+
+  A login lasts its TTL: enough for a job. A long-running `roll run --watch` uses a token.
+- When roll-access takes over tokens, identities mint its scoped tokens instead; the routes stay.
 
 ### Protected environments and approvals
 
@@ -791,6 +836,10 @@ isn't in the workspace is 404.
 | `GET /tokens` | | `Token[]` |
 | `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |
 | `DELETE /tokens/{id}` | | 204 |
+| `GET /identities` | | `Identity[]` (admin) |
+| `POST /identities` | `NewIdentity` | 201 `Identity` |
+| `DELETE /identities/{id}` | | 204 (its tokens revoked) |
+| `POST /v1/secrets/login` | `{identity, token}` | `{token, expires_at, project, identity}` (public) |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format` |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
@@ -861,6 +910,8 @@ type Compare = { from: string; to: string; path: string; rows: { key: string; st
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
+type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null };
+type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number };
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";
@@ -889,12 +940,15 @@ versions(secret_id, version, seq, env_id, path, key, owner, op, value BLOB, fp, 
          at, by, PRIMARY KEY (secret_id, version))
 changes(project_id, seq, env_id, path, kind, message, by, at, keys, PRIMARY KEY (project_id, seq))
 requests(id PK, project_id, env_id, path, message, by, at, state, ops BLOB, items, reviews, applied_seq)
-leases(id PK, project_id, env_id, secret_id, key, consumer, handle, issued_at, expires_at, revoked_at)
+leases(id PK, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at,
+       revoked_at)
 tokens(id PK, project_id, name, hash UNIQUE, prefix, environments, paths, actions, expires_at,
-       created_at, created_by, last_used_at, revoked_at)
+       created_at, created_by, last_used_at, revoked_at, identity)  -- identity: a login's
+identities(id PK, project_id, name, issuer, audience, subject, claims, environments, paths,
+       actions, ttl_minutes, created_at, created_by, last_used_at, last_subject)
 audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip)
 syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
-      last_digest, state, last_synced_at, running_until, created_at, created_by)
+      last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by)
       -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)
 ```
 
@@ -927,24 +981,27 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
 streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
 checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
-sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), the
-dashboard's Secrets surface, and the fixes from a
-security review. `pnpm test:code` is green on the head. Reviewed on 2026-11-12 against Infisical,
-Doppler, Vercel and 1Password Developer, and against the apps, previews, MCP and search branches.
-Ranked:
+sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), audit
+sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
+previews, workload identities (OIDC logins for CI), and the fixes from two security reviews.
+Reviewed on 2026-11-13 against Infisical, Doppler, Vault, Vercel and 1Password Developer, and
+against the apps, previews, MCP and search branches (previews resolves untrusted; apps refuses
+dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 
 1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands: done and
-   tested on `wip/secrets-on-mcp` (this branch merged with roll-mcp): `Secrets::caller` reads
+   tested on `wip/secrets-on-mcp` (kept merged with both branches): `Secrets::caller` reads
    `roll_auth::Grant` before the operator marker, `GrantGrants` answers second resources through
-   `Grant::allows` (an `ask` is a no inside the product), whoami's project comes from the grant's
-   rules, a sync made by a grant re-checks it through `roll_auth::Grants`, rolld opens secrets
-   after roll-access. Merge it in when #19 is on main; then retire `rlst_` tokens for roll-access's.
-   Also: roll apps' `SecretSource` wired to `Secrets::values` as `app:<svc>` (whichever of #20 and
-   #21 merges second; the adapter is in the apps thread).
+   `Grant::allows`, whoami's project comes from the grant's rules, a sync made by a grant re-checks
+   it through `roll_auth::Grants`. Merge it in when #19 is on main; then `rlst_` tokens, and the
+   tokens identities mint, become roll-access's. Also roll apps' `SecretSource` wired to
+   `Secrets::values` as `app:<svc>` (whichever of #20 and #21 merges second).
 2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
    against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
-3. **A second security audit** of what came after the first: syncs, audit sinks, notices, one-time
-   shares, purge and retention, insights, request values, lease renewal, the TypeScript client. In
-   progress.
-4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
+3. **Secret scanning beyond new changes**: scan a repo's existing tree and history once when it's
+   put on a project's canvas (bounded, in the background, on the repo's owner), reporting keys
+   and paths, never values; today only a change's added lines are checked.
+4. **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
+   approver grants it for minutes (Infisical's access requests), audited; built on the change
+   request approvals.
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

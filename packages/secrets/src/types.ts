@@ -142,6 +142,27 @@ export type Token = {
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
+/** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
+export type Identity = {
+  id: string;
+  name: string;
+  /** The token's `iss`. */
+  issuer: string;
+  audience: string;
+  /** The token's `sub`, or a pattern of it (`*` for any run of characters). */
+  subject: string;
+  /** Other claims that must match. */
+  claims: Record<string, string>;
+  environments: string[] | null;
+  paths: string[] | null;
+  actions: Action[];
+  ttl_minutes: number;
+  created_at: number;
+  created_by: string;
+  last_used_at: number | null;
+  last_subject: string | null;
+};
+export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number };
 export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */

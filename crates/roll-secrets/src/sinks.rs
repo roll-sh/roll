@@ -48,6 +48,12 @@ pub trait Deliver: Send + Sync {
     fn check(&self, url: &str) -> Result<()>;
     /// POST `body` to `url`, signed with `secret`, `X-Roll-Sink: <id>`.
     fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()>;
+    /// GET `url` (https, public, no redirects), at most `limit` bytes: an OIDC issuer's discovery
+    /// document and keys (identities.rs).
+    fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
+        let _ = (url, limit);
+        Err(crate::Error::Link("fetching isn't on this server".into()))
+    }
 }
 
 #[derive(Debug, Serialize)]

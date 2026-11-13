@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Identity, NewIdentity, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI } from "@roll/secrets/types";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
@@ -157,6 +157,9 @@ export function secretsApi(project: string) {
     tokens: () => req<Token[]>("GET", `${P}/tokens`),
     createToken: (t: NewToken) => req<Token & { token: string }>("POST", `${P}/tokens`, t),
     revokeToken: (id: string) => req<null>("DELETE", `${P}/tokens/${enc(id)}`),
+    identities: () => req<Identity[]>("GET", `${P}/identities`),
+    createIdentity: (i: NewIdentity) => req<Identity>("POST", `${P}/identities`, i),
+    deleteIdentity: (id: string) => req<null>("DELETE", `${P}/identities/${enc(id)}`),
 
     shares: () => req<Share[]>("GET", `${P}/shares`),
     createShare: (s: NewShare) => req<Share>("POST", `${P}/shares`, s),

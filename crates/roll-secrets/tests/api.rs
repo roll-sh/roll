@@ -91,9 +91,9 @@ impl SyncTarget for FakeSync {
     }
 }
 
-/// Audit deliveries, kept instead of sent.
+/// Audit deliveries, kept instead of sent; and an OIDC issuer's keys, served.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>);
 
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
@@ -103,6 +103,43 @@ impl roll_secrets::Deliver for Sent {
         self.0.lock().unwrap().push(body.clone());
         Ok(())
     }
+    fn get(&self, url: &str, _: usize) -> roll_secrets::Result<Vec<u8>> {
+        let doc = match url.strip_prefix(ISSUER) {
+            Some("/.well-known/openid-configuration") => json!({ "issuer": ISSUER, "jwks_uri": format!("{ISSUER}/keys") }),
+            Some("/keys") => self.1.lock().unwrap().clone().unwrap_or(json!({ "keys": [] })),
+            _ => return Err(roll_secrets::Error::Link(format!("{url}: 404"))),
+        };
+        Ok(doc.to_string().into_bytes())
+    }
+}
+
+const ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+/// An ES256 key of the fake issuer, its JWKS, and tokens it signs.
+struct Issuer(ring::signature::EcdsaKeyPair);
+
+impl Issuer {
+    fn new() -> Issuer {
+        use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        Issuer(EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap())
+    }
+    fn jwks(&self) -> Value {
+        use ring::signature::KeyPair;
+        let p = self.0.public_key().as_ref();
+        json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "k1", "use": "sig", "x": b64(&p[1..33]), "y": b64(&p[33..65]) }] })
+    }
+    fn sign(&self, claims: Value) -> String {
+        let signed = format!("{}.{}", b64(json!({ "alg": "ES256", "kid": "k1", "typ": "JWT" }).to_string().as_bytes()), b64(claims.to_string().as_bytes()));
+        let sig = self.0.sign(&ring::rand::SystemRandom::new(), signed.as_bytes()).unwrap();
+        format!("{signed}.{}", b64(sig.as_ref()))
+    }
+}
+
+fn b64(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
 struct Api {
@@ -710,4 +747,50 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     assert_eq!(call("/environments/production/values".into()).await.0, StatusCode::FORBIDDEN);
     let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
     assert_eq!(audit[0]["action"], "secrets.export");
+}
+
+#[tokio::test]
+async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token() {
+    let api = Api::new().await;
+    api.set("staging", "API_KEY", "staging-key").await;
+    api.set("production", "API_KEY", "prod-key").await;
+    let issuer = Issuer::new();
+    *api.sent.1.lock().unwrap() = Some(issuer.jwks());
+    let identity = |subject: &str| json!({ "name": "deploy", "issuer": ISSUER, "audience": "roll", "subject": subject, "claims": { "ref": "refs/heads/*" }, "environments": ["staging"], "actions": ["read", "reveal"], "ttl_minutes": 10 });
+    // GitHub signs for every repo: an identity of its names one.
+    let (s, _) = api.call(Method::POST, "/identities", Some(identity("repo:*"))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let i = api.ok(Method::POST, "/identities", Some(identity("repo:acme/web:*"))).await;
+    let id = i["id"].as_str().unwrap().to_string();
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let claims = |sub: &str, git_ref: &str, exp: i64| json!({ "iss": ISSUER, "aud": "roll", "sub": sub, "ref": git_ref, "exp": exp, "iat": now });
+    let login = |token: String| api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": id, "token": token })));
+    let (s, l) = login(issuer.sign(claims("repo:acme/web:ref:refs/heads/main", "refs/heads/main", now + 300))).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    let token = l["token"].as_str().unwrap().to_string();
+    assert!(token.starts_with("rlst_") && l["expires_at"].as_i64().unwrap() <= (now + 601) * 1000);
+    let (s, v) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
+    assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("staging-key")));
+    let (s, _) = api.req(Method::GET, "/environments/production/values", None, Some(&token)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "only the identity's environments");
+
+    // Another repo, another claim, an old token and a forged one log in as nobody.
+    for (bad, want) in [
+        (issuer.sign(claims("repo:acme/website:ref:refs/heads/main", "refs/heads/main", now + 300)), StatusCode::FORBIDDEN),
+        (issuer.sign(claims("repo:acme/web:pull_request", "refs/pull/1/merge", now + 300)), StatusCode::FORBIDDEN),
+        (issuer.sign(claims("repo:acme/web:ref:refs/heads/main", "refs/heads/main", now - 600)), StatusCode::UNAUTHORIZED),
+        (Issuer::new().sign(claims("repo:acme/web:ref:refs/heads/main", "refs/heads/main", now + 300)), StatusCode::UNAUTHORIZED),
+    ] {
+        assert_eq!(login(bad).await.0, want);
+    }
+    let audit = api.ok(Method::GET, &format!("/audit?actor=identity:{id}"), None).await;
+    assert_eq!(audit.as_array().unwrap().iter().map(|a| a["action"].as_str().unwrap()).collect::<Vec<_>>(), ["secrets.export", "identity.login"]);
+    let listed = api.ok(Method::GET, "/identities", None).await;
+    assert_eq!(listed[0]["last_subject"], "repo:acme/web:ref:refs/heads/main");
+
+    // Deleting the identity ends what it gave out.
+    api.ok(Method::DELETE, &format!("/identities/{id}"), None).await;
+    let (s, _) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 }

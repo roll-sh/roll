@@ -259,10 +259,15 @@ impl Api {
 }
 
 /// The API as roll secrets is called: with `ROLL_TOKEN` (a scoped secrets token) if it's set,
-/// else the operator token.
-fn secrets_api(api: &Api) -> Api {
-    let token = std::env::var("ROLL_TOKEN").ok().filter(|t| !t.trim().is_empty());
-    Api { base: api.base.clone(), http: api.http.clone(), key: token.or(api.key.clone()), headers: api.headers.clone() }
+/// else a workload identity's login (`ROLL_IDENTITY`), else the operator token.
+async fn secrets_api(api: &Api) -> anyhow::Result<Api> {
+    let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
+    let token = match (env("ROLL_TOKEN"), env("ROLL_IDENTITY")) {
+        (Some(t), _) => Some(t),
+        (None, Some(identity)) => Some(secrets::identity_login(api, identity.trim()).await?),
+        (None, None) => api.key.clone(),
+    };
+    Ok(Api { base: api.base.clone(), http: api.http.clone(), key: token, headers: api.headers.clone() })
 }
 
 fn s(v: &Value) -> String {
@@ -411,8 +416,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
-        Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api), cli.json, at, cmd).await,
-        Cmd::Run(r) => return secrets::run_command(&secrets_api(&api), r).await,
+        Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
+        Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
         Cmd::Nosql(cmd) => {
