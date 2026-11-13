@@ -1045,6 +1045,9 @@ impl Spec<'_> {
                 let slot = self.geo_slot(field, vm)?;
                 let i = usize::from(!*lat);
                 D(fx(move |vm| {
+                    if let Some(p) = vm.host.doc_geo_at(slot) {
+                        return Ok(p[i]);
+                    }
                     if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
                         crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
                     }
@@ -1080,13 +1083,18 @@ impl Spec<'_> {
                     // Arguments are evaluated on every call (an argument that fails, fails the
                     // call), but only the first call's build the binding.
                     let d = decay(vm)?;
-                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
-                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
-                    }
-                    let dv = &vm.st.doc_bufs[slot];
-                    let [lat, lon] = match dv.geo.first() {
-                        Some(&p) if dv.kind == crate::host::DocKind::GeoPoint => p,
-                        _ => return Err(()),
+                    let [lat, lon] = match vm.host.doc_geo_at(slot) {
+                        Some(p) => p,
+                        None => {
+                            if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                                crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                            }
+                            let dv = &vm.st.doc_bufs[slot];
+                            match dv.geo.first() {
+                                Some(&p) if dv.kind == crate::host::DocKind::GeoPoint => p,
+                                _ => return Err(()),
+                            }
+                        }
                     };
                     vm.st.cur_binding = binding;
                     if let Some(v) = crate::es::score::geo_decay_cached(vm, kind, lat, lon) {

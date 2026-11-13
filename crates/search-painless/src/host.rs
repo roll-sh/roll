@@ -266,6 +266,12 @@ pub trait Host {
         None
     }
 
+    /// [`Host::doc_long_at`] for a `geo_point` field: `[lat, lon]`.
+    fn doc_geo_at(&mut self, slot: usize) -> Option<[f64; 2]> {
+        let _ = slot;
+        None
+    }
+
     /// Values of `field` for the field API (`field('f')`, `$('f', d)`). Elasticsearch loads
     /// these with `FielddataOperation.SCRIPT`, which falls back to `_source` where `doc[...]`
     /// fails (a `text` field without fielddata reads its source values as strings, sorted);

@@ -549,6 +549,12 @@ impl Host for DocHost {
         matches!(kind, Kind::Long | Kind::Integer | Kind::Short | Kind::Byte).then_some(v)
     }
 
+    fn doc_geo_at(&mut self, slot: usize) -> Option<[f64; 2]> {
+        let (kind, v) = self.prefetched(slot)?;
+        // As `push_numeric` decodes them.
+        (kind == Kind::GeoPoint).then(|| [encode::decode_latitude((v >> 32) as i32), encode::decode_longitude(v as i32)])
+    }
+
     fn doc_double_at(&mut self, slot: usize) -> Option<f64> {
         let (kind, v) = self.prefetched(slot)?;
         // As `push_numeric` decodes them.
