@@ -771,6 +771,16 @@ A start command set in the service, a site over 512 MiB or 100,000 files, or a r
 can't export (the fleet's CodeBuild builder, until its first run) means a container serves it,
 as before. A service's sites are deleted with its images.
 
+## Private services
+
+`run.public: false` (Settings' "Reachable", `roll apps set --public false`) takes a web service
+off the internet, as Render's private services: its `up.roll.site` names, its deployments' own
+hostnames and its custom domains are 404s like an address nobody has, and `Environment.url` is
+null. It's read from the service's settings on each request, so it takes effect at once, not
+with the next deploy. The project's services still reach it at `<svc>.<env>.internal` on their
+network (while it's awake: waking over the private network is in `## Next`). Its previews have
+no public URL either.
+
 ## Workers that follow their work
 
 A worker with `run.scale` (`{ stream, group, per_instance }`) runs one instance per
@@ -1096,58 +1106,63 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Private networking that wakes**: `<svc>.<env>.internal` reaching a service that's asleep, as
-   Railway's private network and Fly's Flycast do (one small forwarder per project network,
-   handing connections to the owner's waking proxy), so scale to zero works between services.
-2. **Private services**: `run.public: false` (no `up.roll.site` hostname, the proxy a 404; the
-   private name still answers), as Render's private services; then an IP allow list.
-3. **A rollback restores variables**: each deployment keeps a sealed snapshot of its service
+1. **A rollback restores variables**: each deployment keeps a sealed snapshot of its service
    variables and a rollback restores them (audited; `--keep-variables` to opt out), as Heroku's
    and Railway's do.
-4. **The project file as a Blueprint**: `repo`/`branch`, `type`, `start`, `schedule` and a `run`
+2. **The project file as a Blueprint**: `repo`/`branch`, `type`, `start`, `schedule` and a `run`
    table in `[apps.<name>]`, checked by `[app.run]`'s checker, applied on each landing on the
    default branch as Render's Blueprints sync (never deleting).
-5. **The rollback target on the server, and CLI parity**: "Roll back" without an id picks the
+3. **The rollback target on the server, and CLI parity**: "Roll back" without an id picks the
    deployment before the live one on the server (two clicks can't go forward); the CLI gains
    cancel, unlink, registry login, domain redirect and private environments; `roll apps restart`'s
    help; the shell says when a keystroke didn't go; the deployments and jobs tabs follow
    `/changes` instead of polling every 1.5 s; one date format; http-api.md's stray quote, the
    `audit.*` events, the hooks' own check and the 402.
-6. **Tests for what people rely on**: a crash loop's event and notification, a worker restarting
+4. **Tests for what people rely on**: a crash loop's event and notification, a worker restarting
    with backoff, cron firing on schedule and skipping while the last run goes, concurrent requests
    waking one instance, a wake timeout's 503 with `Retry-After`, a web service scaling in; and
    the tag and wake tests reading what a user sees, not internals.
-7. **Links between services**: a `service` link kind giving `<NAME>_URL` (private) and
+5. **Private networking that wakes**: `<svc>.<env>.internal` reaching a service that's asleep, as
+   Railway's private network and Fly's Flycast do. The network sandbox already holds the
+   aliases while the app sleeps, so the shape is a waker in the sandbox: roll-fetch's `wake`
+   mode listening on the app's port while it's down, asking the owner to wake it on the first
+   connection, letting go of the port and handing the held connection to the app. It needs
+   (a) roll-fetch in the sandbox (a static build mounted read-only, or the fleet's guard image),
+   and (b) a handoff that never makes a starting app lose its bind: rolld signals the waker to
+   let go before any start (a public request, a cron run), measured so the cold start keeps its
+   gain.
+6. **Links between services**: a `service` link kind giving `<NAME>_URL` (private) and
    `<NAME>_PUBLIC_URL`, as Render's `fromService`.
-8. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
+7. **Wildcard custom domains**: `*.example.com`, matched after exact names, certificates through
    DNS-01 on a delegated `_acme-challenge` (Railway's and Render's).
-9. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
+8. **The drain and maintenance mode**: `run.drain_s` (1–300) and an environment's maintenance
     page (Render's `maxShutdownDelaySeconds` and `maintenanceMode`).
-10. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+9. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-11. **Region**: the region shown on the overview and each environment, defaulting to the project's
+10. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-12. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+11. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-13. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+12. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-14. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+13. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-15. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+14. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-16. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-17. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+15. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+16. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-18. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+17. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
    restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
    Firecracker microVM hosts on the fleet.
-19. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+18. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+19. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).

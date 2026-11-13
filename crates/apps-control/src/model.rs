@@ -382,6 +382,19 @@ pub struct Run {
     /// "Workers that follow their work"). Between `min_instances` and `max_instances`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scale: Option<Scale>,
+    /// A web service answers on its public URLs (its `up.roll.site` names, its deployments'
+    /// and its custom domains); false: only on the project's private network, as Render's
+    /// private services.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub public: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// What a worker scales on: `group`'s lag on `stream` (a roll stream in the service's project),
@@ -475,6 +488,7 @@ impl Default for Run {
             rollout: Rollout::default(),
             h2c: false,
             scale: None,
+            public: true,
         }
     }
 }

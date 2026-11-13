@@ -514,6 +514,8 @@ impl Apps {
     }
 
     async fn summary(self: &Arc<Self>, e: &EnvRow) -> Result<EnvironmentSummary> {
+        let sid = e.service.clone();
+        let public = self.db(move |s| s.service(&sid)).await.map(|s| s.run.public).unwrap_or(true);
         let (svc, env) = (e.service.clone(), e.name.clone());
         let recent = self.db(move |s| s.deployments(&svc, &env, 1)).await?;
         let active = match &e.active {
@@ -536,7 +538,7 @@ impl Apps {
                 None => InstanceState::None,
             }
         };
-        Ok(EnvironmentSummary { name: e.name.clone(), state, url: Some(self.url(&e.slug)), active, latest })
+        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest })
     }
 
     pub async fn patch_service(self: &Arc<Self>, id: &str, body: Value) -> Result<Service> {
@@ -1360,6 +1362,14 @@ impl Apps {
     /// The service and environment a hostname is, and the deployment when it's one's own
     /// (`<deployment>--<slug>`: the id without `dep_`).
     pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+        let found = self.host_target(host).await?;
+        // A private service has no public names: the same 404 as an address nobody has, read
+        // from its settings now (making it private takes effect at once, not with a deploy).
+        let sid = found.0.clone();
+        self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public).then_some(found)
+    }
+
+    async fn host_target(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         if let Some(label) = host.strip_suffix(&self.cfg.domain).and_then(|s| s.strip_suffix('.')).filter(|s| !s.contains('.')) {
