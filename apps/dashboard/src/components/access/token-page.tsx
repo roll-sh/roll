@@ -260,7 +260,13 @@ function Requests({ id, events }: { id: string; events: AuditEvent[] | null }) {
   return (
     <Panel
       title="Recent requests"
-      aside={events?.[0]?.client ? <span className="truncate text-[12px] text-subtle">Last from {events[0].client}</span> : undefined}
+      aside={
+        events?.[0]?.client ? (
+          <span className="truncate text-[12px] text-subtle">
+            Last from a client that says it's <bdi>{events[0].client}</bdi>
+          </span>
+        ) : undefined
+      }
     >
       {events === null ? (
         <div className="p-5">

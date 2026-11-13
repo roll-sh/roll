@@ -132,7 +132,12 @@ function Row({ e, onResource }: { e: AuditEvent; onResource: (resource: string) 
         <div className="rise space-y-2 px-11 pb-3 text-[12px] text-muted">
           <p className="font-mono text-[11px]">
             {e.method} {e.route} · {e.action ?? "—"} · {e.source} · {e.duration_ms} ms{e.ip ? ` · ${e.ip}` : ""}
-            {e.client ? ` · ${e.client}` : ""}
+            {e.client && (
+              <>
+                {" · says it's "}
+                <bdi>{e.client}</bdi>
+              </>
+            )}
             {e.approval ? ` · approval ${e.approval}` : ""} · {new Date(e.at).toISOString()}
             {e.resource && (
               <>

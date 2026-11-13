@@ -62,7 +62,7 @@ export function WaitingApprovals() {
           open ? "scale-100 opacity-100" : "pointer-events-none scale-95 opacity-0"
         }`}
       >
-        {approvableTogether(waiting).map((g) => (
+        {approvableTogether(waiting.slice(0, 6)).map((g) => (
           <Together key={g.grant_id} group={g} onDecided={(ids) => setDecided((d) => new Set([...d, ...ids]))} />
         ))}
         <ul className="max-h-[60vh] divide-y divide-line overflow-y-auto">
@@ -81,27 +81,36 @@ export function WaitingApprovals() {
 /** A token's reads and writes waiting together, approved in one go (each once). */
 function Together({ group, onDecided }: { group: { grant_name: string; ids: string[] }; onDecided: (ids: string[]) => void }) {
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  // Each once, past one that fails (decided meanwhile, expired): what failed is said.
   const approveAll = async () => {
     setBusy(true);
+    setFailed(null);
     const done: string[] = [];
-    try {
-      for (const id of group.ids) {
+    const errors: string[] = [];
+    for (const id of group.ids) {
+      try {
         await accessApi.approve(id);
         done.push(id);
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : String(e));
       }
-    } finally {
-      onDecided(done);
-      setBusy(false);
     }
+    onDecided(done);
+    if (errors.length) setFailed(`${errors.length} not approved: ${errors[0]}`);
+    setBusy(false);
   };
   return (
-    <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-[12px]">
-      <span className="min-w-0 flex-1 truncate text-muted">
-        <b className="font-medium text-fg">{group.grant_name}</b> has {group.ids.length} reads and writes waiting
-      </span>
-      <button type="button" onClick={() => void approveAll()} disabled={busy} className="shrink-0 rounded-md border border-fg/30 px-2 py-0.5 text-fg hover:border-fg/60">
-        {busy ? <span className="shimmer">Approving…</span> : `Approve ${group.ids.length}`}
-      </button>
+    <div className="space-y-1 border-b border-line px-3 py-2 text-[12px]">
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-muted">
+          <b className="font-medium text-fg">{group.grant_name}</b>: these {group.ids.length} reads and writes below
+        </span>
+        <button type="button" onClick={() => void approveAll()} disabled={busy} className="shrink-0 rounded-md border border-fg/30 px-2 py-0.5 text-fg hover:border-fg/60">
+          {busy ? <span className="shimmer">Approving…</span> : `Approve ${group.ids.length}`}
+        </button>
+      </div>
+      {failed && <p className="text-danger">{failed}</p>}
     </div>
   );
 }

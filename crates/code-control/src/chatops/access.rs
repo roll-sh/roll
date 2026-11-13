@@ -118,7 +118,8 @@ impl Code {
         match i.platform {
             super::Platform::Slack => {
                 let (client, token) = self.slack_token(&i)?;
-                let m = code_chat::slack::Message { channel: channel.into(), text: text.into(), blocks: None, thread_ts: None };
+                // Plain text, never markup: `<!channel>` or `<url|label>` in a name stay text.
+                let m = code_chat::slack::Message { channel: channel.into(), text: code_chat::slack::escape(text), blocks: None, thread_ts: None };
                 client.post_message(&token, &m).await.map(|_| ()).map_err(|e| e.to_string())
             }
             super::Platform::Discord => {
