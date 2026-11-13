@@ -101,7 +101,10 @@ own host), `Authorization: ApiKey base64(<name>:<password>)` or
 
 The per-index routes are one Elasticsearch operation each, so the cluster, the index and the kind
 of access (read, write, delete) are in the route: roll's scoped tokens and MCP tools map onto
-them. They answer with Elasticsearch's own status and body, and pass the query string through
+them. A route's request runs as the cluster's owner narrowed to the index names in its path
+(`x-roll-index-scope`: like an API key of the owner whose one role grants every privilege on
+those names), so it reaches no other index: a bulk line's `_index` or an `mget` doc naming
+another index is refused (403). They answer with Elasticsearch's own status and body, and pass the query string through
 (`refresh`, `routing`, `size`, …). A write names exactly one index; a name starting with `_` is
 refused (those are Elasticsearch's own APIs: use the console). Bodies may be up to the cluster's
 `max_body_mb`.
