@@ -25,5 +25,7 @@ spec:
 Install: `kubectl apply -f deploy/crd.yaml -f deploy/operator.yaml` after setting the API URL,
 the identity and the token's audience in `deploy/operator.yaml`. The identity's issuer is the
 cluster's service account issuer, its subject `system:serviceaccount:roll-system:roll-secrets-operator`.
+roll fetches the issuer's keys over public HTTPS, so the cluster's issuer must be published (EKS,
+GKE and AKS publish theirs); for a cluster whose issuer isn't, set `ROLL_TOKEN` to a roll token instead.
 
 Tests: `go test ./...` (a fake Kubernetes API and a fake rolld).
