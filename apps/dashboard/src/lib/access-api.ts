@@ -152,6 +152,8 @@ export function catalogFor(c: Catalog, me: Me | null): Catalog {
 export interface Policy {
   max_days?: number | null;
   require_expiry?: boolean;
+  /** Tokens unused this many days stop working. */
+  max_idle_days?: number | null;
 }
 
 export interface Consent {

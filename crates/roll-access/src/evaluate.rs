@@ -218,6 +218,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         blocking(move || a.store.by_secret(&token)).await
     };
     let grant = match lookup {
+        // Unused longer than the operator's policy allows: it stops (making it again is a person's
+        // choice, not an agent's).
+        Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
         Ok(Some(g)) => g,
         Ok(None) => return invalid_token(&access),
         Err(e) => return e.into_response(),

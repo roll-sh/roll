@@ -30,7 +30,8 @@ pub enum Token {
     Whoami,
     /// The products, actions and presets the builder offers.
     Presets,
-    /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`; nothing to show them.
+    /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
+    /// `--max-idle-days 60` (`0` for no idle limit); nothing to show them.
     Policy {
         #[arg(long)]
         max_days: Option<u32>,
@@ -38,6 +39,9 @@ pub enum Token {
         require_expiry: Option<bool>,
         #[arg(long, conflicts_with = "max_days")]
         no_limit: bool,
+        /// Tokens unused this many days stop working (0: no limit).
+        #[arg(long)]
+        max_idle_days: Option<u32>,
     },
 }
 
@@ -410,9 +414,12 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
                 print_grant(&me["grant"]);
             }
         }
-        Token::Policy { max_days, require_expiry, no_limit } => {
+        Token::Policy { max_days, require_expiry, no_limit, max_idle_days } => {
             let mut p = api.get("/v1/access/policy").await?;
-            if max_days.is_some() || require_expiry.is_some() || no_limit {
+            if let Some(d) = max_idle_days {
+                p["max_idle_days"] = if d == 0 { Value::Null } else { json!(d) };
+            }
+            if max_days.is_some() || require_expiry.is_some() || no_limit || max_idle_days.is_some() {
                 if let Some(d) = max_days {
                     p["max_days"] = json!(d);
                 }
@@ -429,7 +436,8 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
             } else {
                 let days = p["max_days"].as_u64().map_or_else(|| "no limit".to_string(), |d| format!("at most {d} days"));
                 let must = if p["require_expiry"].as_bool() == Some(true) { ", and must expire" } else { "" };
-                println!("tokens live {days}{must}");
+                let idle = p["max_idle_days"].as_u64().map(|d| format!("; unused for {d} days, they stop")).unwrap_or_default();
+                println!("tokens live {days}{must}{idle}");
             }
         }
         Token::Presets => {
