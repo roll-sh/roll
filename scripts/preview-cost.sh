@@ -74,6 +74,9 @@ NOSQL=$(api POST /v1/nosql/databases '{"name":"events"}' | jq_ "d['id']")
 api POST /v1/queues/vhosts '{"name":"jobs"}' >/dev/null
 STREAM=$(api POST /v1/streams '{"name":"clicks"}' | jq_ "d['id']")
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
+# A real-looking row in the parent, which previews mask.
+PG_PARENT_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['parent_id'] is None][0]")
+api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"CREATE TABLE users (id int PRIMARY KEY, email text); INSERT INTO users VALUES (1, '"'"'ada@example.com'"'"')"}' >/dev/null
 api POST "/v1/streams/$STREAM/topics" '{"name":"clicks","partitions":3}' >/dev/null
 api POST /_roll/tenants '{"id":"work"}' >/dev/null
 # Data in the parents, so the branches have something to share: 20 MiB of objects, 20,000 keys.
@@ -105,7 +108,7 @@ PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work"; do
   api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null
 done
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"}}}" >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"}}}" >/dev/null
 
 say "open a change"
 T0=$(now_ms)
@@ -143,6 +146,12 @@ BRANCH_SEES=$($S3 ls --recursive "s3://$BRANCH_BUCKET/" | wc -l)
 BRANCH_NOSQL=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='nosql'][0]")
 MASKED=$(api GET "/v1/nosql/databases/$BRANCH_NOSQL" | jq_ "d['masking'].get('app.users.email')")
 PARENT_MASKED=$(api GET "/v1/nosql/databases/$NOSQL" | jq_ "len(d['masking'])")
+# The preview's Postgres branch has the email rewritten; the parent's row is as it was.
+PG_BRANCH_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d['branches'] if b['id']=='$PG_BRANCH'][0]")
+PG_MASKED=$(api POST "/v1/endpoints/$PG_BRANCH_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
+PG_PARENT=$(api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
+case "$PG_MASKED" in user-*@example.invalid) ;; *) echo "the Postgres branch should read masked, not $PG_MASKED"; exit 1;; esac
+[ "$PG_PARENT" = "ada@example.com" ] || { echo "the parent changed: $PG_PARENT"; exit 1; }
 
 say "visit it: cold start"
 T2=$(now_ms)
@@ -208,6 +217,7 @@ cat <<EOF
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
+| Postgres users.email in the branch / in the parent | $PG_MASKED / $PG_PARENT |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
 | Next visit (warm) | $((T5 - T4)) ms |

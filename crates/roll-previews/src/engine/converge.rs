@@ -416,7 +416,8 @@ impl Engine {
 
     pub(super) async fn mask(&self, id: &str, b: &Arc<dyn Brancher>, key: &str, branch: &str, s: &Settings) -> anyhow::Result<()> {
         let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) else { return Ok(()) };
-        b.mask(branch, cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
+        let parent = key.split_once(':').map_or("", |(_, p)| p);
+        b.mask(parent, branch, cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
         self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
         Ok(())
     }

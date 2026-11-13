@@ -94,6 +94,23 @@ impl Brancher for Postgres {
         }
     }
 
+    /// Rewrite the masked columns in the branch, in one transaction, then `VACUUM FULL` those
+    /// tables so the rows as they were leave the branch's files (`roll_previews::mask`). Run again
+    /// it's harmless: masked values stay masked.
+    async fn mask(&self, parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        let plan = roll_previews::mask::postgres(columns).map_err(|e| anyhow::anyhow!(e))?;
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        anyhow::ensure!(!b["parent_id"].is_null(), "refusing to mask {branch}: it isn't a branch of {parent}");
+        let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
+        let query = format!("/v1/endpoints/{}/query", seg(&ep));
+        self.0.post(&query, json!({ "sql": plan.update })).await?;
+        for v in &plan.vacuum {
+            self.0.post(&query, json!({ "sql": v })).await?;
+        }
+        Ok(())
+    }
+
     /// The parent branch's schema and this one's, from the catalog of each endpoint's `main`
     /// database (`SCHEMA_SQL`). Reading the parent's starts its compute if it sleeps.
     async fn schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
@@ -265,7 +282,7 @@ impl Brancher for Nosql {
     }
 
     /// Merge masks onto the branch's own policy (inherited from its parent at branching).
-    async fn mask(&self, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    async fn mask(&self, _parent: &str, branch: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         let d = self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await?;
         let mut policy = d["masking"].as_object().cloned().unwrap_or_default();
         for (col, f) in columns {

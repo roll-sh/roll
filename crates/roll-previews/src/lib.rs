@@ -17,6 +17,7 @@ pub mod cost;
 pub mod engine;
 pub mod glob;
 pub mod ports;
+pub mod mask;
 pub mod runtime;
 pub mod schema;
 pub mod settings;

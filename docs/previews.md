@@ -299,10 +299,20 @@ logged and read again on the next converge; it never fails the preview.
 - **Rules reach existing previews.** Saving a project's rules makes every preview converge again:
   - a resource whose mode changed is branched again in its new mode;
   - services whose variables or access changed are redeployed.
-- **Masked columns.** `masking` adds column masks (Cassandra 5's mask functions) to a NoSQL
-  branch's policy each time it's made or reset, on top of what it inherits from its parent. The
-  preview reads masked values; the parent's policy is untouched. For other products, a `seed`
-  anonymises the rows instead.
+- **Masked columns.** `masking` masks columns of a preview's branches each time one is made or
+  reset, before anything serves it; the parent is untouched.
+  - Postgres (`"postgres:<ref>": {"schema.table.column": rule}`): the columns are rewritten in
+    the branch. Rules: `null`, `redact` (`***`), `hash` (`md5` of the value), `email`
+    (`user-<12 hex>@example.invalid`, the same for the same input, so joins on it still match),
+    `fixed:<value>`. One transaction rewrites every masked column (names and values quoted
+    whatever they hold), then `VACUUM (FULL, ANALYZE)` of those tables, so the rows as they were
+    leave the branch's files. A mask that fails (a rule a column's type can't take) fails the
+    preview and is retried; nothing serves the branch meanwhile. What masking can't reach: the
+    branch's own WAL history keeps pages from before the rewrite. Only the operator's Postgres
+    routes (restore, history) read it, never a preview's services or a "Previews only" token.
+  - NoSQL: column masks (Cassandra 5's mask functions) added to the branch's read policy, on top
+    of what it inherits.
+  - Other products: a `seed` anonymises the rows instead.
 - **Queues branch without what moves messages in.** Shovels and federation upstreams (and the
   `federation-upstream*` keys of policies) aren't copied, so a branch can't pull production
   messages or carry the production broker's credentials.
@@ -543,7 +553,7 @@ type Settings = {
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
-  masking: Record<string, Record<string, string>>; // "nosql:<ref>" → {"ks.table.column": "mask_default()"}
+  masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}
 };
 ```
 

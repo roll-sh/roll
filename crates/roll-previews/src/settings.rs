@@ -216,12 +216,19 @@ impl Settings {
             }
         }
         for (key, cols) in &self.masking {
-            if !key.strip_prefix("nosql:").is_some_and(|r| !r.is_empty()) {
-                return bad(format!("masking: {key:?} isn't \"nosql:<ref>\" (only NoSQL branches can mask columns)"));
+            let postgres = key.strip_prefix("postgres:").is_some_and(|r| !r.is_empty());
+            if !postgres && !key.strip_prefix("nosql:").is_some_and(|r| !r.is_empty()) {
+                return bad(format!("masking: {key:?} isn't \"postgres:<ref>\" or \"nosql:<ref>\" (only those branches can mask columns)"));
+            }
+            if cols.len() > 200 {
+                return bad(format!("masking: {key}: at most 200 columns"));
             }
             for (col, f) in cols {
-                if col.split('.').count() != 3 || col.split('.').any(str::is_empty) || f.trim().is_empty() || f.len() > 200 {
-                    return bad(format!("masking: {key}: {col:?} → {f:?} isn't \"keyspace.table.column\" → a mask function call"));
+                if col.split('.').count() != 3 || col.split('.').any(str::is_empty) || col.len() > 200 || f.trim().is_empty() || f.len() > 200 {
+                    return bad(format!("masking: {key}: {col:?} → {f:?} isn't \"schema.table.column\" → a rule"));
+                }
+                if postgres && !crate::mask::is_rule(f) {
+                    return bad(format!("masking: {key}: {col}: {f:?} isn't a rule ({})", crate::mask::RULES));
                 }
             }
         }
@@ -300,6 +307,8 @@ mod tests {
         assert_eq!(schema.mode_of(Kind::Postgres, "prj_1"), Some(Mode::Schema));
         assert_eq!(schema.mode_of(Kind::Stream, "st_1"), Some(Mode::Schema));
         assert!(Settings::default().patched(&json!({ "masking": { "nosql:n1": { "app.users.email": "mask_default()" } } })).is_ok());
-        assert!(Settings::default().patched(&json!({ "masking": { "postgres:p1": { "a.b.c": "mask_null()" } } })).is_err(), "only NoSQL masks");
+        assert!(Settings::default().patched(&json!({ "masking": { "postgres:p1": { "a.b.c": "mask_null()" } } })).is_err(), "Postgres takes rules, not functions");
+        assert!(Settings::default().patched(&json!({ "masking": { "postgres:p1": { "public.users.email": "email" } } })).is_ok());
+        assert!(Settings::default().patched(&json!({ "masking": { "redis:r1": { "a.b.c": "null" } } })).is_err(), "Redis can't mask");
     }
 }
