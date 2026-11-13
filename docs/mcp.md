@@ -404,21 +404,17 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Every open sibling's head passes the route check with #25:** apps-next (#26), previews-next
-   (#28) and search (#29) each built merged with #25 and run through rolld's `tests/auth.rs`, now
-   that a route a prefix row decides must be reviewed; send each thread the routes it must
-   classify (in progress).
-2. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
+1. **Integration with secrets, on `feature/mcp-on-secrets`** (#25 with secrets' swap, #30, merged;
    lands after #20, #25 and #30): kept merged both ways; secrets' tenth-review fixes are in #30
    (an admin's token reaches operator projects, project-wide metadata needs a rule over the whole
    project). The canvas check costs nothing measurable (`gate_latency`, release, pinned, A/B
    twice: a token's one-resource request 83–115 µs p50 with it, 105–116 µs without).
-3. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+2. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions.
-4. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
+3. **The operator's step:** register `rlt_`, `rlo_`, `rlf_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
 Done lately: `roll token list --product/--resource` and `--workloads`; a workload token makes no
@@ -431,35 +427,37 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); `secrets_list_aws_users`
-(secrets #40); `apps_set_environment` takes who gets in (maintenance, allowed addresses, a rate
-limit, firewall rules; apps-next #26); routes a prefix row decides are reviewed
-(`prefix-reviewed.txt`, 138 looked at; rolld's auth test fails on a new one until it has its own row
-or is listed); previews-next's routes (#28): a preview's env is reveal, accepting a visual change is
-admin with no tool, screenshots come back as MCP image content (`previews_screenshot`),
-`previews_list_shares`, `previews_env`; the eleventh review (MCP's new surface): read-only excludes
-reveals that make something (a presigned PUT, a share link), either switch turns it on and a
-misspelled key is a 400; completions offer only ids and never ask a person; prompts' arguments are
-quoted ids; template errors say what they were; `secrets_list_outside_databases` (secrets #39); a
-project's page as a resource template (`roll://projects/{project}`, read through the gate, its id
-completed); progress while a call waits (`notifications/progress` every 10 s for a call with a
-`progressToken`, checked with the TypeScript SDK; both SDKs' end-to-end runs pass);
-`secrets_list_aws_roles` (secrets #38); read-only connections (`?readonly=1`: only read-only tools
-listed and run, a checkbox in the connect panel); `try_migration_on_branch` (a schema change on a
-Postgres branch first, main only when it worked and you say so); prompts' arguments complete from
-what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's
-workflows as slash commands: what this connection may do, checking a diff for secrets, fixing
-secrets health, debugging a failing service; offered only with their tools); the integration branch
-on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token
-over MCP reads their own secrets project, the operator's answers 404, disabled it stops;
-`users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for
-products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their
-own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a
-deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open
-sibling's routes classified, built with #25 (apps-next #26, previews-next #28 and search #29 pass
-rolld's route test); a preview's share link is reveal (`previews_share`); search's index mapping,
-settings, refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own tokens
-for its caller through the token route's own function) and tokens listed by what they were made for
+revoked as leaked, about to expire; only their own, never a secret); every open sibling's head
+passes the route check with #25 (apps-next's rollback to the last deploy, previews-next's share
+revoke, search's index refresh and settings reviewed: 178 in all); `secrets_list_aws_users` (secrets
+#40); `apps_set_environment` takes who gets in (maintenance, allowed addresses, a rate limit,
+firewall rules; apps-next #26); routes a prefix row decides are reviewed (`prefix-reviewed.txt`, 138
+looked at; rolld's auth test fails on a new one until it has its own row or is listed);
+previews-next's routes (#28): a preview's env is reveal, accepting a visual change is admin with no
+tool, screenshots come back as MCP image content (`previews_screenshot`), `previews_list_shares`,
+`previews_env`; the eleventh review (MCP's new surface): read-only excludes reveals that make
+something (a presigned PUT, a share link), either switch turns it on and a misspelled key is a 400;
+completions offer only ids and never ask a person; prompts' arguments are quoted ids; template
+errors say what they were; `secrets_list_outside_databases` (secrets #39); a project's page as a
+resource template (`roll://projects/{project}`, read through the gate, its id completed); progress
+while a call waits (`notifications/progress` every 10 s for a call with a `progressToken`, checked
+with the TypeScript SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38);
+read-only connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect
+panel); `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it
+worked and you say so); prompts' arguments complete from what the connection may list
+(`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what
+this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing
+service; offered only with their tools); the integration branch on Postgres 18 (roll-access,
+roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own
+secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth
+review (access with secrets): a person's stored grant dead for products' background work once they
+can't sign in (`Sessions::person_now`), hops carrying only their own product's routes,
+`Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables
+(`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes
+classified, built with #25 (apps-next #26, previews-next #28 and search #29 pass rolld's route
+test); a preview's share link is reveal (`previews_share`); search's index mapping, settings,
+refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own tokens for its
+caller through the token route's own function) and tokens listed by what they were made for
 (`?product=&resource=`), for secrets retiring `rlst_`; taking an apps web service off the internet
 or putting it on (`run.public`) is deploy; a token's rate is the fleet's (each node enforces its
 share, the rate over the live nodes), not N times it; a worker's scaling stream needs read on it; a
