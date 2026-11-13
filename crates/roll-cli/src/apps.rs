@@ -198,6 +198,16 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Deploy what another environment runs here (its image: no build), with this
+    /// environment's variables: `roll apps promote --from staging` puts staging's image live in
+    /// production.
+    Promote {
+        /// The environment whose live deployment is promoted.
+        #[arg(long)]
+        from: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Roll back to an earlier deployment (no build: its image runs again).
     Rollback {
         deployment: String,
@@ -255,12 +265,18 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 30)]
         days: i64,
     },
-    /// Make or change an environment (`--branch` deploys on pushes to it).
+    /// Make or change an environment (`--branch` deploys on pushes to it; `--variables-from`
+    /// starts a new one with another's variables).
     Env {
         #[command(flatten)]
         target: Target,
         #[arg(long)]
         branch: Option<String>,
+        /// Stop deploying on pushes.
+        #[arg(long, conflicts_with = "branch")]
+        no_branch: bool,
+        #[arg(long)]
+        variables_from: Option<String>,
     },
     /// Tear an environment down.
     EnvDelete {
@@ -915,6 +931,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
+        AppsCmd::Promote { from, target } => {
+            let svc = service(api, &target).await?;
+            let dep = api.post(&format!("{}/promote", env_path(&svc, &target.env)), json!({ "from": from })).await?;
+            if !json_out {
+                return watch(api, &svc, &target.env, &dep).await;
+            }
+            dep
+        }
         AppsCmd::Rollback { deployment, target } => {
             let svc = service(api, &target).await?;
             let dep = api.post(&format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(&deployment)), json!({})).await?;
@@ -1001,9 +1025,19 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from } => {
             let svc = service(api, &target).await?;
-            api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(json!({ "branch": branch }))).await?
+            // Only what was asked changes: no `--branch` keeps the one it has.
+            let mut body = serde_json::Map::new();
+            if let Some(b) = branch {
+                body.insert("branch".into(), json!(b));
+            } else if no_branch {
+                body.insert("branch".into(), Value::Null);
+            }
+            if let Some(f) = variables_from {
+                body.insert("variables_from".into(), json!(f));
+            }
+            api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(Value::Object(body))).await?
         }
         AppsCmd::EnvDelete { target } => {
             let svc = service(api, &target).await?;

@@ -139,6 +139,10 @@ export interface ServicePatch {
 export interface EnvironmentPut {
   branch?: string | null;
   ephemeral?: boolean;
+  /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
+  access?: { token: string; bypass_sha256?: string } | null;
+  /** Creating it: start with this environment's variables. */
+  variables_from?: string;
 }
 
 export interface Instance {
@@ -189,7 +193,7 @@ export interface NewDeploy {
   message?: string;
 }
 
-export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings";
+export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
 
 export interface Plan {
   provider: "dockerfile" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "static";
@@ -371,6 +375,7 @@ export const appsApi = {
   rollback: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`),
   /** The live image again with the current variables and settings: no build, same revision. */
   redeploy: (id: string, e: string, body: { message?: string } = {}) => call<Deployment>("POST", `${env(id, e)}/redeploy`, body),
+  promote: (id: string, e: string, from: string) => call<Deployment>("POST", `${env(id, e)}/promote`, { from }),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
 
   restart: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/restart`),
@@ -550,6 +555,7 @@ export const TRIGGER_LABEL: Record<DeployTrigger, string> = {
   upload: "roll up",
   api: "API",
   settings: "Redeploy",
+  promote: "Promote",
 };
 
 /** The environment a service's card and page show first: production, else the oldest. */

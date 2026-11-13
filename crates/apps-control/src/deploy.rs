@@ -190,6 +190,46 @@ impl Apps {
         Ok(dep)
     }
 
+    /// `POST …/environments/{env}/promote` `{from}`: deploy what `from` runs (its image, the
+    /// revision it was built from) to `env`, without a build, with `env`'s own variables and the
+    /// service's current settings (Railway's promotion: staging's tested image to production).
+    pub async fn promote(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Deployment> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| !["from", "message"].contains(&k.as_str())) {
+            return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        let from = o.get("from").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("from (the environment to promote) is required".into()))?;
+        if from == env {
+            return Err(Error::BadRequest("from is another environment".into()));
+        }
+        let message = o.get("message").and_then(Value::as_str).map(|m| m.chars().take(500).collect::<String>());
+        let (sid, e, f) = (service.to_string(), env.to_string(), from.to_string());
+        let (svc, _, source) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.environment(&sid, &f)?))).await?;
+        let active = source.active.clone().ok_or_else(|| Error::Conflict(format!("nothing is deployed in {from} yet")))?;
+        let old = self.deployment(service, from, &active).await?;
+        let image = old.image.clone().ok_or_else(|| Error::Conflict(format!("{active} has no image")))?;
+        let mut run = svc.run.clone();
+        if run.port.is_none() {
+            run.port = old.run.port;
+        }
+        let d = NewDeployment {
+            trigger: Trigger::Promote,
+            revision: old.revision.clone(),
+            message: message.unwrap_or_else(|| format!("Promote {} from {from}", old.id)),
+            image: Some(image),
+            plan: old.plan.clone(),
+            rollback_of: Some(old.id.clone()),
+            run,
+            upload: None,
+            status: DeployStatus::Queued,
+        };
+        let (sid, e) = (service.to_string(), env.to_string());
+        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
+        self.deploy_log(&dep.id).line(format!("queued (promoting {} from {from})", old.id));
+        self.kick(service, env);
+        Ok(dep)
+    }
+
     /// `POST …/deploys/{dep}/rollback`: deploy an earlier deployment's image and settings
     /// again, without a build.
     pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
@@ -316,8 +356,9 @@ impl Apps {
         let id = d.id.clone();
         self.step(&d.id, "build").await;
         let (image, run) = match &d.image {
-            // A rollback or a redeploy: an image roll already has, nothing to build or pull.
-            Some(img) if matches!(d.trigger, Trigger::Rollback | Trigger::Settings) => {
+            // A rollback, a redeploy or a promotion: an image roll already has, nothing to build
+            // or pull.
+            Some(img) if matches!(d.trigger, Trigger::Rollback | Trigger::Settings | Trigger::Promote) => {
                 self.db(move |s| s.set_status(&id, &[DeployStatus::Queued, DeployStatus::Building], DeployStatus::Deploying, None)).await?;
                 log.line(format!("using the image of {}", d.rollback_of.as_deref().unwrap_or("the deployment it redeploys")));
                 (img.clone(), d.run.clone())

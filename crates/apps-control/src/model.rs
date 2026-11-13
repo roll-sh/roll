@@ -601,6 +601,8 @@ pub enum Trigger {
     Upload,
     Api,
     Settings,
+    /// Another environment's live image (`POST …/promote`).
+    Promote,
 }
 
 impl Trigger {
@@ -612,6 +614,7 @@ impl Trigger {
             Trigger::Upload => "upload",
             Trigger::Api => "api",
             Trigger::Settings => "settings",
+            Trigger::Promote => "promote",
         }
     }
 
@@ -622,6 +625,7 @@ impl Trigger {
             "upload" => Trigger::Upload,
             "api" => Trigger::Api,
             "settings" => Trigger::Settings,
+            "promote" => Trigger::Promote,
             _ => Trigger::Manual,
         }
     }

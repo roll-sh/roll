@@ -97,17 +97,31 @@ function useService(id: string, envName: string | undefined) {
 
 const NEW_ENV = "\u0000new";
 
-/** A new environment: its name and, for a repo, the branch that deploys to it on every push. */
-function NewEnvironment({ repo, busy, onCancel, onCreate }: { repo: boolean; busy: boolean; onCancel: () => void; onCreate: (name: string, branch: string | null) => void }) {
+/** A new environment: its name, for a repo the branch that deploys to it on every push, and
+ *  the environment whose variables it starts with. */
+function NewEnvironment({
+  repo,
+  envs,
+  busy,
+  onCancel,
+  onCreate,
+}: {
+  repo: boolean;
+  envs: string[];
+  busy: boolean;
+  onCancel: () => void;
+  onCreate: (name: string, branch: string | null, variablesFrom: string | null) => void;
+}) {
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("");
+  const [from, setFrom] = useState(envs.includes(PRODUCTION) ? PRODUCTION : "");
   const ok = SERVICE_NAME.test(name);
   return (
     <form
       className="rise mt-3 flex flex-wrap items-end gap-2 rounded-xl border border-line bg-panel px-4 py-3"
       onSubmit={(e) => {
         e.preventDefault();
-        if (ok) onCreate(name, branch.trim() || null);
+        if (ok) onCreate(name, branch.trim() || null, from || null);
       }}
     >
       <label className="flex flex-col gap-1 text-[12px] text-muted">
@@ -118,6 +132,19 @@ function NewEnvironment({ repo, busy, onCancel, onCreate }: { repo: boolean; bus
         <label className="flex flex-col gap-1 text-[12px] text-muted">
           Deploys on pushes to
           <input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="a branch (optional)" spellCheck={false} className={`${input} w-48 font-mono text-[12px]`} />
+        </label>
+      )}
+      {envs.length > 0 && (
+        <label className="flex flex-col gap-1 text-[12px] text-muted">
+          Variables from
+          <select value={from} onChange={(e) => setFrom(e.target.value)} className={`${input} w-40 font-mono text-[12px]`}>
+            <option value="">none</option>
+            {envs.map((e) => (
+              <option key={e} value={e}>
+                {e}
+              </option>
+            ))}
+          </select>
         </label>
       )}
       <button type="submit" className={primary} disabled={!ok || busy}>
@@ -298,10 +325,11 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
       {adding && (
         <NewEnvironment
           repo={service.source.kind === "repo"}
+          envs={service.environments.map((e) => e.name)}
           busy={busy}
           onCancel={() => setAdding(false)}
-          onCreate={async (name, branch) => {
-            const made = await runner.run("environment", () => appsApi.putEnvironment(service.id, name, { branch }));
+          onCreate={async (name, branch, variablesFrom) => {
+            const made = await runner.run("environment", () => appsApi.putEnvironment(service.id, name, { branch, ...(variablesFrom ? { variables_from: variablesFrom } : {}) }));
             if (made) {
               setAdding(false);
               go({ env: name });
@@ -368,6 +396,8 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : (
           <SettingsTab
             service={service}
+            env={env}
+            onEnvDeleted={() => go({ env: PRODUCTION })}
             projectName={project?.name ?? service.project}
             runner={runner}
             onDeleted={() => {

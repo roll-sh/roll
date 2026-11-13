@@ -72,6 +72,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
+        .route(&format!("{env}/promote"), post(promote))
         .route(&format!("{env}/restart"), post(restart))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
@@ -445,6 +446,11 @@ async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query
 
 async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
     let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }).await?;
+    Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+    let d = apps.promote(&id, &env, body(&b)?).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 

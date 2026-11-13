@@ -488,6 +488,29 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
     assert_eq!(w.tls.calls.lock().last().map(String::as_str), Some("remove www.example.com"));
 }
 
+/// A new environment starts with another's variables, and promoting deploys what another
+/// environment runs (its image, no pull or build) with the target's own variables.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environment_is_cloned_and_a_live_image_promoted_to_it() {
+    let w = world().await;
+    let (svc, d) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments");
+    let (st, _) = call(&w.api, "PATCH", &format!("{base}/production/variables"), Some(json!({"set": {"API_KEY": "k1"}}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, env) = call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({"variables_from": "production"}))).await;
+    assert_eq!(st, StatusCode::OK, "{env}");
+    let (_, vals) = call(&w.api, "GET", &format!("{base}/staging/variables/values"), None).await;
+    assert_eq!(vals["API_KEY"], "k1", "{vals}");
+    let pulls = Fake::count(&w.fake.counts.pulls);
+    let (st, p) = call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "production"}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{p}");
+    let p = settled(&w, &id, "staging", p["id"].as_str().unwrap()).await;
+    assert_eq!((p["status"].as_str(), p["trigger"].as_str(), &p["image"]), (Some("active"), Some("promote"), &d["image"]), "{p}");
+    assert_eq!(Fake::count(&w.fake.counts.pulls), pulls, "nothing pulled or built");
+    assert_eq!(call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "staging"}))).await.0, StatusCode::BAD_REQUEST);
+}
+
 /// A running instance whose health check keeps failing (its port still open) is replaced, and
 /// the environment's log says why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

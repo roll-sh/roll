@@ -578,7 +578,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -613,6 +613,25 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("access is {token, bypass_sha256?} or null".into())),
         };
+        // A new environment may start with another's variables (cloning staging from production).
+        let variables_from = match o.get("variables_from") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(f)) if f != env => Some(f.clone()),
+            Some(_) => return Err(Error::BadRequest("variables_from is another environment's name".into())),
+        };
+        let (sid, e) = (service.to_string(), env.to_string());
+        let existed = self.db(move |s| s.environment(&sid, &e)).await.is_ok();
+        let copied = match (&variables_from, existed) {
+            (Some(f), false) => {
+                let (sid, f) = (service.to_string(), f.clone());
+                Some(self.db(move |s| {
+                    s.environment(&sid, &f)?;
+                    s.variables(&sid, &f)
+                })
+                .await?)
+            }
+            _ => None,
+        };
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
         let pname = {
@@ -621,6 +640,10 @@ impl Apps {
             tokio::task::spawn_blocking(move || this.project_name(&p)).await.map_err(|e| Error::Internal(e.to_string()))??
         };
         self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
+        if let Some(vars) = copied.filter(|v| !v.is_empty()) {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.change_variables(&sid, &e, &vars, &[])).await?;
+        }
         if let Some(access) = access {
             let (sid, e, a) = (service.to_string(), env.to_string(), access.clone());
             self.db(move |s| s.set_access(&sid, &e, a.as_ref())).await?;
