@@ -558,3 +558,48 @@ async fn a_family_of_branches_gets_its_own_variables() {
     e.engine.pass().await.unwrap();
     assert_eq!(var("chg_f1").as_deref(), Some("mine"));
 }
+
+/// A variable set while a deploy is still going, then removed, is removed from the backend too:
+/// what was sent counts, not only what went live.
+#[tokio::test]
+async fn a_change_made_while_a_deploy_is_still_going_is_sent_again() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_s", 6));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_s").unwrap().unwrap();
+    let sent = || e.apps.vars.lock().get(&(p.id.clone(), "web".to_string())).map(|v| v.iter().any(|(n, _)| n == "FEATURE")).unwrap_or(false);
+    let set = |v: Option<&str>| std::collections::BTreeMap::from([("FEATURE".to_string(), v.map(String::from))]);
+    e.apps.still.store(1, Ordering::SeqCst);
+    e.engine.set_vars(&p.id, set(Some("on"))).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(sent(), "sent, still deploying");
+    e.engine.set_vars(&p.id, set(None)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(!sent(), "back to how it was before the deploy finished: sent again");
+}
+
+/// A variable removed while the deploy that sent it is under way is removed from the backend on
+/// the next converge.
+#[tokio::test]
+async fn a_variable_removed_during_its_deploy_is_removed_after() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_d2", 7));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_d2").unwrap().unwrap();
+    let sent = || e.apps.vars.lock().get(&(p.id.clone(), "web".to_string())).map(|v| v.iter().any(|(n, _)| n == "FEATURE")).unwrap_or(false);
+    e.engine.set_vars(&p.id, std::collections::BTreeMap::from([("FEATURE".to_string(), Some("on".to_string()))])).await.unwrap();
+    let (store, id) = (e.engine.store.clone(), p.id.clone());
+    *e.apps.on_deploy.lock() = Some(Box::new(move || {
+        store.update_vars(&id, |v| {
+            v.clear();
+            Ok(())
+        })
+        .unwrap();
+        store.update(&id, |r| r.next_at = 0).unwrap();
+    }));
+    e.engine.pass().await.unwrap();
+    *e.apps.on_deploy.lock() = None;
+    assert!(sent(), "the deploy that sent it");
+    e.engine.pass().await.unwrap();
+    assert!(!sent(), "removed on the next converge");
+}

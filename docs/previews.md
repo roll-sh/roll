@@ -592,6 +592,12 @@ land on the change.
 database's `previews` schema shared by every node. Every read-then-write is one `Db::write`
 closure.
 
+A converge holds its preview with a lease in `next_at` (5 minutes; a crash is retried when it
+ends). A request meanwhile (a variable removed, a push, a keep, a rules change) sets `next_at` to
+0, which bumps `generation`, and the converge settles only if `generation` didn't move, so the
+request is converged next, never lost. A deploy a backend accepted but hasn't finished counts as
+sent: what it carried is recorded, so a change back to how it was before is sent again.
+
 ```sql
 settings(project_id TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at INTEGER NOT NULL)
 previews(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
