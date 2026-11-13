@@ -508,6 +508,11 @@ fn cql_action(b: &Value) -> Action {
 /// ships (`deploy`); deleting a thread `delete`; and a shell, writing files, rolling back, raising a
 /// thread's runtime or interaction mode, answering an agent's approval (it would approve itself),
 /// endpoints, the gateway, projects and the machine's settings are `admin`. Unknown types too.
+/// A new apps service: `deploy` unless its source is an upload (which deploys only with `roll up`).
+fn apps_create_action(b: &Value) -> Action {
+    if b["source"]["kind"] == "upload" { Action::Write } else { Action::Deploy }
+}
+
 fn agent_command_action(b: &Value) -> Action {
     let kind = b.get("type").and_then(Value::as_str).unwrap_or("");
     let raises = b.get("runtime_mode").is_some_and(|m| !m.is_null()) || b.get("interaction_mode").is_some_and(|m| !m.is_null());
@@ -835,8 +840,15 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // ── apps (feature/roll-apps, docs/apps/http-api.md) ──
     row("GET", "/v1/apps/services", "apps", R, list("id")),
-    row("POST", "/v1/apps/services", "apps", W, Tgt::Product),
-    row("POST", "/v1/apps/projects/{project}/services", "apps", W, Tgt::Create { project: Some("project"), place: None, id_field: "id" }),
+    // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
+    row("POST", "/v1/apps/services", "apps", Act::Body(apps_create_action), Tgt::Product).env(EnvFrom::Fixed("production")),
+    row("POST", "/v1/apps/projects/{project}/services", "apps", Act::Body(apps_create_action), Tgt::Create { project: Some("project"), place: None, id_field: "id" })
+        .env(EnvFrom::Fixed("production")),
+    row("GET", "/v1/apps/events", "apps", R, Tgt::Product),
+    // A private registry's login (never answered back), and unlinking a database: settings.
+    row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1044,6 +1056,8 @@ mod tests {
             let f = by_path("GET", &route.replace('{', "x").replace('}', "")).unwrap();
             assert_eq!(f.row.action("GET", &[], None), Action::Reveal, "{route}");
         }
+        assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
+        assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
         let dep = find("POST", "/v1/apps/services/{id}/environments/{env}/deploys", "x").unwrap();
         assert_eq!(dep.row.action("POST", &[("env".into(), "production".into())], None), Action::Deploy);
         assert_eq!(dep.row.action("POST", &[("env".into(), "staging".into())], None), Action::Write);
