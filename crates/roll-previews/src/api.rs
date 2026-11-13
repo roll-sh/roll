@@ -283,7 +283,7 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
         // `base=1`: the default branch's preview's, the one this was compared with.
         let id = if base {
             match e.store.base_change(&id)? {
-                Some((base_id, ..)) => base_id,
+                Some(b) => b.preview,
                 None => return Ok(None),
             }
         } else {

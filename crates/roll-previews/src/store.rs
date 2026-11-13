@@ -1040,11 +1040,12 @@ impl Store {
 
     /// How much the page differs from the default branch's preview (its branch, basis points
     /// at both widths), and that preview.
-    pub fn base_change(&self, id: &str) -> Result<Option<(String, String, i64, Option<i64>)>> {
-        let row: Option<(Option<String>, Option<String>, Option<i64>, Option<i64>)> = self
+    pub fn base_change(&self, id: &str) -> Result<Option<BaseRow>> {
+        type Raw = (Option<String>, Option<String>, Option<i64>, Option<i64>);
+        let row: Option<Raw> = self
             .db
             .read(|c| c.query_row("SELECT base_preview, base_branch, base_change_bp, base_phone_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
-        Ok(row.and_then(|(p, b, bp, phone)| Some((p?, b?, bp?, phone))))
+        Ok(row.and_then(|(p, b, bp, phone)| Some(BaseRow { preview: p?, branch: b?, change_bp: bp?, phone_bp: phone })))
     }
 
     /// The phone-width screenshot (`previous`: the one before it), if one was taken.
@@ -1352,7 +1353,7 @@ impl Store {
         let phone_percent = self.phone_change(&r.id)?.map(|bp| bp as f64 / 100.0);
         let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0, phone_percent });
         let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
-        let base_change = self.base_change(&r.id)?.map(|(_, branch, bp, phone)| crate::BaseChange { branch, percent: bp as f64 / 100.0, phone_percent: phone.map(|p| p as f64 / 100.0) });
+        let base_change = self.base_change(&r.id)?.map(|b| crate::BaseChange { branch: b.branch, percent: b.change_bp as f64 / 100.0, phone_percent: b.phone_bp.map(|p| p as f64 / 100.0) });
         let page_speed = self.page_speed(&r.id)?;
         let page_health = self.page_health(&r.id)?;
         let page_a11y = self.page_a11y(&r.id)?;
@@ -1430,6 +1431,16 @@ fn host_taken(c: &Conn<'_>, host: &str) -> code_sql::Result<bool> {
     Ok(c.query_row("SELECT 1 FROM services WHERE host = ? UNION ALL SELECT 1 FROM pinned WHERE host = ? LIMIT 1", [host, host], |_| Ok(())).optional()?.is_some())
 }
 
+/// How much a preview's page differs from its project's preview of the default branch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BaseRow {
+    /// The default branch's preview.
+    pub preview: String,
+    pub branch: String,
+    pub change_bp: i64,
+    pub phone_bp: Option<i64>,
+}
+
 /// Live share links a preview may have at once.
 pub const SHARES_MAX: usize = 20;
 
@@ -1490,7 +1501,7 @@ mod tests {
         assert!(store.compare_with_base(id, &main.id, "main").is_ok() && store.base_change(id).unwrap().is_none(), "no screenshot there yet");
         store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
         store.compare_with_base(id, &main.id, "main").unwrap();
-        assert_eq!(store.base_change(id).unwrap(), Some((main.id.clone(), "main".to_string(), 2000, Some(5000))));
+        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000) }));
         // Taken again at the same head: what came before stays.
         store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100)), Some(&png(5))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
