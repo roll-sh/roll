@@ -149,7 +149,9 @@ impl Tool {
             json!({ "type": "string", "description": "An approval id (apr_…) from an earlier call that needed the user's approval: waits for it, and runs once it's approved" }),
         );
         let actions = self.find_actions();
-        let read_only = !actions.is_empty() && actions.iter().all(|a| matches!(a, Action::Read | Action::Reveal));
+        // Read-only changes nothing and makes nothing: a reveal that's a POST (a presigned PUT URL,
+        // a share link) makes something someone can use.
+        let read_only = !actions.is_empty() && (actions.iter().all(|a| *a == Action::Read) || (self.method == "GET" && actions.iter().all(|a| matches!(a, Action::Read | Action::Reveal))));
         let destructive = self.hint == Hint::Destructive || actions.iter().any(|a| matches!(a, Action::Delete | Action::Deploy));
         let idempotent = read_only || self.method == "PUT" || self.method == "DELETE";
         json!({
@@ -690,6 +692,8 @@ mod tests {
         }
         let def = |n: &str| all().iter().find(|t| t.name == n).unwrap().definition();
         assert_eq!(def("postgres_query")["annotations"]["readOnlyHint"], true);
+        assert_eq!(def("storage_presign")["annotations"]["readOnlyHint"], false, "a presigned PUT writes");
+        assert_eq!(def("secrets_reveal")["annotations"]["readOnlyHint"], true);
         assert_eq!(def("postgres_execute")["annotations"]["destructiveHint"], true);
         assert_eq!(def("postgres_delete_project")["annotations"]["destructiveHint"], true);
         assert_eq!(def("postgres_create_branch")["annotations"]["readOnlyHint"], false);

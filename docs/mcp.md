@@ -52,9 +52,12 @@ and OAuth's resource is the server whatever the toolsets (checked with the TypeS
 
 `/v1/mcp?readonly=1` (or `X-MCP-Readonly: true`) is a read-only connection, as GitHub's server's
 read-only mode is: only tools annotated `readOnlyHint` are listed and run, whatever the token
-allows (a call to another is an error result), and prompts that need one aren't offered. It
-narrows, never widens: each call is still decided by the token's rules. Anything but `1`, `true`,
-`0` or `false` is a 400, so a typo never means "not read-only". The connect panel has a checkbox
+allows (a call to another is an error result), and prompts that need one aren't offered. A tool is
+read-only when its route only reads, or reveals with a `GET`: a reveal that's a `POST` makes
+something someone can use (a presigned PUT URL, a share link), so it isn't. It narrows, never
+widens: each call is still decided by the token's rules. It's on when the query or the header asks;
+anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_only`), is a 400,
+so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
 ### With OAuth (Claude Code, Claude.ai, Cursor, VS Code, …)
@@ -201,14 +204,17 @@ roll's workflows as prompts a client offers as slash commands (`prompts/list`, `
 `crates/roll-mcp/src/prompts.rs`), as GitHub's and Sentry's MCP servers ship theirs. A prompt is
 only text that walks the agent through roll's tools: it calls nothing, each tool it names is still
 decided by the gate, and a connection is offered only the prompts whose tools it has. Arguments are
-one line of printable text, at most 200 characters.
+ids (letters, digits, `_`, `.`, `-`, at most 64), quoted in the message: anyone can name a project,
+and a prompt's text is the person's own message to the agent.
 
 A prompt's `project`, `service` and `env` complete as the person types (`completion/complete`): the
 values come from the list tool the connection would call (`workspace_list_projects`; a Postgres
 project's from `postgres_list_projects`;
 `apps_list_services`, `apps_list_environments` for the `service` already given), through the gate
 with the caller's token, so a suggestion is only what it may read, and each is an audited read.
-Nothing completes for a prompt the connection isn't offered.
+Only ids are offered (what tools take). A completion never asks a person: a list that would ask
+is refused at once (`would_ask`), so typing opens no approval. A prompt the connection isn't offered
+is `-32602`.
 
 | Prompt | Arguments | What it does | Tools |
 | --- | --- | --- | --- |
@@ -406,7 +412,7 @@ waits on a sibling PR reaching main is last.
 4. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
 
-Done lately: `secrets_list_outside_databases` (secrets #39); a project's page as a resource template (`roll://projects/{project}`, read through the gate, its id completed); progress while a call waits (`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel); `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and you say so); prompts' arguments complete from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
+Done lately: the eleventh review (MCP's new surface): read-only excludes reveals that make something (a presigned PUT, a share link), either switch turns it on and a misspelled key is a 400; completions offer only ids and never ask a person; prompts' arguments are quoted ids; template errors say what they were; `secrets_list_outside_databases` (secrets #39); a project's page as a resource template (`roll://projects/{project}`, read through the gate, its id completed); progress while a call waits (`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript SDK; both SDKs' end-to-end runs pass); `secrets_list_aws_roles` (secrets #38); read-only connections (`?readonly=1`: only read-only tools listed and run, a checkbox in the connect panel); `try_migration_on_branch` (a schema change on a Postgres branch first, main only when it worked and you say so); prompts' arguments complete from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's workflows as slash commands: what this connection may do, checking a diff for secrets, fixing secrets health, debugging a failing service; offered only with their tools); the integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open sibling's routes classified, built with #25 (apps-next #26, previews-next
 #28 and search #29 pass rolld's route test); a preview's share link is reveal (`previews_share`);
 search's index mapping, settings, refresh and analyze as MCP tools; the ninth review's findings
 (apps settings that change what production runs, its source, build, start and pre-deploy commands,

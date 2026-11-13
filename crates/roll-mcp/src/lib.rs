@@ -152,16 +152,29 @@ fn toolsets(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<Option<Vec<Str
     Ok((!names.is_empty()).then_some(names))
 }
 
-/// Whether a connection asked to be read-only (`?readonly=1|true`, or `X-MCP-Readonly: 1|true`).
-/// Anything else given is an error, so a typo never means "not read-only".
+/// Whether a connection asked to be read-only (`?readonly=1|true`, or `X-MCP-Readonly: 1|true`):
+/// read-only when either asks. A value that isn't one of those, or a key spelled another way
+/// (`read_only`, `readOnly`), is an error, so a typo never means "not read-only".
 fn readonly(uri: &axum::http::Uri, headers: &HeaderMap) -> Result<bool, String> {
-    let from_query = uri.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "readonly").map(|(_, v)| v.into_owned()));
-    let Some(v) = from_query.or_else(|| headers.get("x-mcp-readonly").and_then(|v| v.to_str().ok()).map(str::to_string)) else { return Ok(false) };
-    match v.trim().to_ascii_lowercase().as_str() {
+    let parse = |v: &str| match v.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "" => Ok(true),
         "0" | "false" => Ok(false),
         other => Err(format!("readonly={other:?}: 1 or true (0 or false to turn it off)")),
+    };
+    let mut on = false;
+    for (k, v) in uri.query().map(|q| url::form_urlencoded::parse(q.as_bytes()).collect::<Vec<_>>()).unwrap_or_default() {
+        let folded: String = k.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        if folded == "readonly" && k != "readonly" {
+            return Err(format!("?{k}= isn't a parameter: did you mean ?readonly=1?"));
+        }
+        if k == "readonly" {
+            on |= parse(&v)?;
+        }
     }
+    if let Some(v) = headers.get("x-mcp-readonly") {
+        on |= parse(v.to_str().map_err(|_| "X-MCP-Readonly isn't text".to_string())?)?;
+    }
+    Ok(on)
 }
 
 async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, headers: HeaderMap, body: axum::body::Bytes) -> Response {
@@ -274,7 +287,9 @@ type Work = Pin<Box<dyn Future<Output = Vec<Value>> + Send>>;
 /// `work`'s responses as a stream, with a progress notification for `token` every `every` until
 /// they come. The work is the stream's: a client that goes away drops it, as a plain answer would.
 fn progress_stream(work: Work, token: Option<Value>, every: std::time::Duration) -> impl futures::Stream<Item = Value> + Send {
-    let tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    // A slow reader hears once, not a burst of the ticks it missed.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     futures::stream::unfold((Some(work), tick, 0u64, std::collections::VecDeque::<Value>::new(), token), |(mut work, mut tick, mut n, mut ready, token)| async move {
         loop {
             if let Some(r) = ready.pop_front() {
@@ -396,14 +411,22 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     let project = resources::project_of(uri).unwrap_or_default();
                     match read_route(ctx, &format!("/v1/workspace/projects/{project}"), uri).await {
                         Ok(answer) => rpc_result(id, resources::project(uri, &answer)),
-                        Err((message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": message, "data": data } }),
+                        Err((message, data)) => {
+                            // Only a missing project is "not found"; a refusal or a failure says what it was, briefly.
+                            let code = if data["http_status"] == 404 { -32002 } else { -32603 };
+                            let message: String = message.chars().take(300).collect();
+                            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } })
+                        }
                     }
                 }
                 other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
             },
             "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": resources::templates(&tool_names(ctx)) })),
             "prompts/list" => rpc_result(id, prompts::list(&tool_names(ctx))),
-            "completion/complete" => rpc_result(id, complete(ctx, &params).await),
+            "completion/complete" => match complete(ctx, &params).await {
+                Ok(v) => rpc_result(id, v),
+                Err(e) => rpc_error(id, -32602, e),
+            },
             "prompts/get" => match prompts::get(params.get("name").and_then(Value::as_str).unwrap_or(""), params.get("arguments").unwrap_or(&Value::Null), &tool_names(ctx)) {
                 Ok(v) => rpc_result(id, v),
                 Err(e) => rpc_error(id, -32602, e),
@@ -418,8 +441,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
 /// `completion/complete` for a prompt's argument: the values a list tool answers this connection
 /// (through the gate, as any call), matching what's typed. Nothing for what has no source or a
 /// tool the connection lacks: a suggestion never reaches past a call it could make.
-async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Value {
-    let empty = json!({ "completion": { "values": [], "hasMore": false } });
+async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
+    let empty = Ok(json!({ "completion": { "values": [], "hasMore": false } }));
     let (kind, arg) = (params["ref"]["type"].as_str().unwrap_or(""), params["argument"]["name"].as_str().unwrap_or(""));
     let typed: String = params["argument"]["value"].as_str().unwrap_or("").chars().take(200).collect();
     let tools = tool_names(ctx);
@@ -427,7 +450,7 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Value {
         "ref/prompt" => {
             let prompt = params["ref"]["name"].as_str().unwrap_or("");
             if !prompts::offered_to(prompt, &tools) {
-                return empty;
+                return Err(format!("unknown prompt {prompt:?}"));
             }
             prompts::source(prompt, arg)
         }
@@ -440,12 +463,12 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Value {
         return empty;
     }
     let others = params["context"]["arguments"].clone();
-    let Some(answer) = call(ctx, src.tool, (src.args)(&others)).await else { return empty };
+    let Some(answer) = call_as(ctx, src.tool, (src.args)(&others), true).await else { return empty };
     if answer["isError"] == true {
         return empty;
     }
     let (values, more) = prompts::values(&answer["structuredContent"], src.fields, &typed);
-    json!({ "completion": { "values": values, "hasMore": more } })
+    Ok(json!({ "completion": { "values": values, "hasMore": more } }))
 }
 
 /// The names of the tools this connection is offered (what prompts may use).
@@ -493,9 +516,14 @@ Read the resource roll://access/me for what this connection may do, in words, an
 
 /// Run a tool: one of ours, or a fronted set's.
 async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
+    call_as(ctx, name, args, false).await
+}
+
+/// [`call`], `quiet` for a completion (an `ask` is refused, never put to a person).
+async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option<Value> {
     let redacted = roll_access::redact::value(&args);
     let mut ext = Extensions::new();
-    ext.insert(McpCall { tool: name.into(), args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone() });
+    ext.insert(McpCall { tool: name.into(), args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet });
     let started = std::time::Instant::now();
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
     let (result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
@@ -552,7 +580,7 @@ async fn read_route(ctx: &Arc<Ctx>, route: &str, uri: &str) -> Result<Value, (St
         req = req.header(k, v);
     }
     let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
-    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": uri })), ip: ctx.ip, elicits: false, client: ctx.client.clone() });
+    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": uri })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: false });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
