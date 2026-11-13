@@ -203,6 +203,9 @@ pub enum Mcp {
     },
     /// Every request made with a token and every MCP tool call, newest first.
     Audit {
+        /// csv or jsonl: the matching events as that, for a spreadsheet or a log tool.
+        #[arg(long)]
+        format: Option<String>,
         /// Only this token (tok_…).
         #[arg(long)]
         token: Option<String>,
@@ -681,13 +684,17 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
                 println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
-        Mcp::Audit { token, product, decision, resource, action, limit } => {
+        Mcp::Audit { format, token, product, decision, resource, action, limit } => {
             let mut q = url::form_urlencoded::Serializer::new(String::new());
             q.append_pair("limit", &limit.to_string());
-            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action)] {
+            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action), ("format", format.clone())] {
                 if let Some(v) = v {
                     q.append_pair(k, &v);
                 }
+            }
+            if format.is_some() {
+                print!("{}", api.get_text(&format!("/v1/access/audit?{}", q.finish())).await?);
+                return Ok(());
             }
             let log = api.get(&format!("/v1/access/audit?{}", q.finish())).await?;
             if json_out {

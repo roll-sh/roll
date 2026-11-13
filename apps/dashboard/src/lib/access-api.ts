@@ -330,9 +330,9 @@ export const accessApi = {
   approve: (id: string, remember?: Remember) => call<Approval>("POST", `${approval(id)}/approve`, remember && remember !== "once" ? { remember } : {}),
   deny: (id: string, reason?: string) => call<Approval>("POST", `${approval(id)}/deny`, { reason }),
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
-  /** The log as JSON lines (one event per line), for a download. */
-  auditExport: async (f: AuditFilter = {}) => {
-    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format: "jsonl" })}`, { headers: apiHeaders(), cache: "no-store" });
+  /** The log as CSV (a spreadsheet) or JSON lines (a log tool), for a download. */
+  auditExport: async (f: AuditFilter = {}, format: "csv" | "jsonl" = "csv") => {
+    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, { headers: apiHeaders(), cache: "no-store" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },

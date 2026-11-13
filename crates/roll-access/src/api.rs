@@ -679,8 +679,16 @@ async fn set_policy(State(a): S, ext: Extensions, Json(p): Json<crate::Policy>) 
 
 /// The audit log; `?format=jsonl`: one event per line, as a download (what a SIEM or `jq` reads).
 async fn audit(State(a): S, Query(q): Query<AuditQuery>) -> crate::Result<Response> {
-    let jsonl = q.format.as_deref() == Some("jsonl");
+    let format = q.format.clone();
+    if format.as_deref().is_some_and(|f| f != "jsonl" && f != "csv") {
+        return Err(Error::BadRequest("format: jsonl or csv".into()));
+    }
+    let jsonl = format.as_deref() == Some("jsonl");
     let events = blocking(a, move |a| a.store.audit_log(&q)).await?;
+    if format.as_deref() == Some("csv") {
+        let headers = [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"), (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"roll-audit.csv\"")];
+        return Ok((headers, audit_csv(&events)).into_response());
+    }
     if jsonl {
         let mut out = String::new();
         for e in &events {
@@ -691,6 +699,41 @@ async fn audit(State(a): S, Query(q): Query<AuditQuery>) -> crate::Result<Respon
         return Ok((headers, out).into_response());
     }
     Ok(Json(json!(events)).into_response())
+}
+
+/// The audit log as CSV, for a spreadsheet: one event a row, the time in UTC. Token and client
+/// names and resources are anyone's text, so a cell that would start a formula (`=`, `+`, `-`, `@`,
+/// a tab or a carriage return) is prefixed with `'`, as OWASP's CSV injection advice says.
+pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
+    fn cell(s: &str) -> String {
+        let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() };
+        if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s }
+    }
+    let mut out = String::from("at,token,token_name,source,tool,method,route,product,action,resource,decision,approval,status,ip,duration_ms,client\n");
+    for e in events {
+        let at = chrono::DateTime::from_timestamp_millis(e.at).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
+        let row = [
+            at,
+            e.grant_id.clone().unwrap_or_default(),
+            e.grant_name.clone().unwrap_or_default(),
+            e.source.clone(),
+            e.tool.clone().unwrap_or_default(),
+            e.method.clone(),
+            e.route.clone(),
+            e.product.clone().unwrap_or_default(),
+            e.action.clone().unwrap_or_default(),
+            e.resource.clone().unwrap_or_default(),
+            e.decision.clone(),
+            e.approval.clone().unwrap_or_default(),
+            e.status.to_string(),
+            e.ip.clone().unwrap_or_default(),
+            e.duration_ms.to_string(),
+            e.client.clone().unwrap_or_default(),
+        ];
+        out.push_str(&row.iter().map(|c| cell(c)).collect::<Vec<_>>().join(","));
+        out.push('\n');
+    }
+    out
 }
 
 async fn clients(State(a): S) -> crate::Result<Json<Value>> {
@@ -717,4 +760,37 @@ async fn client(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
     };
     let c = c.ok_or_else(|| Error::NotFound("no such client".into()))?;
     Ok(Json(json!(c)))
+}
+
+#[cfg(test)]
+mod csv_tests {
+    /// A spreadsheet opens it safely: a name that would be a formula is text, and commas and quotes
+    /// stay in their cell.
+    #[test]
+    fn the_audit_csv_never_starts_a_formula() {
+        let e = crate::store::AuditEvent {
+            id: "aud_1".into(),
+            at: 0,
+            grant_id: Some("tok_1".into()),
+            grant_name: Some("=HYPERLINK(\"https://x.example\",\"click\")".into()),
+            source: "mcp".into(),
+            tool: None,
+            method: "GET".into(),
+            route: "/v1/projects".into(),
+            product: Some("postgres".into()),
+            action: Some("read".into()),
+            resource: Some("a,b".into()),
+            decision: "allow".into(),
+            approval: None,
+            status: 200,
+            args: None,
+            ip: None,
+            duration_ms: 3,
+            client: Some("@evil".into()),
+        };
+        let csv = super::audit_csv(&[e]);
+        let row = csv.lines().nth(1).unwrap();
+        assert!(row.starts_with("1970-01-01T00:00:00Z,tok_1,\"'=HYPERLINK(\"\"https://x.example\"\",\"\"click\"\")\""), "{row}");
+        assert!(row.contains(",\"a,b\",") && row.ends_with(",'@evil"), "{row}");
+    }
 }
