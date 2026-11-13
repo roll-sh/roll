@@ -1,7 +1,7 @@
 //! Audit export and streaming (docs/secrets.md, "Audit log"): a project's audit rows to a SIEM.
 //!
 //! A sink is an HTTPS URL that receives the project's new audit rows in order: batches of up to
-//! 200, signed like syncs (`X-Roll-Signature: sha256=HMAC(secret, "ts.body")`), never a value
+//! 200, signed like syncs and every roll webhook (`X-Roll-Signature-256: sha256=HMAC(secret, "ts.body")`, `X-Roll-Delivery`), never a value
 //! (audit rows hold none). Each sink keeps a cursor, the last row id delivered; the sweeper claims a
 //! sink in a write before delivering, so no two nodes deliver one batch, and a failed delivery
 //! retries the same batch later. roll-secrets has no HTTP client: rolld's [`Deliver`] posts.

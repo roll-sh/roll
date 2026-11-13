@@ -177,8 +177,9 @@ environment is a first-class kind, built to be cheap:
 - It carries **labels** (`{"change": "chg_42", "pr": "117"}`, keys and values of `[a-z0-9_.-]`, up
   to 16) and an optional **expiry**. It is deleted when it expires (its leases are revoked first),
   and `DELETE …/environments?label=pr=117` deletes every environment with that label in one call.
-- One call creates the environment together with its first secrets and links, typically links to
-  the preview's branched resources: the preview's Postgres branch, its Redis branch.
+- One call creates the environment together with its first secrets and links. roll previews
+  writes its branched resources' addresses (the preview's Postgres branch, its Redis branch) as
+  plain values: a branch is the preview's own resource, not a link to a parent on the canvas.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
 - **Ensuring one** is a single idempotent call, `PUT …/environments/{env}` with what it should be
@@ -747,8 +748,12 @@ once in the answer, and stored sealed with the project's data key. Every request
 ```
 X-Roll-Sync: syn_…
 X-Roll-Timestamp: <unix seconds>
-X-Roll-Signature: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>
+X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>
+X-Roll-Delivery: dlv_<32 hex>   (the same on every retry of this delivery)
 ```
+
+It's the scheme of every roll webhook (roll code's, roll-access's audit sinks), so one receiver
+verifies them all.
 
 - `webhook` body: `{sync, project, environment, path, digest, at, changed, removed, context,
   sealed}`. `sealed` is a `roll-seal-v1` box (see "Runtime resolve") to `recipient` of the JSON
@@ -909,8 +914,8 @@ days.
   answers up to 10,000 rows as a file.
 - **Streaming to a SIEM**: an audit sink (`POST …/audit/sinks {url, from_start?}`, `admin`) is a
   public HTTPS URL that receives the project's new rows in order, in batches of up to 200:
-  `{sink, project, events: AuditEntry[]}`, signed like syncs (`X-Roll-Sink`, `X-Roll-Timestamp`,
-  `X-Roll-Signature: sha256=HMAC(secret, "ts.body")`; the `whsec_…` secret is shown once and kept
+  `{sink, project, events: AuditEntry[]}`, signed like syncs and every roll webhook (`X-Roll-Sink`, `X-Roll-Timestamp`,
+  `X-Roll-Signature-256: sha256=HMAC(secret, "ts.body")`, `X-Roll-Delivery`; the `whsec_…` secret is shown once and kept
   sealed). Each sink keeps a cursor; the sweeper claims a sink in a write before delivering, so no
   two nodes send one batch, and a failed batch is sent again 5 minutes later. Deliveries go through
   the same `PublicOnly` client as syncs. At most 10 sinks a project.

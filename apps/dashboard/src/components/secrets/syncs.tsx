@@ -182,7 +182,7 @@ function SigningSecret({ id, secret, onDone }: { id: string; secret: string; onD
           Done
         </button>
       </div>
-      <p className="mt-2 font-mono text-[11px] text-subtle">X-Roll-Signature: sha256=HMAC(secret, &quot;&lt;X-Roll-Timestamp&gt;.&lt;body&gt;&quot;)</p>
+      <p className="mt-2 font-mono text-[11px] text-subtle">X-Roll-Signature-256: sha256=HMAC(secret, &quot;&lt;X-Roll-Timestamp&gt;.&lt;body&gt;&quot;)</p>
     </div>
   );
 }

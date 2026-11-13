@@ -228,7 +228,7 @@ function Streams() {
             </button>
           </div>
           <p className="mt-2 text-[11px] text-subtle">
-            Check each batch: <span className="font-mono">X-Roll-Signature</span> is <span className="font-mono">sha256=</span>HMAC-SHA256(secret, <span className="font-mono">X-Roll-Timestamp + &quot;.&quot; + body</span>) in hex.
+            Check each batch: <span className="font-mono">X-Roll-Signature-256</span> is <span className="font-mono">sha256=</span>HMAC-SHA256(secret, <span className="font-mono">X-Roll-Timestamp + &quot;.&quot; + body</span>) in hex.
           </p>
         </div>
       )}
