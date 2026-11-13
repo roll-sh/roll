@@ -154,7 +154,8 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   const [branch, setBranch] = useState("main");
   const [issuer, setIssuer] = useState("");
   const [subject, setSubject] = useState("");
-  const [audience, setAudience] = useState("roll");
+  // This server's URL: a token minted for one roll server isn't good at another.
+  const [audience, setAudience] = useState(ROLL_API);
   const [picked, setPicked] = useState<Set<string>>(new Set(envs.includes("production") ? ["production"] : envs.slice(0, 1)));
   const [actions, setActions] = useState<Set<Action>>(new Set(["read", "reveal"]));
   const [ttl, setTtl] = useState("15");
