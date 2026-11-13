@@ -483,7 +483,7 @@ a key still links to can't be deleted.
 
 ```
 roll secrets ls      [-p project] [-e env] [--path /]          # keys, masked
-roll secrets get     KEY [--plain]
+roll secrets get     KEY [--raw]
 roll secrets set     KEY=VALUE… | KEY (value from stdin) [--comment] [--tag]
 roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
@@ -683,6 +683,9 @@ minutes.
 and folder that holds a key, among those the caller may read (a token, its own project's), with its
 version, when it changed and whether it's linked: never its value. `STRIPE_*` finds every key that
 starts with `STRIPE_`. For rotating an organisation-wide key: where is it, so nothing is missed.
+In the dashboard, "Set everywhere…" under an exact key's places then gives each place one new value:
+one change per environment, a change request where it's protected, and a linked place rotated by
+its provider instead; each place's outcome is listed, so a refusal in one doesn't hide the rest.
 
 ### Sharing a value once
 
@@ -1308,9 +1311,6 @@ Ranked:
    second.
 2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-3. **Rotate a found key everywhere**: from "Find a key", a new value for every place it's set (one
-   change per environment, a change request where protected, linked places rotated by their
-   provider), so an organisation-wide key is replaced in one step.
-4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
