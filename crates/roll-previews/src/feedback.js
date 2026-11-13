@@ -99,8 +99,10 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     if (!picked || !note.value.trim()) return;
+    // The path only: a query can hold a token (a sign-in callback, a reset link), and the note
+    // may end up on a public pull request.
     const q = new URLSearchParams({
-      fb_path: location.pathname + location.search,
+      fb_path: location.pathname,
       fb_selector: picked.selector,
       fb_box: picked.box,
       fb_viewport: `${innerWidth}x${innerHeight}`,

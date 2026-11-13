@@ -370,8 +370,11 @@ pub(crate) async fn upsert_pr(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, 
         }
         (_, None) => return Ok(()),
     };
-    // Its labels are the pull request's (at most 20, 50 characters each, as roll's own).
-    let labels: Vec<String> = d.labels.iter().map(|l| l.trim().chars().take(50).collect::<String>()).filter(|l| !l.is_empty()).take(20).collect();
+    // Its labels are the pull request's (at most 20, 50 characters each, as roll's own; the ones
+    // roll acts on first, so a long list doesn't lose them).
+    let mut labels: Vec<String> = d.labels.iter().map(|l| l.trim().chars().take(50).collect::<String>()).filter(|l| !l.is_empty()).collect();
+    labels.sort_by_key(|l| !matches!(l.to_ascii_lowercase().as_str(), "no-preview" | "preview"));
+    labels.truncate(20);
     code.db.sql().execute(
         "UPDATE changes SET github_pr = ?, github_url = ?, title = ?, body = ?, labels = ?, updated_at = ? WHERE id = ?",
         params![d.github_pr as i64, d.url, title, d.body, serde_json::to_string(&labels).unwrap_or_else(|_| "[]".into()), now(), id],

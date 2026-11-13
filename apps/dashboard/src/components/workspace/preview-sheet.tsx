@@ -48,6 +48,7 @@ export function PreviewSheet({
   onChange,
   onClose,
   feedback,
+  onFeedbackPosted,
 }: {
   preview: Preview;
   /** A parent resource's name on the canvas, by `"<kind>:<ref>"`. */
@@ -59,6 +60,8 @@ export function PreviewSheet({
   onClose: () => void;
   /** A note from the preview page's feedback button, to post on the change. */
   feedback?: PreviewFeedback;
+  /** It was posted (the link that brought it is spent). */
+  onFeedbackPosted?: () => void;
 }) {
   const [tab, setTab] = useState<"Overview" | "Activity" | "Logs">("Overview");
   const [busy, setBusy] = useState<string | null>(null);
@@ -117,7 +120,7 @@ export function PreviewSheet({
             {p.error && <p className="mb-3 rounded-lg border border-danger/40 bg-danger/10 px-2.5 py-2 text-[11.5px] break-words text-danger">{p.error}</p>}
             {feedback && (
               <div className="mb-3">
-                <FeedbackForm preview={p} feedback={feedback} />
+                <FeedbackForm preview={p} feedback={feedback} onPosted={onFeedbackPosted} />
               </div>
             )}
             {p.state === "awaiting_approval" && (

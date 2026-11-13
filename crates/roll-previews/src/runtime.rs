@@ -200,7 +200,15 @@ impl Runtime {
         }
         let ran = live.started.lock().take().map(|t| t.elapsed().as_millis() as i64).unwrap_or(0);
         let was_running = matches!(*live.phase.borrow(), Phase::Running { .. } | Phase::Starting);
-        live.phase.send_replace(Phase::Stopped);
+        // `Starting` here is a start asked for after this stop (none runs while it holds the
+        // lock): it's queued behind it, so its waiters keep waiting for it.
+        live.phase.send_if_modified(|p| {
+            if matches!(p, Phase::Starting) {
+                return false;
+            }
+            *p = Phase::Stopped;
+            true
+        });
         if (was_running || ran > 0)
             && let Ok(e) = self.engine()
         {
@@ -334,6 +342,12 @@ impl Runtime {
             anyhow::bail!("stopped while starting");
         }
         loop {
+            // A stop (a sleep, a new deploy) while it installs and boots: give up now, not once
+            // it answers, so the stop isn't held behind a whole install.
+            if live.stops.load(std::sync::atomic::Ordering::SeqCst) != stops {
+                self.iso.release(&name).await;
+                anyhow::bail!("stopped while starting");
+            }
             if !self.iso.running(&name).await {
                 anyhow::bail!("the service's command exited");
             }
@@ -480,7 +494,7 @@ impl Runtime {
             strip_hop_by_hop(resp.headers_mut(), false);
         }
         let resp = resp.map(Body::new);
-        if feedback { add_feedback(resp).await } else { resp }
+        if feedback { add_feedback(resp) } else { resp }
     }
 
     #[cfg(test)]
@@ -495,44 +509,75 @@ impl Runtime {
 /// allows it), and the tag that loads it.
 pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
-/// The biggest page the button is added to; a bigger one passes through untouched.
-const FEEDBACK_MAX: usize = 2 << 20;
-
-/// `page` with the feedback button's tag before its last `</body>` (or at its end).
-fn with_tag(mut page: Vec<u8>) -> Vec<u8> {
-    let lower = page.to_ascii_lowercase();
-    let at = lower.windows(7).rposition(|w| w == b"</body>").unwrap_or(page.len());
-    page.splice(at..at, FEEDBACK_TAG.iter().copied());
-    page
+/// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
+/// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
+/// they come, so streamed rendering stays streamed and memory stays one chunk.
+struct Tagger {
+    /// The last bytes of what's been read, held back in case `</body>` starts in them.
+    held: Vec<u8>,
+    done: bool,
 }
 
-/// An HTML page from the service with the feedback button added; anything compressed, bigger
-/// than [`FEEDBACK_MAX`] or not HTML passes through as it came.
-async fn add_feedback(resp: Response) -> Response {
+impl Tagger {
+    const CLOSE: &'static [u8] = b"</body>";
+
+    fn new() -> Tagger {
+        Tagger { held: Vec::new(), done: false }
+    }
+
+    /// What to send on after `chunk`.
+    fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if self.done {
+            return chunk.to_vec();
+        }
+        let mut buf = std::mem::take(&mut self.held);
+        buf.extend_from_slice(chunk);
+        if let Some(at) = buf.windows(Self::CLOSE.len()).position(|w| w.eq_ignore_ascii_case(Self::CLOSE)) {
+            self.done = true;
+            buf.splice(at..at, FEEDBACK_TAG.iter().copied());
+            return buf;
+        }
+        let keep = (Self::CLOSE.len() - 1).min(buf.len());
+        self.held = buf.split_off(buf.len() - keep);
+        buf
+    }
+
+    /// What's left at the end of the page.
+    fn finish(&mut self) -> Vec<u8> {
+        let mut rest = std::mem::take(&mut self.held);
+        if !self.done {
+            self.done = true;
+            rest.extend_from_slice(FEEDBACK_TAG);
+        }
+        rest
+    }
+}
+
+/// An HTML page from the service with the feedback button added as it streams; anything
+/// compressed or not HTML passes through as it came.
+fn add_feedback(resp: Response) -> Response {
     let html = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"));
     let plain = resp.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_none_or(|e| e.eq_ignore_ascii_case("identity"));
     if resp.status() != StatusCode::OK || !html || !plain {
         return resp;
     }
     let (mut parts, body) = resp.into_parts();
-    let mut stream = body.into_data_stream();
-    let mut page = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        match chunk {
-            Ok(c) => page.extend_from_slice(&c),
-            Err(e) => return (StatusCode::BAD_GATEWAY, format!("the preview's page broke off: {e}")).into_response(),
-        }
-        if page.len() > FEEDBACK_MAX {
-            let head = futures::stream::once(async move { Ok::<_, axum::Error>(Bytes::from(page)) });
-            return Response::from_parts(parts, Body::from_stream(head.chain(stream)));
-        }
-    }
     // This visitor's page now (a shared cache mustn't hand it to anyone else), and not the
     // service's bytes any more.
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.remove(header::ETAG);
     parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
-    Response::from_parts(parts, Body::from(with_tag(page)))
+    let stream = futures::stream::unfold((body.into_data_stream(), Tagger::new(), false), |(mut s, mut t, ended)| async move {
+        if ended {
+            return None;
+        }
+        match s.next().await {
+            Some(Ok(c)) => Some((Ok::<_, axum::Error>(Bytes::from(t.push(&c))), (s, t, false))),
+            Some(Err(e)) => Some((Err(e), (s, t, true))),
+            None => Some((Ok(Bytes::from(t.finish())), (s, t, true))),
+        }
+    });
+    Response::from_parts(parts, Body::from_stream(stream))
 }
 
 /// The feedback button's script, sending notes to `target` (the preview in roll's dashboard).
@@ -694,26 +739,31 @@ impl Apps for Runtime {
     /// time, and goes when done.
     async fn probe(&self, preview: &str, service: &str, path: &str) -> anyhow::Result<Option<(u16, String)>> {
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
-        // A start that a stop or a push overtook isn't the service failing: ask again later.
-        let superseded = |e: &str| e.starts_with("stopped while starting") || e.starts_with("the change moved on");
-        let addr = match me.ready(preview, service, self.cfg.start_timeout).await {
+        // Never long in a converge slot: a service still starting (installing, booting) or whose
+        // start a stop or a push overtook isn't failing; the engine asks again later.
+        let later = |why: String| -> anyhow::Result<Option<(u16, String)>> { Err(crate::ports::StillDeploying(why).into()) };
+        let superseded = |e: &str| e.starts_with("stopped while starting") || e.starts_with("the change moved on") || e.contains("isn't approved");
+        let addr = match me.ready(preview, service, Duration::from_secs(5)).await {
             Ok(a) => a,
-            Err(Unavailable::Failed(e)) if superseded(&e) => return Err(crate::ports::StillDeploying(e).into()),
-            Err(Unavailable::NotFound) => return Err(crate::ports::StillDeploying("it was stopped while starting".into()).into()),
+            Err(Unavailable::Starting) => return later("starting".into()),
+            Err(Unavailable::Failed(e)) if superseded(&e) => return later(e),
+            Err(Unavailable::NotFound) => return later("it was stopped while starting".into()),
             Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
-            Err(_) => anyhow::bail!("the service didn't start in time"),
         };
         let req = axum::http::Request::get(format!("http://{addr}{path}")).header(header::USER_AGENT, "roll-previews-health").body(Body::empty())?;
-        let resp = tokio::time::timeout(Duration::from_secs(30), self.client.request(req)).await.map_err(|_| anyhow::anyhow!("no answer in 30 s"))??;
+        let resp = tokio::time::timeout(Duration::from_secs(10), self.client.request(req)).await.map_err(|_| anyhow::anyhow!("no answer in 10 s"))??;
         let status = resp.status().as_u16();
-        // The first line of what it said, read no further than 4 KiB.
+        // The first line of what it said: at most 4 KiB, read for at most 2 s.
         let mut stream = Body::new(resp.into_body()).into_data_stream();
         let mut said = Vec::new();
-        while said.len() < 4096
-            && let Ok(Some(Ok(chunk))) = tokio::time::timeout(Duration::from_secs(5), stream.next()).await
-        {
-            said.extend_from_slice(&chunk);
-        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while said.len() < 4096
+                && let Some(Ok(chunk)) = stream.next().await
+            {
+                said.extend_from_slice(&chunk);
+            }
+        })
+        .await;
         let first = String::from_utf8_lossy(&said[..said.len().min(4096)]).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect();
         Ok(Some((status, first)))
     }
@@ -811,8 +861,16 @@ pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> 
     {
         return feedback_script(t);
     }
-    let accepts_html = req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html"));
-    let feedback = target.is_some() && req.method() == axum::http::Method::GET && accepts_html;
+    // A page load: a browser says so (`Sec-Fetch-Dest: document`, so not a fetch, a fragment or
+    // an iframe); without that header, one that asks for HTML.
+    let page_load = {
+        let header_of = |h: &str| req.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_ascii_lowercase);
+        match header_of("sec-fetch-dest") {
+            Some(dest) => dest == "document",
+            None => header_of("accept").is_some_and(|a| a.contains("text/html")),
+        }
+    };
+    let feedback = target.is_some() && req.method() == axum::http::Method::GET && page_load;
     match rt.cluster.get().cloned() {
         Some(cluster) => {
             let rt2 = rt.clone();
@@ -932,9 +990,11 @@ mod tests {
         // its script from the preview's own host; nothing for anyone else.
         let page = |accept: &str| format!("GET /page HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nAccept: {accept}\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id);
         let html = raw(page("text/html,*/*")).await;
-        assert!(html.ends_with(r#"<p>asked for identity</p><script src="/__roll/feedback.js" defer></script></BODY></html>"#), "{html}");
+        assert!(html.contains(r#"<p>asked for identity</p><script src="/__roll/feedback.js" defer></script></BODY></html>"#), "{html}");
         assert!(html.to_ascii_lowercase().contains("cache-control: private"), "only this visitor's page: {html}");
         assert!(raw(page("application/json")).await.ends_with("<p>asked for any</p></BODY></html>"), "only a browser's page");
+        let framed = format!("GET /page HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nAccept: text/html\r\nSec-Fetch-Dest: iframe\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id);
+        assert!(!raw(framed).await.contains("feedback.js"), "not in an iframe or a fragment");
         let script = raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(script.contains("text/javascript") && script.contains(&format!(r#""https://roll.test/dashboard/projects/prj_1/previews?preview={}""#, row.id)), "{script}");
         assert!(raw("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
@@ -953,6 +1013,23 @@ mod tests {
         assert!(get("web-pr1-shop.preview.test:7070").await.ends_with("service saw /hello"), "public previews need no link");
         assert!(get("localhost").await.ends_with("api"));
         assert!(get("nope-pr1-shop.preview.test").await.ends_with("api"), "an unknown label isn't a preview");
+    }
+
+    /// The tag goes in as the page streams: before `</body>` even when a chunk splits it, at the
+    /// end of a page without one, and once.
+    #[test]
+    fn the_feedback_tag_goes_in_as_the_page_streams() {
+        let run = |chunks: &[&str]| {
+            let mut t = Tagger::new();
+            let mut out: Vec<u8> = chunks.iter().flat_map(|c| t.push(c.as_bytes())).collect();
+            out.extend(t.finish());
+            String::from_utf8(out).unwrap()
+        };
+        let tag = std::str::from_utf8(FEEDBACK_TAG).unwrap();
+        assert_eq!(run(&["<p>a</p></bo", "dy></html>"]), format!("<p>a</p>{tag}</body></html>"));
+        assert_eq!(run(&["<p>a</p>", "</BODY>", "<script>late()</script></body>"]), format!("<p>a</p>{tag}</BODY><script>late()</script></body>"));
+        assert_eq!(run(&["<p>fragment</p>"]), format!("<p>fragment</p>{tag}"));
+        assert_eq!(run(&["a", "b", "c"]), format!("abc{tag}"));
     }
 
     #[test]

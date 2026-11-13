@@ -13,9 +13,11 @@ export interface PreviewFeedback {
   note: string;
 }
 
-/** The feedback from `?fb_path=…&fb_selector=…&fb_note=…` (the button opens roll with it), or none. */
-export function feedbackFrom(search: Record<string, unknown>): PreviewFeedback | undefined {
-  const s = (k: string) => (typeof search[k] === "string" ? (search[k] as string) : "");
+/** The feedback from `?fb_path=…&fb_selector=…&fb_note=…` (the button opens roll with it), or
+ * none. Read from the raw query: the router's own parsing would turn a note of `42` into a number. */
+export function feedbackFrom(query: string): PreviewFeedback | undefined {
+  const params = new URLSearchParams(query);
+  const s = (k: string) => params.get(k) ?? "";
   if (!s("fb_note").trim()) return undefined;
   return { path: s("fb_path"), selector: s("fb_selector"), box: s("fb_box") || undefined, viewport: s("fb_viewport") || undefined, note: s("fb_note") };
 }
@@ -31,7 +33,7 @@ export function feedbackBody(p: Preview, f: PreviewFeedback, note: string): stri
 }
 
 /** The note the preview page's button sent, to post on the change as a comment review. */
-export function FeedbackForm({ preview: p, feedback: f }: { preview: Preview; feedback: PreviewFeedback }) {
+export function FeedbackForm({ preview: p, feedback: f, onPosted }: { preview: Preview; feedback: PreviewFeedback; onPosted?: () => void }) {
   const [note, setNote] = useState(f.note);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +64,7 @@ export function FeedbackForm({ preview: p, feedback: f }: { preview: Preview; fe
         try {
           await codeApi.submitReview(p.change, { verdict: "comment", body: feedbackBody(p, f, note) });
           setPosted(true);
+          onPosted?.();
         } catch (err) {
           setError(errorText(err));
         } finally {

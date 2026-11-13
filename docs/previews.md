@@ -98,8 +98,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     it leaves out. The next push that touches anything else, measured from what runs, redeploys.
 - **Warm after a push**: once a new head is deployed, the change's own services are woken (after
   the pass, a few at a time), so the first visit, usually the pull request comment's link,
-  doesn't wait for a cold start; they sleep again after `sleep_after` unused. About $0.002 a push
-  here; `warm: false` turns it off.
+  doesn't wait for a cold start; they sleep again after `sleep_after` unused. Not a preview
+  someone put to sleep, and only on the node that holds its lease. About $0.002 a push here;
+  `warm: false` turns it off.
 - **Sleep**: a service with no requests for `sleep_after` (10 minutes by default) stops. A
   request to any URL of the preview wakes it. The request is held for up to 60 s; after that the
   visitor gets a "starting" page that refreshes. Data products sleep on their own and wake on
@@ -239,7 +240,9 @@ behind the `Apps` trait:
     (Render's and Railway's health checks), asked once per deploy (it wakes the service once). A
     service that answers 500 fails the preview with the status and the first line it said, so
     `roll/preview` and `roll preview wait` don't pass on a broken page; the retry asks again.
-    roll apps services are checked by roll apps.
+    A converge waits for it a few seconds at most: one still installing or booting is asked
+    again on a later pass (for up to 20 minutes), so no converge slot waits on a build. roll
+    apps services are checked by roll apps.
 - The tree is copied into the container, never bind-mounted.
 - Each service answers at `<service>-<slug>.<domain>`.
   - `<slug>` is `pr<number>` for a GitHub PR, `c<number>` for a roll code change, or the branch
@@ -554,13 +557,17 @@ What dominates, from most to least:
 Vercel Comments, Netlify's drawer: people reviewing a preview leave notes on its pages, and they
 land on the change.
 
-- The preview's proxy adds `<script src="/__roll/feedback.js" defer>` before `</body>` of an
-  HTML page, only for a visitor who came in through roll (the preview's access cookie), only
-  when the project's `feedback` rule is on (the default), and only to bodies it can read
-  whole (asked for uncompressed, at most 2 MiB); anything else passes through untouched. The
-  script is served from the preview's own host, so a `script-src 'self'` policy allows it.
+- The preview's proxy adds `<script src="/__roll/feedback.js" defer>` before `</body>` of a
+  page load (`Sec-Fetch-Dest: document`; not a fetch, a fragment or an iframe), only for a
+  visitor who came in through roll (the preview's access cookie) and when the project's
+  `feedback` rule is on (the default). It asks the service for the page uncompressed and adds
+  the tag as the page streams (streamed rendering stays streamed, memory stays one chunk);
+  the page is then `Cache-Control: private` with no `ETag`. Anything compressed, not HTML or
+  not a 200 passes through untouched. The script is served from the preview's own host, so a
+  `script-src 'self'` policy allows it.
 - The script (no dependencies, in a shadow root) shows a small button; it picks an element,
-  takes a note, and opens the preview in roll's dashboard
+  takes a note, and opens the preview in roll's dashboard with the page's path (never its query,
+  which can hold a token)
   (`/dashboard/projects/{project}/previews?preview={id}&fb_path=…&fb_selector=…&fb_note=…`). The
   preview's origin never holds a roll credential: the person, signed in to roll there, reads
   the note in the preview's sheet and posts it (nothing is posted from the link alone).
@@ -811,6 +818,10 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- a seventh review and its fixes (health checks never hold a converge slot; a start notices a
+  stop while it boots, and a stop keeps a start asked for after it; the feedback tag streams in,
+  only on page loads, with the path but never the query; warming skips slept previews and other
+  nodes' previews; `preview`/`no-preview` survive a long label list);
 - a sixth review and its fixes (only `ignore_paths` keeps a build, never past `roll.toml`; hand-made
   previews outlive the rules; warnings for a keep running out; atomic preview variables; a
   pending `roll/preview` settled when a preview goes before it was ready);

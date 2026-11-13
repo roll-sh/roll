@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
 import { feedbackFrom } from "@/components/workspace/preview-feedback";
 import { ProjectPreviews } from "@/components/workspace/previews";
 import { pageHead } from "@/lib/head";
@@ -14,9 +14,21 @@ export const Route = createFileRoute("/dashboard/projects/$id/previews")({
 
 function Page() {
   const { id } = Route.useParams();
-  const search = Route.useSearch() as Record<string, unknown>;
-  const { preview, go } = search as { preview?: string; go?: string };
+  const { preview, go } = Route.useSearch() as { preview?: string; go?: string };
+  const query = useLocation({ select: (l) => l.searchStr });
+  const navigate = useNavigate();
   const ws = useWorkspace();
   const project = ws.projects.find((p) => p.id === id);
-  return project ? <ProjectPreviews key={project.id} project={project} inventory={ws.inventory} open={preview || undefined} go={go || undefined} feedback={feedbackFrom(search)} /> : null;
+  if (!project) return null;
+  return (
+    <ProjectPreviews
+      key={project.id}
+      project={project}
+      inventory={ws.inventory}
+      open={preview || undefined}
+      go={go || undefined}
+      feedback={feedbackFrom(query)}
+      onFeedbackPosted={() => void navigate({ to: ".", search: { preview }, replace: true })}
+    />
+  );
 }

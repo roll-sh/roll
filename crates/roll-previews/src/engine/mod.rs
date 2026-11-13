@@ -272,9 +272,18 @@ impl Engine {
         let warm: Vec<(String, String)> = std::mem::take(&mut *self.warm_wanted.lock());
         let waking = Arc::new(tokio::sync::Semaphore::new(4));
         for (id, svc) in warm {
-            let (apps, gate) = (self.apps.clone(), waking.clone());
+            let (apps, gate, cluster) = (self.apps.clone(), waking.clone(), self.cluster.get().cloned());
             tokio::spawn(async move {
                 let Ok(_one) = gate.acquire_owned().await else { return };
+                // Only where the preview's services run (its lease's holder, which stops them
+                // when the lease moves).
+                let _guard = match &cluster {
+                    Some(c) => match c.route_async(&preview_key(&id)).await {
+                        Ok(roll_cluster::Route::Local(g)) => Some(g),
+                        _ => return,
+                    },
+                    None => None,
+                };
                 if let Err(e) = apps.wake(&id, &svc).await {
                     warn!(preview = %id, service = %svc, error = %e, "previews: warming a service after a push");
                 }

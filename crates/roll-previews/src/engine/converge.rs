@@ -424,12 +424,20 @@ impl Engine {
                 Ok(a) => a,
                 // Its start was overtaken (slept, redeployed, pushed): converge again soon.
                 Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
-                    let again = self.store.now_ms()? + DEPLOY_POLL_MS;
+                    let now = self.store.now_ms()?;
+                    let key = (r.id.clone(), format!("{name} health"));
+                    let since = *self.deploying_since.lock().entry(key.clone()).or_insert(now);
+                    if now - since > DEPLOY_WAIT_MS {
+                        self.deploying_since.lock().remove(&key);
+                        anyhow::bail!("{name} didn't answer {path} for over {} minutes ({e:#})", DEPLOY_WAIT_MS / 60_000);
+                    }
+                    let again = now + DEPLOY_POLL_MS;
                     self.store.update(&r.id, |row| row.next_at = if row.generation == r.generation { again } else { 0 })?;
                     return Ok(());
                 }
                 Err(e) => anyhow::bail!("{name} didn't answer {path}: {e:#}"),
             };
+            self.deploying_since.lock().remove(&(r.id.clone(), format!("{name} health")));
             match answer {
                 Some((status, _)) if (200..400).contains(&status) => {
                     self.store.set_healthy(&r.id, &name, &rev)?;
@@ -457,7 +465,7 @@ impl Engine {
         self.report(row).await;
         // 5b. Warm: the change's own services just deployed are woken after the pass, so the first
         // visit after a push doesn't wait for a cold start.
-        if ready && s.warm && r.change_id.is_some() {
+        if ready && s.warm && r.change_id.is_some() && !r.asleep {
             self.warm_wanted.lock().extend(deployed.into_iter().map(|svc| (r.id.clone(), svc)));
         }
         // 6. A screenshot of the first service, once per head (best effort; it wakes the service):
