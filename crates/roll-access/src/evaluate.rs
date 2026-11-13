@@ -432,11 +432,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // What the request itself does, and the second checks it took (a copy's or a link's reveal):
     // each is its own audit row, so what a token used ("Tighten to what it used") has them all.
     let own = (action, describe(&target));
-    let mut seconds: Vec<(&'static str, Option<String>)> = Vec::new();
+    let mut seconds: Vec<(&'static str, Action, Option<String>)> = Vec::new();
     let mut asked_env: Option<String> = None;
     let mut asked_path: Option<String> = None;
     if let Some((copied, from, from_path)) = copy_outcome(&access, row, &params, &target, (json_body.as_ref(), original.query()), &scope).await {
-        seconds.push((row.product, own.1.clone()));
+        seconds.push((row.product, Action::Reveal, own.1.clone()));
         if rank(copied) < rank(outcome) {
             (outcome, action) = (copied, Action::Reveal);
             (asked_env, asked_path) = (Some(from), from_path);
@@ -445,12 +445,12 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Handing another resource's credentials to this one (apps' links) is revealing them: when
     // that decides, the request (and its approval) is about the linked resource.
     let mut lent: Option<(&'static str, String)> = None;
-    if let Some((o, product, id, all)) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope).await {
-        seconds.extend(all.into_iter().map(|(p, r)| (p, Some(r))));
-        if rank(o) < rank(outcome) {
-            (outcome, action) = (o, Action::Reveal);
+    if let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope).await {
+        seconds.extend(l.all.into_iter().map(|(p, a, r)| (p, a, Some(r))));
+        if rank(l.outcome) < rank(outcome) {
+            (outcome, action) = (l.outcome, l.action);
             (asked_env, asked_path) = (None, None);
-            lent = Some((product, id));
+            lent = Some((l.product, l.id));
         }
     }
     // "Ask for anything else": what the rules refuse asks a person instead. Operator-only routes
@@ -568,9 +568,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         let decision = if approval_used.is_some() { "ask" } else { "allow" };
         ctx.about = None;
         ctx.audit(Some(row), Some(own.0), own.1, decision, approval_used.as_deref(), resp.status());
-        for (product, r) in seconds {
+        for (product, a, r) in seconds {
             ctx.about = Some(product);
-            ctx.audit(Some(row), Some(Action::Reveal), r, decision, approval_used.as_deref(), resp.status());
+            ctx.audit(Some(row), Some(a), r, decision, approval_used.as_deref(), resp.status());
         }
     }
     resp
@@ -643,46 +643,54 @@ pub(crate) async fn copy_outcome(
 /// What handing other resources' credentials to this one needs ([`catalog::Lend`]): `reveal` on
 /// each, as a rule places it. The weakest decides; a kind roll doesn't know is refused.
 #[allow(clippy::type_complexity)]
-pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope) -> Option<(Outcome, &'static str, String, Vec<(&'static str, String)>)> {
+pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope) -> Option<Lending> {
     let param = |n: &str| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
-    let links: Vec<(String, String)> = match row.lends? {
+    let lent: Vec<catalog::Lent> = match row.lends? {
         // A route that names them otherwise than its row is refused, never let through.
         catalog::Lend::Path(k, r) => match (param(k), param(r)) {
-            (Some(k), Some(r)) => vec![(k, r)],
-            _ => return Some((Outcome::Deny, row.product, "a link this route doesn't name".into(), Vec::new())),
+            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal }],
+            _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new() }),
         },
-        catalog::Lend::Body(field) => body?
-            .get(field)?
-            .as_array()?
-            .iter()
-            .map(|l| (l["kind"].as_str().unwrap_or("").to_string(), l["ref"].as_str().unwrap_or("").to_string()))
-            .collect(),
+        catalog::Lend::Each(f) => f(body?),
     };
-    let mut weakest: Option<(Outcome, &'static str, String)> = None;
-    // Every linked resource not allowed outright is named (approving once hands over all of them).
+    if lent.is_empty() {
+        return None;
+    }
+    let mut weakest: Option<(Outcome, &'static str, Action, String)> = None;
+    // Every one not allowed outright is named (approving once hands over all of them).
     let mut short: Vec<String> = Vec::new();
-    let mut all: Vec<(&'static str, String)> = Vec::new();
-    for (kind, r) in links {
-        let found = match catalog::link_target(&kind) {
-            None => (Outcome::Deny, row.product, format!("{kind}/{r}")),
+    let mut all: Vec<(&'static str, Action, String)> = Vec::new();
+    for l in lent {
+        let found = match catalog::link_target(&l.kind) {
+            None => (Outcome::Deny, row.product, l.action, format!("{}/{}", l.kind, l.r#ref)),
             Some((product, rkind)) => {
-                let (a, r2) = (access.clone(), r.clone());
+                let (a, r2) = (access.clone(), l.r#ref.clone());
                 match tokio::task::spawn_blocking(move || a.resource(product, rkind, &r2)).await {
                     // Named as rules name it (a database by name is its id).
-                    Ok(res) => (scope.outcome(&Target::One(res.clone()), Action::Reveal), product, res.id.unwrap_or(r)),
-                    Err(_) => (Outcome::Deny, product, r),
+                    Ok(res) => (scope.outcome(&Target::One(res.clone()), l.action), product, l.action, res.id.unwrap_or(l.r#ref)),
+                    Err(_) => (Outcome::Deny, product, l.action, l.r#ref),
                 }
             }
         };
         if found.0 != Outcome::Allow {
-            short.push(found.2.clone());
+            short.push(found.3.clone());
         }
-        all.push((found.1, found.2.clone()));
+        all.push((found.1, found.2, found.3.clone()));
         if weakest.as_ref().is_none_or(|(w, ..)| rank(found.0) < rank(*w)) {
             weakest = Some(found);
         }
     }
-    weakest.map(|(o, p, id)| (o, p, if short.len() > 1 { short.join(", ") } else { id }, all))
+    weakest.map(|(outcome, product, action, id)| Lending { outcome, product, action, id: if short.len() > 1 { short.join(", ") } else { id }, all })
+}
+
+/// What handing other resources to this one decides ([`lend_outcome`]): the weakest outcome, the
+/// product, action and resource it's about, and every resource it named (each an audit row).
+pub(crate) struct Lending {
+    pub outcome: Outcome,
+    pub product: &'static str,
+    pub action: Action,
+    pub id: String,
+    pub all: Vec<(&'static str, Action, String)>,
 }
 
 /// Outcomes from weakest to strongest.
