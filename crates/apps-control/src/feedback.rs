@@ -65,7 +65,9 @@ pub fn add(resp: Response) -> Response {
     // This visitor's page now: no shared cache may hand it to anyone else.
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.remove(header::ETAG);
-    parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+    // An app's `no-store` stays: the page still mustn't be kept.
+    let no_store = parts.headers.get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()).is_some_and(|v| v.to_ascii_lowercase().contains("no-store"));
+    parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(if no_store { "private, no-store" } else { "private, no-cache" }));
     let stream = futures::stream::unfold((body.into_data_stream(), Tagger { held: Vec::new(), done: false }, false), |(mut s, mut t, ended)| async move {
         if ended {
             return None;

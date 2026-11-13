@@ -14,23 +14,41 @@ impl Apps {
     pub async fn scale_workers(self: &Arc<Self>) {
         for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
             let Some(tpl) = l.template() else { continue };
-            let (run, Some(sc)) = (&tpl.run, tpl.run.scale.clone()) else { continue };
+            let Some(sc) = tpl.run.scale.clone() else {
+                // Not following anything (any more): no stale target for when it does again.
+                l.set_wanted(0, None);
+                continue;
+            };
+            let run = &tpl.run;
             if run.kind != RunType::Worker {
                 continue;
             }
             let sid = l.service.clone();
             let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
-            let placed = self.deps.workspace.as_ref().is_some_and(|ws| {
-                ws.get(roll_workspace::Scope::All, &svc.project).is_ok_and(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Stream && r.r#ref == sc.stream))
-            });
-            if !placed {
-                l.log.stream(crate::logs::Stream::System).line(format!("scale: stream {} isn't in this service's project; scaling on it is off", sc.stream));
+            // A canvas proves ownership only where the operator placed it: anyone can put any
+            // reference on their own project, and streams don't know their owners yet. So a
+            // person's project doesn't follow a stream (as roll secrets refuses links there).
+            let project = self.deps.workspace.as_ref().and_then(|ws| ws.get(roll_workspace::Scope::All, &svc.project).ok());
+            let placed = project.as_ref().is_some_and(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Stream && r.r#ref == sc.stream));
+            let operators = project.as_ref().is_some_and(|p| p.owner.is_empty());
+            let off = if !placed {
+                Some(format!("stream {} isn't on this service's project", sc.stream))
+            } else if !operators {
+                Some("a person's project can't follow a stream until streams know their owners".to_string())
+            } else {
+                None
+            };
+            if let Some(why) = off {
+                l.note_scale(&format!("scaling on a backlog is off: {why}"));
                 l.set_wanted(0, None);
                 continue;
             }
             match self.deps.resources.backlog(&sc.stream, &sc.group).await {
-                Ok(lag) => l.set_wanted(sc.instances(lag, run.min_instances, run.max_instances), Some(lag)),
-                Err(e) => l.log.stream(crate::logs::Stream::System).line(format!("scale: reading {}'s lag: {e:#}", sc.group)),
+                Ok(lag) => {
+                    l.note_scale("");
+                    l.set_wanted(sc.instances(lag, run.min_instances, run.max_instances), Some(lag));
+                }
+                Err(e) => l.note_scale(&format!("scale: reading {}'s lag: {e:#}", sc.group)),
             }
         }
     }

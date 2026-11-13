@@ -233,6 +233,8 @@ pub struct EnvLive {
     wanted: AtomicU32,
     /// The backlog it last read (`u64::MAX`: not read yet).
     backlog: AtomicU64,
+    /// What scaling last said in the log (said again only when it changes).
+    scale_note: Mutex<String>,
     /// Since when it has wanted fewer than run (a scale-in waits `scale_down_after`).
     fewer_since: Mutex<Option<Instant>>,
     /// A gradual rollout's new deployment and the percent of requests it takes.
@@ -284,6 +286,7 @@ impl EnvLive {
             held: AtomicBool::new(false),
             wanted: AtomicU32::new(0),
             backlog: AtomicU64::new(u64::MAX),
+            scale_note: Mutex::new(String::new()),
             fewer_since: Mutex::new(None),
             canary: Mutex::new(None),
             routed: AtomicU64::new(0),
@@ -790,7 +793,8 @@ impl EnvLive {
         let was_awake = self.awake_count() as u32;
         let n = match run.kind {
             RunType::Cron => 0,
-            RunType::Worker => run.min_instances.max(1),
+            // A worker following a backlog starts at what it wants, not back at its floor.
+            RunType::Worker => run.min_instances.max(1).max(if run.scale.is_some() { self.wanted.load(Ordering::SeqCst) } else { 0 }),
             RunType::Web => was_awake.max(run.min_instances).max(1),
         }
         .min(run.max_instances);
@@ -988,6 +992,18 @@ impl EnvLive {
     pub fn set_wanted(&self, n: u32, backlog: Option<u64>) {
         self.wanted.store(n, Ordering::SeqCst);
         self.backlog.store(backlog.unwrap_or(u64::MAX), Ordering::SeqCst);
+    }
+
+    /// A line about scaling in the environment's log, once per change (every ten seconds would
+    /// be thousands a day); empty clears it.
+    pub fn note_scale(&self, line: &str) {
+        let mut n = self.scale_note.lock();
+        if *n != line {
+            *n = line.to_string();
+            if !line.is_empty() {
+                self.log.stream(Stream::System).line(line);
+            }
+        }
     }
 
     /// What a scaling worker follows now: its backlog as last read, and the instances it wants.
@@ -1353,12 +1369,17 @@ impl EnvLive {
         if scale_in
             && let Some(i) = self.instances().into_iter().filter(|i| matches!(i.phase(), Phase::Running(_))).max_by_key(|i| i.started_at())
         {
+            // Out of the set now; its stop (the drain to finish its work) runs off the wake lock,
+            // so a deploy's commit doesn't wait for it.
             *i.phase.lock() = Phase::Stopping;
-            let _ = self.runtime.stop(&i.name, self.cfg.drain).await;
-            self.runtime.remove(&i.name).await;
             self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
             *self.fewer_since.lock() = None;
             self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
+            let (runtime, name, grace) = (self.runtime.clone(), i.name.clone(), self.cfg.drain);
+            tokio::spawn(async move {
+                let _ = runtime.stop(&name, grace).await;
+                runtime.remove(&name).await;
+            });
         }
     }
 

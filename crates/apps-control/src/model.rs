@@ -497,13 +497,17 @@ impl Run {
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");
         }
+        if self.kind != RunType::Worker {
+            // A web service scales on its requests, a cron run is one: only a worker follows a
+            // backlog (dropped, so a worker can become a web service).
+            self.scale = None;
+        }
         if let Some(sc) = &self.scale {
-            if self.kind != RunType::Worker {
-                return bad("scale is for a worker (a web service scales on its requests)");
-            }
-            let id_ok = |s: &str| !s.is_empty() && s.len() <= 200 && s.bytes().all(|b| b.is_ascii_graphic());
-            if !id_ok(&sc.stream) || !id_ok(&sc.group) || !(1..=1_000_000_000).contains(&sc.per_instance) {
-                return bad("scale is { stream, group, per_instance (1–1e9) }");
+            // A stream by its id (`st_…`), never a name; a group as Kafka names one.
+            let stream_ok = sc.stream.strip_prefix("st_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+            let group_ok = !sc.group.is_empty() && sc.group.len() <= 249 && sc.group != "." && sc.group != ".." && sc.group.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+            if !stream_ok || !group_ok || !(1..=1_000_000_000).contains(&sc.per_instance) {
+                return bad("scale is { stream: a stream's id (st_…), group: a-z, A-Z, 0-9, . _ -, per_instance: 1–1e9 }");
             }
         }
         if !(0.25..=8.0).contains(&self.cpu) || !self.cpu.is_finite() {
