@@ -10,7 +10,7 @@ steps:
   - uses: roll-sh/roll/sdk/github-action@main
     with:
       api-url: https://api.roll.example
-      identity: idn_…   # roll secrets identities add ci --github owner/repo --env staging
+      identity: idn_…   # roll secrets identities add ci --github owner/repo --for-env staging
       environment: staging
   - run: make test
 ```

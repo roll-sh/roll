@@ -97,7 +97,7 @@ steps:
   - uses: roll-sh/roll/sdk/github-action@main
     with:
       api-url: https://api.roll.example
-      identity: idn_…          # a workload identity for this repo (roll secrets identities add … --github owner/repo)
+      identity: idn_…          # a workload identity for this repo (roll secrets identities add ci --github owner/repo --for-env staging)
       environment: staging
   - run: make test            # DATABASE_URL and the rest are in the environment
 ```
