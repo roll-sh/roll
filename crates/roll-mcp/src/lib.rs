@@ -95,7 +95,54 @@ struct Mcp {
 /// The `/v1/mcp` route. `api` is rolld's gated API router: tool calls go through it.
 pub fn routes(api: Router, config: Config, sets: Vec<Arc<dyn ToolSet>>) -> Router {
     let state = Mcp { api, config: Arc::new(config), sets: Arc::new(sets) };
-    Router::new().route("/v1/mcp", post(handle).get(not_here).delete(not_here)).with_state(state)
+    Router::new()
+        .route("/v1/mcp", post(handle).get(not_here).delete(not_here))
+        .route("/v1/access/tokens/{id}/tools", axum::routing::get(seen_by))
+        .with_state(state)
+}
+
+/// `GET /v1/access/tokens/{id}/tools`: what an agent connected with this token is offered, as
+/// `tools/list` and `prompts/list` would answer it (the token page shows it). Who may ask is the
+/// gate's: the token is read through the gated router with the caller's own credentials first,
+/// so only someone who may see it learns what it reaches.
+async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::Path<String>, headers: HeaderMap) -> Response {
+    let mut req = Request::builder().method("GET").uri(format!("/v1/access/tokens/{}", url::form_urlencoded::byte_serialize(id.as_bytes()).collect::<String>()));
+    for name in ["authorization", "cookie", "x-roll-user"] {
+        if let Some(v) = headers.get(name) {
+            req = req.header(name, v);
+        }
+    }
+    let Ok(req) = req.body(Body::empty()) else { return http_error(StatusCode::BAD_REQUEST, "bad token id") };
+    let seen = match m.api.clone().oneshot(req).await {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
+    if !seen.status().is_success() {
+        return seen;
+    }
+    let Some(grant) = m.config.access.as_ref().and_then(|a| roll_auth::Grants::grant(a.as_ref(), &id)) else {
+        return Json(json!({ "tools": [], "prompts": [], "live": false })).into_response();
+    };
+    let ctx = Ctx {
+        m,
+        headers: HeaderMap::new(),
+        principal: Principal::Grant(grant),
+        ip: None,
+        url_elicitation: false,
+        toolsets: None,
+        readonly: false,
+        client: None,
+        names: Default::default(),
+    };
+    let tools = ctx.tools();
+    let bytes: usize = tools.iter().map(|t| t.to_string().len()).sum();
+    let listed: Vec<Value> = tools
+        .iter()
+        .map(|t| json!({ "name": t["name"], "title": t["title"], "product": t["_meta"]["roll/product"], "read_only": t["annotations"]["readOnlyHint"], "destructive": t["annotations"]["destructiveHint"] }))
+        .collect();
+    let prompts = prompts::list(&tool_names(&ctx))["prompts"].clone();
+    // About four bytes a token: what the list costs an agent's context before it does anything.
+    Json(json!({ "tools": listed, "prompts": prompts, "context_tokens": bytes / 4, "live": true })).into_response()
 }
 
 fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
