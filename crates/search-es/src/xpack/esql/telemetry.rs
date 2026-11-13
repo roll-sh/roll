@@ -37,19 +37,40 @@ pub struct Used {
 impl Used {
     pub fn of(q: &Query, st: &crate::meta::ClusterState) -> Used {
         let mut u = Used::default();
-        u.cmds(&q.cmds);
+        // A `PROMQL` command counts as Elasticsearch's plan of it: `promql`, `ts`, a filter and
+        // an evaluation, and the functions it calls (not its grouping).
+        let promql = super::promql::find(&q.src);
+        let skip = match promql {
+            Some(_) => {
+                let n = super::promql::desugared_len(&q.cmds);
+                u.features.extend(["promql", "ts", "where", "eval"]);
+                for c in &q.cmds[..n] {
+                    match c {
+                        Cmd::Stats { aggs, .. } => aggs.iter().for_each(|a| u.expr(&a.expr)),
+                        Cmd::Eval(l) => l.iter().for_each(|a| u.expr(&a.expr)),
+                        _ => {}
+                    }
+                }
+                n
+            }
+            None => 0,
+        };
+        u.cmds(&q.cmds[skip..]);
         // A `FROM` naming a view reads it as a subquery, counted as `view`.
         if let Some(Cmd::From { sources, .. }) = q.cmds.first()
             && st.metadata.xpack.iter(super::VIEWS).any(|(v, _)| sources.iter().any(|s| crate::xcontent::filter::glob_match(s, v)))
         {
             u.features.insert("view");
         }
-        if !q.cmds.iter().any(|c| matches!(c, Cmd::Limit(_))) {
+        let ts_stats = matches!(q.cmds.first(), Some(Cmd::Ts { .. })) && q.cmds.iter().any(|c| matches!(c, Cmd::Stats { .. }));
+        if !ts_stats && !q.cmds.iter().any(|c| matches!(c, Cmd::Limit(_))) {
             // The implicit limit is a `LIMIT` of the analyzed plan.
             u.features.insert("limit");
         }
         let s = &q.settings;
-        if s.unmapped != super::parser::Unmapped::Default {
+        // `PROMQL` reads unknown fields as null whatever the query sets.
+        let set_unmapped = promql.is_none_or(|(start, _)| q.src[..start].to_ascii_lowercase().contains("unmapped_fields"));
+        if s.unmapped != super::parser::Unmapped::Default && set_unmapped {
             u.settings.insert("unmapped_fields");
         }
         if s.time_zone.is_some() {

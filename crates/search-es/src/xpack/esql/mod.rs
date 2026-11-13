@@ -18,6 +18,7 @@ pub mod fulltext;
 pub mod functions;
 pub mod parser;
 pub mod profile;
+pub mod promql;
 pub mod spatial;
 pub mod telemetry;
 pub mod value;

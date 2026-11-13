@@ -231,7 +231,7 @@ the discovery/store plugins.
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 0 | 0 | 9 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
 | `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 703 | 703 | 709 |
-| `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 527 | 527 | 22 |
+| `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 542 | 542 | 7 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
 | `analysis-nori` | `plugins/analysis-nori` | plugins | 6 | 6 | 0 | 0 | 6 |
@@ -242,7 +242,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 3961 | 3961 | 1580 |
+| **total** | | | 6044 | 5541 | 3976 | 3976 | 1565 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -285,7 +285,7 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 43 -->
 <!-- test-search: wildcard >= 9 -->
 <!-- test-search: platinum >= 829 -->
-<!-- test-search: esql >= 527 -->
+<!-- test-search: esql >= 542 -->
 
 `platinum` by directory (roll / Elasticsearch passes): `ml` 225/618, `analytics` 103/114,
 `spatial` 92/105, `security` 25/101, `rollup` 0/52, `exponential_histogram` 13/44, `vector-tile`
@@ -1127,12 +1127,17 @@ the rest are skipped by the tests' own prerequisites.
   On a 50k-document index (release build, same machine) every benchmark query is at or below
   Elasticsearch 9.5.5: `STATS` 9–30 ms against 18–40 ms, `SORT n DESC | LIMIT 10` 7 ms against
   19 ms, `EVAL` + `STATS BY` 21 ms against 23 ms, a filtered `STATS` 2–12 ms against 17–20 ms.
-  Not yet: `FORK`, `CHANGE_POINT`, `COMPLETION`/`RERANK`, `TS`/PromQL and
-  `aggregate_metric_double`, flattened and dense_vector columns, `unsigned_long` above
-  `i64::MAX`, `EXPLAIN`, other `ST_*` functions (distance, relations, centroid/extent
-  aggregations). roll claims the ES|QL capabilities whose tests pass; of the 619 tests of the `esql`
+  `TS` computes bucketed `rate`/`increase` across adjacent buckets (Elasticsearch's
+  interpolation, PromQL's extrapolation at the edges) and reads grouping keys per series;
+  `PROMQL` (`esql/promql.rs`) is its translation to `TS` for aggregations over a range function
+  whose range is the step, or over an instant selector, with label matchers and parameters.
+  Not yet: PromQL ranges other than the step, binary operators and unaggregated expressions,
+  `CATEGORIZE`, `TOP_SNIPPETS`, approximation's `_approximation_*` columns, `LOOKUP JOIN` on
+  expressions, Lucene semantics for multi-valued `_ignored` filters, `CHANGE_POINT`,
+  `COMPLETION`/`RERANK`, `unsigned_long` above `i64::MAX`, `EXPLAIN`, other `ST_*` functions
+  (distance, relations, centroid/extent aggregations). roll claims the ES|QL capabilities whose tests pass; of the 619 tests of the `esql`
   extended suite (run with Elasticsearch's `is_partial` check, `--esql-not-partial`), 549 pass
-  on Elasticsearch 9.5.5 and 527 on roll (527 of Elasticsearch's 549). `_terms_enum` reads
+  on Elasticsearch 9.5.5 and 542 on roll (542 of Elasticsearch's 549). `_terms_enum` reads
   the segments' term dictionaries (keyword, version, flattened subfields; ip from its doc
   values dictionary), so `search_after` reaches any term.
   Differential fixtures against Elasticsearch 9.5.5:

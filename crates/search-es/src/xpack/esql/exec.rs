@@ -2822,7 +2822,13 @@ pub(crate) fn refs(e: &Expr, out: &mut std::collections::HashSet<String>) {
             refs(x, out);
             l.iter().for_each(|i| refs(i, out));
         }
-        ExprKind::Call(_, args) => args.iter().for_each(|a| refs(a, out)),
+        ExprKind::Call(f, args) => {
+            // `TBUCKET(span)` buckets `@timestamp`.
+            if f == "tbucket" {
+                out.insert("@timestamp".into());
+            }
+            args.iter().for_each(|a| refs(a, out))
+        }
         ExprKind::Lit(_) | ExprKind::Star | ExprKind::Span(_) => {}
     }
 }
@@ -3436,8 +3442,10 @@ pub async fn execute(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut
 
 async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &mut Warnings) -> EsResult<(Table, Stats)> {
     let q = expand_views(&cluster.state(), q)?;
-    // An implicit `LIMIT 1000` ends every query without a limit.
-    if !has_limit(&q.cmds) && !q.sql {
+    // An implicit `LIMIT 1000` ends every query without a limit; Elasticsearch doesn't warn of
+    // it after a time series aggregation (`TS ... | STATS`, `PROMQL`).
+    let ts_stats = matches!(q.cmds.first(), Some(Cmd::Ts { .. })) && q.cmds.iter().any(|c| matches!(c, Cmd::Stats { .. }));
+    if !has_limit(&q.cmds) && !q.sql && !ts_stats {
         w.add(format!("No limit defined, adding default limit of [{DEFAULT_LIMIT}]"));
     }
     check_forks(&q.src, &q.cmds)?;

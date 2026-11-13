@@ -1415,6 +1415,24 @@ pub fn parse(src: &str, params: &[V], named: &[(String, V)]) -> EsResult<Query> 
 /// the next one, `?N` the N-th, `?name` the one of that name (Elasticsearch numbers named
 /// parameters too). Identifier and pattern parameters become the names they hold.
 pub fn parse_with(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
+    // `PROMQL` isn't ES|QL's syntax: the rest of the query parses around a placeholder source of
+    // the same length (positions stay), and the command becomes the `TS` query it stands for,
+    // where unknown metrics and labels are null.
+    if let Some((start, end)) = super::promql::find(src) {
+        let cmds = super::promql::desugar(src, start, end, all)?;
+        let masked = format!("{}FROM p{}{}", &src[..start], " ".repeat(end - start - "FROM p".len()), &src[end..]);
+        let mut q = parse_tokens(&masked, all)?;
+        q.src = src.to_string();
+        q.cmds.splice(0..1, cmds);
+        if q.settings.unmapped == Unmapped::Default {
+            q.settings.unmapped = Unmapped::Nullify;
+        }
+        return Ok(q);
+    }
+    parse_tokens(src, all)
+}
+
+fn parse_tokens(src: &str, all: &[(Option<String>, Param)]) -> EsResult<Query> {
     let mut toks = lex(src)?;
     let mut next = 0usize;
     let mut positional: Vec<V> = Vec::with_capacity(all.len());
