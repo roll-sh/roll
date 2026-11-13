@@ -233,6 +233,23 @@ pub(crate) fn current(c: &Conn<'_>, env_id: &str, path: &str, key: &str, owner: 
     .optional()?)
 }
 
+/// The earliest `notAfter` (ms) of the PEM certificates in a value (a chain's leaf, usually).
+pub(crate) fn certificate_expiry(v: &str) -> Option<i64> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    let mut rest = &v[v.find(BEGIN)?..];
+    let mut earliest: Option<i64> = None;
+    for _ in 0..16 {
+        let Ok((after, pem)) = x509_parser::pem::parse_x509_pem(rest.as_bytes()) else { break };
+        if let Ok(cert) = pem.parse_x509() {
+            let t = cert.validity().not_after.timestamp() * 1000;
+            earliest = Some(earliest.map_or(t, |e| e.min(t)));
+        }
+        let Some(next) = std::str::from_utf8(after).ok().and_then(|a| a.find(BEGIN).map(|i| &a[i..])) else { break };
+        rest = next;
+    }
+    earliest
+}
+
 fn credential_id(state: &Option<Json>) -> Option<String> {
     state.as_ref()?.get("credential")?.as_str().map(Into::into)
 }
@@ -291,7 +308,8 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 };
                 let comment_now = comment.clone().or_else(|| cur.as_ref().map(|c| c.comment.clone())).unwrap_or_default();
                 let tags_now = tags.clone().or_else(|| cur.as_ref().map(|c| c.tags.clone())).unwrap_or_default();
-                let expires_now = expires_at.unwrap_or_else(|| cur.as_ref().and_then(|c| c.expires_at));
+                // Unless the writer said: a new certificate's own date, else the date it had.
+                let expires_now = expires_at.unwrap_or_else(|| value.as_ref().and_then(|v| certificate_expiry(v.expose())).or_else(|| cur.as_ref().and_then(|c| c.expires_at)));
                 let mut what = vec![];
                 match &cur {
                     None => what.push("added".to_string()),
@@ -552,8 +570,11 @@ impl Secrets {
 
     /// The project's resources on its canvas, as (kind, ref): what its links may reach, checked
     /// on every write, read, issue and rotation (a resource can move to another project).
+    /// What this project may link: its canvas's resources and its own rotators.
     pub(crate) fn members(&self, project: &str) -> Result<BTreeSet<(String, String)>> {
-        Ok(self.workspace.get(project).map_err(|e| Error::Internal(e.to_string()))?.resources.into_iter().map(|r| (r.kind.as_str().to_string(), r.r#ref)).collect())
+        let mut out: BTreeSet<(String, String)> = self.workspace.get(project).map_err(|e| Error::Internal(e.to_string()))?.resources.into_iter().map(|r| (r.kind.as_str().to_string(), r.r#ref)).collect();
+        out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
+        Ok(out)
     }
 
     /// Revoke what [`Secrets::prepare`] issued, after the write failed.
@@ -907,4 +928,20 @@ pub(crate) fn open_parts(dek: &Dek, project: &str, state: &Json) -> Result<BTree
 
 pub(crate) fn plural(n: usize, w: &str) -> String {
     format!("{n} {w}{}", if n == 1 { "" } else { "s" })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_certificate_dates_itself() {
+        let cert = |y: i32| {
+            let mut p = rcgen::CertificateParams::new(vec!["example.com".into()]).unwrap();
+            p.not_after = rcgen::date_time_ymd(y, 3, 31);
+            p.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap().pem()
+        };
+        // A chain: the earliest date counts. Text around it doesn't matter.
+        let chain = format!("leaf and CA\n{}{}", cert(2031), cert(2029));
+        assert_eq!(super::certificate_expiry(&chain), Some(1_869_609_600_000));
+        assert_eq!(super::certificate_expiry("not a certificate"), None);
+    }
 }

@@ -343,7 +343,8 @@ both remind: the day is claimed in the same write that queues the notice.
 certificate, a trial token. A secret's optional `expires_at` (ms; set in any write's `set`
 operation, `null` clears it, leaving it out keeps it) records that date. It's versioned like the
 comment, so history, rollback, promote, change requests and backups carry it, and a new value
-keeps the date until someone changes it. Insights add `expires_at` and `expiring` (within 14 days,
+keeps the date until someone changes it, except a certificate: a new value holding PEM
+certificates is dated by the earliest `notAfter` among them, unless the write gives a date. Insights add `expires_at` and `expiring` (within 14 days,
 or past); the grid and the environment's list show a clock, with the days left inside two weeks
 and "expired" in red after. The daily reminder above also lists expiring and expired keys (soonest
 first, names and dates only), for any environment with a notify URL, limit or not. Like
@@ -366,7 +367,8 @@ hears of reads that look unlike the reader, from the audit log, within a sweep o
   it out by hand).
 
 An alert names the principal, the address or the count, the environment and a link to its
-activity: never a value. The sweep walks the audit log after a cursor; advancing the cursor,
+activity: never a value. Each is also an audit row (`secrets.alert`, by `roll:alerts`), told or
+not: the environment's Activity has an Alerts filter, and audit sinks carry them to a SIEM. The sweep walks the audit log after a cursor; advancing the cursor,
 recording the addresses seen and queueing the notices are one write, so two nodes never both
 alert, and history from before the first sweep isn't alerted on.
 
@@ -451,6 +453,28 @@ a credential never drops data.
 `search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
 Products without a workspace kind yet (queues, tasks, roll apps) join by adding their kind to the
 workspace and registering a provider.
+
+### Rotators
+
+Some values live outside roll and still need rotating: a vendor's API key, a database roll doesn't
+run. A **rotator** is a URL the project names (`POST …/rotators {name, url}`, `admin`; the answer
+holds its signing secret, once), and a link kind like a product's: a key linked to it in `managed`
+mode (`{kind: "rotator", ref: "rot_…", field: "value", mode: "managed"}`, from the dashboard's Link
+a resource too) gets its value from the rotator and then behaves as every managed link does. It
+rotates every `rotate_days` or on demand, the old value is revoked after `grace_minutes`, keys of one
+environment linked to the same rotator share one value, and a protected environment gets a change
+request.
+
+Each call is a POST from rolld's guarded client (HTTPS, a public address, no redirects), signed as
+every roll webhook is (`X-Roll-Signature-256`, `X-Roll-Timestamp`, `X-Roll-Delivery`), with
+`X-Roll-Rotator: <id>`:
+- `{"action": "issue", "rotator", "label"}`: mint a new value; answer `{"value": "…", "handle": …}`
+  (at most 96 KiB). `handle` is anything the endpoint needs to revoke that value later.
+- `{"action": "revoke", "rotator", "handle"}`: retire it; any 2xx.
+
+The URL (which may carry a token) and the signing secret are sealed with the project's data key;
+only the host is shown. An answer is read once, never logged, and never part of an error. A rotator
+a key still links to can't be deleted.
 
 ## Consumption
 
@@ -1108,6 +1132,9 @@ isn't in the workspace is 404.
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
+| `GET /rotators` | | `Rotator[]` (`read` on the project) |
+| `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
+| `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 
@@ -1162,6 +1189,7 @@ type Grid = { path: string; environments: string[]; rows: { key: string; cells: 
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
@@ -1238,7 +1266,8 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 
 Done and in PR #20:
 - the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
-- rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search);
+- rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search), and
+  rotators for values outside roll;
 - `roll secrets`, `roll secrets setup` and `roll run [--watch]`;
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history;

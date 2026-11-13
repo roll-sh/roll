@@ -107,6 +107,11 @@ impl Secrets {
                 if said.is_empty() {
                     continue;
                 }
+                // In the audit log too (the environment's activity, audit sinks), told or not.
+                let reader_keys: Vec<String> = from_json(&keys);
+                for (text, _) in &said {
+                    crate::audit::record(c, &project, &crate::Caller::consumer("roll:alerts"), "secrets.alert", Some(&env), None, &reader_keys, text, now)?;
+                }
                 // Only an environment with somewhere to say it.
                 let target: Option<String> = c.query_row("SELECT id FROM environments WHERE project_id = ? AND slug = ? AND notify_url IS NOT NULL", [&project, &env], |r| r.get(0)).optional()?;
                 let Some(env_id) = target else { continue };
