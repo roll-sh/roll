@@ -475,7 +475,15 @@ static TOOLS: &[Tool] = &[
     t("apps_remove_domain", "Remove a domain", "Remove a domain.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name")]),
     // ── previews (roll previews) ──
     t("previews_list", "List previews", "Preview environments.", "previews", "GET", "/v1/previews", &[q("project", Ty::Str, "Workspace project")]),
-    t("previews_get", "Get a preview", "A preview with its branched resources.", "previews", "GET", "/v1/previews/{id}", &[req("id", "Preview id")]),
+    t(
+        "previews_get",
+        "Get a preview",
+        "A preview with its branched resources, and `schema_changes`: the database schema's +/- lines against what it was branched from (review a migration here).",
+        "previews",
+        "GET",
+        "/v1/previews/{id}",
+        &[req("id", "Preview id")],
+    ),
     t(
         "previews_create",
         "Create a preview",
@@ -487,6 +495,18 @@ static TOOLS: &[Tool] = &[
     ),
     t("previews_refresh", "Refresh a preview", "Redeploy a preview now.", "previews", "POST", "/v1/previews/{id}/refresh", &[req("id", "Preview id")]),
     t("previews_logs", "Preview logs", "A preview's deploy and service logs.", "previews", "GET", "/v1/previews/{id}/logs", &[req("id", "Preview id")]),
+    t(
+        "previews_reset",
+        "Reset a preview",
+        "Branch a preview's resources again from their parents, dropping what changed in it (all of them, or some).",
+        "previews",
+        "POST",
+        "/v1/previews/{id}/reset",
+        &[req("id", "Preview id"), b("resources", Ty::Arr, "Only these, as \"<kind>:<parent>\"")],
+    ),
+    t("previews_sleep", "Sleep a preview", "Stop a preview's services until it's woken (its data stays).", "previews", "POST", "/v1/previews/{id}/sleep", &[req("id", "Preview id")]),
+    t("previews_wake", "Wake a preview", "Start a sleeping preview's services again.", "previews", "POST", "/v1/previews/{id}/wake", &[req("id", "Preview id")]),
+    t("previews_usage", "Previews usage", "What a project's previews used and cost this month, against its budget.", "previews", "GET", "/v1/previews/projects/{project}/usage", &[req("project", "Workspace project")]),
     t("previews_delete", "Delete a preview", "Tear a preview down with its branches.", "previews", "DELETE", "/v1/previews/{id}", &[req("id", "Preview id")]),
 ];
 
