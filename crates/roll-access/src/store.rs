@@ -121,6 +121,9 @@ pub const REFRESH_PREFIX: &str = "rlf_";
 /// An OAuth access token lives an hour; a refresh token 30 days from its last use.
 pub const ACCESS_TTL_MS: i64 = 3600 * 1000;
 pub const REFRESH_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
+/// A spent refresh token presented again this soon after its use is a client retrying (a lost
+/// answer), not a stolen copy: refused, without revoking the connection.
+pub const REFRESH_GRACE_MS: i64 = 30 * 1000;
 /// An authorization code is good for one minute, once.
 pub const CODE_TTL_MS: i64 = 60 * 1000;
 /// `last_used_at` is written at most this often per grant.
@@ -720,7 +723,9 @@ impl Store {
             .optional()
         })?;
         // A refresh token opens nothing but the token endpoint.
-        Ok(row.filter(|(g, kind, exp)| kind != "refresh" && exp.is_none_or(|e| e > now) && g.live(now)).map(|(g, ..)| g))
+        // Only what signs a request in: a token's secret or an access token (never a refresh
+        // token, spent or not).
+        Ok(row.filter(|(g, kind, exp)| matches!(kind.as_str(), "token" | "access") && exp.is_none_or(|e| e > now) && g.live(now)).map(|(g, ..)| g))
     }
 
     pub fn update(&self, id: &str, change: &GrantChange) -> Result<Grant> {
@@ -1329,32 +1334,92 @@ impl Store {
     }
 
     /// A refresh token for a new access token and a new refresh token (the old one stops working).
-    pub fn refresh(&self, refresh_token: &str, client_id: &str) -> Result<(Grant, String, String)> {
+    ///
+    /// The old one is kept as spent until it would have expired: presented again, someone else has
+    /// a copy (OAuth 2.1, §4.3.1), so the whole connection is revoked. Within [`REFRESH_GRACE_MS`]
+    /// of its use it's only refused: a client retrying after a lost answer keeps its connection.
+    pub fn refresh(&self, refresh_token: &str, client_id: &str, grace_ms: i64) -> Result<(Grant, String, String)> {
+        enum Outcome {
+            Fresh(String),
+            Retry,
+            Reused(String),
+            Bad(&'static str),
+        }
         let now = code_sql::now_ms();
         let h = hash(refresh_token);
         let (access, refresh) = (new_secret(ACCESS_PREFIX), new_secret(REFRESH_PREFIX));
-        let grant_id = self.db.write(|c| {
+        let outcome = self.db.write(|c| {
             let row = c
                 .query_row(
-                    "SELECT s.grant_id, s.expires_at, g.client_id, g.revoked_at, g.expires_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind = 'refresh'",
+                    "SELECT s.grant_id, s.expires_at, g.client_id, g.revoked_at, g.expires_at, s.kind, s.created_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind IN ('refresh', 'spent_refresh')",
                     [&h],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<i64>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, Option<i64>>(3)?,
+                            r.get::<_, Option<i64>>(4)?,
+                            r.get::<_, String>(5)?,
+                            r.get::<_, i64>(6)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            let Some((grant_id, exp, cid, revoked, grant_exp)) = row else { return Err(Error::OAuth("invalid_grant", "unknown refresh token".into())) };
-            c.execute("DELETE FROM grant_secrets WHERE hash = ?", [&h])?;
-            if exp.is_some_and(|e| e <= now) || revoked.is_some() || grant_exp.is_some_and(|e| e <= now) {
-                return Err(Error::OAuth("invalid_grant", "the connection expired or was revoked: connect again".into()));
-            }
+            let Some((grant_id, exp, cid, revoked, grant_exp, kind, at)) = row else { return Ok(Outcome::Bad("unknown refresh token")) };
             if cid.as_deref() != Some(client_id) {
-                return Err(Error::OAuth("invalid_grant", "the refresh token belongs to another client".into()));
+                return Ok(Outcome::Bad("the refresh token belongs to another client"));
             }
+            if kind == "spent_refresh" {
+                if now - at < grace_ms {
+                    return Ok(Outcome::Retry);
+                }
+                c.execute(
+                    "UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL",
+                    params![now, "its refresh token was used again after it was spent: someone else may have a copy", grant_id],
+                )?;
+                c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [&grant_id])?;
+                return Ok(Outcome::Reused(grant_id));
+            }
+            if exp.is_some_and(|e| e <= now) || revoked.is_some() || grant_exp.is_some_and(|e| e <= now) {
+                return Ok(Outcome::Bad("the connection expired or was revoked: connect again"));
+            }
+            c.execute("UPDATE grant_secrets SET kind = 'spent_refresh', created_at = ? WHERE hash = ?", params![now, h])?;
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now])?;
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'refresh', ?, ?)", params![hash(&refresh), grant_id, now + REFRESH_TTL_MS, now])?;
             c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
-            Ok(grant_id)
+            Ok::<_, Error>(Outcome::Fresh(grant_id))
         })?;
-        Ok((self.get(&grant_id)?, access, refresh))
+        match outcome {
+            Outcome::Fresh(grant_id) => Ok((self.get(&grant_id)?, access, refresh)),
+            Outcome::Retry => Err(Error::OAuth("invalid_grant", "this refresh token was just used: use the tokens that answer gave".into())),
+            Outcome::Bad(why) => Err(Error::OAuth("invalid_grant", why.into())),
+            Outcome::Reused(grant_id) => {
+                tracing::warn!(grant = %grant_id, "a spent refresh token was used again: the connection was revoked");
+                let g = self.get(&grant_id).ok();
+                self.audit(&AuditEvent {
+                    id: crate::new_id("aud"),
+                    at: now,
+                    grant_id: Some(grant_id),
+                    grant_name: g.map(|g| g.name),
+                    source: "oauth".into(),
+                    tool: None,
+                    method: "POST".into(),
+                    route: "/v1/access/oauth/token".into(),
+                    product: Some("access".into()),
+                    action: Some("admin".into()),
+                    resource: None,
+                    decision: "revoke".into(),
+                    approval: None,
+                    status: 400,
+                    args: None,
+                    ip: None,
+                    duration_ms: 0,
+                    client: None,
+                });
+                Err(Error::OAuth("invalid_grant", "this refresh token was already used, so the connection was revoked: connect again".into()))
+            }
+        }
     }
 
     /// RFC 7009: forget one access or refresh token (whatever it is, the answer is the same).

@@ -207,6 +207,8 @@ pub struct Config {
     pub trust_forwarded_for: bool,
     /// How long a request waits for an approval before answering `approval_pending`.
     pub approval_wait: std::time::Duration,
+    /// A spent refresh token presented again within this is a retry, not a stolen copy.
+    pub refresh_grace: std::time::Duration,
     /// Fetch MCP clients' metadata documents from private addresses and over http (local
     /// development and tests only; `ROLL_ACCESS_METADATA_ALLOW_PRIVATE`).
     pub metadata_allow_private: bool,
@@ -223,6 +225,7 @@ impl Default for Config {
             audit_days: 90,
             trust_forwarded_for: false,
             approval_wait: std::time::Duration::from_secs(55),
+            refresh_grace: std::time::Duration::from_millis(store::REFRESH_GRACE_MS as u64),
             metadata_allow_private: false,
             github_keys_url: leaks::GITHUB_KEYS.into(),
         }

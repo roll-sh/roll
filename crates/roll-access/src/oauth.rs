@@ -331,7 +331,7 @@ async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, St
         }
         Some("refresh_token") => {
             let Some(refresh) = get("refresh_token") else { return Error::OAuth("invalid_request", "refresh_token is required".into()).into_response() };
-            tokio::task::spawn_blocking(move || a.store.refresh(&refresh, &client_id)).await
+            tokio::task::spawn_blocking(move || a.store.refresh(&refresh, &client_id, a.config.refresh_grace.as_millis() as i64)).await
         }
         _ => return Error::OAuth("unsupported_grant_type", "grant_type is authorization_code or refresh_token".into()).into_response(),
     };
