@@ -471,6 +471,24 @@ impl Access {
         Ok(true)
     }
 
+    /// A token used from a network it hasn't been before, told where approvals go (GitHub and
+    /// Google mail a new sign-in's place): a leaked token is used from somewhere new.
+    pub fn network_notice(self: &Arc<Self>, name: &str, id: &str, new: &store::NewNetwork) {
+        let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
+        let roams = if new.networks >= store::ROAMING { " It's used from many networks now, so this is the last message like this about it." } else { "" };
+        let text = format!(
+            "roll token {name:?} was used from a new network, {} (it's been used from {} now). Not you? Revoke it: {}/dashboard/access/tokens/{id}.{roams}",
+            new.network,
+            new.networks,
+            self.config.web_url.trim_end_matches('/'),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = chat.notice(install, channel, text).await {
+                tracing::warn!(error = %e, "telling chat of a token's new network");
+            }
+        });
+    }
+
     /// A new approval: posted to chat, when approvals go there (in the background).
     pub fn announce(self: &Arc<Self>, a: &store::Approval) {
         let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
