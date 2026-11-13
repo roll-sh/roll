@@ -513,7 +513,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
     assert_eq!(c["blockers"], json!([]));
     // Its preview's project requires a visual review: pages that differ from main wait for
     // someone to accept them, then it's free.
-    let preview = |state: &str| code_control::model::Preview {
+    let preview = |state: &str, by: Option<&str>| code_control::model::Preview {
         state: code_control::model::PreviewState::Running,
         url: None,
         postgres: None,
@@ -541,13 +541,18 @@ async fn blockers_keep_changes_out_of_the_queue() {
             page_a11y: None,
             base_change: None,
             pages: Vec::new(),
-            visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: None, required: true }),
+            visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true }),
         }),
     };
-    a.code.report_environment(&id(&c), Some(&preview("changed"))).unwrap();
+    a.code.report_environment(&id(&c), Some(&preview("changed", None))).unwrap();
     let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(kinds(&v), ["visual"]);
-    a.code.report_environment(&id(&c), Some(&preview("accepted"))).unwrap();
+    // Its own author's acceptance doesn't count; someone else's does.
+    let author = v["author"].as_str().unwrap().to_string();
+    a.code.report_environment(&id(&c), Some(&preview("accepted", Some(&author)))).unwrap();
+    let v = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(kinds(&v), ["visual"], "{v}");
+    a.code.report_environment(&id(&c), Some(&preview("accepted", Some("someone-else")))).unwrap();
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(c["blockers"], json!([]));
     enqueue(&a, &c, "normal").await;

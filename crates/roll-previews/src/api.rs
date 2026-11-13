@@ -116,6 +116,7 @@ impl IntoResponse for Error {
             Error::BadRequest(_) => StatusCode::BAD_REQUEST,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Db(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
@@ -213,10 +214,15 @@ async fn keep(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<
 }
 
 /// Accept how a change's pages look at its latest screenshot (the `roll/visual` status).
-async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>) -> crate::Result<Json<Preview>> {
+/// A scoped or OAuth token (an agent's, an app's) isn't a person: it can't accept a required one.
+async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<Preview>> {
     check_id(&id)?;
-    let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
-    e.accept_visual(&id, &by).await.map(Json)
+    let (by, person) = match (who, grant) {
+        (Some(axum::Extension(u)), None) => (u.handle, true),
+        (_, Some(axum::Extension(g))) => (format!("token:{}", g.name), false),
+        (None, None) => ("operator".into(), true),
+    };
+    e.accept_visual(&id, &by, person).await.map(Json)
 }
 
 #[derive(Deserialize)]

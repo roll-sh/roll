@@ -41,6 +41,8 @@ pub enum Error {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    Forbidden(String),
     #[error("previews database: {0}")]
     Db(#[from] code_sql::Error),
     #[error("{0}")]

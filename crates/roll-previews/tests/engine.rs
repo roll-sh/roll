@@ -204,8 +204,8 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     };
     shoot("cs_1b");
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));
-    assert!(e.engine.accept_visual(&base.id, "ada").await.is_err(), "only a change's");
-    let p = e.engine.accept_visual(&chg.id, "ada").await.unwrap();
+    assert!(e.engine.accept_visual(&base.id, "ada", true).await.is_err(), "only a change's");
+    let p = e.engine.accept_visual(&chg.id, "ada", true).await.unwrap();
     assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
     // The next head is reviewed again.
