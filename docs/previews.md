@@ -530,8 +530,9 @@ Ranked by what a person notices first. Done so far:
 - search branches' cost from roll search's `own_bytes`.
 
 1. **Postgres without a reflinking file system**: a branch that starts from the parent's base
-   backup plus WAL with lazy pages, for ext4 hosts like this one. The fleet's XFS volumes already
-   share blocks through reflinks.
+   backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
+   its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
+   idle preview's branch is evicted to object storage after an hour.
 2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
 3. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
