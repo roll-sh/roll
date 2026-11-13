@@ -649,7 +649,8 @@ impl roll_secrets::Workloads for Workloads {
         let within = roll_auth::scope::Scope(vec![rule]);
         let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: within.clone(), expires_at: None, ip_allow: ip_allow.unwrap_or_default(), rate_per_minute: None, ask_otherwise: false };
         let (access, owner) = (self.0.clone(), owner.map(str::to_string));
-        // Logins run on the store's blocking threads, inside the runtime.
+        // Logins run on the store's blocking threads (`blocking` in roll-secrets' api.rs), inside
+        // the runtime: never call this from an async task, where `block_on` panics.
         let made = tokio::runtime::Handle::current().block_on(async move { access.mint_workload(new, &within, minutes, owner.as_deref()).await });
         match made {
             Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
@@ -660,11 +661,9 @@ impl roll_secrets::Workloads for Workloads {
         }
     }
 
+    /// Only a live workload grant, with why and an audit row (`false`: it had already ended).
     fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
-        match self.0.store.revoke(id) {
-            Ok(_) | Err(roll_access::Error::NotFound(_)) => Ok(()),
-            Err(e) => Err(Error::Internal(format!("revoking a workload token: {e}"))),
-        }
+        self.0.revoke_workload(id, "its workload identity was deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a workload token: {e}")))
     }
 }
 
