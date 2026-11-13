@@ -115,8 +115,9 @@ impl Jobs {
     }
 }
 
-/// The earliest due time of any job.
-fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
+/// The earliest due time of any job (Unix ms): what the host records when the cluster unloads,
+/// to wake it then.
+pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
     [super::ism_run::next_due(st), crate::xpack::transform::next_due(st)].into_iter().flatten().min()
 }
 

@@ -244,6 +244,8 @@ impl LifecycleHooks for ControlHooks {
         self.meter.loaded(cluster).await;
         if let Some(c) = self.control.get().and_then(Weak::upgrade) {
             c.note_loaded(&cluster.name, true).await;
+            // Loaded, its scheduler runs its jobs.
+            c.note_wake_at(&cluster.name, None).await;
         }
         let token = self.wakes.claim(&cluster.name);
         match self.control.get().and_then(Weak::upgrade) {
@@ -264,6 +266,7 @@ impl LifecycleHooks for ControlHooks {
         self.meter.unloading(cluster).await;
         if let Some(c) = self.control.get().and_then(Weak::upgrade) {
             c.note_loaded(&cluster.name, false).await;
+            c.note_wake_at(&cluster.name, search_es::opensearch::jobs::next_due(&cluster.state())).await;
         }
     }
 }

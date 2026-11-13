@@ -134,6 +134,12 @@ branch instantly and keep their data on object storage.
 - **A node** with no loaded cluster runs no background loop: refresh, merge, WAL and metering
   timers exist only while a cluster that needs them is loaded. `rolld` returns freed memory to
   the OS (mimalloc collect on park).
+- **Background jobs** (a started transform's triggers, OpenSearch ISM jobs) run on the cluster's
+  job scheduler while it is loaded, and keep their schedule in the cluster state. When a cluster
+  unloads, its earliest due time goes in the catalog (`search_clusters.wake_at`); every
+  `job_wake_interval` (15 s) the node a due cluster's lease is placed on loads it, the scheduler
+  runs what came due, and the idle unload puts it back to sleep, billed as loaded time. A
+  cluster without jobs is never woken: the only standing cost is one catalog query per node.
 - **Local disk** is a cache with a byte budget (`--search-cache-bytes`). Evicting a segment is
   always safe: every segment in a manifest is already in object storage.
 

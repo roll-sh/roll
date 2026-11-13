@@ -90,6 +90,9 @@ pub struct SearchConfig {
     pub history_retention: Duration,
     /// Garbage collection of unreferenced segments and WAL files.
     pub gc_interval: Option<Duration>,
+    /// How often the node wakes sleeping clusters whose background jobs came due
+    /// ([`Control::start_job_wakes`]; `None`: never).
+    pub job_wake_interval: Option<Duration>,
     /// How often loaded clusters are metered.
     pub metering_interval: Duration,
     /// Publish Elasticsearch's test cluster features, so the YAML REST suites can run against
@@ -133,6 +136,7 @@ impl SearchConfig {
             sync_objects: false,
             history_retention: Duration::from_secs(86_400),
             gc_interval: Some(Duration::from_secs(3600)),
+            job_wake_interval: Some(Duration::from_secs(15)),
             metering_interval: Duration::from_secs(60),
             test_features: false,
             stats_interval: Duration::from_secs(600),
@@ -291,6 +295,7 @@ pub struct Usage {
     pub cost: Cost,
 }
 
+
 pub struct Control {
     pub cfg: SearchConfig,
     pub store: Arc<Store>,
@@ -385,6 +390,7 @@ impl Control {
         control.start_metering();
         control.start_gc();
         control.start_always_on();
+        control.start_job_wakes();
         Ok(control)
     }
 
@@ -421,6 +427,52 @@ impl Control {
         let me = l.cluster().node_id();
         if let Err(e) = self.store.set_loaded_on(name, loaded.then_some(me), me).await {
             tracing::debug!(cluster = name, error = %e, "recording where a search cluster is loaded failed");
+        }
+    }
+
+    /// Records when a sleeping cluster must wake for its next background job ([`Self::start_job_wakes`]).
+    pub(crate) async fn note_wake_at(&self, name: &str, at: Option<i64>) {
+        if let Err(e) = self.store.set_wake_at(name, at).await {
+            tracing::warn!(cluster = name, error = %e, "recording a search cluster's next job failed");
+        }
+    }
+
+    /// Wakes sleeping clusters whose background jobs (a started transform's trigger, an ISM
+    /// job) came due, as Elasticsearch runs them on schedule: every `job_wake_interval`, the
+    /// clusters the catalog says are due load (on a fleet, on the node their lease is placed
+    /// on), run what is due, and sleep again after their idle timeout, billed as loaded time.
+    /// Unloading records the next due time; a cluster with no jobs is never woken.
+    fn start_job_wakes(&self) {
+        let (Some(me), Some(every)) = (self.me.get().cloned(), self.cfg.job_wake_interval) else { return };
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                let Some(c) = me.upgrade() else { return };
+                match c.store.due_wakes(crate::meter::now_ms()).await {
+                    Ok(due) => {
+                        for cluster in &due {
+                            c.wake_for_jobs(cluster).await;
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "listing search clusters with due jobs failed"),
+                }
+            }
+        });
+    }
+
+    async fn wake_for_jobs(&self, c: &SearchCluster) {
+        if self.node.get_loaded(&c.name).is_some() || self.wakes.is_deleting(&c.name) {
+            return;
+        }
+        if let Some(l) = self.cluster_leases()
+            && l.cluster().preferred(&crate::cluster::key(&c.name)).is_none_or(|n| n.id != l.cluster().node_id())
+        {
+            return;
+        }
+        if let Err(e) = self.node.open(spec_for(c)).await {
+            // Tried again a minute on, not every pass.
+            tracing::info!(cluster = c.name, error = %e, "waking a search cluster for its due jobs failed");
+            self.note_wake_at(&c.name, Some(crate::meter::now_ms() + 60_000)).await;
         }
     }
 

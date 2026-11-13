@@ -169,6 +169,7 @@ impl Store {
         db.ensure_schema(SCHEMA)?;
         db.add_column("search_clusters", "loaded_on", "TEXT")?;
         db.add_column("search_clusters", "own_bytes", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("search_clusters", "wake_at", "INTEGER")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db })
@@ -262,6 +263,19 @@ impl Store {
             None => x.execute("UPDATE search_clusters SET loaded_on = NULL WHERE name = ?1 AND loaded_on = ?2", params![name, me]),
         })?;
         Ok(())
+    }
+
+    /// When cluster `name` must load again to run a background job that comes due (Unix ms;
+    /// `None`: no job, or it is loaded and its scheduler runs them).
+    pub async fn set_wake_at(&self, name: &str, at: Option<i64>) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("UPDATE search_clusters SET wake_at = ?2 WHERE name = ?1", params![name, at]))?;
+        Ok(())
+    }
+
+    /// Sleeping clusters with a background job due by `now_ms`.
+    pub async fn due_wakes(&self, now_ms: i64) -> anyhow::Result<Vec<SearchCluster>> {
+        let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE deleting = 0 AND wake_at IS NOT NULL AND wake_at <= ?1 ORDER BY wake_at");
+        Ok(self.db.read(|x| x.query(&sql, params![now_ms], row))?)
     }
 
     /// Hides a cluster from lookups while its data is deleted (`on`), or shows it again (the

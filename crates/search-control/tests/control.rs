@@ -868,3 +868,44 @@ async fn console_takes_bodies_up_to_the_cluster_limit() {
     assert_eq!(s, 413, "{v}");
     assert!(v["error"].as_str().unwrap().contains("max_body_mb"), "{v}");
 }
+
+/// A sleeping cluster wakes on its own when a background job comes due (a started continuous
+/// transform's next checkpoint), as Elasticsearch runs it on schedule, and nothing wakes a
+/// cluster without jobs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_due_transform_wakes_its_sleeping_cluster() {
+    let e = env_with(|c| c.job_wake_interval = Some(std::time::Duration::from_millis(200))).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "jobs"})).await;
+    let (user, pw) = creds(&c);
+    e.post("/v1/search/clusters", json!({"name": "idle"})).await;
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/src/_doc/1?refresh=true", Some(json!({"t": "2026-01-01T00:00:00Z", "k": "a"}))).await;
+    assert_eq!(s, 201, "{v}");
+    let transform = json!({
+        "source": {"index": "src"}, "dest": {"index": "dst"}, "frequency": "1s",
+        "sync": {"time": {"field": "t", "delay": "0s"}},
+        "pivot": {"group_by": {"k": {"terms": {"field": "k.keyword"}}}, "aggs": {"n": {"value_count": {"field": "k.keyword"}}}}
+    });
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/_transform/t", Some(transform)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&user, &pw, reqwest::Method::POST, "/_transform/t/_start", None).await;
+    assert_eq!(s, 200, "{v}");
+    for name in ["jobs", "idle"] {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let (s, v) = e.call(reqwest::Method::POST, &format!("/v1/search/clusters/{name}/unload"), Some(json!({}))).await;
+            assert_eq!(s, 200, "{v}");
+            if v["unloaded"] == true || !e.control.node.loaded().iter().any(|n| &**n == name) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "{name} never unloaded: {v}");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    // No request: the transform's next trigger loads its cluster again.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !e.control.node.loaded().iter().any(|n| &**n == "jobs") {
+        assert!(tokio::time::Instant::now() < deadline, "the due transform never woke its cluster");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(!e.control.node.loaded().iter().any(|n| &**n == "idle"), "a cluster without jobs stays asleep");
+}
