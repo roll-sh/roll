@@ -99,11 +99,15 @@ pub enum Kind {
     Bucket,
     Nosql,
     Search,
+    Queue,
+    Tasks,
     Repo,
+    /// A roll apps service (`svc_…`; docs/apps/README.md).
+    Service,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [Kind::Postgres, Kind::Redis, Kind::Stream, Kind::Bucket, Kind::Nosql, Kind::Search, Kind::Repo];
+    pub const ALL: [Kind; 10] = [Kind::Postgres, Kind::Redis, Kind::Stream, Kind::Bucket, Kind::Nosql, Kind::Search, Kind::Queue, Kind::Tasks, Kind::Repo, Kind::Service];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -113,7 +117,10 @@ impl Kind {
             Kind::Bucket => "bucket",
             Kind::Nosql => "nosql",
             Kind::Search => "search",
+            Kind::Queue => "queue",
+            Kind::Tasks => "tasks",
             Kind::Repo => "repo",
+            Kind::Service => "service",
         }
     }
 

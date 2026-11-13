@@ -358,3 +358,90 @@ async fn open_transactions_survive_a_restart() {
     let values: Vec<String> = stream_broker::records::decode(&p.records.unwrap(), Some(&[])).unwrap().into_iter().map(|r| String::from_utf8(r.value.unwrap().to_vec()).unwrap()).collect();
     assert_eq!(values, vec!["in-txn-0", "in-txn-1", "in-txn-2"]);
 }
+
+/// Values of a stream's partition 0 of `topic` over the HTTP API, with their offsets.
+async fn http_records(http: &str, stream: &str, topic: &str) -> Vec<(i64, String)> {
+    let v: serde_json::Value = reqwest::get(format!("{http}/v1/streams/{stream}/topics/{topic}/partitions/0/records?offset=earliest&limit=1000")).await.unwrap().json().await.unwrap();
+    let recs = v["records"].as_array().unwrap_or_else(|| panic!("no records in {v}"));
+    recs.iter().map(|r| (r["offset"].as_i64().unwrap(), r["value"].as_str().unwrap().to_string())).collect()
+}
+
+async fn http_produce(http: &str, stream: &str, topic: &str, values: std::ops::Range<i64>) {
+    let recs: Vec<serde_json::Value> = values.map(|i| serde_json::json!({ "value": format!("v{i}") })).collect();
+    let r = reqwest::Client::new().post(format!("{http}/v1/streams/{stream}/topics/{topic}/records")).json(&recs).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+}
+
+fn numbered(r: std::ops::Range<i64>) -> Vec<(i64, String)> {
+    r.map(|i| (i, format!("v{i}"))).collect()
+}
+
+/// Wait until object storage under `prefix` holds exactly `want` (sorted keys).
+async fn objects_become(tb: &TestBroker, prefix: &str, want: &[String]) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut got: Vec<String> = tb.broker.objects.list(prefix).await.unwrap().into_iter().map(|(k, _)| k).collect();
+        got.sort();
+        if got == want {
+            return;
+        }
+        assert!(Instant::now() < deadline, "objects under {prefix}: {got:?}, want {want:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Branches share their parent's chunks: retention on the parent, deleting another branch and
+/// deleting the parent leave a branch reading every record it had, deleting a branch never
+/// touches its parent, and the last stream to let go of a chunk deletes it. Reads go to object
+/// storage (no caches, no local copies), so a deleted object would show.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_outlives_what_happens_to_its_parent() {
+    let tb = TestBroker::start_with("store-branch", |c| {
+        c.remote_cache_bytes = 0;
+        c.tail_cache_bytes = 1024;
+    })
+    .await;
+    let b = tb.broker.clone();
+    let (src, _, _) = b.create_stream("src", Default::default()).unwrap();
+    let configs = [("segment.bytes", "1024"), ("local.retention.ms", "0"), ("local.retention.bytes", "0")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let topic = b.create_topic(&src, "t", 1, -1, configs, false).unwrap().unwrap();
+    for i in 0..10 {
+        http_produce(&tb.http, &src.id, "t", i * 10..i * 10 + 10).await;
+    }
+    let (keep, _, _) = b.branch_stream(&src, "keep").await.unwrap();
+    let (gone, _, _) = b.branch_stream(&src, "gone").await.unwrap();
+    for s in [&keep.id, &gone.id] {
+        assert_eq!(http_records(&tb.http, s, "t").await, numbered(0..100));
+    }
+
+    // Retention (DeleteRecords) on the parent: the branches keep the chunks it dropped.
+    let p = topic.partition(0).unwrap();
+    assert_eq!(b.clean_partition(&src, &topic, &p, Some(50)).await.unwrap(), 50);
+    assert_eq!(http_records(&tb.http, &src.id, "t").await.first().unwrap().0, 50);
+    assert_eq!(http_records(&tb.http, &keep.id, "t").await, numbered(0..100));
+
+    // Deleting a branch leaves its parent (and the other branch) whole.
+    http_produce(&tb.http, &gone.id, "t", 100..110).await;
+    b.delete_stream(&gone.id).await.unwrap();
+    objects_become(&tb, &stream_broker::config::stream_prefix(&gone.id), &[]).await;
+    assert_eq!(http_records(&tb.http, &src.id, "t").await, numbered(50..100));
+    assert_eq!(http_records(&tb.http, &keep.id, "t").await, numbered(0..100));
+
+    // Deleting the parent leaves exactly the objects the branch still reads.
+    let keep_topic = keep.topic("t").unwrap();
+    let mut shared: Vec<String> = b.store.chunks(&keep_topic.id, 0).unwrap().into_iter().map(|c| c.key).collect();
+    shared.sort();
+    assert!(!shared.is_empty());
+    b.delete_stream(&src.id).await.unwrap();
+    objects_become(&tb, &stream_broker::config::stream_prefix(&src.id), &shared).await;
+    let st: serde_json::Value = reqwest::get(format!("{}/v1/streams/{}", tb.http, keep.id)).await.unwrap().json().await.unwrap();
+    assert_eq!(st["storage"]["shared_bytes"], 0, "nothing is shared any more: {st}");
+    assert_eq!(http_records(&tb.http, &keep.id, "t").await, numbered(0..100));
+    http_produce(&tb.http, &keep.id, "t", 100..105).await;
+    assert_eq!(http_records(&tb.http, &keep.id, "t").await, numbered(0..105));
+
+    // The last reference goes with the branch.
+    b.delete_stream(&keep.id).await.unwrap();
+    objects_become(&tb, &stream_broker::config::stream_prefix(&src.id), &[]).await;
+    objects_become(&tb, &stream_broker::config::stream_prefix(&keep.id), &[]).await;
+}

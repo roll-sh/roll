@@ -17,6 +17,7 @@ pub struct Products<'a> {
     pub nosql: Option<Arc<nosql_control::Control>>,
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub code: Option<&'a Arc<code_control::Code>>,
+    pub apps: Option<Arc<apps_control::Apps>>,
     pub search: Option<Arc<search_control::Control>>,
 }
 
@@ -50,6 +51,11 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
             let code = code.clone();
             r.by_fn(kind, move |id: &str| code.repo_of(kind, id));
         }
+    }
+    if let Some(apps) = p.apps {
+        // A preview's own (ephemeral) environment is what rules call `preview`, so the "previews
+        // only" preset reaches `pv-<id>` and not a hand-named one.
+        r.environment_fn("apps", move |id: &str, env: &str| apps.store.environment(id, env).ok().filter(|e| e.ephemeral).map(|_| "preview".to_string()));
     }
     r
 }

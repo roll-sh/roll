@@ -217,7 +217,7 @@ fn owner_row(r: &Row<'_>) -> code_sql::Result<Owner> {
 /// A change row without its checks (and repo full name), filled in by the caller.
 const CHANGE_COLS: &str = "id, repo_id, number, title, body, author, state, base, head, revision, work_item, branch, github_pr, \
                            github_url, preview, landed_as, conflict, created_at, updated_at, trusted, draft, \
-                           (run_approved_head IS NOT NULL AND run_approved_head = head)";
+                           (run_approved_head IS NOT NULL AND run_approved_head = head), labels";
 
 fn change_row(r: &Row<'_>) -> code_sql::Result<Change> {
     Ok(Change {
@@ -245,6 +245,7 @@ fn change_row(r: &Row<'_>) -> code_sql::Result<Change> {
         trusted: r.get::<_, i64>(19)? != 0,
         draft: r.get::<_, i64>(20)? != 0,
         run_approved: r.get::<_, i64>(21)? != 0,
+        labels: serde_json::from_str(&r.get::<_, String>(22)?).unwrap_or_default(),
         queue: None,
         blockers: Vec::new(),
         review: None,
@@ -384,6 +385,8 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Databases from before drafts and approved runs.
     ("changes", "draft", "INTEGER NOT NULL DEFAULT 0"),
     ("changes", "run_approved_head", "TEXT"),
+    // Databases from before changes had labels (a GitHub pull request's, or set in roll).
+    ("changes", "labels", "TEXT NOT NULL DEFAULT '[]'"),
     // Databases from before queue entries kept a failure's output apart from its reason.
     ("queue_entries", "output", "TEXT"),
     // Databases from before AI jobs reported their stage.
@@ -853,6 +856,31 @@ impl Db {
         })
     }
 
+    /// Set a change's preview when it differs from the stored one, promising the `preview`
+    /// event in the same transaction. `None` when the change doesn't exist or nothing changed;
+    /// else the change's repo and the promise.
+    pub fn set_change_preview_promised(&self, id: &str, preview: Option<&Preview>) -> Result<Option<(String, crate::webhooks::Promises)>> {
+        let new = preview.map(json);
+        self.write(|c| {
+            let row: Option<(String, Option<String>)> =
+                c.query_row("SELECT repo_id, preview FROM changes WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let Some((repo, old)) = row else { return Ok(None) };
+            let same = match (&old, &new) {
+                (Some(a), Some(b)) => serde_json::from_str::<Value>(a).ok() == serde_json::from_str::<Value>(b).ok(),
+                (None, None) => true,
+                _ => false,
+            };
+            if same {
+                return Ok(None);
+            }
+            c.execute("UPDATE changes SET preview = ?, updated_at = ? WHERE id = ?", params![new, now(), id])?;
+            let mut p = crate::webhooks::Promises::default();
+            let data = serde_json::json!({ "change": id, "preview": preview });
+            p.promise(c, &repo, "preview", id, Some(&data))?;
+            Ok(Some((repo, p)))
+        })
+    }
+
     pub fn set_change_preview(&self, id: &str, preview: Option<&Preview>) -> Result<()> {
         self.sql.execute("UPDATE changes SET preview = ?, updated_at = ? WHERE id = ?", params![preview.map(json), now(), id])?;
         Ok(())
@@ -1061,10 +1089,11 @@ impl Db {
 
     // ── change flags ──
 
-    pub fn update_change_meta(&self, id: &str, title: Option<&str>, body: Option<&str>, draft: Option<bool>) -> Result<()> {
+    pub fn update_change_meta(&self, id: &str, title: Option<&str>, body: Option<&str>, draft: Option<bool>, labels: Option<&[String]>) -> Result<()> {
+        let labels = labels.map(|l| serde_json::to_string(l).unwrap_or_else(|_| "[]".into()));
         self.sql.execute(
-            "UPDATE changes SET title = COALESCE(?, title), body = COALESCE(?, body), draft = COALESCE(?, draft), updated_at = ? WHERE id = ?",
-            params![title, body, draft, now(), id],
+            "UPDATE changes SET title = COALESCE(?, title), body = COALESCE(?, body), draft = COALESCE(?, draft), labels = COALESCE(?, labels), updated_at = ? WHERE id = ?",
+            params![title, body, draft, labels, now(), id],
         )?;
         Ok(())
     }

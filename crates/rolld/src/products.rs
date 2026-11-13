@@ -23,11 +23,12 @@ pub enum Product {
     Nosql,
     Queues,
     Code,
+    Apps,
     Search,
 }
 
 impl Product {
-    pub const ALL: [Product; 9] = [Product::Postgres, Product::Redis, Product::Streams, Product::Tasks, Product::Storage, Product::Nosql, Product::Queues, Product::Code, Product::Search];
+    pub const ALL: [Product; 10] = [Product::Postgres, Product::Redis, Product::Streams, Product::Tasks, Product::Storage, Product::Nosql, Product::Queues, Product::Code, Product::Apps, Product::Search];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -39,6 +40,7 @@ impl Product {
             Product::Nosql => "nosql",
             Product::Queues => "queues",
             Product::Code => "code",
+            Product::Apps => "apps",
             Product::Search => "search",
         }
     }
@@ -55,6 +57,7 @@ impl Product {
             Product::Nosql => &["/v1/nosql", "/internal/nosql"],
             Product::Queues => &["/v1/queues"],
             Product::Code => &["/v1/code", "/git", "/internal/code"],
+            Product::Apps => &["/v1/apps"],
             Product::Search => &["/v1/search", "/internal/search"],
         }
     }
@@ -180,9 +183,9 @@ mod tests {
 
     #[test]
     fn the_old_switches_are_shorthands_over_one_set() {
-        assert_eq!(resolve(Switches::default()).unwrap(), "postgres,redis,streams,tasks,storage,nosql,queues,code,search");
+        assert_eq!(resolve(Switches::default()).unwrap(), "postgres,redis,streams,tasks,storage,nosql,queues,code,apps,search");
         assert_eq!(resolve(Switches { products: Some(vec![Product::Code, Product::Redis]), ..Default::default() }).unwrap(), "redis,code");
-        assert_eq!(resolve(Switches { no_storage: true, no_queues: true, ..Default::default() }).unwrap(), "postgres,redis,streams,tasks,nosql,code,search");
+        assert_eq!(resolve(Switches { no_storage: true, no_queues: true, ..Default::default() }).unwrap(), "postgres,redis,streams,tasks,nosql,code,apps,search");
         assert_eq!(resolve(Switches { code_only: true, ..Default::default() }).unwrap(), "code");
         assert_eq!(resolve(Switches { nosql_only: true, no_queues: true, ..Default::default() }).unwrap(), "nosql");
         assert!(resolve(Switches { nosql_only: true, no_nosql: true, ..Default::default() }).is_err());
