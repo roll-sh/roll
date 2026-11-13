@@ -24,9 +24,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/lib/gate.sh
 
-CODE_CRATES=(code-sql roll-cluster code-store code-git code-github code-index code-review code-chat code-control code-preview roll-fetch roll-workspace roll-previews)
+# roll-auth, roll-access, roll-mcp and roll-net are roll code's gate and evaluator too (docs/permissions.md):
+# their suites run here, and with --docker on Postgres like the stores.
+CODE_CRATES=(code-sql roll-cluster code-store code-git code-github code-index code-review code-chat code-control code-preview roll-fetch roll-workspace roll-previews
+             roll-auth roll-access roll-mcp roll-net roll-accounts)
 RUST_PATHS=("${CODE_CRATES[@]/#/crates/}" crates/agent-proto/src crates/roll-cli/src/code crates/roll-cli/src/code.rs crates/roll-cli/src/main.rs
-            crates/roll-cli/tests/code.rs crates/roll-cli/tests/common crates/roll-cli/Cargo.toml
+            crates/roll-cli/src/access.rs crates/roll-cli/tests/code.rs crates/roll-cli/tests/token.rs crates/roll-cli/tests/common crates/roll-cli/Cargo.toml
             docs/code/test-coverage.md Cargo.toml Cargo.lock scripts/test-code.sh scripts/lib/gate.sh)
 # Images are pinned by digest (tag@multi-arch index digest): a rebuilt upstream tag can't change them.
 DYNAMODB_IMAGE=amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
@@ -48,7 +51,7 @@ need_git code
 # The default selection: every code crate's unit and integration tests except the stress run
 # (code-store's throughput) and real Docker (code-preview's docker), and `roll code`'s.
 default_targets() {
-  local t=(--lib --bin roll --test code) crate f
+  local t=(--lib --bin roll --test code --test token) crate f
   for crate in "${CODE_CRATES[@]}"; do
     for f in crates/"$crate"/tests/*.rs; do
       [[ -e $f ]] || continue
@@ -61,7 +64,7 @@ default_targets() {
 default_args() {
   case "$1:$2:$3" in
     roll-cli:roll:bin) ARGS=(code) ;;
-    roll-cli:code:test) ;;
+    roll-cli:code:test | roll-cli:token:test) ;;
     code-store:throughput:test | code-preview:docker:test) return 1 ;;
     *) [[ " ${CODE_CRATES[*]} " == *" $1 "* ]] ;;
   esac

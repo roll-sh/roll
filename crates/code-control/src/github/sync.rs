@@ -33,7 +33,7 @@ fn oid_hex(s: &str) -> Option<Oid> {
 
 pub(super) async fn credentials(hub: &Hub, link: &Link) -> Result<(String, Credentials)> {
     let c = hub.client.git_credentials(link.installation_id, &link.owner, &link.repo).await.map_err(gh)?;
-    Ok((c.url, Credentials { username: c.username, password: c.password }))
+    Ok((c.url, Credentials { username: c.username, password: c.password, vouched: false }))
 }
 
 // ── import ──

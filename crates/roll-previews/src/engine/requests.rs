@@ -5,14 +5,19 @@ use super::*;
 impl Engine {
     // ── what the API asks for ──
 
+    /// The ids of `owner`'s workspace projects (a signed-in person's).
+    pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.workspace.list(roll_workspace::Scope::Owner(owner))?.into_iter().map(|p| p.id).collect())
+    }
+
     /// A workspace project, or a 404.
     pub fn workspace_project(&self, id: &str) -> Result<roll_workspace::Project> {
-        Ok(self.workspace.get(id)?)
+        Ok(self.workspace.get(roll_workspace::Scope::All, id)?)
     }
 
     /// A preview for `branch` of `repo` (or for change `change`), made by hand.
     pub async fn create(&self, project_id: &str, repo: &str, branch: Option<&str>, change: Option<&str>, by: &str) -> Result<(Preview, bool)> {
-        let project = self.workspace.get(project_id)?;
+        let project = self.workspace.get(roll_workspace::Scope::All, project_id)?;
         if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) {
             return Err(Error::NotFound(format!("{repo} isn't in project {}", project.name)));
         }

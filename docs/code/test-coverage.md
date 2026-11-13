@@ -360,6 +360,9 @@ Open mode: `contract.rs::open_mode_makes_everyone_admin`.
   approve or request changes only where installed: `routes.rs::every_repo_route_follows_the_auth_matrix`,
   `review.rs::app_tokens_are_scoped_even_on_an_open_daemon`,
   `review.rs::review_apps_events_scopes_requests_and_failed_deliveries`.
+- A signed-in user's session (docs/accounts.md, rolld's gate) is their own user owner, made on
+  first sign-in; an admin's is the admin: `rolld/tests/auth.rs::every_control_plane_route_needs_the_operator_token`,
+  `roll-accounts/tests/flows.rs::an_invite_becomes_a_session_by_email_code`.
 - Anonymous writes are 401 (the dashboard opens its sign-in prompt), never 403, including owner
   create, owner patch and token create: `api.rs::repos_rename_and_visibility`, `routes.rs::every_repo_route_follows_the_auth_matrix`.
 
@@ -938,6 +941,7 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 | `push` events from git pushes | `webhooks.rs::pushes_are_webhook_events` |
 | writers only (401 anonymous, 403 other owners) for hooks and statuses; private addresses refused at delivery with an admin token | `webhooks.rs::webhooks_need_writers_and_public_addresses` |
 | `landed` from the durable land log: a 4,500-landing burst (more than the broadcast channel holds) delivered exactly once each; landings while webhooks weren't running delivered after a restart, from the persisted cursor; a new webhook gets no history | `webhooks.rs::landed_deliveries_survive_a_burst_larger_than_the_broadcast_channel`, `webhooks.rs::landings_while_the_daemon_was_down_are_delivered_after_a_restart`, `webhooks.rs::a_new_webhook_gets_no_history`, `code-store/tests/land_log.rs` |
+| leaked roll tokens: what lands is read after it lands, from the land log with its own cursor (starting at the present); files that may hold a roll token go to roll-access with where they are, others don't (docs/permissions.md, "Leaked tokens") | `webhooks.rs::landed_files_are_scanned_for_roll_tokens` |
 | the delivery log keeps the start of each response (2 KB, cut at a character) | `webhooks.rs::deliveries_keep_the_start_of_the_response` |
 | two nodes forwarding one land log at once (their background forwarders and four more racing rounds) while landings arrive: each landing queued and delivered exactly once per webhook | `webhooks.rs::two_forwarders_deliver_each_landing_once` |
 | a forwarder failing after queueing a page (a crash mid-page) keeps nothing of it and leaves the cursor; earlier pages stay forwarded, the next round forwards the rest, none twice | `webhooks.rs::a_forwarder_failing_mid_page_neither_drops_nor_duplicates` |

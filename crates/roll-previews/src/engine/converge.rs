@@ -74,7 +74,7 @@ impl Engine {
             self.store.update(&r.id, |row| row.state = State::Creating)?;
             self.store.log(&r.id, "approved: starting")?;
         }
-        let project = self.workspace.get(&r.project_id)?;
+        let project = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
         let name = branch_name(&r.id);
 
         // 1. Data: a branch of every data resource of the project the rules don't skip.

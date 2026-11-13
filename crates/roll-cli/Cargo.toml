@@ -48,6 +48,10 @@ urlencoding.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# `tests/token.rs`: scoped tokens behind the real gate in process.
+roll-access.workspace = true
+roll-auth.workspace = true
+roll-workspace.workspace = true
 code-chat.workspace = true
 code-control.workspace = true
 code-sql.workspace = true
@@ -56,7 +60,6 @@ tempfile.workspace = true
 aws-sdk-s3.workspace = true
 # `tests/preview.rs`: roll previews on a real roll code.
 roll-previews.workspace = true
-roll-workspace.workspace = true
 code-preview.workspace = true
 # `tests/nosql_api.rs`: the real control API in process.
 nosql-control.workspace = true

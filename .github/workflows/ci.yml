@@ -35,6 +35,9 @@ jobs:
           # RESP and S3 auth and parsing.
           - name: protocols
             packages: -p redis-proto -p s3-proto
+          # The permission model scoped tokens are decided by (rules, covers, outcomes).
+          - name: access
+            packages: -p roll-auth
     name: rust (${{ matrix.name }})
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only

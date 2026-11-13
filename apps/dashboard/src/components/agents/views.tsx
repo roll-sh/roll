@@ -1017,7 +1017,7 @@ export function PinTools({
       <div
         ref={ref}
         data-pin-tools
-        className={`pointer-events-none absolute right-2 bottom-[calc(100%+5px)] z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none ${armed ? "" : "hidden"}`}
+        className={`pointer-events-none absolute right-2 bottom-[calc(100%+5px)] z-10 flex translate-y-1 before:absolute before:inset-x-0 before:top-full before:h-2 before:content-[''] items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none ${armed ? "" : "hidden"}`}
         data-nodrag
         data-touch-tools
       >

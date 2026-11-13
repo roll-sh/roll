@@ -765,6 +765,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-sesv2"
+version = "1.140.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf26866eb72be4a43eb1366424e4098567ca621486feec75083b34d1d2b17fee"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sso"
 version = "1.114.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1645,6 +1670,7 @@ dependencies = [
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "roll-net",
  "rsa",
  "serde",
  "serde_json",
@@ -4227,6 +4253,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.8",
  "reqwest",
+ "roll-net",
  "rsa",
  "rusqlite",
  "serde",
@@ -6210,6 +6237,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls 0.26.6",
@@ -6264,12 +6292,83 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-access"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "crc32fast",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "hmac 0.12.1",
+ "http-body-util",
+ "ipnet",
+ "percent-encoding",
+ "reqwest",
+ "ring",
+ "roll-auth",
+ "roll-cluster",
+ "roll-net",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "roll-accounts"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "aws-config",
+ "aws-sdk-sesv2",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "reqwest",
+ "roll-auth",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "roll-auth"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "flate2",
+ "getrandom 0.4.3",
+ "qrcode",
+ "ring",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tower-http 0.7.1",
+ "tracing",
 ]
 
 [[package]]
@@ -6302,6 +6401,8 @@ dependencies = [
  "pg-storage",
  "regex",
  "reqwest",
+ "roll-access",
+ "roll-auth",
  "roll-previews",
  "roll-workspace",
  "rustls-pemfile",
@@ -6393,6 +6494,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-mcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "code-sql",
+ "futures",
+ "http-body-util",
+ "percent-encoding",
+ "roll-access",
+ "roll-auth",
+ "roll-workspace",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "url",
+]
+
+[[package]]
+name = "roll-net"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "roll-previews"
 version = "0.1.0"
 dependencies = [
@@ -6411,6 +6541,7 @@ dependencies = [
  "hyper 1.12.0",
  "hyper-util",
  "parking_lot",
+ "roll-auth",
  "roll-cluster",
  "roll-workspace",
  "serde",
@@ -6419,6 +6550,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -6431,6 +6563,7 @@ dependencies = [
  "code-sql",
  "getrandom 0.4.3",
  "http-body-util",
+ "roll-auth",
  "serde",
  "serde_json",
  "tempfile",
@@ -6455,6 +6588,7 @@ dependencies = [
  "clap",
  "code-control",
  "code-preview",
+ "code-review",
  "code-sql",
  "futures",
  "futures-util",
@@ -6493,9 +6627,13 @@ dependencies = [
  "redis-control",
  "redis-server",
  "reqwest",
+ "roll-access",
+ "roll-accounts",
  "roll-auth",
  "roll-cluster",
  "roll-edge",
+ "roll-mcp",
+ "roll-net",
  "roll-previews",
  "roll-workspace",
  "s3-api",
@@ -6928,11 +7066,11 @@ dependencies = [
  "p256",
  "pkcs1",
  "pkcs8",
- "qrcode",
  "rand 0.8.8",
  "rcgen",
  "reqwest",
  "ring",
+ "roll-auth",
  "roll-cluster",
  "rsa",
  "s3-image",

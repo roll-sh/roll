@@ -6,7 +6,10 @@
 //! - On loopback the token is optional: without one, nothing is checked (local development).
 //! - Off loopback, or with `ROLL_EDGE=1`, rolld refuses to start without one.
 //! - CORS answers only the dashboard's origins (`ROLL_DASHBOARD_ORIGIN`; on loopback, by default,
-//!   any localhost port).
+//!   any localhost port), with credentials: people sign in with a session cookie
+//!   (docs/accounts.md), which the gate resolves on every request. An admin's session opens what
+//!   the token does; anyone else's opens roll code, the agents and their own projects, and gets
+//!   403 on the rest.
 
 use crate::Args;
 use roll_auth::{Access, AdminToken, Gate, Origins, Rule};
@@ -17,6 +20,16 @@ use tracing::{debug, info, warn};
 /// Routes that don't need the operator's token, longest match wins (`/v1/code` covers everything
 /// under it). Everything not here is the operator's.
 pub const RULES: &[Rule] = &[
+    // OAuth for MCP clients (docs/mcp.md, "Authorization"): discovery, registration, the token
+    // endpoint and revocation are public by the spec; they're merged in front of the gate.
+    Rule { route: "/.well-known", access: Access::Public("OAuth discovery for MCP clients") },
+    Rule { route: "/v1/access/oauth/register", access: Access::Public("OAuth dynamic client registration (public clients, PKCE)") },
+    Rule { route: "/v1/access/oauth/token", access: Access::Public("OAuth token endpoint: codes and refresh tokens are the credentials") },
+    Rule { route: "/v1/access/oauth/revoke", access: Access::Public("OAuth token revocation") },
+    Rule { route: "/v1/access/leaks/github", access: Access::Public("GitHub's secret scanning reports: GitHub's signature is the credential") },
+    // roll's MCP server answers 401 itself, naming the OAuth metadata; grants are decided by the
+    // evaluator before it, and each tool call goes through the gate again.
+    Rule { route: "/v1/mcp", access: Access::Product("MCP: 401 with OAuth discovery without a token") },
     // Health: load balancers and the dashboard's status; nothing a tenant owns.
     Rule { route: "/v1/health", access: Access::Public("health: Postgres control plane version and status") },
     Rule { route: "/v1/code/health", access: Access::Public("health: load balancers") },
@@ -33,6 +46,11 @@ pub const RULES: &[Rule] = &[
     // operator's token as its admin.
     Rule { route: "/v1/code", access: Access::Product("roll code: owners, tokens, public repos, signed webhooks, device login") },
     Rule { route: "/git", access: Access::Product("roll code's git smart HTTP: its tokens, public repos") },
+    // Accounts: sign-in is public; the rest checks the session, an admin's, or the operator's
+    // token (docs/accounts.md).
+    Rule { route: "/v1/accounts", access: Access::Product("accounts: sign-in, then the session decides") },
+    // Workspace projects: the operator and every signed-in user, each seeing their own.
+    Rule { route: "/v1/workspace", access: Access::User("workspace projects: a user's own") },
     // Node-to-node hops are signed with the cluster secret; computes fetch WAL with their token.
     Rule { route: "/internal", access: Access::Product("internal: signed hops and the WAL token") },
     // Storage: IAM users signed in to the dashboard (console sessions) act as themselves.
@@ -64,6 +82,14 @@ pub struct Auth {
 }
 
 impl Auth {
+    /// Sign people in with session cookies too (docs/accounts.md). `api_url`: where browsers
+    /// reach this API, whose origin may send writes besides the dashboard's.
+    pub fn sessions(&mut self, sessions: Arc<dyn roll_auth::Sessions>, api_url: &str) {
+        self.gate = Gate::with_sessions(self.token.clone(), RULES.to_vec(), sessions, self.origins.clone(), api_url);
+    }
+}
+
+impl Auth {
     /// The token and origins from the environment, refusing what isn't safe: no token while
     /// listening off loopback (or behind the edge).
     pub fn new(args: &Args) -> anyhow::Result<Self> {
@@ -83,6 +109,14 @@ impl Auth {
             None if exposed => {
                 warn!("ROLL_DASHBOARD_ORIGIN isn't set: no browser origin may call the control-plane API");
                 Origins::List(Vec::new())
+            }
+            // With a token, sessions are on and CORS carries credentials: any page on any local
+            // port reading the session (and its CSRF token) would act as whoever is signed in.
+            // Only the dashboard's own origin (`ROLL_WEB_URL`) then.
+            None if token.is_some() => {
+                let web = args.web_url.trim();
+                let origin = web.find("://").map_or(web, |i| web[i + 3..].find('/').map_or(web, |j| &web[..i + 3 + j]));
+                Origins::parse(origin).map_err(|e| anyhow::anyhow!("ROLL_WEB_URL as the dashboard's origin: {e}"))?
             }
             None => Origins::Local,
         };
@@ -112,18 +146,30 @@ impl Auth {
     /// route with its access at debug (`RUST_LOG=rolld::auth=debug`).
     pub fn gate(&self, host: &str, router: axum::Router) -> axum::Router {
         let routes = route_patterns(&router);
-        let (mut public, mut product, mut credential, mut operator) = (0, 0, 0, 0);
+        let (mut public, mut product, mut credential, mut user, mut operator) = (0, 0, 0, 0, 0);
         for r in &routes {
             let access = self.gate.access(r);
             match access {
                 Access::Public(_) => public += 1,
                 Access::Product(_) => product += 1,
                 Access::Credential(_) => credential += 1,
+                Access::User(_) => user += 1,
                 Access::Operator => operator += 1,
             }
-            debug!(target: "rolld::auth", host = %host, route = %r, access = %access, "route");
+            let scoped = roll_access::catalog::classified(r).unwrap_or("none");
+            debug!(target: "rolld::auth", host = %host, route = %r, scoped = %scoped, access = %access, "route");
         }
-        info!(host = %host, routes = routes.len(), operator, operator_or_credential = credential, product, public, "control-plane routes");
+        info!(host = %host, routes = routes.len(), operator, operator_or_credential = credential, user, product, public, "control-plane routes");
+        router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check))
+    }
+
+    /// Scoped tokens' evaluator (`access.rs`): set before serving.
+    pub fn set_authorizer(&self, a: std::sync::Arc<dyn roll_auth::Authorizer>) {
+        self.gate.set_authorizer(a);
+    }
+
+    /// `router` behind the gate, without listing its routes (the MCP server's view of the API).
+    pub fn layer(&self, router: axum::Router) -> axum::Router {
         router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check))
     }
 

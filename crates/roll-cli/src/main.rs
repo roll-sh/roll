@@ -1,3 +1,4 @@
+mod access;
 mod agent;
 mod automation;
 mod code;
@@ -39,6 +40,10 @@ struct Cli {
     /// and it's the default for `roll code` and `roll tasks`.
     #[arg(long, env = "ROLL_ADMIN_TOKEN", global = true, hide_env_values = true)]
     admin_token: Option<String>,
+    /// A scoped token (`rlt_…`, `roll token create`): every API takes it, within its rules. It
+    /// wins over the operator's token when both are set.
+    #[arg(long = "roll-token", env = "ROLL_TOKEN", global = true, hide_env_values = true)]
+    roll_token: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -75,6 +80,12 @@ enum Cmd {
     /// S3-compatible object storage.
     #[command(subcommand, alias = "s3")]
     Storage(storage::Storage),
+    /// Scoped tokens: what an agent, a CI job or a script may do (`create`, `list`, `revoke`, …).
+    #[command(subcommand, alias = "tokens")]
+    Token(access::Token),
+    /// roll's MCP server: client config, approvals waiting for you, the audit log.
+    #[command(subcommand)]
+    Mcp(access::Mcp),
     /// Preview environments: every service and a branch of every data resource of a project,
     /// per change or pull request.
     #[command(subcommand, alias = "previews")]
@@ -381,7 +392,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
     let cli = Cli::from_arg_matches(&matches)?;
-    let admin = cli.admin_token.filter(|t| !t.trim().is_empty());
+    // A scoped token, when set, is what everything uses: the narrower credential wins.
+    let admin = cli.roll_token.filter(|t| !t.trim().is_empty()).or(cli.admin_token.filter(|t| !t.trim().is_empty()));
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
@@ -407,6 +419,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
+        Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
+        Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;

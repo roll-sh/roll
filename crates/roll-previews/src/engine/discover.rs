@@ -38,7 +38,7 @@ impl Engine {
     }
 
     pub(super) async fn discover(&self, project_id: &str, s: &Settings) -> anyhow::Result<()> {
-        let project = match self.workspace.get(project_id) {
+        let project = match self.workspace.get(roll_workspace::Scope::All, project_id) {
             Ok(p) => p,
             Err(roll_workspace::Error::NotFound(_)) => {
                 // The project is gone: so are its previews (their branches go with them).

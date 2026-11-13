@@ -272,6 +272,17 @@ export async function loadInventory(): Promise<Inventory> {
   return { views: new Map(lists.flat().map((v) => [resourceKey(v), v])), kinds };
 }
 
+/** A product's resources as rules name them (their ids), with their names: the token builder's picker. */
+export function resourcesByProduct(inv: Inventory): Record<string, { id: string; name: string }[]> {
+  const out: Record<string, { id: string; name: string }[]> = {};
+  for (const v of inv.views.values()) {
+    const product = KIND_PRODUCT[v.kind];
+    (out[product] ??= []).push({ id: v.ref, name: v.name });
+  }
+  for (const list of Object.values(out)) list.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
 /** What can be made from the canvas (repos are connected, not made, here). */
 export const CREATABLE: ResourceKind[] = ["postgres", "redis", "nosql", "stream", "bucket"];
 

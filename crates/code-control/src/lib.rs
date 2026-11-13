@@ -12,6 +12,7 @@ pub mod cluster;
 pub mod db;
 pub mod ext;
 pub mod git;
+pub mod leaks;
 pub mod github;
 pub mod mcp;
 pub mod model;
@@ -450,6 +451,13 @@ pub struct Code {
     pub(crate) chat: std::sync::OnceLock<Arc<chatops::Chat>>,
     /// Linear: roll's app config and the integration's state here.
     pub linear: agents::linear::Linear,
+    /// The router the agents relay calls on a caller's behalf, when the host gives one: rolld's
+    /// whole API behind its gate, so a scoped token's relayed requests are decided like its own.
+    pub(crate) relay_api: Arc<std::sync::OnceLock<axum::Router>>,
+    /// Where presses on access approval cards go (rolld: roll's access service).
+    pub(crate) access_decider: std::sync::OnceLock<chatops::access::AccessDecider>,
+    /// Where leaked roll tokens go (rolld: roll's access service), once set.
+    pub(crate) leak_handler: std::sync::OnceLock<leaks::LeakHandler>,
 }
 
 /// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
@@ -527,6 +535,9 @@ impl Code {
             db,
             events,
             landing_changes: Cache::new(65_536),
+            relay_api: Default::default(),
+            access_decider: Default::default(),
+            leak_handler: Default::default(),
             languages: Cache::new(1024),
             contributors: Cache::new(1024),
             last_changes: Cache::new(4096),
@@ -676,6 +687,61 @@ impl Code {
         Err(Error::Unauthorized)
     }
 }
+
+impl Code {
+    /// The caller a signed-in user is (docs/accounts.md): an admin is the admin, anyone else
+    /// their own user owner, looked up on every request. A user whose owner doesn't exist (yet)
+    /// is anonymous here.
+    pub fn session_caller(&self, user: &roll_auth::SignedIn) -> Result<Caller> {
+        if user.admin {
+            return Ok(Caller::Admin);
+        }
+        let Some(id) = &user.code_owner else { return Ok(Caller::Anonymous) };
+        Ok(match self.db.owner_by_id(id)? {
+            Some(o) => Caller::Owner { id: o.id, name: o.name, token: SESSION_TOKEN_NAME.into() },
+            None => Caller::Anonymous,
+        })
+    }
+
+    /// A user owner named `handle` for a new account (docs/accounts.md): its id, or `None` when
+    /// the name is taken or reserved.
+    pub fn create_user_owner(&self, handle: &str, display_name: &str) -> Result<Option<String>> {
+        match self.create_owner(&Caller::Admin, handle, model::OwnerKind::User, Some(display_name)) {
+            Ok(o) => Ok(Some(o.id)),
+            Err(Error::Conflict(_) | Error::Unprocessable(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Cut an owner off at once (its person's account was disabled, docs/accounts.md): every
+    /// token it holds stops working and every machine's link closes. Re-enabling the account
+    /// gives none of them back.
+    pub async fn suspend_owner(&self, owner_id: &str) -> Result<()> {
+        for t in self.db.tokens(owner_id)? {
+            if let Some(id) = t["id"].as_str() {
+                self.db.delete_token(owner_id, id)?;
+            }
+        }
+        for m in agents::store::machines(self.db.sql(), owner_id)? {
+            if !m.revoked {
+                agents::api::revoke(self, owner_id, &m.id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `name` could be a new owner's name: valid, not reserved, not taken.
+    pub fn owner_name_free(&self, name: &str) -> Result<bool> {
+        Ok(match names::owner(name) {
+            Ok(n) => self.db.owner(&n)?.is_none(),
+            Err(_) => false,
+        })
+    }
+}
+
+/// The token name a signed-in user's caller carries (never `agent:…`: a person manages their
+/// owner).
+pub const SESSION_TOKEN_NAME: &str = "session";
 
 /// control.db in `dir` (SQLite) — or, in tests with `ROLL_CODE_TEST_DATABASE` set, a Postgres
 /// schema that a restart on the same directory finds again ([`code_sql::Db::open_or_test`]).
