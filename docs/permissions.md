@@ -713,7 +713,8 @@ the list below. It also fails on a route decided only by a prefix row (`/v1/prev
 method) that isn't in `crates/roll-access/src/prefix-reviewed.txt`: such a route takes the prefix's
 action whatever it answers (a preview's variables, with their values, were a read until they got
 a row of their own), so each new one is either given its own row or looked at and listed. The
-operator's routes:
+operator's routes (public routes, which anyone may call without a token, aren't a grant's to
+classify, so the check skips them):
 
 | routes | why |
 | --- | --- |
