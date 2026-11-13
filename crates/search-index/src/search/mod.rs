@@ -168,6 +168,12 @@ pub trait Scorer: Scorable + Send {
     fn has_two_phase(&self) -> bool {
         false
     }
+
+    /// The score of every match, when it is one constant: [`DefaultBulkScorer`] then hands a
+    /// collector that skips nothing blocks of matches ([`LeafCollector::collect_block`]).
+    fn constant_score(&self) -> Option<f32> {
+        None
+    }
     fn approx_next(&mut self) -> u32 {
         self.next()
     }
@@ -420,6 +426,23 @@ impl BulkScorer for DefaultBulkScorer {
         if collector.skips() {
             return score_skipping(s.as_mut(), collector, live, d, max);
         }
+        if let Some(score) = s.constant_score() {
+            let mut block = [0u32; 256];
+            while d < max {
+                let mut n = 0;
+                while n < block.len() && d < max {
+                    if live.is_none_or(|l| l.is_live(d)) {
+                        block[n] = d;
+                        n += 1;
+                    }
+                    d = s.next();
+                }
+                if n > 0 {
+                    collector.collect_block(&block[..n], score)?;
+                }
+            }
+            return Ok(d);
+        }
         while d < max {
             if live.is_none_or(|l| l.is_live(d)) {
                 collector.collect(d, s.as_mut())?;
@@ -599,10 +622,13 @@ pub type QueryRef = Arc<dyn Query>;
 pub trait LeafCollector {
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()>;
     /// Collects `docs` (ascending, all live), every one scoring the constant `score`: Lucene's
-    /// `collect(DocIdStream)` for constant-score bulk scorers (`match_all`), so a collector
-    /// takes a block at once (a count, an append to an aggregation batch) instead of a virtual
-    /// call per doc. Callers use it only where no minimum competitive score could prune a doc.
-    /// Same results as [`collect`](Self::collect) per doc, which is the default.
+    /// `collect(DocIdStream)` for constant-score bulk scorers (`match_all`, and any scorer with a
+    /// [`Scorer::constant_score`] under [`DefaultBulkScorer`]), so a collector takes a block at
+    /// once (a count, an append to an aggregation batch) instead of a virtual call per doc. No
+    /// scorer sees a minimum competitive score announced here: a collector whose minimum passes
+    /// `score` ends the segment itself (`CollectionTerminated`), where a constant-score scorer
+    /// would have ended its iterator. Same results as [`collect`](Self::collect) per doc, which
+    /// is the default.
     fn collect_block(&mut self, docs: &[u32], score: f32) -> Result<()> {
         let mut sv = ScoreValue(score);
         for &d in docs {

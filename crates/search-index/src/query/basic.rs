@@ -114,6 +114,9 @@ impl Scorer for SetScorer {
     fn pure_scores(&self) -> bool {
         true
     }
+    fn constant_score(&self) -> Option<f32> {
+        Some(self.score)
+    }
     fn doc(&self) -> u32 {
         self.doc
     }
@@ -172,6 +175,9 @@ impl Scorable for ConstScorer {
 impl Scorer for ConstScorer {
     fn pure_scores(&self) -> bool {
         true
+    }
+    fn constant_score(&self) -> Option<f32> {
+        Some(self.score)
     }
     fn doc(&self) -> u32 {
         self.inner.doc()
@@ -483,6 +489,11 @@ impl LeafCollector for ConstLeaf<'_> {
             return Err(crate::error::Error::CollectionTerminated);
         }
         Ok(())
+    }
+    /// A block takes our score; the collector ends the segment itself once nothing can
+    /// compete ([`LeafCollector::collect_block`]'s contract).
+    fn collect_block(&mut self, docs: &[u32], _score: f32) -> Result<()> {
+        self.inner.collect_block(docs, self.score)
     }
     // A sorted collector's competitive iterator still applies under a constant score.
     fn skips(&self) -> bool {
