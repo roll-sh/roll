@@ -528,6 +528,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   consent screen. A token theirs makes is theirs too.
 - **It acts as them, never as more.** On every request the evaluator looks the person up as they
   are now (`roll_auth::Sessions::person`, never cached): disabled or gone, the token answers 401.
+  A product's own background work that looks a stored grant up (`roll_auth::Grants::grant`: a
+  sync a token made) gets `None` for it then too (`Sessions::person_now`).
   An admin's token runs as the operator's, narrowed. Anyone else's token runs as their session
   would: only routes their session may call (the gate's `User`, `Product` and `Public` rules, which
   it hands the evaluator as `roll_auth::RouteAccess`), as them (`roll_auth::SignedIn`, no
