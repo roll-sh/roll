@@ -16,8 +16,20 @@ pub enum Token {
     ///   roll token create migrate --product postgres --resource prj_ab… --allow read,write --ask delete
     Create(Box<Create>),
     /// List tokens and OAuth connections, newest first.
+    ///   roll token list --product secrets --resource prj_x4k9…   (the ones made for it)
+    ///   roll token list --workloads                               (workloads' tokens for minutes)
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Only tokens with a rule on this product by name.
+        #[arg(long)]
+        product: Option<String>,
+        /// With --product: only those whose rule names this resource (an id or project).
+        #[arg(long, requires = "product")]
+        resource: Option<String>,
+        /// Workload tokens instead (a CI job's, for minutes; the latest 500).
+        #[arg(long, conflicts_with_all = ["product", "resource"])]
+        workloads: bool,
+    },
     /// Show a token's rules, expiry and last use.
     Show { id: String },
     /// Revoke a token or connection: every request with it fails from now on.
@@ -377,15 +389,30 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token) -> anyhow::Result<()> 
             println!("\n{}\n", s(&made["token"]));
             eprintln!("Copy it now: it isn't shown again. Use it as ROLL_TOKEN, or as Authorization: Bearer for the API and MCP.");
         }
-        Token::List => {
-            let list = api.get("/v1/access/tokens").await?;
+        Token::List { product, resource, workloads } => {
+            let mut query: Vec<String> = Vec::new();
+            if workloads {
+                query.push("kind=workload".into());
+            }
+            if let Some(p) = &product {
+                query.push(format!("product={}", urlencoding::encode(p)));
+            }
+            if let Some(r) = &resource {
+                query.push(format!("resource={}", urlencoding::encode(r)));
+            }
+            let path = if query.is_empty() { "/v1/access/tokens".to_string() } else { format!("/v1/access/tokens?{}", query.join("&")) };
+            let list = api.get(&path).await?;
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&list)?);
                 return Ok(());
             }
             let list = list.as_array().cloned().unwrap_or_default();
             if list.is_empty() {
-                println!("no tokens yet: roll token create <name> --preset read-only");
+                if path.contains('?') {
+                    println!("none");
+                } else {
+                    println!("no tokens yet: roll token create <name> --preset read-only");
+                }
             }
             for g in &list {
                 print_grant(g);

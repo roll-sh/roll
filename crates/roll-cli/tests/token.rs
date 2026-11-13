@@ -50,6 +50,10 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     let made = json_of(&roll(&api, "", &["--json", "token", "create", "agent", "--product", "postgres", "--allow", "read", "--ask", "delete", "--expires", "7d"]));
     let token = made["token"].as_str().unwrap().to_string();
     let id = made["grant"]["id"].as_str().unwrap().to_string();
+    // Listed by what it's for: a rule on postgres, but not naming one database.
+    let ids = |args: &[&str]| json_of(&roll(&api, "", args)).as_array().unwrap().iter().map(|g| g["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(ids(&["--json", "token", "list", "--product", "postgres"]), vec![id.clone()]);
+    assert!(ids(&["--json", "token", "list", "--product", "postgres", "--resource", "prj_a"]).is_empty());
 
     // ROLL_TOKEN wins over ROLL_ADMIN_TOKEN: the scoped token is what's used.
     let me = json_of(&roll(&api, &token, &["--json", "token", "whoami"]));
