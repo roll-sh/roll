@@ -266,10 +266,13 @@ struct TightenQuery {
 
 /// Its rules narrowed to what its allowed requests used ([`crate::tighten`]): a proposal, never
 /// wider; applying it is a `PATCH` of `rules`.
-async fn tighten(State(a): S, Path(id): Path<String>, Query(q): Query<TightenQuery>) -> crate::Result<Json<Value>> {
+async fn tighten(State(a): S, ext: Extensions, Path(id): Path<String>, Query(q): Query<TightenQuery>) -> crate::Result<Json<Value>> {
     let days = q.days.unwrap_or(30).clamp(1, 90);
     let since = code_sql::now_ms() - days * 86_400_000;
-    let (grant, used) = blocking(a, move |a| Ok((a.store.get(&id)?, a.store.used(&id, since)?))).await?;
+    // A person sees only their own tokens' activity.
+    let who = who(&a, &ext)?;
+    let grant = visible_grant(&a, &who, &id).await?;
+    let used = blocking(a, move |a| a.store.used(&id, since)).await?;
     let rules = crate::tighten::tighten(&grant.rules, &used);
     Ok(Json(json!({ "since": since, "days": days, "used": used, "rules": rules, "narrower": rules != grant.rules })))
 }
