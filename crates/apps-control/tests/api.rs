@@ -235,6 +235,20 @@ async fn visit(w: &World, host: &str, path: &str) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&b).unwrap_or(Value::Null))
 }
 
+/// Visit until `dep` answers: a deployment reads as active at its switch, and its instances
+/// take the requests a moment after (about 4 s at most).
+async fn visit_deployment(w: &World, host: &str, dep: &str) -> (StatusCode, Value) {
+    let mut last = (StatusCode::NOT_FOUND, Value::Null);
+    for _ in 0..200 {
+        last = visit(w, host, "/").await;
+        if last.1["deployment"] == dep {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    last
+}
+
 /// GET `path` until `pred` holds of its answer (about 4 s at most).
 async fn get_until(api: &axum::Router, path: &str, pred: impl Fn(&Value) -> bool) -> Value {
     for _ in 0..200 {
@@ -602,7 +616,7 @@ async fn a_link_puts_its_variables_in_the_instances() {
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,REDIS_URL"}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
-    let (st, body) = visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
+    let (st, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), r["id"].as_str().unwrap()).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "REDIS_URL": "redis://key0@cache.roll.test:6379"}));
     // Unlinking revokes them, and so does deleting the service.
@@ -1589,6 +1603,22 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     assert_eq!(st, StatusCode::OK);
     assert!(js.contains("https://roll.test/dashboard/projects/") && js.contains("previews?preview=abc"), "the note goes to the preview in roll");
     assert!(!get("/", "application/json").await.1.contains("feedback.js"), "an API call isn't a page");
+    // What's been said about a page, from roll previews: none before it's on this node.
+    assert_eq!(get("/__roll/feedback.json?path=%2Fpricing", "*/*").await.0, StatusCode::NOT_FOUND);
+    struct Said(Mutex<Vec<(String, String)>>);
+    #[async_trait]
+    impl apps_control::integrations::FeedbackNotes for Said {
+        async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
+            self.0.lock().push((env.into(), path.into()));
+            Ok(vec![apps_control::integrations::Note { path: path.into(), selector: "h1".into(), note: "bigger".into(), by: "ana".into(), at: 1 }])
+        }
+    }
+    let said = Arc::new(Said(Mutex::new(Vec::new())));
+    w.apps.set_feedback_notes(said.clone());
+    let (st, list) = get("/__roll/feedback.json?path=%2Fpricing", "*/*").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<Value>(&list).unwrap(), json!([{"path": "/pricing", "selector": "h1", "note": "bigger", "by": "ana", "at": 1}]));
+    assert_eq!(*said.0.lock(), [("pv-abc".to_string(), "/pricing".to_string())], "the preview and the page's path");
 }
 
 /// A worker that follows its work: its instances follow a stream group's lag within its bounds,
@@ -1886,7 +1916,7 @@ async fn a_service_link_gives_another_services_urls() {
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "API_URL,API_PUBLIC_URL"}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &wid, "production", r["id"].as_str().unwrap()).await;
-    let (_, body) = visit(&w, &host(&web["environments"][0]["url"]), "/").await;
+    let (_, body) = visit_deployment(&w, &host(&web["environments"][0]["url"]), r["id"].as_str().unwrap()).await;
     assert_eq!(body["vars"]["API_URL"], "http://api.production.internal:3000", "{body}");
     assert_eq!(body["vars"]["API_PUBLIC_URL"], api["environments"][0]["url"], "{body}");
     // Private, it has no public URL to give.
@@ -1985,8 +2015,8 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
         fn name(&self) -> &'static str {
             "fake"
         }
-        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
-            Ok(vec![("DB_PASSWORD".into(), "s3cret".into())])
+        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            Ok(vec![apps_control::integrations::SecretVar { name: "DB_PASSWORD".into(), value: "s3cret".into(), linked: false }])
         }
         async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, _: &str, _: &str) -> bool {
             who.operator

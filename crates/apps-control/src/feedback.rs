@@ -14,6 +14,10 @@ use bytes::Bytes;
 use futures::StreamExt;
 
 pub const PATH: &str = "/__roll/feedback.js";
+/// What's been said about a page (`?path=`), for the button's list.
+pub const NOTES: &str = "/__roll/feedback.json";
+/// The most a list holds.
+const MAX_NOTES: usize = 200;
 const TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 const SCRIPT: &str = include_str!("../assets/feedback.js");
 
@@ -82,6 +86,28 @@ pub fn add(resp: Response) -> Response {
 }
 
 /// The button's script, sending notes to `target` (the preview in roll's dashboard).
+/// The notes on the page `query`'s `path` names (the path only, at most 2 KiB), from roll
+/// previews: `no-store`, at most [`MAX_NOTES`]; 404 without previews, 502 when it fails (the
+/// button then shows no list).
+pub async fn notes(notes: Option<std::sync::Arc<dyn crate::integrations::FeedbackNotes>>, env: &str, query: Option<&str>) -> Response {
+    let Some(n) = notes else { return StatusCode::NOT_FOUND.into_response() };
+    let path = query
+        .unwrap_or("")
+        .split('&')
+        .find_map(|p| p.strip_prefix("path="))
+        .map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned())
+        .filter(|p| p.starts_with('/') && p.len() <= 2048);
+    let Some(path) = path else { return (StatusCode::BAD_REQUEST, "path is the page's path").into_response() };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), n.notes(env, &path)).await {
+        Ok(Ok(mut list)) => {
+            let over = list.len().saturating_sub(MAX_NOTES);
+            list.drain(..over);
+            ([(header::CACHE_CONTROL, "no-store")], axum::Json(list)).into_response()
+        }
+        _ => StatusCode::BAD_GATEWAY.into_response(),
+    }
+}
+
 pub fn script(target: &str) -> Response {
     let js = SCRIPT.replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()));
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()

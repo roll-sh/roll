@@ -168,6 +168,8 @@ pub struct Apps {
     running_jobs: Mutex<HashMap<String, String>>,
     /// Services whose project reached its spend limit this month (`spend`), as last read.
     capped: Mutex<std::collections::HashSet<String>>,
+    /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
+    notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Private environments' token hashes, by environment, as the owner last read or set them.
@@ -265,6 +267,7 @@ impl Apps {
             cancels: Mutex::new(HashMap::new()),
             running_jobs: Mutex::new(HashMap::new()),
             capped: Mutex::new(Default::default()),
+            notes: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
@@ -1073,8 +1076,10 @@ impl Apps {
         }
         match self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await {
             Ok(secrets) => {
-                for (k, v) in secrets {
-                    vars.insert(k, (v, "secret"));
+                for s in secrets {
+                    // A linked resource's address, rewritten for the container as apps' own links.
+                    let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
+                    vars.insert(s.name, (v, "secret"));
                 }
             }
             Err(e) => return Err(Error::Internal(format!("the project's {} secrets couldn't be read: {e}", env.name))),
@@ -1532,6 +1537,16 @@ impl Apps {
         let m = self.db(move |s| s.environment(&sid, &e)).await.ok()?.maintenance;
         live.set_maintenance(m.clone());
         m
+    }
+
+    /// Where a preview's feedback button reads what's been said (roll previews, once it's on this
+    /// node). Set once.
+    pub fn set_feedback_notes(&self, notes: Arc<dyn integrations::FeedbackNotes>) {
+        let _ = self.notes.set(notes);
+    }
+
+    pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
+        self.notes.get().cloned()
     }
 
     /// Where a preview's feedback goes (the preview in roll's dashboard), for a visitor who came

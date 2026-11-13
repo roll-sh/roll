@@ -385,6 +385,9 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     {
         return crate::feedback::script(t);
     }
+    if target.is_some() && req.uri().path() == crate::feedback::NOTES {
+        return crate::feedback::notes(apps.feedback_notes(), env, req.uri().query()).await;
+    }
     let page_load = req.method() == axum::http::Method::GET
         && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {
             Some(dest) => dest.eq_ignore_ascii_case("document"),

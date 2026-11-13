@@ -89,13 +89,43 @@ pub trait SecretSource: Send + Sync {
     /// The project's secrets in `env`, as variables, for `service` (`svc_…`: the consumer the
     /// audit names, `app:<service>`). An unresolved reference or a missing required key is an
     /// error: the deploy fails rather than start without it.
-    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<(String, String)>>;
+    async fn resolve(&self, project: &str, env: &str, service: &str) -> anyhow::Result<Vec<SecretVar>>;
     /// Whether `who` may see the project's secrets in `env` in the clear, by roll secrets' own
     /// rules (protected environments, a token's scope): `…/variables/values` answers them only
     /// then. No: the safe default.
     async fn may_reveal(&self, _who: Asker<'_>, _project: &str, _env: &str) -> bool {
         false
     }
+}
+
+/// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on
+/// the preview page"), as its feedback button lists them.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Note {
+    pub path: String,
+    pub selector: String,
+    pub note: String,
+    pub by: String,
+    pub at: i64,
+}
+
+/// roll previews' notes, for a preview environment's own host (rolld fills it with
+/// `roll_previews::Engine::notes_for`). Unset: no list, only the button.
+#[async_trait]
+pub trait FeedbackNotes: Send + Sync {
+    /// `env` (`pv-<id>`)'s notes on `path`, oldest first; none for a name that isn't a live
+    /// preview's.
+    async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
+}
+
+/// One of a project's secrets as a variable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SecretVar {
+    pub name: String,
+    pub value: String,
+    /// It's a linked resource's address as rolld sees it (`Values.linked`: `127.0.0.1`, a
+    /// node's own host name): apps rewrites it for the container, as its own links.
+    pub linked: bool,
 }
 
 /// Who asks for variables' values: what rolld's gate put on the request.
@@ -115,7 +145,7 @@ impl SecretSource for NoSecrets {
         "none"
     }
 
-    async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<(String, String)>> {
+    async fn resolve(&self, _project: &str, _env: &str, _service: &str) -> anyhow::Result<Vec<SecretVar>> {
         Ok(Vec::new())
     }
 }

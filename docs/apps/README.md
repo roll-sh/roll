@@ -581,8 +581,13 @@ through the preview's access link (its cookie; an automation's bypass header doe
 `<script src="/__roll/feedback.js" defer>` before `</body>` of a page load (a browser's document,
 else a GET that asks for HTML), the page asked of the app uncompressed and sent `private,
 no-cache` with no length or ETag; the script itself comes from the preview's own host. It holds no
-credential: notes go to the preview in roll's dashboard. The script and the tagger are roll
-previews', copied (`assets/feedback.js`, `feedback.rs`) until one copy serves both.
+credential: notes go to the preview in roll's dashboard. The button also lists what's been said
+about the page (Vercel's comment pins): `GET /__roll/feedback.json?path=<pathname>` on the same
+host and for the same visitors, answered from roll previews through a port
+(`integrations::FeedbackNotes`, `Apps::set_feedback_notes`) as previews' own proxy answers it:
+`no-store`, the latest 200, a 404 where previews isn't on the node and a 502 when it fails (the
+button then shows no list). The script and the tagger are roll previews', copied
+(`assets/feedback.js`, `feedback.rs`, equal to #28's) until one copy serves both.
 
 ### Permissions and MCP
 
@@ -1138,6 +1143,9 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   `code-preview/src/docker.rs` (#20's change). Previews sends `feedback: true` (its own rule:
   the setting, a change, an access token) once apps' follow-up is in its tree: the held #21
   answers 400 to an unknown field. One copy of `feedback.js` and its tagger after the merge.
+  Once #26 and #28 are both on main, rolld calls `apps.set_feedback_notes(…)` with an adapter
+  over previews' `Engine::notes_for(env, path)` (`p.engine` in `rolld/src/previews/mod.rs`),
+  mapping its `Note` onto apps' (`path, selector, note, by, at`, ms).
 - **roll-secrets** (see "Secrets and environments"). Ours on wiring:
   - apps never ensures a secrets environment: an apps environment roll secrets doesn't have
     reads as no secrets (previews ensures its `pv-` ones with their base and trust; ensuring
@@ -1194,35 +1202,40 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+1. **An IP allow list** for a public service (Render's `ipAllowList`): CIDRs per environment,
+   checked on the proxy before anything wakes (the client address the edge vouches for), 403
+   otherwise; deployment URLs and the private network unaffected.
+2. **Autoscaling on CPU** for web services (Render's target CPU, Cloud Run's): `run.cpu_target`
+   adds an instance while the awake ones average over it for a minute, as concurrency does
+   now, and scales in the same way.
+3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-2. **Region**: the region shown on the overview and each environment, defaulting to the project's
+4. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-3. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-4. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-8. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
-   `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
-   another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
-   origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-10. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+10. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
+    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
+11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+    origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
+12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-12. **An IP allow list** for a public service (Render's `ipAllowList`), after private services (done).
+13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

@@ -26,18 +26,27 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
 .row{display:flex;gap:6px;justify-content:flex-end}
 .row button{height:28px;padding:0 10px;border-radius:7px;border:1px solid rgba(255,255,255,.14);background:transparent;color:#ededed;cursor:pointer}
 .row button.go{background:#4c8dff;border-color:#4c8dff;color:#fff}
+.bar{display:flex;gap:6px;justify-content:flex-end}
+.count{height:30px;min-width:30px;padding:0 9px;border-radius:999px;border:1px solid rgba(255,255,255,.14);background:#0a0a0a;color:#ededed;
+ cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.35);font-variant-numeric:tabular-nums}
+.list{width:300px;max-height:320px;overflow:auto;padding:6px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:#0a0a0a;
+ color:#ededed;box-shadow:0 12px 32px rgba(0,0,0,.45);margin-bottom:8px}
+.note{padding:8px;border-radius:8px}
+.note:hover{background:rgba(255,255,255,.05)}
+.note p{margin:4px 0 0;white-space:pre-wrap;word-break:break-word}
 .box{position:fixed;pointer-events:none;border:2px solid #4c8dff;border-radius:4px;background:rgba(76,141,255,.08);display:none}
 @media (prefers-reduced-motion:no-preference){.box{transition:all .12s ease-out}}
 </style>
 <div class="box"></div>
-<button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button>
+<div class="list" hidden role="list" aria-label="Feedback on this page"></div>
+<div class="bar"><button class="count" type="button" hidden aria-label="Feedback on this page"></button><button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button></div>
 <form class="card" hidden>
   <div class="muted">On <code class="where"></code></div>
   <textarea placeholder="What should change here?" aria-label="Your feedback" required maxlength="4000"></textarea>
   <div class="row"><button type="button" class="cancel">Cancel</button><button type="submit" class="go">Post in roll</button></div>
 </form>`;
   const $ = (s) => root.querySelector(s);
-  const btn = $(".btn"), form = $("form"), box = $(".box"), note = $("textarea"), where = $(".where");
+  const btn = $(".btn"), form = $("form"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count"), list = $(".list");
   let picking = false, picked = null;
 
   // A short selector a person can read: an id, or the tag, two classes and its place, four levels up.
@@ -111,6 +120,42 @@ textarea{width:100%;min-height:72px;resize:vertical;padding:8px;border-radius:8p
     window.open(`${TARGET}&${q}`, "_blank", "noopener");
     reset();
   });
+  // What's been said about this page already (who, what, on which element), as text only.
+  const ago = (at) => {
+    const m = Math.round((Date.now() - at) / 60000);
+    return m < 60 ? `${Math.max(m, 1)}m ago` : m < 2880 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+  };
+  const show = (notes) => {
+    if (!notes.length) return;
+    count.textContent = String(notes.length);
+    count.title = `${notes.length} ${notes.length === 1 ? "note" : "notes"} on this page`;
+    count.hidden = false;
+    list.replaceChildren(
+      ...notes.slice().reverse().map((n) => {
+        const item = document.createElement("div");
+        item.className = "note";
+        item.setAttribute("role", "listitem");
+        const meta = document.createElement("div");
+        meta.className = "muted";
+        meta.textContent = `${n.by} · ${ago(n.at)}${n.selector ? ` · ${n.selector}` : ""}`;
+        const text = document.createElement("p");
+        text.textContent = n.note;
+        item.append(meta, text);
+        item.addEventListener("mouseenter", () => {
+          let el = null;
+          try { el = n.selector ? document.querySelector(n.selector) : null; } catch { el = null; }
+          if (el) outline(el);
+        });
+        item.addEventListener("mouseleave", () => { if (!picked) box.style.display = "none"; });
+        return item;
+      }),
+    );
+  };
+  count.addEventListener("click", () => { list.hidden = !list.hidden; });
+  fetch(`/__roll/feedback.json?path=${encodeURIComponent(location.pathname)}`, { credentials: "same-origin" })
+    .then((r) => (r.ok ? r.json() : []))
+    .then((notes) => Array.isArray(notes) && show(notes))
+    .catch(() => {});
   const mount = () => document.body && !host.isConnected && document.body.appendChild(host);
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);
   else mount();
