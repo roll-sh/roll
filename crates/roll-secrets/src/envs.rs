@@ -146,6 +146,9 @@ pub struct Policy {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Import {
+    /// Another project, which shares that folder with this one (exports.rs); absent: this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub environment: String,
     pub path: String,
 }
@@ -592,8 +595,16 @@ impl Secrets {
         let mut list = list;
         for i in &mut list {
             i.path = names::path(&i.path)?;
-            caller.need(Action::Reveal, &Scope::at(project, &i.environment, &i.path))?;
-            if i.environment == slug && i.path == path {
+            if i.project.as_deref() == Some(project) {
+                i.project = None;
+            }
+            match &i.project {
+                // Another project's folder: shared with this one by its admin (checked in the
+                // write), and taken in by an admin here, since every reader of the folder reads it.
+                Some(_) => caller.need(Action::Admin, &Scope::at(project, slug, &path))?,
+                None => caller.need(Action::Reveal, &Scope::at(project, &i.environment, &i.path))?,
+            }
+            if i.project.is_none() && i.environment == slug && i.path == path {
                 return Err(Error::BadRequest("a folder can't import itself".into()));
             }
         }
@@ -608,14 +619,19 @@ impl Secrets {
             let env = by_slug(c, project, slug)?;
             c.execute("DELETE FROM imports WHERE env_id = ? AND path = ?", [&env.id, &path])?;
             for (n, i) in list.iter().enumerate() {
-                let from = by_slug(c, project, &i.environment)?;
+                let from = by_slug(c, i.project.as_deref().unwrap_or(project), &i.environment)?;
+                if let Some(p) = &i.project
+                    && !crate::exports::exported(c, &from.id, &i.path, project)?
+                {
+                    return Err(Error::Forbidden(format!("{p} doesn't share {}:{} with this project", i.environment, i.path)));
+                }
                 c.execute(
                     "INSERT INTO imports (env_id, path, position, from_env_id, from_path) VALUES (?, ?, ?, ?, ?)",
                     params![env.id, path, n as i64, from.id, i.path],
                 )?;
             }
             ensure_folders(c, &env.id, &path, now)?;
-            let summary = list.iter().map(|i| format!("{}:{}", i.environment, i.path)).collect::<Vec<_>>().join(", ");
+            let summary = list.iter().map(|i| format!("{}{}:{}", i.project.as_ref().map(|p| format!("{p}/")).unwrap_or_default(), i.environment, i.path)).collect::<Vec<_>>().join(", ");
             audit::record(c, project, caller, "imports.set", Some(slug), Some(&path), &[], &format!("imports: {}", if summary.is_empty() { "none" } else { &summary }), now)?;
             imports_of(c, &env.id, &path)
         })
@@ -624,9 +640,10 @@ impl Secrets {
 
 pub(crate) fn imports_of(c: &Conn<'_>, env_id: &str, path: &str) -> Result<Vec<Import>> {
     Ok(c.query(
-        "SELECT e.slug, i.from_path FROM imports i JOIN environments e ON e.id = i.from_env_id WHERE i.env_id = ? AND i.path = ? ORDER BY i.position",
+        "SELECT e.slug, i.from_path, CASE WHEN e.project_id = me.project_id THEN NULL ELSE e.project_id END FROM imports i
+         JOIN environments e ON e.id = i.from_env_id JOIN environments me ON me.id = i.env_id WHERE i.env_id = ? AND i.path = ? ORDER BY i.position",
         [env_id, path],
-        |r| Ok(Import { environment: r.get(0)?, path: r.get(1)? }),
+        |r| Ok(Import { environment: r.get(0)?, path: r.get(1)?, project: r.get(2)? }),
     )?)
 }
 

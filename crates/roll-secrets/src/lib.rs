@@ -16,6 +16,7 @@ mod audit;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
+pub mod exports;
 pub mod identities;
 pub mod insights;
 pub mod leaks;
@@ -44,6 +45,7 @@ pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
 pub use read::{Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
+pub use exports::Export;
 pub use identities::{Identity, Login, NewIdentity};
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
@@ -336,6 +338,7 @@ impl Secrets {
         db.add_column("leases", "path", "TEXT")?;
         // Workload identities (identities.rs) and the tokens their logins made.
         db.ensure_schema(identities::SCHEMA)?;
+        db.ensure_schema(exports::SCHEMA)?;
         db.add_column("tokens", "identity", "TEXT")?;
         // Typed keys (required.rs).
         db.add_column("required", "type", "TEXT")?;

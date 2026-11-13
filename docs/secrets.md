@@ -248,6 +248,32 @@ imports in the order listed, and then the base environment (for an ephemeral env
 are followed up to 8 deep, and cycles are ignored and reported. Imported keys are marked with where
 they come from.
 
+#### Sharing across projects
+
+An organisation-wide value (an error tracker's DSN, a shared API key) lives in one project and is
+shared with the others, with both sides' consent:
+
+1. The owning project's admin **exports** a folder to a project: `PUT …/environments/{env}/exports?path=`
+   `[{project}]` (admin on that folder; audited `exports.set`). `roll secrets exports add <project>`.
+2. That project's admin **imports** it like any folder, naming the project:
+   `{"project": "<id>", "environment": "production", "path": "/shared"}` (admin on the importing
+   folder, since every reader of it will read the shared values; refused with 403 unless the folder
+   is shared with this project). `roll secrets imports add production:/shared --from-project <id>`.
+
+Readers of the importing folder then see the shared values as part of their project, a token
+scoped to it too: the export stands in for access to the other project, the one exception to
+"nothing reaches an environment its caller can't read", made explicit by the other project's admin.
+Values stay encrypted with their own project's data key and are opened with it. The export is
+checked on every read, so removing it cuts every import of it off at once. Changes to a shared
+value move the importing folder's digest (`roll run --watch` and syncs follow it).
+
+What crosses is stored values only: plain values and managed credentials, never personal values,
+the other folder's own imports, a value with a reference, or a live or dynamic link (those would
+resolve against the other project's environments and resources).
+
+In the dashboard the imports panel has "From another project" and, under it, "Shared with other
+projects" for the folder's own exports; an imported key names the project it comes from.
+
 ### Required keys
 
 A project can list keys every standard environment must define, each in a folder
@@ -824,6 +850,8 @@ isn't in the workspace is 404.
 | `DELETE /environments/{env}/folders?path=` | | `{change: Change \| null}` |
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
+| `GET /environments/{env}/exports?path=` | | `Export[]` |
+| `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
 | `GET /environments/{env}/secrets/{key}?path=&type=` | | `Secret` |
 | `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written` |
@@ -900,7 +928,8 @@ type NewEnvironment = {
   expires_at?: number; ttl_minutes?: number; secrets?: Op[]; // ephemeral: created in one call with its overrides
 };
 type Folder = { path: string; name: string; secrets: number; folders: number };
-type Import = { environment: string; path: string };
+type Import = { project?: string; environment: string; path: string }; // project: another project's shared folder
+type Export = { project: string; created_at: number; created_by: string };
 type Link = { kind: string; ref: string; field: string; mode: "live" | "managed" | "dynamic"; options?: Record<string, unknown> };
 type Secret = {
   id: string; key: string; path: string; type: "shared" | "personal"; version: number;
@@ -1006,7 +1035,7 @@ checks and sandboxes, leaked secrets don't land, required keys, one-time sharing
 sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), audit
 sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
 previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
-for stored values, typed keys, and the fixes from two security reviews.
+for stored values, typed keys, sharing across projects, and the fixes from two security reviews.
 Reviewed on 2026-11-13 against Infisical, Doppler, Vault, Vercel and 1Password Developer, and
 against the apps, previews, MCP and search branches (previews resolves untrusted; apps refuses
 dynamic links for services and uses the digest for `needs_deploy`). Ranked:
@@ -1023,9 +1052,7 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **Shared values across projects**: an import from another project's environment and folder
-   (`{project, environment, path}`), allowed only where the caller may read it there and audited
-   on both sides, so an organisation-wide value (an error tracker's DSN, a shared API key) lives
-   once; cycles across projects are caught like imports'; the grid marks where a value comes from.
+4. **Shares offered, not typed**: the imports panel lists the folders other projects share with
+   this one (`GET …/shared-with-me`) instead of asking for an environment and folder by name.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

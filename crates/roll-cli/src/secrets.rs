@@ -190,6 +190,13 @@ pub enum Secrets {
     /// Scoped tokens for CI and services: list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
+    /// The folders this folder imports (its own project's, or a folder another project shares
+    /// with it): list, add, rm.
+    #[command(subcommand)]
+    Imports(ImportsCmd),
+    /// The projects this folder is shared with (they can then import it): list, add, rm.
+    #[command(subcommand)]
+    Exports(ExportsCmd),
     /// Keys every standard environment must set, and what their values must be: list, add, rm.
     #[command(subcommand)]
     Required(RequiredCmd),
@@ -392,6 +399,39 @@ pub enum Tokens {
         ttl_days: Option<i64>,
     },
     Revoke { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum ImportsCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Import `ENV` or `ENV:/folder` (after this folder's own keys, before its base).
+    Add {
+        from: String,
+        /// A folder another project shares with this one (`roll secrets exports add` there).
+        #[arg(long)]
+        from_project: Option<String>,
+    },
+    Rm {
+        from: String,
+        #[arg(long)]
+        from_project: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ExportsCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Share this folder with a project (an id); its admin then imports it.
+    Add {
+        #[arg(value_name = "PROJECT")]
+        to: String,
+    },
+    Rm {
+        #[arg(value_name = "PROJECT")]
+        to: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -825,6 +865,76 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
+        Secrets::Imports(cmd) => {
+            let url = format!("{env}/imports?{}", c.q());
+            let list = c.call(Method::GET, &url, None).await?;
+            let mut rows: Vec<Value> = list.as_array().cloned().unwrap_or_default();
+            let parse = |from: &str, project: &Option<String>| {
+                let (e, p) = from.split_once(':').unwrap_or((from, "/"));
+                let mut v = json!({ "environment": e, "path": p });
+                if let Some(pr) = project {
+                    v["project"] = json!(pr);
+                }
+                v
+            };
+            let same = |a: &Value, b: &Value| a["environment"] == b["environment"] && a["path"] == b["path"] && a.get("project") == b.get("project");
+            match cmd {
+                ImportsCmd::Ls => {
+                    if json_out {
+                        return print(&list);
+                    }
+                    for i in &rows {
+                        let from = i["project"].as_str().map(|p| format!("{p}/")).unwrap_or_default();
+                        println!("{from}{}:{}", s(&i["environment"]), s(&i["path"]));
+                    }
+                }
+                ImportsCmd::Add { from, from_project } => {
+                    let new = parse(&from, &from_project);
+                    rows.retain(|x| !same(x, &new));
+                    rows.push(new);
+                    c.call(Method::PUT, &url, Some(Value::Array(rows))).await?;
+                    println!("{}:{} imports {from}", c.at.env, c.at.path);
+                }
+                ImportsCmd::Rm { from, from_project } => {
+                    let gone = parse(&from, &from_project);
+                    let before = rows.len();
+                    rows.retain(|x| !same(x, &gone));
+                    anyhow::ensure!(rows.len() < before, "{}:{} doesn't import {from}", c.at.env, c.at.path);
+                    c.call(Method::PUT, &url, Some(Value::Array(rows))).await?;
+                    println!("{}:{} doesn't import {from} any more", c.at.env, c.at.path);
+                }
+            }
+        }
+        Secrets::Exports(cmd) => {
+            let url = format!("{env}/exports?{}", c.q());
+            let list = c.call(Method::GET, &url, None).await?;
+            let mut to: Vec<String> = list.as_array().into_iter().flatten().filter_map(|e| e["project"].as_str().map(String::from)).collect();
+            let body = |to: &[String]| Value::Array(to.iter().map(|p| json!({ "project": p })).collect());
+            match cmd {
+                ExportsCmd::Ls => {
+                    if json_out {
+                        return print(&list);
+                    }
+                    for e in list.as_array().into_iter().flatten() {
+                        println!("{}  shared {} by {}", s(&e["project"]), ago(e["created_at"].as_i64().unwrap_or(0)), s(&e["created_by"]));
+                    }
+                }
+                ExportsCmd::Add { to: project } => {
+                    if !to.contains(&project) {
+                        to.push(project.clone());
+                    }
+                    c.call(Method::PUT, &url, Some(body(&to))).await?;
+                    println!("{}:{} is shared with {project}: import it there with --from-project {}", c.at.env, c.at.path, c.project);
+                }
+                ExportsCmd::Rm { to: project } => {
+                    let before = to.len();
+                    to.retain(|p| p != &project);
+                    anyhow::ensure!(to.len() < before, "{}:{} isn't shared with {project}", c.at.env, c.at.path);
+                    c.call(Method::PUT, &url, Some(body(&to))).await?;
+                    println!("{}:{} isn't shared with {project} any more (its imports stop now)", c.at.env, c.at.path);
+                }
+            }
+        }
         Secrets::Required(r) => {
             let url = format!("{}/required", c.base());
             let list = c.call(Method::GET, &url, None).await?;

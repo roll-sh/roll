@@ -781,3 +781,29 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     let (s, _) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn a_folder_shared_by_another_project_reads_as_its_own_until_the_share_ends() {
+    let api = Api::new().await;
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "platform" }))).await;
+    let platform = other["id"].as_str().unwrap().to_string();
+    let theirs = |p: &str| format!("/v1/secrets/projects/{platform}{p}");
+    api.ok(Method::PUT, &theirs("/environments/production/secrets/SENTRY_DSN?path=/shared"), Some(json!({ "value": "https://key@sentry.example/1" }))).await;
+    api.ok(Method::PUT, &theirs("/environments/production/secrets/NEXT?path=/shared"), Some(json!({ "value": "${SENTRY_DSN}" }))).await;
+    let import = json!([{ "project": platform, "environment": "production", "path": "/shared" }]);
+    // Not shared yet: no import.
+    let (s, _) = api.call(Method::PUT, "/environments/staging/imports?path=/", Some(import.clone())).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    api.ok(Method::PUT, &theirs("/environments/production/exports?path=/shared"), Some(json!([{ "project": api.project }]))).await;
+    api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(import)).await;
+    // Its stored values, opened with its own key; a reference would resolve against the wrong
+    // project, so it doesn't cross.
+    let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
+    let (s, v) = api.req(Method::GET, "/environments/staging/values", None, t["token"].as_str()).await;
+    assert_eq!((s, v["values"].clone()), (StatusCode::OK, json!({ "SENTRY_DSN": "https://key@sentry.example/1" })));
+    // The share ends: so does the import, at once.
+    api.ok(Method::PUT, &theirs("/environments/production/exports?path=/shared"), Some(json!([]))).await;
+    assert_eq!(api.values("staging", "/").await["values"], json!({}));
+    let audit = api.ok(Method::GET, &theirs("/audit"), None).await;
+    assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "exports.set"));
+}

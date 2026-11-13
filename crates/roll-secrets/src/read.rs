@@ -20,6 +20,8 @@ pub const DEPTH: usize = 8;
 #[derive(Clone, Debug)]
 pub(crate) struct Row {
     pub id: String,
+    /// Its project: the one asked about, or another that shares the folder (exports.rs).
+    pub project_id: String,
     pub env_id: String,
     pub path: String,
     pub key: String,
@@ -47,7 +49,7 @@ impl Row {
     }
 }
 
-const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs";
+const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     Ok(Row {
@@ -65,6 +67,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         updated_at: r.get(11)?,
         updated_by: r.get(12)?,
         refs: r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()),
+        project_id: r.get(14)?,
     })
 }
 
@@ -72,7 +75,13 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Source {
     Own,
-    Import { environment: String, path: String },
+    Import {
+        environment: String,
+        path: String,
+        /// Another project that shares the folder.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
     Base { environment: String },
 }
 
@@ -200,14 +209,33 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     let mut have: HashSet<String> = out.iter().map(|e| e.row.key.clone()).collect();
     for imp in envs::imports_of(c, &env.id, path)? {
-        let Ok(from) = envs::by_slug(c, &env.project_id, &imp.environment) else { continue };
-        if !through(&from.slug, &imp.path) {
-            continue;
-        }
-        for mut e in view_in(c, &from, &imp.path, principal, through, depth + 1, seen)? {
+        let entries = match &imp.project {
+            None => {
+                let Ok(from) = envs::by_slug(c, &env.project_id, &imp.environment) else { continue };
+                if !through(&from.slug, &imp.path) {
+                    continue;
+                }
+                view_in(c, &from, &imp.path, principal, through, depth + 1, seen)?
+            }
+            // Another project's folder, while it's shared with this one: its own stored values
+            // (no personal ones, nothing it imports, no reference or live link, which would
+            // resolve against that project). The share stands in for the caller's access there.
+            Some(p) => {
+                let Ok(from) = envs::by_slug(c, p, &imp.environment) else { continue };
+                if !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
+                    continue;
+                }
+                c.query(&format!("SELECT {ROW_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
+                    .into_iter()
+                    .filter(|r| r.refs.as_ref().is_some_and(|x| x.is_empty()) && r.link.as_ref().is_none_or(|l| l.mode == Mode::Managed))
+                    .map(|r| Entry { row: r, env: from.slug.clone(), source: Source::Own, overridden: false })
+                    .collect()
+            }
+        };
+        for mut e in entries {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
-                    e.source = Source::Import { environment: imp.environment.clone(), path: imp.path.clone() };
+                    e.source = Source::Import { environment: imp.environment.clone(), path: imp.path.clone(), project: imp.project.clone() };
                 }
                 out.push(e);
             }
@@ -618,6 +646,8 @@ pub(crate) struct Resolver<'a> {
     s: &'a Secrets,
     project: &'a str,
     dek: &'a Dek,
+    /// Sharing projects' data keys, by project.
+    deks: HashMap<String, Dek>,
     caller: &'a Caller,
     resolve: bool,
     consumer: String,
@@ -636,7 +666,7 @@ pub(crate) struct Resolver<'a> {
 
 impl<'a> Resolver<'a> {
     pub fn new(s: &'a Secrets, project: &'a str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Self {
-        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], members: None, issued: BTreeMap::new(), no_dynamic: false }
+        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], members: None, issued: BTreeMap::new(), no_dynamic: false, deks: HashMap::new() }
     }
 
     fn env(&mut self, slug: &str) -> Option<EnvRow> {
@@ -722,10 +752,23 @@ impl<'a> Resolver<'a> {
                 }
             }
             _ => match &e.row.value {
-                Some(ct) => self.dek.open(&value_aad(self.project, &e.row.id, e.row.version), ct).map_err(|_| "the stored value doesn't decrypt".to_string()),
+                Some(ct) => self.dek_of(&e.row.project_id).and_then(|dek| dek.open(&value_aad(&e.row.project_id, &e.row.id, e.row.version), ct).map_err(|_| "the stored value doesn't decrypt".to_string())),
                 None => Ok(Value::default()),
             },
         }
+    }
+
+    /// The data key of `project`: this resolve's, or a sharing project's (cached).
+    fn dek_of(&mut self, project: &str) -> std::result::Result<Dek, String> {
+        if project == self.project {
+            return Ok(self.dek.clone());
+        }
+        if let Some(d) = self.deks.get(project) {
+            return Ok(d.clone());
+        }
+        let d = self.s.project(project).map_err(|_| format!("project {project}'s key isn't available"))?;
+        self.deks.insert(project.to_string(), d.clone());
+        Ok(d)
     }
 
     fn text(&mut self, env: &str, path: &str, raw: &Value) -> (Value, Option<String>) {

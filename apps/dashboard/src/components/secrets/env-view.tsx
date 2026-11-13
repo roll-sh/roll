@@ -367,7 +367,7 @@ export function EnvView({ env }: { env: Environment }) {
                     onWrite={write}
                     onHistory={() => setDrawer({ kind: "versions", key: s.key, type: s.type })}
                     onShare={() => setSharing({ kind: "secret", env: env.slug, key: s.key, path })}
-                    onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
+                    onSource={(src) => (src.kind === "import" ? setImportsOpen({ highlight: { ...(src.project && { project: src.project }), environment: src.environment, path: src.path } }) : go({ env: src.environment, path: p, key: s.key }))}
                   />
                 ))}
                 {list.data && shown.length === 0 && secrets.length > 0 && <p className="px-2 py-6 text-center text-[12px] text-subtle">{unread && !query ? "Every key here was read in the last 90 days." : `Nothing matches "${query}".`}</p>}
