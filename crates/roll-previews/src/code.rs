@@ -239,6 +239,12 @@ impl Source for CodeSource {
         Ok(Some(self.code.store.compare(&r.id, &a, &b)?.into_iter().map(|d| d.path.as_str().to_string()).collect()))
     }
 
+    async fn merge_base(&self, repo: &str, head: &str) -> anyhow::Result<Option<String>> {
+        let r = self.repo(repo)?;
+        let Some(cs) = self.code.store.resolve(&r.id, head)? else { return Ok(None) };
+        Ok(self.code.merge_base(&r, &cs)?.map(|id| id.to_string()))
+    }
+
     async fn default_branch(&self, repo: &str) -> anyhow::Result<Option<String>> {
         Ok(self.repo(repo).ok().map(|r| r.default_branch))
     }

@@ -516,6 +516,10 @@ impl Engine {
                 if kept && r.change_id.is_some() {
                     self.compare_with_default_branch(r).await;
                 } else if kept {
+                    // A branch's preview may be a baseline: its screenshots are kept by head.
+                    if let Err(e) = self.store.keep_base_history(&r.id, r.build()) {
+                        warn!(preview = %r.id, error = %e, "previews: keeping the screenshot's history");
+                    }
                     self.compare_waiting(r).await;
                 }
                 if kept {
@@ -552,7 +556,9 @@ impl Engine {
         let own = rows.iter().find(|x| x.repo == r.repo && x.branch.as_deref() == Some(default.as_str()));
         let Some(base) = own.or_else(|| rows.iter().find(|x| x.is_baseline())) else { return };
         let Some(branch) = base.branch.as_deref() else { return };
-        if let Err(e) = self.store.compare_with_base(&r.id, &base.id, branch) {
+        // Where the change left the branch (Chromatic's ancestor build), when roll code knows.
+        let at = self.source.merge_base(&r.repo, r.build()).await.ok().flatten();
+        if let Err(e) = self.store.compare_with_base(&r.id, &base.id, branch, at.as_deref()) {
             warn!(preview = %r.id, error = %e, "previews: comparing with the default branch's");
         }
     }

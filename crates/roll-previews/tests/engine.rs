@@ -160,6 +160,7 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     }
     let compared = compared.expect("compared with the baseline");
     assert_eq!((compared.branch.as_str(), compared.percent), ("main", 0.0));
+    assert_eq!(e.engine.store.base_change(&e.engine.store.row_by_change("chg_1").unwrap().unwrap().id).unwrap().and_then(|b| b.head).as_deref(), Some("cs_web0"), "at its merge base");
     // Its other pages too, each against the baseline's at the same path.
     let pages: Vec<_> = e.code.last_report("chg_1").pages.iter().map(|p| (p.path.clone(), p.base_percent)).collect();
     assert_eq!(pages, vec![("/pricing".to_string(), Some(0.0))]);
@@ -199,7 +200,7 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
     let shoot = |head: &str| {
         e.engine.store.set_screenshot(&chg.id, head, &png(255), None, None).unwrap();
-        e.engine.store.compare_with_base(&chg.id, &base.id, "main").unwrap();
+        e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
     };
     shoot("cs_1b");
     assert_eq!(review().map(|v| (v.state, v.percent)), Some((VisualState::Changed, 100.0)));

@@ -774,7 +774,10 @@ type Settings = {
     (`roll preview create --branch main`) serves instead. Deleted, it comes back at the next pass
     while the rule is on; turning the rule off deletes it. A change is compared at its screenshot;
     one taken before the baseline had any is compared once the baseline's first one comes in, and
-    its comment updated. When main moves the comparison follows at the change's next push.
+    its comment updated. The baseline keeps its screenshots of its last 10 heads, and a change is
+    compared with the one where it left the branch (its merge base, as Chromatic compares with an
+    ancestor build), so main's own changes since don't count as the change's; when that head's
+    are gone, with the latest (`base_change.head` says which; `?base=1` serves that one).
     The same session then takes the page at a phone's width (390 × 844 at twice the density,
     `GET …/screenshot?view=phone`, the sheet's Desktop/Phone), with its own change since the push
     before ("At a phone's width: 3.4%" in the comment), as Percy and Chromatic check widths.
@@ -914,6 +917,7 @@ Ranked by what a person notices first. Done so far:
 - the comment's page checks folded under one line of counts;
 - screenshots of the project's other pages (`github.pages`), each compared like the first;
 - a visual review per push (`github.visual_review`, the `roll/visual` status, Accept in roll);
+- comparisons with main at the change's merge base (the baseline's last 10 heads kept);
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
   public or private restarting nothing on roll's runtime;
 - what went wrong while the page loaded (exceptions, console errors, failed requests);
@@ -951,26 +955,23 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Compared at the merge base** (Chromatic's ancestor builds): the baseline keeps its last few
-   heads' screenshots, and a change is compared with the one at its merge base, so a change
-   opened a while ago doesn't show main's own changes since as its own.
-2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-5. **A visual review that blocks landing in roll**: `roll/visual` gates GitHub merges through
+4. **A visual review that blocks landing in roll**: `roll/visual` gates GitHub merges through
    branch protection; roll's own landing (`Code::blockers`, its rules from `roll.toml` on the
    default branch) could ask for an accepted review the same way, for repos without GitHub.
-6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

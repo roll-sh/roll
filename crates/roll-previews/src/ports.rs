@@ -175,6 +175,10 @@ pub trait Source: Send + Sync {
     async fn paths_between(&self, _repo: &str, _from: &str, _to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
+    /// Where `head` of `repo` left the default branch (`None`: not known).
+    async fn merge_base(&self, _repo: &str, _head: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
     /// `repo`'s default branch (`None`: not known).
     async fn default_branch(&self, _repo: &str) -> anyhow::Result<Option<String>> {
         Ok(None)

@@ -578,7 +578,7 @@ function Screenshot({
   at: number;
   change?: { since: string; percent: number; phone_percent?: number | null } | null;
   phone?: boolean;
-  base?: { branch: string; percent: number; phone_percent: number | null } | null;
+  base?: { branch: string; percent: number; phone_percent: number | null; head?: string | null } | null;
   pages?: PageCheck[];
 }) {
   // Which page: the first (`/`) or another of the project's (desktop only).
@@ -586,7 +586,7 @@ function Screenshot({
   const other = pages.find((x) => x.path === path);
   const hasPhone = !other && hasPhoneFirst;
   const change = other ? (other.since && other.percent != null ? { since: other.since, percent: other.percent } : null) : changeFirst;
-  const baseChange = baseFirst && other ? (other.base_percent != null ? { branch: baseFirst.branch, percent: other.base_percent, phone_percent: null } : null) : baseFirst;
+  const baseChange = baseFirst && other ? (other.base_percent != null ? { ...baseFirst, percent: other.base_percent, phone_percent: null } : null) : baseFirst;
   const page = other?.path;
   // Main: the default branch's preview's screenshot, the one this differs from.
   const [main, setMain] = useState(false);
@@ -660,7 +660,7 @@ function Screenshot({
       {baseChange && (
         <p className="mb-1 text-[11.5px] text-subtle">
           {main
-            ? `On ${baseChange.branch}.`
+            ? `On ${baseChange.branch}${baseChange.head ? ` at ${baseChange.head.replace(/^cs_/, "").slice(0, 10)}, where this change left it` : ""}.`
             : (() => {
                 const pct = phone ? baseChange.phone_percent : baseChange.percent;
                 return pct == null ? "" : pct > 0 ? `Differs ${Math.max(pct, 0.1).toFixed(1)}% from ${baseChange.branch}.` : `Looks the same as ${baseChange.branch}.`;

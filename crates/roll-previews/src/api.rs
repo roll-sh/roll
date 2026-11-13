@@ -295,15 +295,11 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
         return Err(Error::BadRequest("page: a path from github.pages (desktop only)".into()));
     }
     let png = blocking(e, move |e| {
-        // `base=1`: the default branch's preview's, the one this was compared with.
-        let id = if base {
-            match e.store.base_change(&id)? {
-                Some(b) => b.preview,
-                None => return Ok(None),
-            }
-        } else {
-            id
-        };
+        // `base=1`: the default branch's preview's, the one this was compared with (at the
+        // change's merge base when that was kept).
+        if base {
+            return e.store.base_screenshot(&id, phone, page.as_deref());
+        }
         if let Some(path) = &page {
             return e.store.page_screenshot(&id, path, previous);
         }

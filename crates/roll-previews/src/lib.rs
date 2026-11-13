@@ -433,6 +433,9 @@ pub struct BaseChange {
     pub branch: String,
     pub percent: f64,
     pub phone_percent: Option<f64>,
+    /// The head of the branch it was compared at: where the change left it, when that one's
+    /// screenshots were kept, else the latest.
+    pub head: Option<String>,
 }
 
 /// An earlier push of a change's service, still reachable at a URL of its own (on the preview's

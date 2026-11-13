@@ -55,6 +55,10 @@ impl Source for FakeCode {
     async fn head(&self, repo: &str, branch: Option<&str>) -> anyhow::Result<Option<String>> {
         Ok(self.heads.lock().get(&format!("{repo}@{}", branch.unwrap_or("main"))).cloned())
     }
+    async fn merge_base(&self, _repo: &str, _head: &str) -> anyhow::Result<Option<String>> {
+        // Every change leaves main where the fake's main is.
+        Ok(self.heads.lock().get("acme/web@main").cloned())
+    }
     async fn default_branch(&self, _repo: &str) -> anyhow::Result<Option<String>> {
         Ok(Some("main".into()))
     }

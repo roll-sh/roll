@@ -398,6 +398,8 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ -n "$BASE" ] || { echo "the change's page should be compared with main's preview: $(api GET "/v1/previews/$MAINPV" | jq_ "{k: d.get(k) for k in ('state', 'screenshot_at', 'branch')}")"; exit 1; }
+# At the change's merge base: main's head, which the baseline runs.
+[ "$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('head')")" = "$(api GET "/v1/previews/$MAINPV" | jq_ "d['head']")" ] || { echo "the change should be compared with main where it left it: $(api GET "/v1/previews/$PV" | jq_ "d.get('base_change')")"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?base=1")" = image/png ] || { echo "main's screenshot should be there to compare"; exit 1; }
 # The other page, taken in the same session and compared with main's.
 PAGES=$(api GET "/v1/previews/$PV" | jq_ "'; '.join('%s: %d error(s), %s%% against main' % (x['path'], x['errors'], x['base_percent']) for x in d.get('pages', []))")
