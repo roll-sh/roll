@@ -800,11 +800,11 @@ impl Store {
         Ok(self.db.query_row(&format!("SELECT {DOMAIN_COLS} FROM domains WHERE hostname = ?"), [host], domain_row).optional()?)
     }
 
-    /// Custom domains to check: DNS not verified yet, or verified with a certificate that isn't
-    /// issued yet (or failed).
+    /// Custom domains to check: DNS not verified yet, or verified with a certificate still
+    /// pending (a failed one waits for Verify).
     pub fn domains_to_check(&self) -> Result<Vec<(String, String, Domain)>> {
         Ok(self.db.query(
-            &format!("SELECT {DOMAIN_COLS} FROM domains WHERE kind = 'custom' AND (status IN ('pending', 'issuing') OR tls IN ('pending', 'failed')) ORDER BY created_at"),
+            &format!("SELECT {DOMAIN_COLS} FROM domains WHERE kind = 'custom' AND (status IN ('pending', 'issuing') OR tls = 'pending') ORDER BY created_at"),
             (),
             domain_row,
         )?)

@@ -561,8 +561,9 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   accepts the fallback origin's certificate for the custom hostname's server name (Full, or Full
   (strict) with an Origin Rule overriding SNI to `up.roll.site`). Custom hostnames aren't held to
   authenticated origin pulls, and their `CF-Connecting-IP` isn't believed yet: the edge classes
-  them as unknown hosts. Domains' state comes from the minute loop and Verify; Cloudflare's
-  webhooks for custom hostnames aren't used.
+  them as unknown hosts. Domains' state comes from the minute loop (while `pending`) and Verify;
+  Cloudflare's webhooks for custom hostnames aren't used, and a custom hostname whose validation
+  timed out isn't re-validated (removing and adding the domain again starts over).
 - Links: Postgres and Redis are wired; buckets, streams, queues and NoSQL answer "not wired yet".
 - roll secrets isn't on main yet: `NoSecrets` stands in, and service variables are the env store.
 - Private networking is a Docker network per project and environment; it isn't reachable from

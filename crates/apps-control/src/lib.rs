@@ -824,9 +824,13 @@ impl Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         let mut custom = self.db(move |s| s.domains(&sid, &e)).await?;
         let target = self.target(&row.slug);
+        let issues = self.deps.tls.issues();
         for d in &mut custom {
             d.target = target.clone();
             d.record = record_for(&d.hostname);
+            if !issues {
+                (d.tls, d.tls_error) = (TlsStatus::None, None);
+            }
         }
         let own = Domain {
             hostname: format!("{}.{}", row.slug, self.cfg.domain),

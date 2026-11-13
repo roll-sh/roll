@@ -7,6 +7,8 @@
 //! or, for a hostname Cloudflare proxies and a peer that is Cloudflare, `CF-Connecting-IP`; and
 //! with a [`ViaEdge`] extension. Every response, the listener's own included, passes through
 //! [`HttpsConfig::observe`] (access logs, metrics).
+//!
+//! [`serve_plain`] is the plain-HTTP listener: ACME HTTP-01 answers and redirects to HTTPS.
 
 use crate::acme::Http01;
 use crate::drain::Drain;
