@@ -1,0 +1,133 @@
+> CREATE TABLE a226_l (i int, s text, v varchar(20)) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a226_l SELECT g, (ARRAY['ab', 'abb', 'aab', 'b', '', 'abab', 'héllo wörld', 'special requests', 'x%y', 'x_y', 'xy', 'a', NULL])[1 + g % 13],
+>   (ARRAY['ab', 'ba', 'éé', 'é', 'aé', NULL])[1 + g % 6] FROM generate_series(1, 120000) g
+-- INSERT 0 120000
+
+> VACUUM ANALYZE a226_l
+-- VACUUM
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE 'ab%b' GROUP BY s ORDER BY s
+s:text | count:int8
+abab | 9231
+abb | 9231
+-- SELECT 2
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE 'a%a' GROUP BY s ORDER BY s
+s:text | count:int8
+-- SELECT 0
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE '%b%b%' GROUP BY s ORDER BY s
+s:text | count:int8
+abab | 9231
+abb | 9231
+-- SELECT 2
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE '%%' GROUP BY s ORDER BY s
+s:text | count:int8
+ | 9231
+a | 9230
+aab | 9231
+ab | 9230
+abab | 9231
+abb | 9231
+b | 9231
+héllo wörld | 9231
+special requests | 9231
+x%y | 9231
+x_y | 9231
+xy | 9231
+-- SELECT 12
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE '%' GROUP BY s ORDER BY s
+s:text | count:int8
+ | 9231
+a | 9230
+aab | 9231
+ab | 9230
+abab | 9231
+abb | 9231
+b | 9231
+héllo wörld | 9231
+special requests | 9231
+x%y | 9231
+x_y | 9231
+xy | 9231
+-- SELECT 12
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE '%ö%' GROUP BY s ORDER BY s
+s:text | count:int8
+héllo wörld | 9231
+-- SELECT 1
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE 'h%ö%d' GROUP BY s ORDER BY s
+s:text | count:int8
+héllo wörld | 9231
+-- SELECT 1
+
+> SELECT s, count(*) FROM a226_l WHERE s NOT LIKE '%special%requests%' GROUP BY s ORDER BY s
+s:text | count:int8
+ | 9231
+a | 9230
+aab | 9231
+ab | 9230
+abab | 9231
+abb | 9231
+b | 9231
+héllo wörld | 9231
+x%y | 9231
+x_y | 9231
+xy | 9231
+-- SELECT 11
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE 'x\%%' GROUP BY s ORDER BY s
+s:text | count:int8
+x%y | 9231
+-- SELECT 1
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE '%\_y' GROUP BY s ORDER BY s
+s:text | count:int8
+x_y | 9231
+-- SELECT 1
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE 'x#%y' ESCAPE '#' GROUP BY s ORDER BY s
+s:text | count:int8
+x%y | 9231
+-- SELECT 1
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE 'abab%ab' GROUP BY s ORDER BY s
+s:text | count:int8
+-- SELECT 0
+
+> SELECT s, count(*) FROM a226_l WHERE s LIKE '%ab%ab' GROUP BY s ORDER BY s
+s:text | count:int8
+abab | 9231
+-- SELECT 1
+
+> SELECT v, count(*) FROM a226_l WHERE v LIKE '%é' GROUP BY v ORDER BY v
+v:varchar | count:int8
+aé | 20000
+é | 20000
+éé | 20000
+-- SELECT 3
+
+> SELECT v, count(*) FROM a226_l WHERE v LIKE 'é%é' GROUP BY v ORDER BY v
+v:varchar | count:int8
+éé | 20000
+-- SELECT 1
+
+> SELECT v, count(*) FROM a226_l WHERE v NOT LIKE '%a%' GROUP BY v ORDER BY v
+v:varchar | count:int8
+é | 20000
+éé | 20000
+-- SELECT 2
+
+> SELECT count(*) FILTER (WHERE s LIKE '%b'), count(*) FILTER (WHERE s LIKE 'a%'), count(*) FILTER (WHERE s LIKE '') FROM a226_l
+count:int8 | count:int8 | count:int8
+46154 | 46153 | 9231
+-- SELECT 1
+
+> DROP TABLE a226_l
+-- DROP TABLE
+

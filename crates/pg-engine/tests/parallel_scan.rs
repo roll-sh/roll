@@ -1035,10 +1035,14 @@ fn random_aggregates(seed: u64, n: usize) -> Vec<String> {
         ((st >> 33) % m as u64) as usize
     };
     const KEYS: &[&str] = &["a", "c", "d", "ok", "t", "z"];
-    const LEAVES: &[&str] = &["x", "x", "a", "b", "id", "big", "z", "2.5", "1", "0.01", "-3", "NULL::numeric", "99999999999999999999.9999"];
+    const LEAVES: &[&str] = &[
+        "x", "x", "a", "b", "id", "big", "z", "2.5", "1", "0.01", "-3", "NULL::numeric", "99999999999999999999.9999",
+        "4611686018427387903", "-4611686018427387904", "(b * 1000)",
+    ];
     const FILTERS: &[&str] = &[
         "", "WHERE x > 50", "WHERE ok", "WHERE a IS NULL", "WHERE d < date '2024-06-01'", "WHERE c = 'ab'",
         "WHERE t LIKE 'k1%'", "WHERE x * 3 > 200", "WHERE id > 39990", "WHERE id < 0", "WHERE 1 / (a - 3) > 0",
+        "WHERE t LIKE '%1%3'", "WHERE t NOT LIKE 'k%2%'", "WHERE t LIKE '%u%1%'",
     ];
     let expr = |next: &mut dyn FnMut(usize) -> usize, depth: usize| -> String {
         fn go(next: &mut dyn FnMut(usize) -> usize, depth: usize) -> String {
