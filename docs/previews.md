@@ -304,6 +304,31 @@ default) with the project's `env` overrides and the branched resources' URLs on 
     comment, statuses, deployments and repo webhooks get the plain URL (which answers 401 to
     anyone without the link). The dashboard and `roll preview` hand out `share_url`.
   - The redirect only ever goes to a path on the preview's own host.
+  - **Automation** (end-to-end tests in CI, Vercel's "Protection Bypass for Automation"): a
+    project can have one bypass secret (`roll preview bypass <project> --rotate`, or the rules'
+    Automation field). A request with it in the `x-roll-preview-bypass` header reaches any of
+    the project's private previews, with no cookie or redirect. The service never sees the
+    header. The secret is shown once, kept only as its SHA-256, and compared in constant time.
+    Rotating it stops the old one at once. CI gets each preview's plain URL from the GitHub
+    deployment (`deployment_status`), so the secret is the only thing it has to keep:
+
+    ```yaml
+    on: deployment_status
+    jobs:
+      e2e:
+        if: github.event.deployment_status.state == 'success' && startsWith(github.event.deployment.environment, 'preview/')
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v4
+          - run: npx playwright test
+            env:
+              BASE_URL: ${{ github.event.deployment_status.environment_url }}
+              # extraHTTPHeaders: { 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS }
+              ROLL_PREVIEW_BYPASS: ${{ secrets.ROLL_PREVIEW_BYPASS }}
+    ```
+
+    Services on roll apps check their own gate, which takes only the link's token today (see
+    `## Next`).
   - Services on roll apps get the same token (`PUT …/environments/pv-… {access: {token}}`), and
     roll apps' waking proxy checks it the same way: the token once, then a host-only cookie,
     else 401 without waking anything.
@@ -433,7 +458,10 @@ Bodies are JSON. Every error is `{"error": string}`.
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
-| `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes}` |
+| `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes, spent_usd_month, max_usd_month}` |
+| `GET /v1/previews/projects/{project}/bypass` | | `{enabled, created_at, header}` (never the secret) |
+| `POST /v1/previews/projects/{project}/bypass` | | 201 `{enabled, created_at, header, secret}`: a new secret, shown only here; the old one stops working |
+| `DELETE /v1/previews/projects/{project}/bypass` | | 204 |
 
 - 400: a bad body or setting. 404: no such preview, project or repo. 409: the change already has
   a preview in another project, or `max_previews` is reached (manual creation only; automatic
@@ -527,14 +555,19 @@ Ranked by what a person notices first. Done so far:
 - a monthly budget per project, `roll preview open`, and following logs in the dashboard;
 - a second adversarial review and its fixes (and a stream branch's cut that waits for aborting
   transactions' index rows);
-- search branches' cost from roll search's `own_bytes`.
+- search branches' cost from roll search's `own_bytes`;
+- integration with roll secrets and roll MCP (`wip/previews-on-secrets-mcp`): a preview's
+  branches resolve to the `preview` environment in rolld's access resolvers, so a "Previews
+  only" token reads and changes the branches and gets 403 on their parents and on the rules
+  (measured against a live rolld with the operator token on);
+- a project bypass secret for CI (`x-roll-preview-bypass`), so end-to-end tests triggered by the
+  GitHub deployment can open private previews.
 
-1. **Postgres without a reflinking file system**: a branch that starts from the parent's base
-   backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
-   its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
-   idle preview's branch is evicted to object storage after an hour.
-2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
-   run is in the measurements).
+1. **The bypass on roll apps' gate**: `pv-…` environments take the secret's SHA-256 next to the
+   link token (`access: {token, bypass_sha256}`), once roll apps accepts the field (asked).
+2. **Schema changes in the pull request comment** (Neon does): the Postgres branch's schema
+   against its parent's (`pg_dump --schema-only` of both, as a diff), so a reviewer sees the
+   migration a change ran without opening the preview.
 3. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page, and the comment shows it (Vercel does). Store it in roll storage and
    drop it with the preview.
@@ -543,3 +576,9 @@ Ranked by what a person notices first. Done so far:
    today.
 5. **A cost alert outside the dashboard**: tell the project's owners (webhook, chat) when its
    previews pass 80% of `max_usd_month`; the Previews tab shows it today.
+6. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+   run is in the measurements).
+7. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+   backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
+   its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
+   idle preview's branch is evicted to object storage after an hour.

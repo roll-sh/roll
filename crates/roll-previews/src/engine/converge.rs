@@ -221,7 +221,7 @@ impl Engine {
         let urls = self.resource_env(&r.id).await?;
         let branches = self.branch_vars(&r.id).await?;
         let access_token = match self.store.access(&r.id)? {
-            Some((t, true)) if !t.is_empty() => Some(t),
+            Some(crate::store::Access { token: t, required: true, .. }) if !t.is_empty() => Some(t),
             _ => None,
         };
         let mut vars: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();

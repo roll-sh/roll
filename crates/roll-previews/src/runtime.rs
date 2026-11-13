@@ -337,12 +337,20 @@ impl Runtime {
     /// sent to the same URL without it) or in that cookie; anything else is refused. `None`:
     /// let it through.
     fn gate(&self, preview: &str, service: &str, req: &Request) -> Option<Response> {
-        let (token, required) = match self.store.access(preview) {
+        let crate::store::Access { token, required, bypass } = match self.store.access(preview) {
             Ok(Some(a)) => a,
             Ok(None) => return None,
             Err(_) => return Some((StatusCode::SERVICE_UNAVAILABLE, "try again").into_response()),
         };
         if !required {
+            return None;
+        }
+        // Automation (end-to-end tests in CI): the project's bypass secret in a header, for every
+        // request (no cookie, no redirect).
+        let given = req.headers().get(BYPASS_HEADER).and_then(|v| v.to_str().ok());
+        if let (Some(want), Some(given)) = (&bypass, given)
+            && same(&crate::store::bypass_hash(given), want)
+        {
             return None;
         }
         let cookie = format!("roll_access_{preview}");
@@ -411,6 +419,8 @@ impl Runtime {
         *req.uri_mut() = uri;
         *req.version_mut() = axum::http::Version::HTTP_11;
         strip_hop_by_hop(req.headers_mut(), upgrade);
+        // The service never sees the project's secret.
+        req.headers_mut().remove(BYPASS_HEADER);
         if let Some(h) = host {
             req.headers_mut().insert(HeaderName::from_static("x-forwarded-host"), h);
         }
@@ -441,6 +451,9 @@ impl Runtime {
         live.phase.send_replace(Phase::Running { addr });
     }
 }
+
+/// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
+pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
 
 /// A private preview's answer to a request without its link: where to get in, if roll knows.
 fn private_page(through: Option<&str>) -> Response {
@@ -674,7 +687,8 @@ mod tests {
                     let n = s.read(&mut buf).await.unwrap_or(0);
                     let head = String::from_utf8_lossy(&buf[..n]).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
-                    let body = format!("service saw {path}");
+                    let secret = if head.to_ascii_lowercase().contains("x-roll-preview-bypass") { " and the bypass secret" } else { "" };
+                    let body = format!("service saw {path}{secret}");
                     let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
                 });
             }
@@ -693,7 +707,7 @@ mod tests {
         };
         // Link access (the default): no token, no preview; the link's token turns into a cookie.
         assert!(get("web-pr1-shop.preview.test:7070").await.starts_with("HTTP/1.1 401"));
-        let token = rt.store.access(&row.id).unwrap().unwrap().0;
+        let token = rt.store.access(&row.id).unwrap().unwrap().token;
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
         s.write_all(format!("GET /hello?roll_access={token}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
         let mut out = String::new();
@@ -704,6 +718,20 @@ mod tests {
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.ends_with("service saw /hello"), "{out}");
+        // Automation: the project's bypass secret in a header, which the service never sees.
+        let raw = |head: String| async move {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(head.as_bytes()).await.unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).await.unwrap();
+            out
+        };
+        let with = |secret: &str| format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nX-Roll-Preview-Bypass: {secret}\r\nConnection: close\r\n\r\n");
+        let (secret, _) = rt.store.rotate_bypass("prj_1").unwrap();
+        assert!(raw(with(&secret)).await.ends_with("service saw /hello"));
+        assert!(raw(with("rpb_wrong")).await.starts_with("HTTP/1.1 401"));
+        rt.store.rotate_bypass("prj_1").unwrap();
+        assert!(raw(with(&secret)).await.starts_with("HTTP/1.1 401"), "a rotated secret stops working");
         rt.store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
         assert!(get("web-pr1-shop.preview.test:7070").await.ends_with("service saw /hello"), "public previews need no link");
         assert!(get("localhost").await.ends_with("api"));

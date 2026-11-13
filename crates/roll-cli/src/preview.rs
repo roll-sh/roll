@@ -71,6 +71,16 @@ pub enum Preview {
     },
     /// What a project's previews cost.
     Usage { project: String },
+    /// The secret CI sends (header `x-roll-preview-bypass`) to reach a project's private
+    /// previews: shows whether there is one, `--rotate` makes a new one (printed once), `--off`
+    /// removes it.
+    Bypass {
+        project: String,
+        #[arg(long, conflicts_with = "off")]
+        rotate: bool,
+        #[arg(long)]
+        off: bool,
+    },
     /// Print a service's link (with its access token when the preview is private); `--browser`
     /// opens it.
     Open {
@@ -270,6 +280,29 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 return Ok(());
             }
             json!({ "service": svc["name"], "url": url })
+        }
+        Preview::Bypass { project, rotate, off } => {
+            let path = format!("/v1/previews/projects/{}/bypass", project_id(api, &project).await?);
+            let v = match (rotate, off) {
+                (true, _) => api.post(&path, json!({})).await?,
+                (_, true) => {
+                    api.call(reqwest::Method::DELETE, &path, None).await?;
+                    json!({ "enabled": false })
+                }
+                _ => api.get(&path).await?,
+            };
+            if !as_json {
+                match (v["secret"].as_str(), v["enabled"].as_bool() == Some(true)) {
+                    (Some(secret), _) => {
+                        println!("{secret}");
+                        eprintln!("send it as `{}: <secret>`; it's shown only now (the old one stopped working)", v["header"].as_str().unwrap_or("x-roll-preview-bypass"));
+                    }
+                    (None, true) => println!("a bypass secret is set (made {}); --rotate makes a new one", s(&v["created_at"])),
+                    (None, false) => println!("no bypass secret; --rotate makes one"),
+                }
+                return Ok(());
+            }
+            v
         }
         Preview::Usage { project } => {
             let v = api.get(&format!("/v1/previews/projects/{}/usage", project_id(api, &project).await?)).await?;

@@ -130,6 +130,15 @@ export interface PreviewUsage {
   max_usd_month?: number;
 }
 
+/** A project's secret for automation: CI sends it in `header` to open private previews. */
+export interface PreviewBypass {
+  enabled: boolean;
+  created_at: number | null;
+  header: string;
+  /** Only in the answer that made it. */
+  secret?: string;
+}
+
 export type PreviewSource = { branch: string; change?: never } | { change: string; branch?: never };
 
 const one = (id: string) => `/v1/previews/${encodeURIComponent(id)}`;
@@ -163,6 +172,10 @@ export const previewsApi = {
   settings: (projectId: string) => call<PreviewSettings>("GET", `${project(projectId)}/settings`),
   putSettings: (projectId: string, patch: SettingsPatch) => call<PreviewSettings>("PUT", `${project(projectId)}/settings`, patch),
   usage: (projectId: string) => call<PreviewUsage>("GET", `${project(projectId)}/usage`),
+  bypass: (projectId: string) => call<PreviewBypass>("GET", `${project(projectId)}/bypass`),
+  /** A new secret (the old one stops working), shown only in this answer. */
+  rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),
+  deleteBypass: (projectId: string) => call<void>("DELETE", `${project(projectId)}/bypass`),
 };
 
 /** A resource as the reset body and the settings name it. */

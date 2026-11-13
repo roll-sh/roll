@@ -35,6 +35,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/activity", get(activity))
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
+        .route("/v1/previews/projects/{project}/bypass", get(bypass).post(rotate_bypass).delete(delete_bypass))
         .with_state(engine)
 }
 
@@ -209,6 +210,39 @@ async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> c
     .await?;
     e.kick();
     Ok(Json(s))
+}
+
+/// Whether the project has a bypass secret for automation (never the secret).
+async fn bypass(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json<Value>> {
+    blocking(e, move |e| {
+        e.workspace_project(&project)?;
+        let at = e.store.bypass_created(&project)?;
+        Ok(json!({ "enabled": at.is_some(), "created_at": at, "header": crate::runtime::BYPASS_HEADER }))
+    })
+    .await
+    .map(Json)
+}
+
+/// A new bypass secret (the old one stops working): the only time it's shown.
+async fn rotate_bypass(AxState(e): S, Path(project): Path<String>) -> crate::Result<Response> {
+    let v = blocking(e, move |e| {
+        e.workspace_project(&project)?;
+        let (secret, at) = e.store.rotate_bypass(&project)?;
+        Ok(json!({ "enabled": true, "created_at": at, "header": crate::runtime::BYPASS_HEADER, "secret": secret }))
+    })
+    .await?;
+    let mut r = (StatusCode::CREATED, Json(v)).into_response();
+    r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    Ok(r)
+}
+
+async fn delete_bypass(AxState(e): S, Path(project): Path<String>) -> crate::Result<StatusCode> {
+    blocking(e, move |e| {
+        e.workspace_project(&project)?;
+        e.store.delete_bypass(&project)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn usage(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json<Value>> {

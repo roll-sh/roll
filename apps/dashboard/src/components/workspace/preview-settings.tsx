@@ -1,6 +1,6 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, type PreviewBypass, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -290,6 +290,7 @@ function Form({
         <Field group label="Access" note="Previews run on branches of real data. Private ones answer only to their link (from roll, the change or the pull request).">
           <Choice value={s.access} options={["link", "public"]} onChange={(v) => set("access", v)} labels={{ link: "Private link", public: "Anyone with the URL" }} />
         </Field>
+        {s.access === "link" && <Bypass projectId={projectId} />}
       </Section>
 
       <Section title="GitHub pull requests">
@@ -321,6 +322,70 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /** A labelled field; `group` for one that holds several controls (a label would click the first). */
+/** The project's bypass secret for CI (acts at once, not on Save): shown once when made. */
+function Bypass({ projectId }: { projectId: string }) {
+  const [state, setState] = useState<PreviewBypass | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    let live = true;
+    previewsApi.bypass(projectId).then((b) => live && setState(b), (e) => live && setError(errorText(e)));
+    return () => {
+      live = false;
+    };
+  }, [projectId]);
+  const act = async (f: () => Promise<PreviewBypass>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setState(await f());
+      setCopied(false);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const header = state?.header ?? "x-roll-preview-bypass";
+  const btn = "h-7 rounded-md border border-line-2 px-2.5 text-[12px] text-muted transition-colors hover:text-fg disabled:opacity-50";
+  return (
+    <Field group label="Automation" note={`End-to-end tests in CI send this secret as the ${header} header to open private previews. Keep it in your CI's secrets.`}>
+      {state?.secret ? (
+        <span className="flex items-center gap-2">
+          <code className={`${field} flex h-8 min-w-0 flex-1 items-center truncate font-mono text-[12px]`}>{state.secret}</code>
+          <button
+            type="button"
+            className={btn}
+            onClick={() => navigator.clipboard?.writeText(state.secret ?? "").then(() => setCopied(true), () => setCopied(false))}
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </span>
+      ) : (
+        <span className="flex items-center gap-2 text-[12px] text-muted">
+          {state === null ? "…" : state.enabled ? "A secret is set." : "No secret."}
+          <button type="button" disabled={busy || state === null} className={btn} onClick={() => act(() => previewsApi.rotateBypass(projectId))}>
+            {state?.enabled ? "Rotate" : "Create a secret"}
+          </button>
+          {state?.enabled && (
+            <button
+              type="button"
+              disabled={busy}
+              className={btn}
+              onClick={() => act(async () => (await previewsApi.deleteBypass(projectId), { enabled: false, created_at: null, header }))}
+            >
+              Remove
+            </button>
+          )}
+        </span>
+      )}
+      {state?.secret && <span className="mt-1 block text-[11px] text-subtle">Shown only now; the previous secret stopped working.</span>}
+      {error && <span role="alert" className="mt-1 block text-[11px] text-danger">{error}</span>}
+    </Field>
+  );
+}
+
 function Field({ label, note, group, children }: { label: string; note?: string; group?: boolean; children: ReactNode }) {
   const Tag = group ? "div" : "label";
   return (

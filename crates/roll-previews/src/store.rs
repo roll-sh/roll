@@ -90,12 +90,34 @@ CREATE TABLE IF NOT EXISTS activity (
     message TEXT NOT NULL,
     PRIMARY KEY (preview_id, seq)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS bypass (
+    project_id TEXT PRIMARY KEY,
+    hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 ";
 
 /// The newest activity lines kept per preview.
 pub const ACTIVITY_KEEP: i64 = 200;
 /// The longest slug: leaves room for a service name in a 63-character host label.
 pub const SLUG_MAX: usize = 40;
+
+/// Who may open a preview's services (`runtime`'s gate).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Access {
+    /// The link's token.
+    pub token: String,
+    /// Whether the link is needed (`access: link`), or anyone may (`public`).
+    pub required: bool,
+    /// The project's bypass secret's SHA-256 (hex), for automation (`x-roll-preview-bypass`).
+    pub bypass: Option<String>,
+}
+
+/// The SHA-256 (hex) a bypass secret is kept as.
+pub fn bypass_hash(secret: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+}
 
 /// Which preview a branched resource belongs to (for scoped tokens: feature/roll-mcp).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -370,6 +392,7 @@ impl Store {
     pub fn delete_settings(&self, project: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
     }
@@ -714,12 +737,45 @@ impl Store {
     }
 
     /// A preview's access token, and whether its project requires it.
-    pub fn access(&self, id: &str) -> Result<Option<(String, bool)>> {
-        let row: Option<(Option<String>, String)> =
-            self.db.read(|c| c.query_row("SELECT token, project_id FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
-        let Some((token, project)) = row else { return Ok(None) };
+    pub fn access(&self, id: &str) -> Result<Option<Access>> {
+        let row: Option<(Option<String>, String, Option<String>)> = self.db.read(|c| {
+            c.query_row(
+                "SELECT p.token, p.project_id, b.hash FROM previews p LEFT JOIN bypass b ON b.project_id = p.project_id WHERE p.id = ?",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+        })?;
+        let Some((token, project, bypass)) = row else { return Ok(None) };
         let required = self.settings(&project)?.access == crate::settings::Access::Link;
-        Ok(Some((token.unwrap_or_default(), required)))
+        Ok(Some(Access { token: token.unwrap_or_default(), required, bypass }))
+    }
+
+    /// A new bypass secret for `project`'s private previews (replacing any): returned once,
+    /// kept only as its SHA-256.
+    pub fn rotate_bypass(&self, project: &str) -> Result<(String, i64)> {
+        let secret = format!("rpb_{}", new_token());
+        let (hash, now) = (bypass_hash(&secret), self.now_ms()?);
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO bypass (project_id, hash, created_at) VALUES (?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET hash = excluded.hash, created_at = excluded.created_at",
+                params![project, hash, now],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        Ok((secret, now))
+    }
+
+    pub fn delete_bypass(&self, project: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// When `project`'s bypass secret was made, if it has one.
+    pub fn bypass_created(&self, project: &str) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT created_at FROM bypass WHERE project_id = ?", [project], |r| r.get(0)).optional())?)
     }
 
     /// Whether any preview but `except` has a service from `repo`.
@@ -762,7 +818,7 @@ impl Store {
         }
         // With link access, the links roll hands out carry the token (once; then a cookie).
         let token = match self.access(&r.id)? {
-            Some((t, true)) if !t.is_empty() => Some(t),
+            Some(Access { token: t, required: true, .. }) if !t.is_empty() => Some(t),
             _ => None,
         };
         let share = |u: &str| match &token {
