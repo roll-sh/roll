@@ -70,7 +70,7 @@ export interface Run {
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
-export type DeployStatus = "queued" | "building" | "deploying" | "active" | "inactive" | "failed" | "canceled" | "superseded" | "removed";
+export type DeployStatus = "queued" | "building" | "deploying" | "active" | "inactive" | "failed" | "canceled" | "superseded" | "removed" | "ready";
 
 export interface EnvironmentSummary {
   name: string;
@@ -612,7 +612,20 @@ const DEPLOY: Record<DeployStatus, { label: string; tone: Tone }> = {
   canceled: { label: "Canceled", tone: "muted" },
   superseded: { label: "Superseded", tone: "muted" },
   removed: { label: "Removed", tone: "muted" },
+  ready: { label: "Ready, no traffic", tone: "muted" },
 };
+
+/** A deployment's own URL (`<id>--<slug>`), from its environment's: a web service's built deployment runs there, whatever is live. */
+export function deploymentUrl(envUrl: string | null | undefined, deployment: string): string | null {
+  if (!envUrl) return null;
+  try {
+    const u = new URL(envUrl);
+    u.hostname = `${deployment.replace(/^dep_/, "")}--${u.hostname}`;
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
 
 export const deployStatus = (s: DeployStatus) => DEPLOY[s];
 

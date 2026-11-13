@@ -230,6 +230,9 @@ pub struct EnvLive {
     routed: AtomicU64,
     /// Requests answered and 5xx answers per deployment while a canary runs.
     served: Mutex<HashMap<String, Served>>,
+    /// Deployments asked for by their own URL (not the active one): their templates, one
+    /// instance each at most, gone a minute after their last request.
+    viewed: Mutex<HashMap<String, Arc<Template>>>,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
     /// The last failed wake, of which deployment, and how many failed in a row: the requests
@@ -269,6 +272,7 @@ impl EnvLive {
             canary: Mutex::new(None),
             routed: AtomicU64::new(0),
             served: Mutex::new(HashMap::new()),
+            viewed: Mutex::new(HashMap::new()),
             waiters: AtomicU32::new(0),
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
@@ -305,14 +309,18 @@ impl EnvLive {
         self.template()
     }
 
-    /// `deployment`'s template while it still serves (the active one or the canary).
+    /// `deployment`'s template while it still serves (the active one, the canary, or one asked
+    /// for by its own URL).
     fn serving(&self, deployment: &str) -> Option<Arc<Template>> {
         if let Some((c, _)) = self.canary.lock().as_ref()
             && c.deployment == deployment
         {
             return Some(c.clone());
         }
-        self.template().filter(|t| t.deployment == deployment)
+        if let Some(t) = self.template().filter(|t| t.deployment == deployment) {
+            return Some(t);
+        }
+        self.viewed.lock().get(deployment).cloned()
     }
 
     /// The canary's deployment and share, while a gradual rollout runs.
@@ -489,7 +497,30 @@ impl EnvLive {
 
     /// [`Self::acquire`] for a visitor in rollout `bucket` (0–99).
     pub async fn acquire_for(self: &Arc<Self>, bucket: Option<u8>) -> Result<Lease, WakeError> {
-        let began = Instant::now();
+        self.may_wake()?;
+        let tpl = self.route(bucket).ok_or(WakeError::NoDeployment)?;
+        self.acquire_tpl(tpl).await
+    }
+
+    /// A request to one deployment by its own URL (Vercel's deployment URLs, Cloud Run's
+    /// revision tags): the active one's instances when it's that one, else an instance of it
+    /// (one at most), which goes a minute after its last request.
+    pub async fn acquire_deployment(self: &Arc<Self>, tpl: Template) -> Result<Lease, WakeError> {
+        self.may_wake()?;
+        let tpl = match self.serving(&tpl.deployment) {
+            Some(t) => t,
+            None => {
+                let mut t = tpl;
+                t.run.min_instances = 0;
+                t.run.max_instances = 1;
+                let t = Arc::new(t);
+                self.viewed.lock().entry(t.deployment.clone()).or_insert(t).clone()
+            }
+        };
+        self.acquire_tpl(tpl).await
+    }
+
+    fn may_wake(&self) -> Result<(), WakeError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(WakeError::NoDeployment);
         }
@@ -499,7 +530,11 @@ impl EnvLive {
         if self.held.load(Ordering::SeqCst) {
             return Err(WakeError::Busy);
         }
-        let tpl = self.route(bucket).ok_or(WakeError::NoDeployment)?;
+        Ok(())
+    }
+
+    async fn acquire_tpl(self: &Arc<Self>, tpl: Arc<Template>) -> Result<Lease, WakeError> {
+        let began = Instant::now();
         if tpl.run.kind != RunType::Web {
             return Err(WakeError::NotWeb);
         }
@@ -951,6 +986,7 @@ impl EnvLive {
         let _g = self.wake.lock().await;
         self.closed.store(true, Ordering::SeqCst);
         *self.canary.lock() = None;
+        self.viewed.lock().clear();
         let all: Vec<Arc<Inst>> = self.insts.lock().drain(..).collect();
         self.discard(&all).await;
         *self.template.lock() = None;
@@ -960,6 +996,8 @@ impl EnvLive {
     /// `min_instances` up, scale down what's no longer needed, restart crashed workers.
     pub async fn tick(self: &Arc<Self>) {
         if self.template().is_none() {
+            // Nothing live, but a deployment's own URL may have woken one.
+            self.reap_viewed().await;
             return;
         }
         let now = Instant::now();
@@ -1037,6 +1075,28 @@ impl EnvLive {
             RunType::Worker => self.keep_workers(&tpl).await,
             RunType::Web => self.reap_web(&tpl).await,
         }
+        self.reap_viewed().await;
+    }
+
+    /// Instances of deployments asked for by their own URL go a minute after their last
+    /// request, and the deployment is forgotten once none is left.
+    async fn reap_viewed(&self) {
+        if self.viewed.lock().is_empty() {
+            return;
+        }
+        let viewed: std::collections::HashSet<String> = self.viewed.lock().keys().cloned().collect();
+        let idle = |i: &Inst| i.in_flight() == 0 && i.last_used.lock().elapsed() >= Duration::from_secs(60);
+        let gone: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| viewed.contains(&i.deployment) && idle(i)).collect();
+        for i in &gone {
+            if i.awake() && self.claim_idle(i).is_none() {
+                continue;
+            }
+            let _ = self.runtime.stop(&i.name, Duration::from_secs(5)).await;
+            self.runtime.remove(&i.name).await;
+            self.insts.lock().retain(|x| !Arc::ptr_eq(x, i));
+        }
+        let left: std::collections::HashSet<String> = self.instances().into_iter().map(|i| i.deployment.clone()).collect();
+        self.viewed.lock().retain(|d, _| left.contains(d));
     }
 
     /// Health checks while running (Render's, Fly's `checks`): every running instance's

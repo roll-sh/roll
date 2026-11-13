@@ -251,9 +251,15 @@ type Environment = EnvironmentSummary & {
 
 type Instance = { id: string; deployment: string; state: InstanceState; started_at: number | null; in_flight: number };
 
-type DeployStatus = "queued" | "building" | "deploying" | "active" | "inactive" | "failed" | "canceled" | "superseded" | "removed";
+type DeployStatus = "queued" | "building" | "deploying" | "active" | "inactive" | "failed" | "canceled" | "superseded" | "removed" | "ready"; // ready: a no_traffic deploy, built and health-checked, never live
 
-type NewDeploy = { revision?: string; image?: string; message?: string };
+/** no_traffic: build, pull and health-check it, then stop at `ready` without switching (a web
+ *  service without a volume; 400 otherwise). It answers on its own URL; a rollback to it puts it
+ *  live. Every built deployment of a web service without a volume has its own URL:
+ *  `<id without dep_>--<environment's host>` (`abc123def456--web-prod.up.roll.site`), behind the
+ *  environment's access token when it's private; one instance at most, gone a minute after its
+ *  last request, metered with the environment. */
+type NewDeploy = { revision?: string; image?: string; message?: string; no_traffic?: boolean };
 
 type Deployment = {
   id: string;

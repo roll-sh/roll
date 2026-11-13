@@ -53,7 +53,7 @@ impl Apps {
         self.refuse_capped(service)?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["revision", "image", "message"].contains(&k.as_str()) {
+            if !["revision", "image", "message", "no_traffic"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -65,6 +65,13 @@ impl Apps {
             }
         };
         let (revision, image, message) = (text("revision")?, text("image")?, text("message")?);
+        // Built and health-checked, not switched to: its own URL runs it (Cloud Run's
+        // `--no-traffic`); a rollback to it puts it live.
+        let no_traffic = match o.get("no_traffic") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(Error::BadRequest("no_traffic is a boolean".into())),
+        };
         if let Some(k) = key {
             if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
                 return Err(Error::BadRequest("Idempotency-Key is 1–200 printable ASCII characters".into()));
@@ -142,7 +149,18 @@ impl Apps {
         let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.for_env(&row)?.run, upload: upload_key, status: DeployStatus::Queued, actor: by.actor };
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
-        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
+        if no_traffic && (svc.run.kind != RunType::Web || svc.run.volume.is_some()) {
+            return Err(Error::BadRequest("no_traffic is for a web service without a volume (its deployment runs next to the live one)".into()));
+        }
+        let dep = self
+            .db(move |s| {
+                let d = s.create_deployment(&sid, &e, d, "", k.as_deref())?;
+                if no_traffic {
+                    s.set_no_traffic(&d.id)?;
+                }
+                Ok(d)
+            })
+            .await?;
         self.changed(service);
         if let Some(up) = ours {
             let id = dep.id.clone();
@@ -350,7 +368,9 @@ impl Apps {
             Ok(()) => {
                 log.stream(Stream::System).line(format!("deployed in {:.1} s", began.elapsed().as_secs_f64()));
                 info!(service = %d.service, env = %d.environment, deployment = %d.id, "apps: deployed");
-                self.report(&d, "success", "live").await;
+                let did = d.id.clone();
+                let ready = self.db(move |s| s.deployment(&did)).await.is_ok_and(|x| x.status == DeployStatus::Ready);
+                self.report(&d, "success", if ready { "ready, not live (no traffic)" } else { "live" }).await;
             }
             Err(e) if cancel.is_cancelled() => {
                 let _ = e;
@@ -481,6 +501,18 @@ impl Apps {
         }
         if !made.is_empty() {
             log.stream(Stream::System).line(format!("healthy after {:.1} s", took.as_secs_f64()));
+        }
+        // No traffic: healthy is as far as it goes; its own URL wakes it when asked.
+        let did = d.id.clone();
+        if self.db(move |s| s.no_traffic(&did)).await? {
+            for i in &made {
+                self.deps.runtime.remove(&i.name).await;
+            }
+            let did = d.id.clone();
+            self.db(move |s| s.set_status(&did, &[DeployStatus::Deploying], DeployStatus::Ready, None)).await?;
+            let short = d.id.strip_prefix("dep_").unwrap_or(&d.id);
+            log.stream(Stream::System).line(format!("ready, not live: its own URL is {}; roll back to it to put it live", self.url(&format!("{short}--{}", env.slug))));
+            return Ok(());
         }
         // A gradual rollout needs something to split: the old deployment running and taking
         // requests. Asleep, it switches at once (nothing would judge the new one).

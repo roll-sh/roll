@@ -703,6 +703,19 @@ find a leaked URL. Making or removing one is admin in roll MCP's catalogue: it's
 credential. rolld's gate lets `/v1/apps/hooks` through to the hook's own check (its `RULES`);
 access lines log the route pattern, never the token; it runs on the service's owner.
 
+## A deployment's own URL
+
+Every built deployment of a web service without a volume answers on its own hostname,
+`<id>--<slug>` (the id without `dep_`), whatever is live (Vercel's deployment URLs, Cloud Run's
+revision tags): the same environment's access rules, one instance at most (made from that
+deployment's image, variables and settings), gone a minute after its last request, metered with
+the environment. The active one's URL is just its instances. With `no_traffic` (`roll deploy
+--no-traffic`), a deploy builds, pulls and health-checks, then stops at `ready` without
+switching anything, so it can be tried at its URL; "Put live" (a rollback to it) runs its image
+again, no build, through a gradual rollout when the service has one. The proxy tries the whole
+label as an environment's slug first, so a slug that happens to contain `--` still resolves.
+A service with a volume has neither: one instance writes it.
+
 ## Following a tag
 
 An image service's environment can follow its tag (`follow_tag`; "Follow the tag" in the
@@ -915,6 +928,10 @@ Ours are done or in `## Next`; theirs (each thread has been told):
   then take the copies secrets (`products_api`) and mcp (`auth.layer`, last) keep.
 - `crates/rolld/tests/auth.rs` `every_control_plane_route_needs_the_operator_token` fails on main
   too (`/v1/storage/` from `nest_service`); mcp and search carry the one-line fix.
+- **Deploy hooks' leaked tokens** (roll-mcp 98e0e3980 knows `rlh_`): on merge, rolld registers
+  `Access::on_leaked("rlh_", …)`, parsing the service and environment from the URL around the
+  secret and calling `Apps::delete_hook`. GitHub's partner program needs the pattern
+  `rlh_[a-z2-7]{40}` registered before its reports include it.
 - Merge order: mcp, secrets, search, apps (then the secrets wiring), previews.
 
 ## Next
@@ -923,38 +940,35 @@ Ranked; the top item not marked *waiting* is what's being worked on. A product r
 2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
 earlier security, product and integration reviews).
 
-1. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
-   environment's access token, and `no_traffic` deploys promoted later (Cloud Run's revision
-   tags, Vercel's deployment URLs).
-2. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
+1. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
    bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
    (Render's and Vercel's static sites).
-3. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
+2. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
    (Cloud Run's `--use-http2`, Fly's `h2_backend`); then TCP services.
-4. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
+3. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
    by `roll up --all` with the plan shown first (Render's Blueprints), then importing a Compose
    file's image services (Railway's).
-5. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
+4. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-6. **Region**: the region shown on the overview and each environment, defaulting to the project's
+5. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-7. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+6. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-8. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-9. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-10. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-12. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+11. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
-14. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+13. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
     (`/__roll/feedback.js` before `</body>` of HTML a visitor reached through roll; the rules in
     `roll-previews/src/runtime.rs` `add_feedback`), in the proxy.

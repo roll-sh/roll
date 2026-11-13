@@ -48,6 +48,10 @@ pub struct Deploy {
     /// Deploy this public image instead of the service's source.
     #[arg(long)]
     pub image: Option<String>,
+    /// Build and health-check it without putting it live: it answers on its own URL
+    /// (`<id>--<host>`), and `roll apps rollback <id>` puts it live.
+    #[arg(long)]
+    pub no_traffic: bool,
     #[arg(long, short = 'd')]
     pub detach: bool,
 }
@@ -879,7 +883,7 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
 
 pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> {
     let svc = service(api, &d.target).await?;
-    let body = json!({ "revision": d.revision, "image": d.image });
+    let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true) });
     let dep = api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?;
     if json_out || d.detach {
         println!("{}", serde_json::to_string_pretty(&dep)?);

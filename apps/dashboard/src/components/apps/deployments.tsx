@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
-import { RotateCcw, X } from "lucide-react";
+import { ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
+import { appsApi, deploymentUrl, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -44,10 +44,13 @@ export function Deployments({
   env,
   deploys,
   runner,
+  own = false,
 }: {
   service: string;
   env: Environment;
   deploys: Deployment[] | null;
+  /** Its deployments have their own URLs (a web service without a volume). */
+  own?: boolean;
   runner: Runner;
 }) {
   const [open, setOpen] = useState<string | null>(null);
@@ -111,15 +114,34 @@ export function Deployments({
                         <X className="size-3.5" /> Cancel
                       </button>
                     )}
+                    {own && d.image && d.status !== "removed" && !isPending(d.status) && (
+                      <a
+                        href={deploymentUrl(env.url, d.id) ?? undefined}
+                        target="_blank"
+                        rel="noreferrer"
+                        className={`${btn} ${d.status === "ready" ? "" : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100"}`}
+                        title="This deployment at its own URL, whatever is live"
+                      >
+                        <ExternalLink className="size-3.5" /> Open
+                      </a>
+                    )}
                     {!active && !isPending(d.status) && d.image && d.status !== "removed" && (
                       <SureButton
-                        className={`${btn} opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100`}
+                        className={`${btn} ${d.status === "ready" ? "" : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100"}`}
                         disabled={runner.busy !== null}
-                        sure={`Sure? Roll ${env.name} back`}
+                        sure={d.status === "ready" ? `Sure? Put it live in ${env.name}` : `Sure? Roll ${env.name} back`}
                         onSure={() => runner.run(`rollback:${d.id}`, () => appsApi.rollback(service, env.name, d.id))}
                         title="Run this deployment's image again, without a build"
                       >
-                        <RotateCcw className="size-3.5" /> Roll back
+                        {d.status === "ready" ? (
+                          <>
+                            <Rocket className="size-3.5" /> Put live
+                          </>
+                        ) : (
+                          <>
+                            <RotateCcw className="size-3.5" /> Roll back
+                          </>
+                        )}
                       </SureButton>
                     )}
                   </div>

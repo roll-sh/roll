@@ -144,6 +144,9 @@ CREATE TABLE IF NOT EXISTS fences (
     service TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_no_traffic (
+    deployment TEXT PRIMARY KEY
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_steps (
     deployment TEXT NOT NULL,
     step TEXT NOT NULL,
@@ -1029,6 +1032,16 @@ impl Store {
 
     /// Move a deployment from one of `from` to `to`, with an error when it failed. False when
     /// it wasn't in one of `from` (canceled meanwhile).
+    /// A deployment that stops when it's healthy, never switched to (`no_traffic`).
+    pub fn set_no_traffic(&self, id: &str) -> Result<()> {
+        self.db.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?) ON CONFLICT (deployment) DO NOTHING", [id])?;
+        Ok(())
+    }
+
+    pub fn no_traffic(&self, id: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM deploy_no_traffic WHERE deployment = ?", [id], |_| Ok(())).optional()?.is_some())
+    }
+
     pub fn set_status(&self, id: &str, from: &[DeployStatus], to: DeployStatus, error: Option<&str>) -> Result<bool> {
         let now = self.now()?;
         let froms: Vec<&str> = from.iter().map(|s| s.as_str()).collect();

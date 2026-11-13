@@ -31,7 +31,7 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                 return r;
             }
             match apps.env_for_host(&host).await {
-                Some((service, env)) => serve(apps, service, env, req).await,
+                Some((service, env, deployment)) => serve(apps, service, env, deployment, req).await,
                 None => page(StatusCode::NOT_FOUND, "Nothing here", "No roll apps service answers on this address."),
             }
         }
@@ -42,15 +42,15 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
 pub fn port_router(apps: Arc<Apps>, service: String, env: String) -> axum::Router {
     axum::Router::new().fallback(move |req: Request| {
         let (apps, service, env) = (apps.clone(), service.clone(), env.clone());
-        async move { serve(apps, service, env, req).await }
+        async move { serve(apps, service, env, None, req).await }
     })
 }
 
-/// Run the request where the service lives.
-pub async fn serve(apps: Arc<Apps>, service: String, env: String, req: Request) -> Response {
+/// Run the request where the service lives (`deployment`: one deployment's own URL).
+pub async fn serve(apps: Arc<Apps>, service: String, env: String, deployment: Option<String>, req: Request) -> Response {
     let cluster = apps.deps.cluster.clone();
     cluster
-        .dispatch(&lease_key(&service), req, move |req, _guard| async move { proxy(apps, &service, &env, req).await })
+        .dispatch(&lease_key(&service), req, move |req, _guard| async move { proxy(apps, &service, &env, deployment.as_deref(), req).await })
         .await
 }
 
@@ -244,7 +244,7 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 
 /// The waking proxy on the owner: an instance (woken if need be), the request forwarded, the
 /// answer metered.
-async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> Response {
+async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
     let began = Instant::now();
     // A private environment answers only visitors with its token, before anything wakes.
     if let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
@@ -257,13 +257,21 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
     // gave them (never passed to the app), or a new one while a canary runs.
     let mut bucket = take_bucket(&mut req);
-    let fresh = bucket.is_none() && live.canary().is_some();
+    let fresh = deployment.is_none() && bucket.is_none() && live.canary().is_some();
     if fresh {
         let mut b = [0u8; 1];
         getrandom::fill(&mut b).expect("system randomness");
         bucket = Some(b[0] % 100);
     }
-    let lease = match live.acquire_for(bucket).await {
+    let acquired = match deployment {
+        // One deployment's own URL: that deployment, whatever is live.
+        Some(d) => match apps.deployment_template(service, env, d).await {
+            Ok(t) => live.acquire_deployment(t).await,
+            Err(e) => return page(StatusCode::NOT_FOUND, "No such deployment", &e.to_string()),
+        },
+        None => live.acquire_for(bucket).await,
+    };
+    let lease = match acquired {
         Ok(l) => l,
         Err(WakeError::NoDeployment) => return page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet."),
         Err(WakeError::NotWeb) => return page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP."),

@@ -684,10 +684,13 @@ pub enum DeployStatus {
     Canceled,
     Superseded,
     Removed,
+    /// Built and health-checked, never live (a `no_traffic` deploy): its own URL runs it, and a
+    /// rollback to it puts it live.
+    Ready,
 }
 
 impl DeployStatus {
-    pub const ALL: [DeployStatus; 9] = [
+    pub const ALL: [DeployStatus; 10] = [
         DeployStatus::Queued,
         DeployStatus::Building,
         DeployStatus::Deploying,
@@ -697,6 +700,7 @@ impl DeployStatus {
         DeployStatus::Canceled,
         DeployStatus::Superseded,
         DeployStatus::Removed,
+        DeployStatus::Ready,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -710,6 +714,7 @@ impl DeployStatus {
             DeployStatus::Canceled => "canceled",
             DeployStatus::Superseded => "superseded",
             DeployStatus::Removed => "removed",
+            DeployStatus::Ready => "ready",
         }
     }
 

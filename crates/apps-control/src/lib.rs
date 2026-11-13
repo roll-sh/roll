@@ -1319,14 +1319,38 @@ impl Apps {
     }
 
     /// The environment a request's `Host` names: a generated hostname, or an active custom domain.
-    pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<(String, String)> {
+    /// The service and environment a hostname is, and the deployment when it's one's own
+    /// (`<deployment>--<slug>`: the id without `dep_`).
+    pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
         let host = host.trim_end_matches('.').to_ascii_lowercase();
-        if let Some(slug) = host.strip_suffix(&self.cfg.domain).and_then(|s| s.strip_suffix('.')).filter(|s| !s.contains('.')) {
-            let slug = slug.to_string();
-            return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name));
+        if let Some(label) = host.strip_suffix(&self.cfg.domain).and_then(|s| s.strip_suffix('.')).filter(|s| !s.contains('.')) {
+            let slug = label.to_string();
+            if let Some(e) = self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten() {
+                return Some((e.service, e.name, None));
+            }
+            let (dep, slug) = label.split_once("--").filter(|(d, s)| d.len() == 12 && d.bytes().all(|b| b.is_ascii_alphanumeric()) && !s.is_empty())?;
+            let (dep, slug) = (format!("dep_{dep}"), slug.to_string());
+            return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep)));
         }
-        self.db(move |s| s.domain_owner(&host)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active).map(|(s, e, _)| (s, e))
+        self.db(move |s| s.domain_owner(&host)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active).map(|(s, e, _)| (s, e, None))
+    }
+
+    /// What a deployment's own URL runs: that deployment of a web service, built and not
+    /// removed, in this environment. A service with a volume has none (one instance writes it).
+    pub async fn deployment_template(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<live::Template> {
+        let (sid, e, d) = (service.to_string(), env.to_string(), dep.to_string());
+        let (svc, row, d) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployment(&d)?))).await?;
+        if d.service != service || d.environment != env || d.image.is_none() || d.status == DeployStatus::Removed {
+            return Err(Error::NotFound(format!("no deployment {dep} to run here")));
+        }
+        if d.run.kind != RunType::Web {
+            return Err(Error::Conflict("only a web service's deployments have their own URL".into()));
+        }
+        if d.run.volume.is_some() {
+            return Err(Error::Conflict("a service with a volume has no deployment URLs: one instance writes the volume".into()));
+        }
+        self.template(&svc.for_env(&row)?, &row, &d).await
     }
 
     // ── logs, metrics, usage ──

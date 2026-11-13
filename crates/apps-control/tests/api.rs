@@ -1412,3 +1412,31 @@ async fn a_followed_tag_that_moves_deploys_once() {
     assert!(d2["image"].as_str().unwrap().ends_with(&moved) && d2["id"] != d1["id"], "{d2}");
     assert!(w.apps.watch_tags().await.is_empty(), "deployed: nothing more to do");
 }
+
+/// A deployment has its own URL: one deployed without traffic is reached there, not on the
+/// environment's, until a rollback to it puts it live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
+    let w = world().await;
+    let (svc, d1) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    let h = host(&env["url"]);
+    let own = |dep: &Value| format!("{}--{h}", dep.as_str().unwrap().trim_start_matches("dep_"));
+    let (st, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({"no_traffic": true}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d2}");
+    let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
+    assert_eq!(d2["status"], "ready", "{d2}");
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["active"]["id"], d1["id"], "nothing switched");
+    assert_eq!(visit(&w, &h, "/").await.1["deployment"], d1["id"]);
+    let (st, v) = visit(&w, &own(&d2["id"]), "/").await;
+    assert_eq!((st, v["deployment"].clone()), (StatusCode::OK, d2["id"].clone()), "its own URL runs it");
+    assert_eq!(visit(&w, &own(&d1["id"]), "/").await.1["deployment"], d1["id"], "the live one has its own URL too");
+    assert_eq!(visit(&w, &format!("aaaaaaaaaaaa--{h}"), "/").await.0, StatusCode::NOT_FOUND);
+    // Put live: its image again, no build.
+    let (_, d3) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", d2["id"].as_str().unwrap()), None).await;
+    let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
+    assert_eq!((d3["status"].as_str(), &d3["image"]), (Some("active"), &d2["image"]), "{d3}");
+    assert_eq!(visit(&w, &h, "/").await.1["deployment"], d3["id"]);
+}
