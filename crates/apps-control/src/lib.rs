@@ -268,7 +268,7 @@ impl Apps {
     pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
-            if !["project", "name", "source", "build", "run", "variables", "registry", "x", "y"].contains(&k.as_str()) {
+            if !["project", "name", "source", "build", "run", "variables", "registry", "links", "x", "y"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -294,6 +294,20 @@ impl Apps {
                 Some(Value::Object(m.clone()))
             }
             Some(_) => return Err(Error::BadRequest("variables is an object of names to values".into())),
+        };
+        // The project's databases (and other resources) to link before the first deploy:
+        // `[{kind, ref, prefix?}]`, `PUT …/links/{kind}/{ref}`'s.
+        let links: Vec<(String, String, Value)> = match o.get("links") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) if a.len() <= 20 => a
+                .iter()
+                .map(|l| {
+                    let kind = l["kind"].as_str().ok_or_else(|| Error::BadRequest("links[].kind is required".into()))?;
+                    let r = l["ref"].as_str().ok_or_else(|| Error::BadRequest("links[].ref is required".into()))?;
+                    Ok((kind.to_string(), r.to_string(), json!({ "prefix": l.get("prefix").cloned().unwrap_or(Value::Null) })))
+                })
+                .collect::<Result<_>>()?,
+            Some(_) => return Err(Error::BadRequest("links is a list of at most 20 {kind, ref, prefix?}".into())),
         };
         // A private image's login, before its first pull (`PUT …/registry`'s body).
         let registry = match o.get("registry") {
@@ -340,6 +354,13 @@ impl Apps {
         self.ensure_environment(&row, PRODUCTION, Some(branch.as_deref()), Some(false), &pname).await?;
         if let Some(set) = variables {
             self.change_variables(&row.id, PRODUCTION, json!({ "set": set })).await?;
+        }
+        for (kind, r, body) in links {
+            // A link that doesn't check out makes no service: nothing to clean up by hand.
+            if let Err(e) = self.put_link(&row.id, &kind, &r, body).await {
+                let _ = self.delete_service(&row.id).await;
+                return Err(e);
+            }
         }
         if let Some(r) = registry
             && let Err(e) = self.put_registry(&row.id, r).await

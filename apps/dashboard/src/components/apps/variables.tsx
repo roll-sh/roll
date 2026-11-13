@@ -15,7 +15,7 @@ const SOURCE_TONE: Record<VariableSource, string> = {
 };
 
 /** Workspace kinds a service can link to, by their link kind. */
-const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql" };
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql" };
 
 type Edit = { name: string; value: string };
 

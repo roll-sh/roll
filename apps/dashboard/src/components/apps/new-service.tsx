@@ -3,6 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceType, type Source } from "@/lib/apps-api";
 import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
+import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
+import { useWorkspace } from "@/lib/workspace-store";
+import { LINKABLE } from "./variables";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
 
@@ -57,6 +60,13 @@ export function NewServiceSheet({
   const [kind, setKind] = useState<ServiceType>("web");
   const [schedule, setSchedule] = useState("");
   const [env, setEnv] = useState("");
+  // The project's databases and storage, linked before the first deploy (their variables are in it).
+  const ws = useWorkspace();
+  const linkable = useMemo(
+    () => project.resources.filter((r) => LINKABLE[r.kind]).map((r) => ws.inventory.get(resourceKey(r))).filter((v): v is ResourceView => !!v && v.state !== "missing"),
+    [project.resources, ws.inventory],
+  );
+  const [links, setLinks] = useState<Set<string>>(new Set());
   const [plan, setPlan] = useState<{ key: string; plan?: Plan; error?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +126,8 @@ export function NewServiceSheet({
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
       const run = kind === "web" ? (portN ? { port: portN } : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
       const registry = from === "image" && regUser.trim() && regPassword ? { registry: { username: regUser.trim(), password: regPassword } } : {};
-      const s = await appsApi.create({ project: project.id, name, source, ...(run ? { run } : {}), ...variables, ...registry, ...spot });
+      const chosen = linkable.filter((v) => links.has(resourceKey(v))).map((v) => ({ kind: LINKABLE[v.kind]!, ref: v.ref }));
+      const s = await appsApi.create({ project: project.id, name, source, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
@@ -243,6 +254,37 @@ export function NewServiceSheet({
                   Schedule <span className="font-normal">five fields, UTC</span>
                 </Label>
                 <input value={schedule} onChange={(e) => setSchedule(e.target.value)} placeholder="0 3 * * *" spellCheck={false} className={`${field} font-mono ${schedule && !scheduleOk ? "border-danger/60" : ""}`} />
+              </>
+            )}
+            {linkable.length > 0 && (
+              <>
+                <Label>
+                  Link <span className="font-normal">their connection variables (DATABASE_URL…) are in the first deploy</span>
+                </Label>
+                <div className="flex flex-wrap gap-1.5">
+                  {linkable.map((v) => {
+                    const k = resourceKey(v);
+                    const on = links.has(k);
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() =>
+                          setLinks((s) => {
+                            const n = new Set(s);
+                            if (on) n.delete(k);
+                            else n.add(k);
+                            return n;
+                          })
+                        }
+                        className={`h-7 rounded-md border px-2 text-[12px] transition-colors ${on ? "border-accent/50 bg-accent/[0.08] text-fg" : "border-line text-muted hover:text-fg"}`}
+                      >
+                        {v.name} <span className="text-subtle">{v.kind}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </>
             )}
             <Label>

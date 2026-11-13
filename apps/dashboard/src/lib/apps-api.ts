@@ -100,6 +100,8 @@ export interface NewService {
   variables?: Record<string, string>;
   /** An image source's private registry login, before its first pull. */
   registry?: { username: string; password: string; server?: string };
+  /** Resources to link before the first deploy (their variables are in it). */
+  links?: { kind: LinkKind; ref: string; prefix?: string }[];
   x?: number;
   y?: number;
 }

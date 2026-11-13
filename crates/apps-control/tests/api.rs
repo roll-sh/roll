@@ -555,6 +555,15 @@ async fn a_postgres_link_puts_its_variables_in_the_instances() {
     let (st, body) = visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders"}));
+    // Linked when it's made, the first deploy has them; a link that doesn't resolve makes nothing.
+    let (st, made) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "worker", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "links": [{"kind": "postgres", "ref": "main"}], "variables": {"FAKE_ECHO": "DATABASE_URL"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{made}");
+    settled(&w, made["id"].as_str().unwrap(), "production", made["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let (_, body) = visit(&w, &host(&made["environments"][0]["url"]), "/").await;
+    assert_eq!(body["vars"]["DATABASE_URL"], "postgres://app:pw@db.roll.test:5432/main");
+    let (st, _) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "broken", "source": {"kind": "image", "image": "nginx:1.27"}, "links": [{"kind": "postgres", "ref": "nope"}] }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(call(&w.api, "GET", "/v1/apps/services", None).await.1.as_array().unwrap().iter().all(|s| s["name"] != "broken"), "nothing was left behind");
 }
 
 /// Requests that pile up past an instance's concurrency start more instances, up to
