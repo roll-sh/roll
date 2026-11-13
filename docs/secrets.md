@@ -331,6 +331,14 @@ that doesn't fit (`misfit` on its cell, the rule it breaks), for a caller who ma
 The dashboard's add and edit forms check a typed key's value as it's typed, with the same rules
 and messages (`apps/dashboard/src/lib/secrets-required.ts`).
 
+### Owners
+
+A required key can name its `owner` (`roll secrets required add STRIPE_KEY --owner @payments`, the
+Environments view's Owner field): the person or team who supplies it. Health's findings about that
+key carry it (`owner`, "ask @payments" in the view), and so does the daily notice, so whoever sees
+an expired or missing key knows who decides its new value. The key's rule in its own folder
+counts first, else its rule anywhere.
+
 ### Insights
 
 `GET …/environments/{env}/insights?path=` shows, for each key of a folder, when it last changed
@@ -1377,7 +1385,7 @@ type Version = { version: number; seq: number; op: "set" | "delete"; what: strin
 type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
-type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string };
+type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
@@ -1499,8 +1507,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **Key owners**: a key's optional owner (a person or team to ask), shown in health findings and
-   the daily notice, so whoever fixes it knows who decides.
 
 Waiting on other pull requests:
 

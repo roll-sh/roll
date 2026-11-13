@@ -172,7 +172,8 @@ export type Share = { id: string; note: string; views_left: number; created_by: 
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
 export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
-export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string };
+/** `owner`: who supplies it (a person or team), named in health and the daily notice. */
+export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string };
 /** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
 export type Identity = {
   id: string;
@@ -237,7 +238,7 @@ export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; res
 /** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
+export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */

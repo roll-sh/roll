@@ -554,6 +554,9 @@ pub enum RequiredCmd {
         pattern: Option<String>,
         #[arg(long, default_value = "")]
         comment: String,
+        /// Who supplies it (a person or team): health and the daily notice name them.
+        #[arg(long)]
+        owner: Option<String>,
     },
     Rm {
         key: String,
@@ -1253,10 +1256,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     }
                     for x in &rows {
                         let rule = [x["type"].as_str().map(|t| format!("type {t}")), x["pattern"].as_str().map(|p| format!("/{p}/"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
-                        println!("{:<28} {:<12} {:<28} {}", s(&x["key"]), s(&x["path"]), rule, x["comment"].as_str().unwrap_or_default());
+                        println!("{:<28} {:<12} {:<28} {}{}", s(&x["key"]), s(&x["path"]), rule, x["comment"].as_str().unwrap_or_default(), x["owner"].as_str().map(|o| format!("  (owner {o})")).unwrap_or_default());
                     }
                 }
-                RequiredCmd::Add { key, path, kind, pattern, comment } => {
+                RequiredCmd::Add { key, path, kind, pattern, comment, owner } => {
                     rows.retain(|x| !same(x, &key, &path));
                     let mut row = json!({ "key": key, "path": path, "comment": comment });
                     if let Some(k) = kind {
@@ -1264,6 +1267,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     }
                     if let Some(p) = pattern {
                         row["pattern"] = json!(p);
+                    }
+                    if let Some(o) = owner {
+                        row["owner"] = json!(o);
                     }
                     rows.push(row);
                     put(rows).await?;

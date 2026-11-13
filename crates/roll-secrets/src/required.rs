@@ -29,6 +29,9 @@ pub struct Required {
     /// A regular expression the whole value must match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Who supplies it (a person or team, `@payments`): health and the daily notice name them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// A typed key's type.
@@ -118,8 +121,8 @@ fn root() -> String {
 }
 
 pub(crate) fn of(c: &Conn<'_>, project: &str) -> Result<Vec<Required>> {
-    Ok(c.query("SELECT key, path, comment, type, pattern FROM required WHERE project_id = ? ORDER BY path, key", [project], |r| {
-        Ok(Required { key: r.get(0)?, path: r.get(1)?, comment: r.get(2)?, kind: r.get::<_, Option<String>>(3)?.and_then(|t| serde_json::from_value(serde_json::Value::String(t)).ok()), pattern: r.get(4)? })
+    Ok(c.query("SELECT key, path, comment, type, pattern, owner FROM required WHERE project_id = ? ORDER BY path, key", [project], |r| {
+        Ok(Required { key: r.get(0)?, path: r.get(1)?, comment: r.get(2)?, kind: r.get::<_, Option<String>>(3)?.and_then(|t| serde_json::from_value(serde_json::Value::String(t)).ok()), pattern: r.get(4)?, owner: r.get(5)? })
     })?)
 }
 
@@ -141,6 +144,10 @@ impl Secrets {
             names::key(&r.key)?;
             r.path = names::path(&r.path)?;
             names::comment(&r.comment)?;
+            r.owner = r.owner.take().map(|o| o.trim().to_string()).filter(|o| !o.is_empty());
+            if r.owner.as_ref().is_some_and(|o| o.chars().count() > 64 || o.chars().any(char::is_control)) {
+                return Err(Error::BadRequest(format!("{}: an owner is a name of at most 64 characters", r.key)));
+            }
             if let Some(p) = &r.pattern {
                 if p.is_empty() || p.len() > PATTERN_MAX {
                     return Err(Error::BadRequest(format!("{}: a pattern is 1–{PATTERN_MAX} characters", r.key)));
@@ -156,7 +163,7 @@ impl Secrets {
             c.execute("DELETE FROM required WHERE project_id = ?", [project])?;
             for r in &list {
                 let kind = r.kind.and_then(|t| serde_json::to_value(t).ok()).and_then(|v| v.as_str().map(str::to_string));
-                c.execute("INSERT INTO required (project_id, path, key, comment, created_at, type, pattern) VALUES (?, ?, ?, ?, ?, ?, ?)", params![project, r.path, r.key, r.comment, now, kind, r.pattern])?;
+                c.execute("INSERT INTO required (project_id, path, key, comment, created_at, type, pattern, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![project, r.path, r.key, r.comment, now, kind, r.pattern, r.owner])?;
             }
             let keys: Vec<String> = list.iter().map(|r| r.key.clone()).collect();
             audit::record(c, project, caller, "required.set", None, None, &keys, &format!("{} required", crate::write::plural(list.len(), "key")), now)?;

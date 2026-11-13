@@ -115,6 +115,7 @@ export function HealthView() {
                       {f.path !== "/" && <span className="font-mono"> {f.path}</span>}
                     </span>
                   </Link>
+                  {f.owner && <span className="text-[11.5px] text-muted" title="Who supplies it (the required key's owner)">ask {f.owner}</span>}
                   <span className={`ml-auto text-[11.5px] ${serious ? "text-danger" : "text-muted"}`}>{f.detail}</span>
                   {f.issue === "weak" && (
                     <button className={`${ghost} h-6`} onClick={() => fix(f, { value: generateValue() }, "a new random value")} title="48 random letters and digits, made here; a change request where the environment is protected">

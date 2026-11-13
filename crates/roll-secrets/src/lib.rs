@@ -374,6 +374,8 @@ impl Secrets {
         db.add_column("versions", "expires_at", "INTEGER")?;
         // Why a credential's value is easy to guess (strength.rs), judged when it was written.
         db.add_column("secrets", "weak", "TEXT")?;
+        // Who supplies a required key (health and the daily notice name them).
+        db.add_column("required", "owner", "TEXT")?;
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;

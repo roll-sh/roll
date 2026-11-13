@@ -830,7 +830,7 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "DB_PASSWORD", "value": "Password1" }, { "op": "set", "key": "CERT", "value": "c", "expires_at": 1000 }] }))).await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true }))).await;
     api.set("staging", "DB_PASSWORD", "Password1").await;
-    api.ok(Method::PUT, "/required", Some(json!([{ "key": "CERT" }]))).await;
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "CERT", "owner": "@payments" }]))).await;
     let found = api.ok(Method::GET, "/health", None).await;
     let got: Vec<(&str, &str, &str)> = found.as_array().unwrap().iter().map(|f| (f["issue"].as_str().unwrap(), f["environment"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
     assert_eq!(
@@ -845,6 +845,8 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
         ]
     );
     assert_eq!(found[3]["detail"], "also in staging");
+    // A required key's owner is who to ask.
+    assert_eq!((found[0]["owner"].as_str(), found[1]["owner"].as_str(), found[3]["owner"].as_str()), (Some("@payments"), Some("@payments"), None));
     // It filters itself (roll-access lets environment-limited tokens in on that): a token for
     // staging hears only of staging.
     let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ci", "environments": ["staging"], "actions": ["read", "reveal"] }))).await;
