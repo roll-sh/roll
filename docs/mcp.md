@@ -52,9 +52,12 @@ and OAuth's resource is the server whatever the toolsets (checked with the TypeS
 
 `/v1/mcp?readonly=1` (or `X-MCP-Readonly: true`) is a read-only connection, as GitHub's server's
 read-only mode is: only tools annotated `readOnlyHint` are listed and run, whatever the token
-allows (a call to another is an error result), and prompts that need one aren't offered. It
-narrows, never widens: each call is still decided by the token's rules. Anything but `1`, `true`,
-`0` or `false` is a 400, so a typo never means "not read-only". The connect panel has a checkbox
+allows (a call to another is an error result), and prompts that need one aren't offered. A tool is
+read-only when its route only reads, or reveals with a `GET`: a reveal that's a `POST` makes
+something someone can use (a presigned PUT URL, a share link), so it isn't. It narrows, never
+widens: each call is still decided by the token's rules. It's on when the query or the header asks;
+anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_only`), is a 400,
+so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
 ### With OAuth (Claude Code, Claude.ai, Cursor, VS Code, …)
@@ -171,7 +174,8 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 - Requests with an `Origin` header must come from the dashboard's or the API's origin (DNS
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
-  `text` block, cut at 256 KiB. Binary content comes back base64 (`content_b64`).
+  `text` block, cut at 256 KiB. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
+  4 MiB) comes back as MCP image content the agent can look at.
 - A route refusing a call is a result with `isError: true`, and its text says why ("not allowed:
   this token can't delete postgres prj_…"). Unknown tools and bad arguments are JSON-RPC errors.
 
@@ -201,14 +205,17 @@ roll's workflows as prompts a client offers as slash commands (`prompts/list`, `
 `crates/roll-mcp/src/prompts.rs`), as GitHub's and Sentry's MCP servers ship theirs. A prompt is
 only text that walks the agent through roll's tools: it calls nothing, each tool it names is still
 decided by the gate, and a connection is offered only the prompts whose tools it has. Arguments are
-one line of printable text, at most 200 characters.
+ids (letters, digits, `_`, `.`, `-`, at most 64), quoted in the message: anyone can name a project,
+and a prompt's text is the person's own message to the agent.
 
 A prompt's `project`, `service` and `env` complete as the person types (`completion/complete`): the
 values come from the list tool the connection would call (`workspace_list_projects`; a Postgres
 project's from `postgres_list_projects`;
 `apps_list_services`, `apps_list_environments` for the `service` already given), through the gate
 with the caller's token, so a suggestion is only what it may read, and each is an audited read.
-Nothing completes for a prompt the connection isn't offered.
+Only ids are offered (what tools take). A completion never asks a person: a list that would ask
+is refused at once (`would_ask`), so typing opens no approval. A prompt the connection isn't offered
+is `-32602`.
 
 | Prompt | Arguments | What it does | Tools |
 | --- | --- | --- | --- |
@@ -382,6 +389,9 @@ previews are listed once those products are on.
 | `previews_keep` | Keep a preview past its time to live, for some hours. | `POST /v1/previews/{id}/keep` |
 | `previews_activity` | What happened to a preview, newest first. | `GET /v1/previews/{id}/activity` |
 | `previews_share` | A link for someone outside the team, for some hours (reveal: its token is in the answer). | `POST /v1/previews/{id}/shares` |
+| `previews_list_shares` | Who a preview is shared with outside the team (never the links' tokens). | `GET /v1/previews/{id}/shares` |
+| `previews_env` | A preview's own variables, with their values (reveal). | `GET /v1/previews/{id}/env` |
+| `previews_screenshot` | A preview's page as an image the agent can look at (`diff`, `page`, `view`); accepting a visual change stays a person's (admin, no tool). | `GET /v1/previews/{id}/screenshot` |
 | `previews_sleep` | Stop a preview's services until it's woken. | `POST /v1/previews/{id}/sleep` |
 | `previews_wake` | Start a sleeping preview's services again. | `POST /v1/previews/{id}/wake` |
 | `previews_usage` | What a project's previews used and cost this month. | `GET /v1/previews/projects/{project}/usage` |
@@ -416,7 +426,12 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret);
+revoked as leaked, about to expire; only their own, never a secret); previews-next's routes (#28): a
+preview's env is reveal, accepting a visual change is admin with no tool, screenshots come back as
+MCP image content (`previews_screenshot`), `previews_list_shares`, `previews_env`; the eleventh
+review (MCP's new surface): read-only excludes reveals that make something (a presigned PUT, a share
+link), either switch turns it on and a misspelled key is a 400; completions offer only ids and never
+ask a person; prompts' arguments are quoted ids; template errors say what they were;
 `secrets_list_outside_databases` (secrets #39); a project's page as a resource template
 (`roll://projects/{project}`, read through the gate, its id completed); progress while a call waits
 (`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript

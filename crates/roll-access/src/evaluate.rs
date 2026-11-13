@@ -40,6 +40,9 @@ pub struct McpCall {
     pub elicits: bool,
     /// The MCP client's name and version, as it said in `initialize`.
     pub client: Option<Arc<str>>,
+    /// Asked for nobody's sake (an argument's completions): what would ask a person is refused at
+    /// once instead, so typing never opens an approval.
+    pub quiet: bool,
 }
 
 /// What a client calls itself, fit for a log line: one line, no control characters, at most 120
@@ -784,6 +787,9 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
     if existing.is_none() {
         let (a, g, h) = (access.clone(), ctx.grant.id.clone(), request_hash.clone());
         existing = blocking(move || a.store.open_approval(&g, &h)).await.map_err(|e| Box::new(e.into_response()))?.map(|a| a.id);
+    }
+    if existing.is_none() && ctx.mcp.as_ref().is_some_and(|m| m.quiet) {
+        return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and a completion never does".into(), json!({}))));
     }
     let approval = match existing {
         Some(id) => {
