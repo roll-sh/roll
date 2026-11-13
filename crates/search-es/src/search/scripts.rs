@@ -382,6 +382,19 @@ impl DocHost {
     /// over a dense field): [`Host::doc_values_at`] then reads them from the run instead of
     /// ranking and unpacking each doc's value on its own. Other runs and fields keep the
     /// per-doc path.
+    /// The current doc's value of literal field `slot` from the block [`prefetch`](Self::prefetch)
+    /// decoded, with the field's kind (`None`: not prefetched, or runtime fields may shadow it).
+    #[inline]
+    fn prefetched(&self, slot: usize) -> Option<(Kind, i64)> {
+        if self.runtime.is_some() {
+            return None;
+        }
+        let Some(Slot::Numeric { kind, .. }) = self.slots.get(slot) else { return None };
+        let c = self.cols.get(slot)?.as_ref()?;
+        let i = self.doc.wrapping_sub(self.block_start);
+        (i < c.len).then(|| (*kind, c.values[i as usize]))
+    }
+
     pub fn prefetch(&mut self, docs: &[u32]) {
         let n = docs.len();
         let run = n >= PREFETCH_MIN && docs[n - 1] - docs[0] == (n - 1) as u32 && PREFETCH.load(std::sync::atomic::Ordering::Relaxed);
@@ -529,6 +542,23 @@ impl Host for DocHost {
             }
             _ => self.doc_values(field, out),
         }
+    }
+
+    fn doc_long_at(&mut self, slot: usize) -> Option<i64> {
+        let (kind, v) = self.prefetched(slot)?;
+        matches!(kind, Kind::Long | Kind::Integer | Kind::Short | Kind::Byte).then_some(v)
+    }
+
+    fn doc_double_at(&mut self, slot: usize) -> Option<f64> {
+        let (kind, v) = self.prefetched(slot)?;
+        // As `push_numeric` decodes them.
+        Some(match kind {
+            Kind::Double => encode::sortable_f64(v),
+            Kind::Float => encode::sortable_f32(v as i32) as f64,
+            Kind::HalfFloat => encode::sortable_f16(v as i16) as f64,
+            Kind::ScaledFloat(sf) => super::hits::scaled_double(v, sf),
+            _ => return None,
+        })
     }
 
     fn doc_values(&mut self, field: &str, out: &mut DocValues) -> Result<bool, HostError> {

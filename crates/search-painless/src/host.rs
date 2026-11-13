@@ -250,6 +250,22 @@ pub trait Host {
         self.doc_values(field, out)
     }
 
+    /// The current document's one value of the `slot`-th literal field, of an integer kind,
+    /// when the host has it at hand without filling a [`DocValues`] (a block it decoded
+    /// ahead). It must be what [`Host::doc_values_at`] would give; `None` sends the caller
+    /// there.
+    fn doc_long_at(&mut self, slot: usize) -> Option<i64> {
+        let _ = slot;
+        None
+    }
+
+    /// [`Host::doc_long_at`] for a floating-point kind (`double`, `float`, `half_float`,
+    /// `scaled_float`).
+    fn doc_double_at(&mut self, slot: usize) -> Option<f64> {
+        let _ = slot;
+        None
+    }
+
     /// Values of `field` for the field API (`field('f')`, `$('f', d)`). Elasticsearch loads
     /// these with `FielddataOperation.SCRIPT`, which falls back to `_source` where `doc[...]`
     /// fails (a `text` field without fielddata reads its source values as strings, sorted);

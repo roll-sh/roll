@@ -863,6 +863,9 @@ impl Spec<'_> {
                 };
                 match kind {
                     K::Long | K::Integer | K::Short | K::Byte => L(fx(move |vm| {
+                        if let Some(x) = vm.host.doc_long_at(slot) {
+                            return Ok(x);
+                        }
                         fetch(vm)?;
                         let dv = &vm.st.doc_bufs[slot];
                         match dv.longs.first() {
@@ -871,6 +874,9 @@ impl Spec<'_> {
                         }
                     })),
                     K::Double | K::Float | K::HalfFloat | K::ScaledFloat => D(fx(move |vm| {
+                        if let Some(x) = vm.host.doc_double_at(slot) {
+                            return Ok(x);
+                        }
                         fetch(vm)?;
                         let dv = &vm.st.doc_bufs[slot];
                         match dv.doubles.first() {
