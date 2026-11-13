@@ -722,8 +722,9 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; visual_review: boolean };   // all true but screenshot and visual_review; pages: []
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[] };   // all true but screenshot; pages: []
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
+  visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
@@ -787,13 +788,15 @@ type Settings = {
     went wrong while it loaded (`pages` on the preview, `GET …/screenshot?page=/pricing`, a page
     switcher on the sheet, "2 more pages, most changed /pricing by 40.0%" in the comment's
     checks). A path no longer listed is dropped at the next screenshot.
-    With `github.visual_review` (off by default) a change's pages are reviewed as Chromatic's UI
-    Review does: once compared with the baseline, the change has `visual_review` (the most any
-    page differs, at either width), and a `roll/visual` commit status that's pending while a page
-    differs and nobody has accepted it ("Differs from main by 8.0%: accept it in roll"), and
-    success once someone has (the sheet's Accept, `roll preview accept`, `POST …/visual/accept`;
-    "Accepted by ada"), or when the pages look the same. An acceptance is of one screenshot's
-    head: the next push is reviewed again. Branch protection can require `roll/visual`.
+    With `visual_review` (`off` by default, `check` or `required`) a change's pages are reviewed as
+    Chromatic's UI Review does: once compared with the baseline, the change has `visual_review`
+    (the most any page differs, at either width), and a `roll/visual` commit status that's
+    pending while a page differs and nobody has accepted it ("Differs from main by 8.0%: accept it
+    in roll"), and success once someone has (the sheet's Accept, `roll preview accept`, `POST
+    …/visual/accept`; "Accepted by ada"), or when the pages look the same. An acceptance is of one
+    screenshot's head: the next push is reviewed again. GitHub's branch protection can require
+    `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
+    `Code::blockers`, from the project's rule, never the change's).
     The same session checks what a screen reader can't name (images without alt text, form
     fields without a label, buttons and links with no name) and whether the document has a
     language and a title (`page_a11y`, counts and the first one's markup, bounded; "**Accessibility:**
@@ -916,7 +919,8 @@ Ranked by what a person notices first. Done so far:
 - every change compared with the default branch, whose preview roll keeps itself (`github.baseline`);
 - the comment's page checks folded under one line of counts;
 - screenshots of the project's other pages (`github.pages`), each compared like the first;
-- a visual review per push (`github.visual_review`, the `roll/visual` status, Accept in roll);
+- a visual review per push (`visual_review`: the `roll/visual` status, Accept in roll, and
+  `required` keeping the change from landing in roll);
 - comparisons with main at the change's merge base (the baseline's last 10 heads kept);
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project
   public or private restarting nothing on roll's runtime;
@@ -968,10 +972,7 @@ Ranked by what a person notices first. Done so far:
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-4. **A visual review that blocks landing in roll**: `roll/visual` gates GitHub merges through
-   branch protection; roll's own landing (`Code::blockers`, its rules from `roll.toml` on the
-   default branch) could ask for an accepted review the same way, for repos without GitHub.
-5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+4. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
    name (fixed); if it comes back, log both starts' container ids.

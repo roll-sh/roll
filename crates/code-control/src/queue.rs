@@ -164,6 +164,11 @@ impl Code {
         if !c.trusted && !c.run_approved {
             out.push(Blocker::new("untrusted", "from someone without write access: a writer must approve running it"));
         }
+        // The project's previews ask for a visual review (`visual_review = "required"`, the
+        // project's rule, not the change's): pages that differ from main wait for someone.
+        if let Some(v) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).and_then(|e| e.visual_review.as_ref()).filter(|v| v.required && v.state == "changed") {
+            out.push(Blocker::new("visual", format!("its pages differ from {} by {:.1}%: someone must accept them on its preview", v.branch, v.percent.max(0.1))));
+        }
         if r.land_policy == LandPolicy::Queue {
             let pending: Vec<String> = settings
                 .change_checks(&r.required_checks)

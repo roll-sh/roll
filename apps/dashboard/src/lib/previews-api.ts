@@ -84,7 +84,7 @@ export interface Preview {
   /** The project's other pages (`github.pages`) at the latest screenshot. */
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
-  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null } | null;
+  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null; required: boolean } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
   /** How fast its first page loaded at this head (timed with the screenshot), and at the one before. */
@@ -185,9 +185,11 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; visual_review?: boolean };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
+  /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
+  visual_review?: "off" | "check" | "required";
   /** A feedback button on its pages for people who came in through roll (link access). */
   feedback: boolean;
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */

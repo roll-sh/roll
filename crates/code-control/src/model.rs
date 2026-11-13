@@ -333,6 +333,9 @@ pub struct PreviewVisualReview {
     pub branch: String,
     pub percent: f64,
     pub by: Option<String>,
+    /// Required to land in roll (`Code::blockers`), not only a status.
+    #[serde(default)]
+    pub required: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

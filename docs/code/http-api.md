@@ -158,7 +158,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           page_a11y?: {issues: [{kind: "images" | "fields" | "buttons" | "links", count, first: string | null}], lang: bool, title: bool} /* what a screen reader can't name there; first is the page's markup, untrusted */,
                           base_change?: {branch, percent, phone_percent: number | null, head?: string | null} /* how much the page differs from the project's preview of the default branch */,
                           pages?: [{path, errors, percent: number | null, base_percent: number | null}] /* the project's other pages (github.pages): errors while each loaded, its change since the push before, against the default branch */,
-                          visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null} /* the roll/visual status (github.visual_review) */} /* roll previews (docs/previews.md) */}
+                          visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null, required} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",
            base, head, revision, work_item: string | null, branch: string | null /* git branch it was pushed as */,
@@ -174,7 +174,8 @@ Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, tit
            review: ReviewSummary /* see Reviews */,
            created_at, updated_at}
 Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval" | "needs_codeowner" | "changes_requested"
-                   | "unresolved_threads" | "review_pending" | "review_required" /* more may come: show unknown kinds by message */,
+                   | "unresolved_threads" | "review_pending" | "review_required"
+                   | "visual" /* its preview's pages differ from main's and nobody accepted them (visual_review = "required") */ /* more may come: show unknown kinds by message */,
              message}
 QueueInfo = {id /* qe_… */, position: number | null /* 1-based while queued; null once it left */,
              lane: "urgent" | "normal", state: EntryState, error: string | null /* why it was ejected: one line */,

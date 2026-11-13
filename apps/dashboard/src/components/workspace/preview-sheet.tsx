@@ -236,7 +236,9 @@ export function PreviewSheet({
                   <span className="text-subtle">Accepted by {p.visual_review.by ?? "someone"} at this push.</span>
                 ) : (
                   <>
-                    <span className="text-soft">Differs from {p.visual_review.branch} by {Math.max(p.visual_review.percent, 0.1).toFixed(1)}%: waiting for a review.</span>
+                    <span className="text-soft">
+                      Differs from {p.visual_review.branch} by {Math.max(p.visual_review.percent, 0.1).toFixed(1)}%: waiting for a review{p.visual_review.required ? " before it can land" : ""}.
+                    </span>
                     <button
                       type="button"
                       disabled={busy !== null || gone}

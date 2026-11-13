@@ -73,6 +73,8 @@ export function blockerCopy(b: Blocker): BlockerCopy {
       return { title: "Review pending", detail: b.message, action: null };
     case "review_required":
       return { title: "Review required", detail: b.message, action: null };
+    case "visual":
+      return { title: "Visual change to accept", detail: `${b.message} (Accept on its preview's sheet, or roll preview accept).`, action: null };
     default:
       return { title: b.message, detail: "", action: null };
   }

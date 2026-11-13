@@ -415,6 +415,8 @@ pub struct VisualReview {
     pub percent: f64,
     pub by: Option<String>,
     pub at: Option<i64>,
+    /// The project's `visual_review` is `required`: a change waiting for one can't land in roll.
+    pub required: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

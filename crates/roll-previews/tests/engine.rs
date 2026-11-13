@@ -177,7 +177,7 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
 
 #[tokio::test]
 async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
-    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "visual_review": true } }));
+    let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
     let png = |v: u8| {
         let mut out = Vec::new();
         image::RgbaImage::from_pixel(4, 4, image::Rgba([v, v, v, 255])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();

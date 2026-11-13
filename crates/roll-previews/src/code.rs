@@ -132,6 +132,7 @@ impl CodeSource {
                     // As precise as the status says.
                     percent: (v.percent * 10.0).round() / 10.0,
                     by: v.by.clone(),
+                    required: v.required,
                 }),
                 page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
                     issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone() }).collect(),

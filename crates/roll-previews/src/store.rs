@@ -1235,7 +1235,8 @@ impl Store {
     /// The visual review of a change's preview (`github.visual_review`), once its pages were
     /// compared with the baseline's: the most any of them differs, and who accepted that head.
     fn visual_review(&self, r: &Row, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck]) -> Result<Option<crate::VisualReview>> {
-        if r.change_id.is_none() || !self.settings(&r.project_id)?.github.visual_review {
+        let rule = self.settings(&r.project_id)?.visual_review;
+        if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
             return Ok(None);
         }
         let Some(base) = base else { return Ok(None) };
@@ -1252,7 +1253,7 @@ impl Store {
             Some((_, by, at)) => (Some(by), Some(at)),
             None => (None, None),
         };
-        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at }))
+        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required }))
     }
 
     /// Another page's screenshot (`previous`: the one before it).

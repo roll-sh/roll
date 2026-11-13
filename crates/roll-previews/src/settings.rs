@@ -48,6 +48,10 @@ pub struct Settings {
     /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
     /// its access token once and then a cookie; `public` is anyone who can reach the domain.
     pub access: Access,
+    /// Chromatic's UI Review, with screenshots on: `check` gives a change a visual review (the
+    /// `roll/visual` commit status), pending while its pages differ from the baseline's and
+    /// nobody has accepted them at that head; `required` also keeps it from landing in roll.
+    pub visual_review: VisualReviewRule,
     /// A feedback button on the pages of people who came in through roll (link access): it pins a
     /// note to an element and posts it on the change, from roll.
     pub feedback: bool,
@@ -86,6 +90,15 @@ fn seed_timeout() -> u32 {
 
 fn seed_memory() -> u32 {
     1024
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VisualReviewRule {
+    #[default]
+    Off,
+    Check,
+    Required,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,10 +142,6 @@ pub struct GithubRule {
     /// [`MAX_PAGES`], each compared with its own screenshot before and with the baseline's.
     #[serde(default)]
     pub pages: Vec<String>,
-    /// A `roll/visual` commit status (Chromatic's UI Review): pending while a change's pages
-    /// differ from the baseline's and nobody has accepted them at that head, in roll.
-    #[serde(default)]
-    pub visual_review: bool,
 }
 
 pub const MAX_PAGES: usize = 5;
@@ -168,6 +177,7 @@ impl Default for Settings {
             env_for: BTreeMap::new(),
             github: GithubRule::default(),
             access: Access::Link,
+            visual_review: VisualReviewRule::Off,
             feedback: true,
             warm: true,
             seed: None,
@@ -185,7 +195,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), visual_review: false }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new() }
     }
 }
 

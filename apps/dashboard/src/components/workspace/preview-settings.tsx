@@ -369,12 +369,14 @@ function Form({
           />
         )}
         {s.github.screenshot && (
-          <Toggle
-            label="Visual review (roll/visual)"
-            note="A change whose pages differ from the default branch's waits for someone to accept it in roll, at each push."
-            checked={!!s.github.visual_review}
-            onChange={(v) => set("github", { ...s.github, visual_review: v })}
-          />
+          <Field group label="Visual review" note="A change whose pages differ from the default branch's waits for someone to accept it, at each push (the roll/visual status); required also keeps it from landing in roll.">
+            <Choice
+              value={s.visual_review ?? "off"}
+              options={["off", "check", "required"]}
+              onChange={(v) => set("visual_review", v)}
+              labels={{ off: "Off", check: "A check", required: "Required to land" }}
+            />
+          </Field>
         )}
         {s.github.screenshot && (
           <Field label="Other pages" note="Taken with / at each push and compared the same way (up to 5 paths: /pricing, /login).">

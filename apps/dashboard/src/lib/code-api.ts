@@ -278,6 +278,7 @@ export interface Blocker {
     | "unresolved_threads"
     | "review_pending"
     | "review_required"
+    | "visual"
     | (string & {});
   message: string;
 }
