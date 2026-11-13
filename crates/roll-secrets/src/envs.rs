@@ -122,6 +122,37 @@ pub struct NewEnvironment {
     pub trusted: bool,
 }
 
+/// `PUT …/environments/{env}`: what an environment should be (docs/secrets.md, "Ensuring an
+/// environment"). Absent fields leave what's there.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ensure {
+    pub name: Option<String>,
+    pub kind: Option<Kind>,
+    pub base: Option<String>,
+    pub labels: Option<BTreeMap<String, String>>,
+    pub expires_at: Option<i64>,
+    pub ttl_minutes: Option<i64>,
+    /// Its own keys at `path`: set as given (an unchanged one is no change).
+    #[serde(default)]
+    pub secrets: Vec<crate::Op>,
+    pub path: Option<String>,
+    #[serde(default)]
+    pub trusted: bool,
+    /// Also delete the folder's own keys `secrets` doesn't name (never a linked or personal one).
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// What ensuring did.
+#[derive(Debug, Serialize)]
+pub struct Ensured {
+    pub environment: Environment,
+    pub created: bool,
+    /// The change it made to the overrides, if any.
+    pub change: Option<crate::Change>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvChange {
@@ -269,6 +300,66 @@ impl Secrets {
             let rows = all(c, project)?.into_iter().filter(|e| caller.allows(Action::Read, &Scope::env(project, &e.slug))).collect();
             view(c, rows)
         })
+    }
+
+    /// Create `slug` as `e` says, or bring it to that: labels, expiry and its own keys at `path`
+    /// in one change. Idempotent: ensuring what's there changes nothing. Its kind, base and trust
+    /// aren't changed in place (409 `mismatch`: delete and ensure again, on purpose).
+    pub fn ensure_environment(&self, project: &str, slug: &str, e: Ensure, caller: &Caller) -> Result<Ensured> {
+        let found = self.db.read(|c| Ok::<_, Error>(by_slug(c, project, slug).ok()))?;
+        let Some(env) = found else {
+            let new = NewEnvironment { slug: slug.to_string(), name: e.name, kind: e.kind, base: e.base, labels: e.labels.unwrap_or_default(), expires_at: e.expires_at, ttl_minutes: e.ttl_minutes, secrets: e.secrets, path: e.path, trusted: e.trusted };
+            let environment = self.create_environment(project, new, caller)?;
+            return Ok(Ensured { environment, created: true, change: None });
+        };
+        caller.need(Action::Write, &Scope::env(project, slug))?;
+        let base = self.db.read(|c| env.base_id.as_deref().map(|b| by_id(c, b).map(|b| b.slug)).transpose())?;
+        let kind = e.kind.unwrap_or(if e.base.is_some() { Kind::Ephemeral } else { env.kind });
+        if kind != env.kind || (e.base.is_some() && e.base != base) || (env.kind == Kind::Ephemeral && e.trusted != env.trusted) {
+            return Err(Error::Conflict("mismatch", format!("{slug} exists with another kind, base or trust: delete it and ensure it again")));
+        }
+        if let Some(l) = &e.labels {
+            names::labels(l)?;
+        }
+        let path = names::path(e.path.as_deref().unwrap_or("/"))?;
+        let now = self.db.now_ms()?;
+        let expires_at = match (e.expires_at, e.ttl_minutes) {
+            (Some(at), _) => Some(at),
+            (None, Some(m)) if m > 0 => Some(now + m * 60_000),
+            (None, Some(_)) => return Err(Error::BadRequest("ttl_minutes is positive".into())),
+            (None, None) => None,
+        };
+        if expires_at.is_some() && env.kind != Kind::Ephemeral {
+            return Err(Error::BadRequest("only an ephemeral environment expires".into()));
+        }
+        if e.labels.as_ref().is_some_and(|l| *l != env.labels) || expires_at.is_some_and(|at| Some(at) != env.expires_at) || e.name.as_ref().is_some_and(|n| *n != env.name) {
+            if let Some(n) = &e.name {
+                names::env_name(n)?;
+            }
+            self.db.write(|c| {
+                if let Some(l) = &e.labels {
+                    c.execute("UPDATE environments SET labels = ? WHERE id = ?", params![json(l), env.id])?;
+                }
+                if let Some(at) = expires_at {
+                    c.execute("UPDATE environments SET expires_at = ? WHERE id = ?", params![at, env.id])?;
+                }
+                if let Some(n) = &e.name {
+                    c.execute("UPDATE environments SET name = ? WHERE id = ?", params![n, env.id])?;
+                }
+                audit::record(c, project, caller, "environment.ensure", Some(slug), None, &[], &format!("brought {slug}'s settings up to date"), now)
+            })?;
+        }
+        let mut ops = e.secrets;
+        if e.replace {
+            let named: std::collections::HashSet<String> = ops.iter().map(|o| match o {
+                crate::Op::Set { key, .. } | crate::Op::Delete { key, .. } => key.clone(),
+            }).collect();
+            let own = self.secrets(project, slug, &path, caller)?;
+            ops.extend(own.into_iter().filter(|s| s.source == crate::read::Source::Own && s.kind == crate::SecretType::Shared && s.link.is_none() && !named.contains(&s.key)).map(|s| crate::Op::Delete { key: s.key, kind: None, path: None }));
+        }
+        let change = if ops.is_empty() { None } else { self.batch(project, slug, crate::Batch { path: Some(path), message: Some("ensured".into()), ops, if_seq: None }, caller)?.change };
+        let environment = self.environment(project, slug, caller)?;
+        Ok(Ensured { environment, created: false, change })
     }
 
     /// The caller a read of `slug` runs as: an ephemeral environment that isn't trusted never reads

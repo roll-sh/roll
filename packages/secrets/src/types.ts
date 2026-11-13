@@ -29,6 +29,9 @@ export type Environment = {
   /** An ephemeral environment that may read a protected base (else it never does). */
   trusted: boolean;
 };
+/** `PUT …/environments/{env}`: what it should be; `replace` also deletes its other own keys at `path`. */
+export type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean };
+export type Ensured = { environment: Environment; created: boolean; change: Change | null };
 export type NewEnvironment = {
   slug: string;
   name?: string;

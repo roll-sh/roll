@@ -181,6 +181,14 @@ environment is a first-class kind, built to be cheap:
   the preview's branched resources: the preview's Postgres branch, its Redis branch.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
+- **Ensuring one** is a single idempotent call, `PUT …/environments/{env}` with what it should be
+  (`{base?, kind?, name?, labels?, expires_at? | ttl_minutes?, trusted?, path?, secrets?: Op[],
+  replace?}`). If the environment is missing, it's created (201). Otherwise its labels, expiry and
+  name are brought to what's given, and `secrets` are applied to its own keys at `path` as one
+  change, with `replace` also deleting the folder's other own keys (never a linked or personal
+  one). An unchanged value is no change, so ensuring what's there records nothing (`change: null`).
+  Its kind, base and trust aren't changed in place: 409 `mismatch`, delete it and ensure it again.
+  previews' reconcile loop and apps' environments are each one call.
 - It is **untrusted** unless made with `"trusted": true` (which needs `admin` on its base): it
   runs a change's code, so reading it never reaches a protected environment (its base, an import, a
   reference), whoever reads it. A preview of a same-repo change in a project that allows it is made
@@ -926,6 +934,7 @@ isn't in the workspace is 404.
 | `DELETE /environments?label=k=v` | | `{deleted: string[]}` (ephemeral only) |
 | `PUT /environments/order` | `{order: slug[]}` | `Environment[]` |
 | `GET /environments/{env}` | | `Environment` |
+| `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
@@ -1009,6 +1018,7 @@ type Environment = {
   protected: boolean; approvals: number; approvers: string[]; created_at: number; secrets: number;
   max_age_days: number | null; notify: string | null; trusted: boolean; // trusted: an ephemeral one that may read a protected base
 };
+type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}
 type NewEnvironment = {
   slug: string; name?: string; kind?: "standard" | "ephemeral"; base?: string; labels?: Record<string, string>;
   expires_at?: number; ttl_minutes?: number; secrets?: Op[]; // ephemeral: created in one call with its overrides
@@ -1137,12 +1147,7 @@ Reviewed again on 2026-11-13:
 
 Ranked:
 
-1. **`PUT …/environments/{env}`: ensure an environment in one call.** It creates the environment
-   if it's missing, and otherwise brings its labels, expiry and overrides to what's given in one
-   change (the keys given, and deletes for overrides no longer wanted with `replace`). It's
-   idempotent. previews' create, then 409, then GET, then changes, and apps' "an apps environment
-   is a secrets environment", both become one call. In progress.
-2. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
+1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
    prepared on `wip/secrets-on-mcp`. Also, on that branch:
    - list `secrets` among MCP's products, so its tools aren't filtered out;
    - map ephemeral environments to roll-access's `preview` environment class;
@@ -1151,14 +1156,14 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-3. **Errors from in-process product calls carry the HTTP status.** rolld's `Api` (link providers,
+2. **Errors from in-process product calls carry the HTTP status.** rolld's `Api` (link providers,
    syncs) reads a status, not "404" or "no " in an error's text.
-4. **One table of every secrets route and its action**, generated from the router and checked by a
+3. **One table of every secrets route and its action**, generated from the router and checked by a
    test against roll-access's `classify`, so a catch-all row can't hide a misclassified route.
-5. **Fly.io and Railway syncs**, checked against their own clients' sources. Fly is GraphQL
+4. **Fly.io and Railway syncs**, checked against their own clients' sources. Fly is GraphQL
    `setSecrets`/`unsetSecrets` `{appId, secrets: [{key, value}]}` / `{appId, keys}`.
-6. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+5. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-7. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+6. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-8. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+7. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

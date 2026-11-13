@@ -374,12 +374,12 @@ async fn blame(
 
 /// Secrets' values in the default branch (docs/secrets.md, "Leaked secrets don't land"): where,
 /// never what. For the repo's managers: it confirms which line holds which secret.
-async fn scan_leaks(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, Q(q): Q<LeakQuery>) -> Result<Json<crate::leaks::LeakScan>> {
+async fn scan_leaks(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, Q(q): Q<LeakQuery>) -> Result<Json<crate::secret_leaks::LeakScan>> {
     let r = code.writable(&caller, &owner, &repo)?;
     code.check_manage(&caller, &r)?;
     let history = q.history.unwrap_or(0);
-    if history > crate::leaks::SCAN_HISTORY_MAX {
-        return Err(Error::Invalid(format!("history is a number of commits, at most {}", crate::leaks::SCAN_HISTORY_MAX)));
+    if history > crate::secret_leaks::SCAN_HISTORY_MAX {
+        return Err(Error::Invalid(format!("history is a number of commits, at most {}", crate::secret_leaks::SCAN_HISTORY_MAX)));
     }
     Ok(Json(code.scan_leaks(&r, history).await?))
 }

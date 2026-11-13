@@ -40,7 +40,7 @@ pub use access::{Action, Caller, Scope};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
-pub use envs::{EnvChange, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
+pub use envs::{EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
 pub use read::{Grid, Problem, Secret, Source, Values, Version};
