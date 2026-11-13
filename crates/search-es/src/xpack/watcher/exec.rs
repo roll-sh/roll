@@ -325,7 +325,7 @@ impl Run<'_> {
             "http" => {
                 let stored = body.get("request").and_then(Value::as_object).cloned().unwrap_or_default();
                 let model = self.model(payload);
-                let req = match http::render(&stored, &|t| self.render(t, &model)) {
+                let req = match http::render(self.cluster, &stored, &|t| self.render(t, &model)) {
                     Ok(r) => r,
                     Err(e) => return StepResult::failed("http", e),
                 };
@@ -613,7 +613,7 @@ impl Run<'_> {
             },
             "webhook" => {
                 let stored = body.as_object().cloned().unwrap_or_default();
-                let req = match http::render(&stored, &|t| self.render(t, &model)) {
+                let req = match http::render(self.cluster, &stored, &|t| self.render(t, &model)) {
                     Ok(r) => r,
                     Err(e) => return failed(e),
                 };
