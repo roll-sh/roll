@@ -1,7 +1,8 @@
-import { Clock, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
+import { Clock, Dices, Download, Folder, FolderPlus, History, Import as ImportIcon, Link2, Lock, MoreHorizontal, Pencil, Plus, RotateCw, Search, Send, Trash2, Upload, User } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/components/link";
 import { canRotate, needsApproval, SECRET_KEY, TAG, type Batch, type Environment, type ExportFormat, type Import, type KeyInsight, type Op, type Secret, type SecretType } from "@/lib/secrets-api";
+import { generateValue } from "@/lib/secrets-generate";
 import { childPath, folderName } from "@/lib/secrets-grid";
 import { misfit } from "@/lib/secrets-required";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../agents/ui/menu";
@@ -440,11 +441,11 @@ function AddSecret({ path, keys, refs, onAdd, onCancel }: { path: string; keys: 
           {key && !keyOk && <span className="mt-1 block text-[11px] text-danger">A letter or _ then letters, digits and _.</span>}
           {exists && <span className="mt-1 block text-[11px] text-muted">{key} exists: this writes a new version.</span>}
         </label>
-        <label>
-          <span className={label}>Value</span>
-          <RefInput value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
+        <div>
+          <ValueHead onGenerate={() => setValue(generateValue())} />
+          <RefInput aria-label="Value" value={value} onValue={setValue} source={refs} rows={value.includes("\n") ? 4 : 1} placeholder="value, or ${OTHER_KEY}, ${production.KEY}" spellCheck={false} autoComplete="off" className={`${field} h-auto min-h-8 resize-y py-1.5 font-mono`} />
           {unfit && value && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
-        </label>
+        </div>
         <label>
           <span className={label}>Comment</span>
           <input value={comment} onChange={(e) => setComment(e.target.value)} maxLength={1000} placeholder="What it's for" className={field} />
@@ -740,8 +741,8 @@ function Editor({
         </p>
       )}
       <div className="grid gap-2 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <label>
-          <span className={label}>Value</span>
+        <div>
+          <ValueHead onGenerate={linked ? undefined : () => (setValue(generateValue()), setTouched(true))} />
           {linked ? (
             <div className="flex h-8 items-center gap-2 text-[11.5px] text-muted">
               The value comes from the link.
@@ -751,6 +752,7 @@ function Editor({
             </div>
           ) : (
             <RefInput
+              aria-label="Value"
               autoFocus
               value={value}
               source={refs}
@@ -766,7 +768,7 @@ function Editor({
             />
           )}
           {unfit && <span className="mt-1 block text-[11px] text-danger">{unfit}</span>}
-        </label>
+        </div>
         <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
           <label>
             <span className={label}>Comment</span>
@@ -794,5 +796,19 @@ function Editor({
         </button>
       </div>
     </form>
+  );
+}
+
+/** A form's "Value" label, with a button that fills in a random value (48 letters and digits). */
+function ValueHead({ onGenerate }: { onGenerate?: () => void }) {
+  return (
+    <span className={`${label} flex items-center justify-between`}>
+      Value
+      {onGenerate && (
+        <button type="button" onClick={onGenerate} className="flex items-center gap-1 text-[11px] font-normal text-muted transition-colors hover:text-accent" title="A random value of 48 letters and digits, made here in the browser">
+          <Dices className="size-3" /> Generate
+        </button>
+      )}
+    </span>
   );
 }
