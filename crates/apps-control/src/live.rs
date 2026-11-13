@@ -314,16 +314,18 @@ impl EnvLive {
                     return Err(WakeError::Timeout(self.cfg.wake_timeout));
                 }
                 if !self.runtime.running(&inst.name).await {
-                    self.crashed(inst, "the process exited before it answered");
-                    return Err(WakeError::Failed("the process exited before it answered".into()));
+                    let why = format!("the process exited before it answered: {}", self.exit_reason(&inst.name, run).await);
+                    self.crashed(inst, &why);
+                    return Err(WakeError::Failed(why));
                 }
                 tokio::time::sleep(self.cfg.probe_every).await;
             },
             _ => {
                 tokio::time::sleep(self.cfg.worker_grace).await;
                 if !self.runtime.running(&inst.name).await {
-                    self.crashed(inst, "the process exited right after it started");
-                    return Err(WakeError::Failed("the process exited right after it started".into()));
+                    let why = format!("the process exited right after it started: {}", self.exit_reason(&inst.name, run).await);
+                    self.crashed(inst, &why);
+                    return Err(WakeError::Failed(why));
                 }
             }
         }
@@ -477,6 +479,15 @@ impl EnvLive {
     pub fn connect_failed(&self, inst: &Inst) {
         if matches!(inst.phase(), Phase::Running(_)) {
             self.crashed(inst, "its port stopped answering");
+        }
+    }
+
+    /// Why a stopped instance stopped, as the runtime tells it (its exit code, out of memory),
+    /// else that it exited on its own.
+    async fn exit_reason(&self, name: &str, run: &Run) -> String {
+        match self.runtime.exited(name).await {
+            Some(e) => e.reason(run.memory_mb),
+            None => "the process exited on its own".to_string(),
         }
     }
 
@@ -863,9 +874,10 @@ impl EnvLive {
         for i in &insts {
             if matches!(i.phase(), Phase::Running(_) | Phase::Suspended(_)) && !self.runtime.running(&i.name).await {
                 // Exited on its own: the next request starts it again.
-                self.crashed(i, "the process exited on its own");
+                let why = self.exit_reason(&i.name, run).await;
+                self.crashed(i, &why);
                 awake = awake.saturating_sub(1);
-                self.log.stream(Stream::System).line(format!("{} exited", i.name));
+                self.log.stream(Stream::System).line(format!("{} stopped: {why}", i.name));
                 continue;
             }
             if i.in_flight() > 0 {
@@ -912,9 +924,10 @@ impl EnvLive {
             match i.phase() {
                 Phase::Running(_) if self.runtime.running(&i.name).await => up += 1,
                 Phase::Running(_) => {
-                    self.crashed(i, "the process exited");
+                    let why = self.exit_reason(&i.name, run).await;
+                    self.crashed(i, &why);
                     i.crashes.fetch_add(1, Ordering::SeqCst);
-                    self.log.stream(Stream::System).line(format!("{} exited; restarting", i.name));
+                    self.log.stream(Stream::System).line(format!("{} stopped: {why}; restarting", i.name));
                 }
                 _ => {}
             }
@@ -1107,7 +1120,7 @@ mod tests {
             drop(live.acquire().await.unwrap());
         }
         let c = live.crash_loop().expect("three crashes in ten minutes");
-        assert_eq!((c.crashes, c.last_error.as_str()), (3, "the process exited on its own"));
+        assert_eq!((c.crashes, c.last_error.as_str()), (3, "it was killed (exit 137: out of memory, or a SIGKILL)"), "the runtime's exit code says why");
     }
 
     #[tokio::test]

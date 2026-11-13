@@ -722,6 +722,16 @@ impl Runtime for Fargate {
         container(&t, APP).and_then(Container::exit_code).ok_or_else(|| anyhow!("the task stopped before the app ran: {}", stopped_reason(&t)))
     }
 
+    async fn exited(&self, name: &str) -> Option<super::Exit> {
+        let s = self.started(name)?;
+        let t = self.describe(&s.arn).await.ok()??;
+        let c = container(&t, APP)?;
+        (c.last_status() == Some("STOPPED")).then(|| super::Exit {
+            code: c.exit_code(),
+            oom: c.reason().is_some_and(|r| r.contains("OutOfMemory")) || t.stopped_reason().is_some_and(|r| r.contains("OutOfMemory")),
+        })
+    }
+
     async fn running(&self, name: &str) -> bool {
         let Some(s) = self.started(name) else { return false };
         if let Some((at, up)) = s.seen

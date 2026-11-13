@@ -384,7 +384,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "logs" ? (
           <RuntimeLogs service={service.id} env={envName} />
         ) : tab === "metrics" ? (
-          <MetricsTab service={service.id} env={envName} />
+          <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} />
         ) : tab === "variables" ? (
           <VariablesTab service={service.id} project={service.project} env={env!} envs={service.environments.map((e) => e.name).filter((n) => n !== env!.name)} runner={runner} onRedeploy={redeploy} />
         ) : tab === "jobs" ? (

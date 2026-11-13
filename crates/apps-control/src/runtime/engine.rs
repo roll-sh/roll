@@ -38,6 +38,9 @@ pub struct Inspect {
     pub host_port: Option<u16>,
     /// The CPU limit roll gave it (`sh.roll.apps.cpu`, nano-CPUs), whatever it runs with now.
     pub cpu_nanos: Option<i64>,
+    /// Its last exit: the code, and whether the kernel killed it for its memory limit.
+    pub exit_code: Option<i32>,
+    pub oom_killed: bool,
 }
 
 impl Engine {
@@ -280,6 +283,10 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     struct State {
         #[serde(rename = "Running")]
         running: bool,
+        #[serde(rename = "ExitCode", default)]
+        exit_code: Option<i32>,
+        #[serde(rename = "OOMKilled", default)]
+        oom_killed: bool,
     }
     #[derive(Deserialize)]
     struct Host {
@@ -294,7 +301,7 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     let c: Container = serde_json::from_slice(body).context("reading an inspect")?;
     let host_port = c.host.ports.into_iter().flatten().flat_map(|(_, b)| b.into_iter().flatten()).find_map(|b| b.port.parse().ok());
     let cpu_nanos = c.config.and_then(|c| c.labels).and_then(|l| l.get("sh.roll.apps.cpu").and_then(|v| v.parse().ok()));
-    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos })
+    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed })
 }
 
 /// Splits Docker's multiplexed log stream (a container without a TTY): frames of an 8-byte header
@@ -345,7 +352,10 @@ mod tests {
     #[test]
     fn inspect_reads_id_state_and_the_published_port() {
         let body = br#"{"Id":"abc","State":{"Running":true},"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"41234"}]}}}"#;
-        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None });
+        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false });
+        let oom = br#"{"Id":"o","State":{"Running":false,"ExitCode":137,"OOMKilled":true},"HostConfig":{}}"#;
+        let i = parse_inspect(oom).unwrap();
+        assert_eq!((i.exit_code, i.oom_killed), (Some(137), true));
         let none = br#"{"Id":"w","State":{"Running":false},"HostConfig":{"PortBindings":null}}"#;
         assert_eq!(parse_inspect(none).unwrap().host_port, None);
     }

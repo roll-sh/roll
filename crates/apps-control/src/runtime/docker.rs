@@ -347,6 +347,11 @@ impl Runtime for Docker {
         docker(&["inspect", "-f", "{{.State.Running}}", name]).await.is_ok_and(|s| s == "true")
     }
 
+    async fn exited(&self, name: &str) -> Option<super::Exit> {
+        let i = self.engine.as_ref()?.inspect(name).await.ok()?;
+        (!i.running).then_some(super::Exit { code: i.exit_code, oom: i.oom_killed })
+    }
+
     async fn usage(&self, name: &str) -> Option<Usage> {
         let (id, _) = self.id_and_port(name).await.ok()?;
         let dir = Self::cgroup_dir(&id)?;

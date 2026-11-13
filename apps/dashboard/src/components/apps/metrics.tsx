@@ -63,10 +63,29 @@ export function bucketed(m: MetricsData, size: number): MetricsData {
   return out;
 }
 
-function Chart({ title, minutes, series, format, summary, agg, range }: { title: string; minutes: number[]; series: Series[]; format: (v: number) => string; summary: string; agg: Agg; range: Range }) {
+function Chart({
+  title,
+  minutes,
+  series,
+  format,
+  summary,
+  agg,
+  range,
+  limit,
+}: {
+  title: string;
+  minutes: number[];
+  series: Series[];
+  format: (v: number) => string;
+  summary: string;
+  agg: Agg;
+  range: Range;
+  /** A ceiling the values run against (the memory limit): a dashed line, inside the axis. */
+  limit?: number;
+}) {
   const [hover, setHover] = useState<number | null>(null);
   const n = minutes.length;
-  const top = niceMax(Math.max(0, ...series.flatMap((s) => s.values)));
+  const top = niceMax(Math.max(0, limit ?? 0, ...series.flatMap((s) => s.values)));
   const x = (i: number) => (n <= 1 ? W : (i / (n - 1)) * W);
   // The top 14px hold the axis label above the top gridline.
   const y = (v: number) => H - 2 - (v / top) * (H - 16);
@@ -95,6 +114,7 @@ function Chart({ title, minutes, series, format, summary, agg, range }: { title:
             {series.length > 1 && <span className="text-[11px] text-subtle">{s.label}</span>}
           </span>
         ))}
+        {limit != null && <span className="text-[11px] text-subtle">of {format(limit)}</span>}
       </div>
       <div
         className="relative mt-2 text-fg outline-none"
@@ -116,6 +136,7 @@ function Chart({ title, minutes, series, format, summary, agg, range }: { title:
           {series.map((s) => (
             <path key={s.label} d={path(s.values)} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
           ))}
+          {limit != null && <line x1={0} x2={W} y1={y(limit)} y2={y(limit)} stroke="var(--muted)" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />}
           {hover !== null && <line x1={x(hover)} x2={x(hover)} y1={0} y2={H} stroke="var(--line-3)" vectorEffect="non-scaling-stroke" />}
         </svg>
         <span className="pointer-events-none absolute top-0 left-0 -translate-y-0.5 font-mono text-[10px] leading-none text-subtle">{format(top)}</span>
@@ -125,7 +146,7 @@ function Chart({ title, minutes, series, format, summary, agg, range }: { title:
 }
 
 /** Requests, errors, latency, CPU, memory, instances and cold starts over the last hour, day or week. */
-export function MetricsTab({ service, env }: { service: string; env: string }) {
+export function MetricsTab({ service, env, memoryMb }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
@@ -179,12 +200,12 @@ export function MetricsTab({ service, env }: { service: string; env: string }) {
         summary: `p99 peaked at ${formatMs(peak(m.p99_ms))}`,
       },
       { title: "CPU (cores)", agg: "peak" as Agg, series: [{ label: "cpu", values: m.cpu, color: ink }], format: cores, summary: `peak ${cores(peak(m.cpu))} cores` },
-      { title: "Memory", agg: "peak" as Agg, series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}` },
+      { title: "Memory", agg: "peak" as Agg, series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}${memoryMb ? ` of ${formatBytes(memoryMb * 1024 * 1024)}` : ""}`, limit: memoryMb ? memoryMb * 1024 * 1024 : undefined },
       { title: "Instances", agg: "peak" as Agg, series: [{ label: "instances", values: m.instances, color: ink }], format: count, summary: `peak ${peak(m.instances)}` },
       { title: `Cold starts / ${per}`, agg: "total" as Agg, series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the ${range.label}` },
       { title: "Cold start time", agg: "peak" as Agg, series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
     ];
-  }, [m, range, per]);
+  }, [m, range, per, memoryMb]);
 
   if (error && !m) return <p className="text-[13px] text-danger">Metrics didn't load: {error}</p>;
   if (!m) return <p className="text-[13px] text-subtle"><span className="shimmer">Loading metrics…</span></p>;

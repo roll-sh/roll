@@ -671,6 +671,19 @@ async fn an_environment_is_cloned_and_a_live_image_promoted_to_it() {
     assert_eq!(call(&w.api, "POST", &format!("{base}/staging/promote"), Some(json!({"from": "staging"}))).await.0, StatusCode::BAD_REQUEST);
 }
 
+/// An instance the kernel killed for its memory says so: in the log and in why it crashed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_killed_for_its_memory_says_so() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "hungry", json!({"port": 80, "min_instances": 1, "memory_mb": 256})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let up = w.fake.instances(&id).into_iter().find(|(_, _, st)| *st == FakeState::Running).expect("min_instances 1").0;
+    w.fake.oom(&up);
+    let path = format!("/v1/apps/services/{id}/environments/production/logs");
+    let log = get_until(&w.api, &path, |l| l.to_string().contains("ran out of memory")).await;
+    assert!(log.to_string().contains("its limit is 256 MB"), "{log}");
+}
+
 /// A running instance whose health check keeps failing (its port still open) is replaced, and
 /// the environment's log says why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -63,6 +63,25 @@ impl std::fmt::Debug for InstanceSpec {
     }
 }
 
+/// How an instance's process ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exit {
+    pub code: Option<i32>,
+    pub oom: bool,
+}
+
+impl Exit {
+    /// Why it stopped, for a person: `memory_mb` is its limit.
+    pub fn reason(&self, memory_mb: u32) -> String {
+        match (self.oom, self.code) {
+            (true, _) => format!("it ran out of memory (its limit is {memory_mb} MB)"),
+            (false, Some(137)) => "it was killed (exit 137: out of memory, or a SIGKILL)".to_string(),
+            (false, Some(c)) => format!("it exited with code {c}"),
+            (false, None) => "it stopped".to_string(),
+        }
+    }
+}
+
 /// A private registry's login for one pull; the password never shows in `Debug`.
 #[derive(Clone)]
 pub struct RegistryLogin {
@@ -110,6 +129,11 @@ pub trait Runtime: Send + Sync {
     /// Wait for a started instance to exit: its exit code.
     async fn wait(&self, name: &str) -> anyhow::Result<i32>;
     async fn running(&self, name: &str) -> bool;
+    /// How a stopped instance ended, when the runtime can say: its exit code, and whether it
+    /// was killed for running out of memory.
+    async fn exited(&self, _name: &str) -> Option<Exit> {
+        None
+    }
     async fn usage(&self, name: &str) -> Option<Usage>;
     /// Names of every instance this runtime has for `service` (or for every service), made by
     /// any process of this node.

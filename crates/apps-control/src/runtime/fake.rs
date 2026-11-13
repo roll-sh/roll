@@ -54,6 +54,8 @@ pub struct Fake {
     pub pulled_as: Mutex<Option<String>>,
     /// Instances that answer 500 from now on (a running app that broke: [`Fake::sicken`]).
     sick: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Instances the kernel killed for their memory ([`Fake::oom`]).
+    oom: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Fake {
@@ -75,6 +77,12 @@ impl Fake {
     /// The app breaks while it runs: every path answers 500 from now on, its port still open.
     pub fn sicken(&self, name: &str) {
         self.sick.lock().insert(name.to_string());
+    }
+
+    /// The kernel kills it for its memory limit: [`Fake::crash`], reported as out of memory.
+    pub fn oom(&self, name: &str) {
+        self.oom.lock().insert(name.to_string());
+        self.crash(name);
     }
 
     /// The process dies on its own (killed, out of memory): its port stops answering.
@@ -241,6 +249,13 @@ impl Runtime for Fake {
 
     async fn running(&self, name: &str) -> bool {
         matches!(self.state(name), Some(FakeState::Running | FakeState::Paused))
+    }
+
+    async fn exited(&self, name: &str) -> Option<super::Exit> {
+        let m = self.instances.lock();
+        let i = m.get(name)?;
+        let code = *i.exited.borrow();
+        (i.state == FakeState::Stopped).then_some(super::Exit { code, oom: self.oom.lock().contains(name) })
     }
 
     async fn usage(&self, name: &str) -> Option<Usage> {
