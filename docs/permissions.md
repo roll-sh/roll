@@ -550,7 +550,8 @@ writes a policy from activity:
 
 ### Checkup
 
-The access page opens with what needs attention (`GET /v1/access/checkup`, `roll_access::checkup`),
+The access page opens with what needs attention (`GET /v1/access/checkup`, `roll_access::checkup`,
+`roll token checkup`, which prints each fix's command),
 as Google's security checkup and GitHub's security overview do: each live token with a finding,
 most serious first, and its fix.
 
