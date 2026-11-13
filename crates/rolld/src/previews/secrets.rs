@@ -39,16 +39,19 @@ impl roll_previews::ports::Secrets for Secrets {
         }
     }
 
-    async fn resolve(&self, project: &str, env: &str, untrusted: bool) -> anyhow::Result<Vec<(String, String)>> {
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool) -> anyhow::Result<roll_previews::ports::Resolved> {
         let path = format!("/v1/secrets/projects/{}/environments/{}/resolve", seg(project), seg(env));
         match self.0.post(&path, json!({ "path": "/", "consumer": format!("preview:{env}"), "untrusted": untrusted })).await {
-            Ok(v) => {
-                if let Some(p) = v["problems"].as_array().filter(|p| !p.is_empty()) {
-                    tracing::warn!(%env, problems = p.len(), "previews: unresolved secrets");
-                }
-                Ok(v["values"].as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
-            }
-            Err(e) if is_404(&e) => Ok(Vec::new()),
+            Ok(v) => Ok(roll_previews::ports::Resolved {
+                values: v["values"].as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(),
+                problems: v["problems"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|p| format!("{}: {}", p["key"].as_str().unwrap_or("?"), p["problem"].as_str().unwrap_or("doesn't resolve")))
+                    .collect(),
+            }),
+            Err(e) if is_404(&e) => Ok(Default::default()),
             Err(e) => Err(e),
         }
     }

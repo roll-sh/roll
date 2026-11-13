@@ -82,6 +82,8 @@ pub struct Engine {
     /// In a cluster: requests that act on running services go to the reconciler's node.
     pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
     usage_read: Mutex<HashMap<String, i64>>,
+    /// The unresolved secrets last told per preview (each set once in its activity).
+    secrets_told: Mutex<HashMap<String, Vec<String>>>,
     /// One pass at a time.
     passing: tokio::sync::Mutex<()>,
 }
@@ -128,6 +130,7 @@ impl Engine {
             kick: Notify::new(),
             cluster: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
+            secrets_told: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
         })
     }
@@ -224,6 +227,23 @@ impl Engine {
 
 
 /// What a service is deployed with, as a digest (FNV-1a: change detection, not a secret).
+impl Engine {
+    /// The preview's secrets resolved as its code gets them, unresolved keys said once in its
+    /// activity (a check fails on them; a preview starts without them, saying which).
+    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool) -> anyhow::Result<Vec<(String, String)>> {
+        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        let mut problems = got.problems.clone();
+        problems.sort();
+        let new = self.secrets_told.lock().insert(r.id.clone(), problems.clone()).is_none_or(|before| before != problems);
+        if new && !problems.is_empty() {
+            let shown: Vec<&str> = problems.iter().take(10).map(String::as_str).collect();
+            let more = problems.len().saturating_sub(shown.len());
+            let _ = self.store.log(&r.id, &format!("secrets that don't resolve: {}{}", shown.join("; "), if more > 0 { format!(" (and {more} more)") } else { String::new() }));
+        }
+        Ok(got.values)
+    }
+}
+
 /// How long a preview's secrets environment outlives its last converge (roll secrets deletes it
 /// then, revoking its leases): a preview converges every few minutes while it exists.
 const SECRETS_ENV_MARGIN_MS: i64 = 24 * 3_600_000;

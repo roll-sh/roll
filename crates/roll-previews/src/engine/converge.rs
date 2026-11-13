@@ -369,7 +369,7 @@ impl Engine {
     /// change is trusted), the branches and overrides on top.
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
-        let mut env = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        let mut env = self.resolve_secrets(r, untrusted).await?;
         for (k, v) in vars {
             set(&mut env, k, v.clone());
         }
@@ -504,6 +504,7 @@ impl Engine {
             c.retire(&preview_key(&r.id));
         }
         self.usage_read.lock().remove(&r.id);
+        self.secrets_told.lock().remove(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
     }

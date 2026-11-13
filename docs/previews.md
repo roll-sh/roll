@@ -265,6 +265,9 @@ default) with the project's `env` overrides and the branched resources' URLs on 
 - **It expires by itself.** `ttl_minutes` is a day, renewed by each converge (a preview converges
   every few minutes while it exists), so a teardown that never happened leaves it for a day at
   most; roll secrets then deletes it and revokes its leases.
+- **Keys that don't resolve are said.** A reference to nothing, or to a protected value an
+  untrusted preview may not read, leaves the key out (a check would fail on it); the preview's
+  activity names those keys once, again whenever the set changes.
 - The environment is deleted with the preview.
 
 ## Schema changes
@@ -639,19 +642,18 @@ Ranked by what a person notices first. Done so far:
   roll search (`wip/previews-on-search`: the branch reads the parent's documents, its own writes
   stay in it, its bytes are roll search's `own_bytes`, it's gone after landing and the parent
   stays);
+- unresolved secrets named in the preview's activity;
 - a third adversarial review and its fixes (no bypass for forks, rotation restarts nothing the
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Unresolved secrets in the preview's activity**: roll secrets' `problems` (a reference that
-   doesn't resolve) are only logged; say which keys on the preview, as a check does.
-2. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+1. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page through the bypass, and the comment shows it (Vercel does). Store it in
    roll storage and drop it with the preview. Needs a host whose containers reach rolld (not
    ai-server's firewall) to verify.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
