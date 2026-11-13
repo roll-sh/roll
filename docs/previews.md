@@ -762,6 +762,9 @@ type Settings = {
     head before's to compare; "Its first page loads in 1.2 s (+300 ms since the push before)" in
     the comment). The page reports this about itself, so it's bounded (10 minutes, 10 GiB) and
     only ever shown. An operator's own screenshot command only has to write the PNG.
+    The same session then takes the page at a phone's width (390 × 844 at twice the density,
+    `GET …/screenshot?view=phone`, the sheet's Desktop/Phone), with its own change since the push
+    before ("At a phone's width: 3.4%" in the comment), as Percy and Chromatic check widths.
     The same session catches what went wrong while the page loaded: uncaught exceptions,
     `console.error`s, and requests that failed or answered 4xx/5xx (`page_health`, counts and the
     first of each, one bounded line each because they're the page's own words; "**While its
@@ -869,6 +872,7 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- a phone-width screenshot with its own visual change;
 - what went wrong while the page loaded (exceptions, console errors, failed requests);
 - expiring share links for people outside the team (revocable, shown once);
 - page speed per push (timed with the screenshot, compared with the push before);
@@ -904,18 +908,16 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A phone-width screenshot** beside the desktop one (Percy's and Chromatic's widths), with
-   its own visual change.
-2. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
+1. **The feedback button on roll apps' `pv-` environments**: apps adds it itself once told
    (`Target.feedback` = the `feedback` rule, a change's, link access; in `config_fingerprint`;
    `"feedback": true` in RollApps' environment `PUT`). Waits for that apps change
    (PR #26) to reach main: today's apps refuses an unknown field, which would
    fail every link-access deploy.
-3. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
+2. **roll apps' `pv-` environments, the rest of the apps thread's review**: once roll secrets is
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

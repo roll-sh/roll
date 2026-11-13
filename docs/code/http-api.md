@@ -152,7 +152,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
                           earlier?: [{service, head, url}] /* earlier pushes still reachable on the same data, newest first */,
-                          visual_change?: {since, percent} /* how much the first service's page changed since the screenshot at an earlier head */,
+                          visual_change?: {since, percent, phone_percent?} /* how much the first service's page changed since the screenshot at an earlier head */,
                           page_speed?: {ttfb_ms, fcp_ms: number | null, load_ms, bytes, before_load_ms: number | null} /* how fast that page loaded, timed with its screenshot */,
                           page_health?: {errors, first_error: string | null, failed, first_failed: string | null} /* what went wrong while it loaded: the page's own words, untrusted */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,

@@ -138,6 +138,8 @@ pub struct Shot {
     pub png: Vec<u8>,
     pub speed: Option<crate::PageSpeed>,
     pub health: Option<crate::PageHealth>,
+    /// The same page at a phone's width, when the backend took one.
+    pub phone: Option<Vec<u8>>,
 }
 
 /// roll code, as previews read it and report to it.

@@ -337,6 +337,9 @@ pub struct PreviewVisualChange {
     pub since: String,
     /// The share of pixels that changed, in percent.
     pub percent: f64,
+    /// The same at a phone's width, when both screenshots had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone_percent: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

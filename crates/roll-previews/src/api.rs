@@ -273,7 +273,17 @@ async fn put_vars(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Res
 async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
     check_id(&id)?;
     let previous = q.get("previous").is_some_and(|v| v == "1" || v == "true");
-    let png = blocking(e, move |e| if previous { e.store.previous_screenshot(&id) } else { Ok(e.store.screenshot(&id)?.map(|(_, png)| png)) }).await?;
+    let phone = match q.get("view").map(String::as_str) {
+        None | Some("desktop") => false,
+        Some("phone") => true,
+        Some(v) => return Err(Error::BadRequest(format!("view: desktop or phone, not {v:?}"))),
+    };
+    let png = blocking(e, move |e| match (phone, previous) {
+        (true, p) => e.store.phone_screenshot(&id, p),
+        (false, true) => e.store.previous_screenshot(&id),
+        (false, false) => Ok(e.store.screenshot(&id)?.map(|(_, png)| png)),
+    })
+    .await?;
     match png.filter(|png| !png.is_empty()) {
         Some(png) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
         None => Err(Error::NotFound(if previous { "the preview has no earlier screenshot" } else { "the preview has no screenshot" }.into())),

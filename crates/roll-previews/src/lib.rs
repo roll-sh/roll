@@ -212,6 +212,8 @@ pub struct Preview {
     /// How much the page changed since the screenshot at an earlier head (`GET
     /// …/screenshot?previous=1` is that one).
     pub visual_change: Option<VisualChange>,
+    /// It also has a phone-width screenshot (`GET …/screenshot?view=phone`).
+    pub phone_screenshot: bool,
     /// How fast the first service's page loaded at this head, and at the head before.
     pub page_speed: Option<PageSpeedView>,
     /// What went wrong while that page loaded (at the latest screenshot's head).
@@ -329,6 +331,8 @@ pub struct VisualChange {
     pub since: String,
     /// The share of pixels that changed, in percent (two decimals).
     pub percent: f64,
+    /// The same at a phone's width, when both screenshots had one.
+    pub phone_percent: Option<f64>,
 }
 
 /// An earlier push of a change's service, still reachable at a URL of its own (on the preview's

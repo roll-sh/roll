@@ -377,7 +377,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -941,29 +941,41 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT tried FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
-    pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8], speed: Option<&crate::PageSpeed>) -> Result<()> {
+    pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8], speed: Option<&crate::PageSpeed>, phone: Option<&[u8]>) -> Result<()> {
         use base64::Engine as _;
         let b64e = base64::engine::general_purpose::STANDARD;
         let (b64, now) = (b64e.encode(png), self.now_ms()?);
+        let phone_b64 = phone.map(|p| b64e.encode(p));
         let speed = speed.and_then(|s| serde_json::to_string(s).ok());
-        // The one it replaces, at another head, is kept as "before", with how much changed.
-        let before: Option<(String, String, Option<String>)> =
-            self.db.read(|c| c.query_row("SELECT head, png, speed FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
-        let before = before.filter(|(h, p, _)| h != head && !p.is_empty());
-        let change_bp = before.as_ref().and_then(|(_, p, _)| b64e.decode(p).ok()).and_then(|old| crate::visual::changed(&old, png)).map(|f| (f * 10_000.0).round() as i64);
+        // The one it replaces, at another head, is kept as "before", with how much changed (at
+        // both widths).
+        type Before = (String, String, Option<String>, Option<String>);
+        let before: Option<Before> = self
+            .db
+            .read(|c| c.query_row("SELECT head, png, speed, phone_png FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
+        let before = before.filter(|(h, p, _, _)| h != head && !p.is_empty());
+        let changed = |old: Option<&String>, new: Option<&[u8]>| -> Option<i64> {
+            let old = b64e.decode(old?).ok()?;
+            crate::visual::changed(&old, new?).map(|f| (f * 10_000.0).round() as i64)
+        };
+        let change_bp = before.as_ref().and_then(|(_, p, _, _)| changed(Some(p), Some(png)));
+        let phone_change_bp = before.as_ref().and_then(|(_, _, _, pp)| changed(pp.as_ref(), phone));
         self.db.write(|c| {
             match &before {
-                Some((prev_head, prev_png, prev_speed)) => c.execute(
-                    "INSERT INTO screenshots (preview_id, head, png, at, tried, prev_head, prev_png, change_bp, speed, prev_speed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                Some((prev_head, prev_png, prev_speed, prev_phone)) => c.execute(
+                    "INSERT INTO screenshots (preview_id, head, png, at, tried, prev_head, prev_png, change_bp, speed, prev_speed, phone_png, prev_phone_png, phone_change_bp) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, \
-                     prev_head = excluded.prev_head, prev_png = excluded.prev_png, change_bp = excluded.change_bp, speed = excluded.speed, prev_speed = excluded.prev_speed",
-                    params![id, head, b64, now, head, prev_head, prev_png, change_bp, speed, prev_speed],
+                     prev_head = excluded.prev_head, prev_png = excluded.prev_png, change_bp = excluded.change_bp, speed = excluded.speed, prev_speed = excluded.prev_speed, \
+                     phone_png = excluded.phone_png, prev_phone_png = excluded.prev_phone_png, phone_change_bp = excluded.phone_change_bp",
+                    params![id, head, b64, now, head, prev_head, prev_png, change_bp, speed, prev_speed, phone_b64, prev_phone, phone_change_bp],
                 )?,
                 // A first one, or the same head again: what came before stays.
                 None => c.execute(
-                    "INSERT INTO screenshots (preview_id, head, png, at, tried, speed) VALUES (?, ?, ?, ?, ?, ?) \
-                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, speed = excluded.speed",
-                    params![id, head, b64, now, head, speed],
+                    "INSERT INTO screenshots (preview_id, head, png, at, tried, speed, phone_png) VALUES (?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, speed = excluded.speed, \
+                     phone_png = excluded.phone_png",
+                    params![id, head, b64, now, head, speed, phone_b64],
                 )?,
             };
             Ok::<_, Error>(())
@@ -994,6 +1006,20 @@ impl Store {
     pub fn visual_change(&self, id: &str) -> Result<Option<(String, i64)>> {
         let row: Option<(Option<String>, Option<i64>)> = self.db.read(|c| c.query_row("SELECT prev_head, change_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
         Ok(row.and_then(|(h, bp)| Some((h?, bp?))))
+    }
+
+    /// The phone-width screenshot (`previous`: the one before it), if one was taken.
+    pub fn phone_screenshot(&self, id: &str, previous: bool) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let col = if previous { "prev_phone_png" } else { "phone_png" };
+        let row: Option<Option<String>> = self.db.read(|c| c.query_row(&format!("SELECT {col} FROM screenshots WHERE preview_id = ?"), [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten().and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
+    }
+
+    /// How much the phone-width page changed since the one before (basis points).
+    pub fn phone_change(&self, id: &str) -> Result<Option<i64>> {
+        let row: Option<Option<i64>> = self.db.read(|c| c.query_row("SELECT phone_change_bp FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?;
+        Ok(row.flatten())
     }
 
     /// The screenshot before the latest (another head's), for comparing.
@@ -1284,7 +1310,9 @@ impl Store {
         let kept_until = self.kept_until(&r.id)?;
         let goes_at = self.goes_at(&r.id)?;
         let screenshot_at = self.screenshot_at(&r.id)?;
-        let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0 });
+        let phone_percent = self.phone_change(&r.id)?.map(|bp| bp as f64 / 100.0);
+        let visual_change = self.visual_change(&r.id)?.map(|(since, bp)| crate::VisualChange { since, percent: bp as f64 / 100.0, phone_percent });
+        let phone_screenshot = self.phone_screenshot(&r.id, false)?.is_some();
         let page_speed = self.page_speed(&r.id)?;
         let page_health = self.page_health(&r.id)?;
         let screenshot_link = self.screenshot_link(&r.id)?;
@@ -1329,6 +1357,7 @@ impl Store {
             earlier,
             screenshot_at,
             visual_change,
+            phone_screenshot,
             page_speed,
             page_health,
             screenshot_link,
@@ -1403,15 +1432,18 @@ mod tests {
         let (row, _) = store.create(&new("chg_visual")).unwrap();
         let id = row.id.as_str();
         let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000 };
-        store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900))).unwrap();
+        store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900)), Some(&png(0))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
         assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(900), before: None }));
-        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1200))).unwrap();
+        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1200)), Some(&png(5))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)), "30% of pixels");
         assert_eq!(store.previous_screenshot(id).unwrap(), Some(png(0)));
         assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(1200), before: Some(speed(900)) }));
+        // The phone-width one too, with its own change.
+        assert_eq!(store.phone_change(id).unwrap(), Some(5000));
+        assert_eq!(store.phone_screenshot(id, true).unwrap(), Some(png(0)));
         // Taken again at the same head: what came before stays.
-        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100))).unwrap();
+        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100)), Some(&png(5))).unwrap();
         assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
         assert_eq!(store.page_speed(id).unwrap().unwrap().before, Some(speed(900)));
     }
@@ -1443,7 +1475,7 @@ mod tests {
         let (row, _) = store.create(&new("chg_shot")).unwrap();
         let id = row.id.as_str();
         assert_eq!(store.screenshot_link(id).unwrap(), None, "no screenshot, no link");
-        store.set_screenshot(id, "cs_1", b"\x89PNG...", None).unwrap();
+        store.set_screenshot(id, "cs_1", b"\x89PNG...", None, None).unwrap();
         let (exp, sig) = store.screenshot_link(id).unwrap().unwrap();
         assert!(store.screenshot_link_ok(id, exp, &sig).unwrap());
         assert!(!store.screenshot_link_ok("pv_other", exp, &sig).unwrap(), "another preview");

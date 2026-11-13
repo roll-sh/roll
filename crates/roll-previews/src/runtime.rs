@@ -858,8 +858,17 @@ impl Apps for Runtime {
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
         args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
-        // The PNG on the first line, the timings (if the command wrote them) on the second.
-        args.extend([self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), format!("{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true)", self.cfg.screenshot_command)]);
+        // The PNG on the first line, the timings (if the command wrote them) on the second, the
+        // phone-width PNG (if it took one) on the third.
+        args.extend([
+            self.cfg.screenshot_image.clone(),
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true)",
+                self.cfg.screenshot_command
+            ),
+        ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = match tokio::time::timeout(Duration::from_secs(90), code_preview::docker::docker(&argv)).await {
             Ok(r) => r?,
@@ -868,10 +877,13 @@ impl Apps for Runtime {
                 anyhow::bail!("the screenshot took over 90 s");
             }
         };
-        let (b64, speed) = out.split_once('\n').unwrap_or((out.as_str(), ""));
-        let png = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
+        let mut lines = out.splitn(3, '\n');
+        let (b64, speed, phone) = (lines.next().unwrap_or(""), lines.next().unwrap_or(""), lines.next().unwrap_or(""));
+        let b64e = base64::engine::general_purpose::STANDARD;
+        let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
-        Ok(Some(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed) }))
+        let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
+        Ok(Some(crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), phone }))
     }
 
     async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {

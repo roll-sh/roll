@@ -366,6 +366,10 @@ for _ in $(seq 1 120); do
 done
 case "$HEALTH" in *boom*) ;; *) echo "the page's console.error should be caught: $(api GET "/v1/previews/$PV" | jq_ "d.get('page_health')")"; exit 1;; esac
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?previous=1")" = image/png ] || { echo "the screenshot before should be there"; exit 1; }
+# And at a phone's width, with its own change.
+[ "$(api GET "/v1/previews/$PV" | jq_ "d.get('phone_screenshot')")" = True ] || { echo "a phone-width screenshot should be taken too"; exit 1; }
+PHONE=$(curl -sS "http://$API/v1/previews/$PV/screenshot?view=phone" | python3 -c "import sys, struct; b=sys.stdin.buffer.read(); print(f'{struct.unpack(\">I\", b[16:20])[0]} px wide, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')")
+case "$PHONE" in "780 px wide, PNG") ;; *) echo "the phone-width screenshot should be 390 px at twice the density: $PHONE"; exit 1;; esac
 
 say "[skip preview] in the title removes the preview; without it, a new one comes"
 api PATCH "/v1/code/changes/$CHG" '{"title":"New page [skip preview]"}' >/dev/null
@@ -422,6 +426,7 @@ cat <<EOF
 | A share link (1 hour): in through it / revoked | 200 / 401 |
 | What went wrong while the page loaded (a push whose page logs an error) | $HEALTH |
 | The page's change since the push before (screenshots) | $VISUAL |
+| The phone-width screenshot | $PHONE |
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 3 / $BRANCHES_LEFT |

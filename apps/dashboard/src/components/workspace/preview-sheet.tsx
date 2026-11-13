@@ -229,7 +229,7 @@ export function PreviewSheet({
               </>
             )}
 
-            {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} /> : null}
+            {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} change={p.visual_change} phone={p.phone_screenshot} /> : null}
             {p.page_health && (p.page_health.errors > 0 || p.page_health.failed > 0) && (
               <div className="mt-1.5 space-y-0.5 text-[11.5px] text-danger">
                 {p.page_health.errors > 0 && (
@@ -542,14 +542,15 @@ function useVisible() {
 }
 
 /** The first service's page as the preview's last push left it. */
-function Screenshot({ id, at, change }: { id: string; at: number; change?: { since: string; percent: number } | null }) {
+function Screenshot({ id, at, change, phone: hasPhone }: { id: string; at: number; change?: { since: string; percent: number; phone_percent?: number | null } | null; phone?: boolean }) {
   const [src, setSrc] = useState<string | null>(null);
-  // Before: the screenshot at the head before, to compare.
+  // Before: the screenshot at the head before, to compare; phone: at a phone's width.
   const [before, setBefore] = useState(false);
+  const [phone, setPhone] = useState(false);
   useEffect(() => {
     let url: string | null = null;
     let live = true;
-    screenshotUrl(id, before).then(
+    screenshotUrl(id, before, phone).then(
       (u) => {
         url = u;
         if (live) setSrc(u);
@@ -561,13 +562,18 @@ function Screenshot({ id, at, change }: { id: string; at: number; change?: { sin
       live = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [id, at, before]);
+  }, [id, at, before, phone]);
   if (!src) return null;
   const since = change?.since.replace(/^cs_/, "").slice(0, 10);
   return (
     <>
       <Label>
         <span>Screenshot</span>
+        {hasPhone && (
+          <button type="button" onClick={() => setPhone((p) => !p)} aria-pressed={phone} className="ml-auto text-muted hover:text-fg">
+            {phone ? "Desktop" : "Phone"}
+          </button>
+        )}
         {change && (
           <button type="button" onClick={() => setBefore((b) => !b)} aria-pressed={before} className="text-muted hover:text-fg" title={`The page at ${since}, the head before`}>
             {before ? "After" : "Before"}
@@ -576,11 +582,20 @@ function Screenshot({ id, at, change }: { id: string; at: number; change?: { sin
       </Label>
       {change && (
         <p className="mb-1.5 text-[11.5px] text-subtle">
-          {before ? `At ${since}, before this push.` : change.percent > 0 ? `Changed ${Math.max(change.percent, 0.1).toFixed(1)}% since ${since}.` : `Looks the same as at ${since}.`}
+          {(() => {
+            if (before) return `At ${since}, before this push.`;
+            const pct = phone ? change.phone_percent : change.percent;
+            if (pct == null) return "No phone-width screenshot before this push to compare.";
+            return pct > 0 ? `Changed ${Math.max(pct, 0.1).toFixed(1)}% since ${since}.` : `Looks the same as at ${since}.`;
+          })()}
         </p>
       )}
       <a href={src} target="_blank" rel="noreferrer" title="Open it full size">
-        <img src={src} alt="The first service's page" className="max-h-56 w-full rounded-lg border border-line-2 object-cover object-top" />
+        <img
+          src={src}
+          alt={phone ? "The first service's page at a phone's width" : "The first service's page"}
+          className={`max-h-56 rounded-lg border border-line-2 object-cover object-top ${phone ? "mx-auto w-28" : "w-full"}`}
+        />
       </a>
     </>
   );

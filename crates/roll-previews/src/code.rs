@@ -123,7 +123,7 @@ impl CodeSource {
                     bytes: v.now.bytes,
                     before_load_ms: v.before.as_ref().map(|b| b.load_ms),
                 }),
-                visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent }),
+                visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent, phone_percent: v.phone_percent }),
                 earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone() }).collect(),
                 // Only a public preview's: the comment is readable by whoever reads the pull request.
                 screenshot_url: (s.access == crate::settings::Access::Public)

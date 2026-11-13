@@ -323,10 +323,15 @@ fn speed_line(s: &crate::model::PreviewPageSpeed) -> String {
 /// The comment's line on how much the page changed since the screenshot at an earlier head.
 fn visual_line(v: &crate::model::PreviewVisualChange) -> String {
     let since: String = v.since.strip_prefix("cs_").unwrap_or(&v.since).chars().filter(|c| c.is_ascii_alphanumeric()).take(10).collect();
+    let phone = match v.phone_percent {
+        Some(p) if p > 0.0 => format!(" At a phone's width: {:.1}%.", p.max(0.1)),
+        Some(_) => " At a phone's width: the same.".into(),
+        None => String::new(),
+    };
     if v.percent <= 0.0 {
-        format!("The page looks the same as at `{since}`.\n\n")
+        format!("The page looks the same as at `{since}`.{phone}\n\n")
     } else {
-        format!("The page changed {:.1}% since `{since}` (its share of pixels).\n\n", v.percent.max(0.1))
+        format!("The page changed {:.1}% since `{since}` (its share of pixels).{phone}\n\n", v.percent.max(0.1))
     }
 }
 
@@ -480,9 +485,11 @@ mod preview_tests {
         let earlier = |url: &str| crate::model::PreviewEarlier { service: "web".into(), head: "cs_1a2b3c4d5e6f".into(), url: url.into() };
         assert_eq!(earlier_line(&[earlier("https://web-1a2b3c4d5e-pr7-shop.preview.roll.site")]).as_deref(), Some("\nEarlier pushes, on the same data: [web at `1a2b3c4d5e`](https://web-1a2b3c4d5e-pr7-shop.preview.roll.site).\n"));
         assert_eq!(earlier_line(&[earlier("javascript:alert(1)"), earlier("https://x/a)b")]), None, "only plain links");
-        let v = |percent: f64| crate::model::PreviewVisualChange { since: "cs_1a2b3c4d5e6f".into(), percent };
+        let v = |percent: f64| crate::model::PreviewVisualChange { since: "cs_1a2b3c4d5e6f".into(), percent, phone_percent: None };
         assert_eq!(visual_line(&v(12.34)), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels).\n\n");
         assert_eq!(visual_line(&v(0.0)), "The page looks the same as at `1a2b3c4d5e`.\n\n");
+        let both = crate::model::PreviewVisualChange { phone_percent: Some(3.44), ..v(12.34) };
+        assert_eq!(visual_line(&both), "The page changed 12.3% since `1a2b3c4d5e` (its share of pixels). At a phone's width: 3.4%.\n\n");
         let sp = |load_ms, before| crate::model::PreviewPageSpeed { ttfb_ms: 40, fcp_ms: Some(380), load_ms, bytes: 312_000, before_load_ms: before };
         assert_eq!(speed_line(&sp(1200, Some(900))), "Its first page loads in 1.2 s (+300 ms since the push before), first paint 380 ms, 305 KB, first byte 40 ms.\n\n");
         assert_eq!(speed_line(&sp(800, None)), "Its first page loads in 800 ms, first paint 380 ms, 305 KB, first byte 40 ms.\n\n");

@@ -80,6 +80,17 @@ listeners.add((m) => {
   report.errors = errors;
   report.failed = failed;
   fs.writeFileSync(process.env.OUT + ".json", JSON.stringify(report));
+  // The same page at a phone's width (390 × 844, at twice the density), to $OUT.phone.png. Best
+  // effort: the desktop one is kept whatever happens here.
+  try {
+    await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, sessionId);
+    const again = once("Page.loadEventFired");
+    await send("Page.reload", {}, sessionId);
+    await Promise.race([again, sleep(30000)]);
+    await sleep(300);
+    const phone = await send("Page.captureScreenshot", { format: "png" }, sessionId);
+    fs.writeFileSync(process.env.OUT + ".phone.png", Buffer.from(phone.data, "base64"));
+  } catch {}
   chrome.kill();
   process.exit(0);
 })().catch((e) => {
