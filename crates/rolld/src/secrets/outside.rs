@@ -1,10 +1,12 @@
-//! Databases outside roll (roll-secrets' outside.rs), Postgres or MySQL by the URL's scheme: the
+//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL or Redis by the URL's scheme: the
 //! address is the tenant's, so the host is resolved here, private addresses are refused (unless
 //! rolld allows them for local development), and the connection goes to the address that was
 //! checked. TLS is required off private addresses. Postgres gets a new password as a SCRAM
-//! verifier, so neither the wire nor the server's statement log ever sees it (MySQL: mysql.rs).
+//! verifier, so neither the wire nor the server's statement log ever sees it (MySQL: mysql.rs;
+//! Redis: redis.rs).
 
 mod mysql;
+mod redis;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -27,6 +29,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::check(c, &roles, group.as_deref()).await);
         }
+        if let Some(u) = self.redis(url)? {
+            return self.rd(u, ca, async move |c| redis::check(c, &roles, group.as_deref()).await);
+        }
         self.run(url, ca, move |c| {
             Box::pin(async move {
                 let rows = c.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND rolcanlogin", &[&roles]).await.map_err(db_error)?;
@@ -48,6 +53,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::set_password(c, role, password).await);
         }
+        if let Some(u) = self.redis(url)? {
+            return self.rd(u, ca, async move |c| redis::set_password(c, role, password).await);
+        }
         // Checked by roll-secrets (lowercase letters, digits, _), quoted anyway.
         let sql = format!("ALTER ROLE {} PASSWORD '{}'", ident(role), postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
@@ -57,13 +65,16 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::create_login(c, name, password, group).await);
         }
+        if let Some(u) = self.redis(url)? {
+            return self.rd(u, ca, async move |c| redis::create_login(c, name, password, group).await);
+        }
         let sql = format!("CREATE ROLE {} LOGIN PASSWORD '{}' VALID UNTIL '{}' IN ROLE {}", ident(name), postgres_protocol::password::scram_sha_256(password.as_bytes()), stamp(until)?, ident(group));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
     fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> Result<(), String> {
-        // MySQL has no VALID UNTIL: its logins last until roll ends the lease.
-        if self.mysql(url)?.is_some() {
+        // MySQL and Redis have no expiry for a login: it lasts until roll ends the lease.
+        if self.mysql(url)?.is_some() || self.redis(url)?.is_some() {
             return Ok(());
         }
         let sql = format!("ALTER ROLE {} VALID UNTIL '{}'", ident(name), stamp(until)?);
@@ -73,6 +84,9 @@ impl roll_secrets::outside::OutsideDb for Guarded {
     fn drop_login(&self, url: &str, ca: Option<&str>, name: &str) -> Result<(), String> {
         if let Some(u) = self.mysql(url)? {
             return self.my(u, ca, async move |c| mysql::drop_login(c, name).await);
+        }
+        if let Some(u) = self.redis(url)? {
+            return self.rd(u, ca, async move |c| redis::drop_login(c, name).await);
         }
         let name = name.to_string();
         self.run(url, ca, move |c| {
@@ -106,6 +120,15 @@ impl Guarded {
     /// A `mysql://` URL's settings; `None` for Postgres.
     fn mysql(&self, url: &str) -> Result<Option<mysql::Url>, String> {
         if url.starts_with("mysql://") { mysql::parse(url, self.allow_private).map(Some) } else { Ok(None) }
+    }
+
+    /// A `redis://` or `rediss://` URL's settings; `None` for the others.
+    fn redis(&self, url: &str) -> Result<Option<redis::Url>, String> {
+        if url.starts_with("redis://") || url.starts_with("rediss://") { redis::parse(url, self.allow_private).map(Some) } else { Ok(None) }
+    }
+
+    fn rd<T>(&self, u: redis::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut redis::Conn) -> Result<T, String>) -> Result<T, String> {
+        tokio::runtime::Handle::current().block_on(redis::run(u, ca.map(str::to_string), self.allow_private, work))
     }
 
     fn my<T>(&self, u: mysql::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut mysql_async::Conn) -> Result<T, String>) -> Result<T, String> {
@@ -241,7 +264,22 @@ mod tests {
         assert!(g.mysql("mysql://a:b@db.example.com/x?ssl-mode=DISABLED").err().unwrap().contains("TLS"));
         assert!(g.mysql("mysql://a:b@db.example.com/x?local_infile=1").err().unwrap().contains("local_infile"));
         assert!(g.mysql("mysql://a:b@db.example.com/x?ssl-mode=VERIFY_IDENTITY").unwrap().is_some());
+        // Redis: rediss:// unless private addresses are allowed.
+        assert!(g.redis("redis://:pw@cache.example.com").err().unwrap().contains("rediss://"));
+        assert!(g.redis("rediss://admin:pw@cache.example.com:6380").unwrap().is_some());
         assert!(resolve("127.0.0.1", 5432, false).await.unwrap_err().contains("private"));
         assert!(resolve("10.1.2.3", 5432, false).await.unwrap_err().contains("private"));
+    }
+
+    /// A tenant's Redis can send anything: the reader bounds depth and lengths by what's there.
+    #[test]
+    fn a_hostile_redis_reply_is_bounded() {
+        use redis::{Reply, read_reply};
+        assert_eq!(read_reply(b"$5\r\nhello\r\n").unwrap(), Some((Reply::Bulk(b"hello".to_vec()), 11)));
+        assert_eq!(read_reply(b"$9223372036854775807\r\nx").unwrap(), None, "a length past what's here waits, never allocates or overflows");
+        assert_eq!(read_reply(b"*4294967295\r\n").unwrap(), None);
+        assert!(read_reply("*1\r\n".repeat(50).as_bytes()).is_err(), "nesting is capped");
+        let template = Reply::Array(vec![Reply::Bulk(b"flags".to_vec()), Reply::Array(vec![]), Reply::Bulk(b"commands".to_vec()), Reply::Bulk(b"-@all +@read".to_vec()), Reply::Bulk(b"keys".to_vec()), Reply::Bulk(b"~app:*".to_vec()), Reply::Bulk(b"channels".to_vec()), Reply::Bulk(b"".to_vec())]);
+        assert_eq!(redis::rules_of(&template).unwrap(), [b"-@all".to_vec(), b"+@read".to_vec(), b"~app:*".to_vec()]);
     }
 }

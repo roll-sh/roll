@@ -43,7 +43,7 @@ pub(super) fn parse(url: &str, allow_private: bool) -> Result<Url, String> {
     Ok(Url { host, port: u.port().unwrap_or(3306), user: decode(u.username())?, password: decode(u.password().unwrap_or(""))?, db: (!db.is_empty()).then(|| db.to_string()), tls })
 }
 
-fn percent_decode(s: &str) -> Option<String> {
+pub(super) fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

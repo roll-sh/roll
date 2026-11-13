@@ -7,7 +7,7 @@ import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field
 const ROLE = /^[a-z_][a-z0-9_]{0,62}$/;
 
 /**
- * Databases outside roll (docs/secrets.md, "Databases outside roll"): Postgres and MySQL servers roll
+ * Databases outside roll (docs/secrets.md, "Databases outside roll"): Postgres, MySQL and Redis servers roll
  * rotates logins on itself. Two roles take turns (managed links), so the one in use keeps working
  * through the grace period while the other gets a new password; a group role gives each dynamic
  * lease a login of its own.
@@ -27,7 +27,7 @@ export function OutsideDatabases() {
   const pair = roles.every((r) => ROLE.test(r)) && roles[0] !== roles[1];
   const noPair = roles.every((r) => r === "");
   const groupOk = group === "" ? !noPair : ROLE.test(group) && !roles.includes(group);
-  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && /^(postgres(ql)?|mysql):\/\/\S+@\S+/.test(url.trim()) && (pair || noPair) && groupOk;
+  const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && /^(postgres(ql)?|mysql|rediss?):\/\/\S+@\S+/.test(url.trim()) && (pair || noPair) && groupOk;
 
   const add = async () => {
     setBusy(true);
@@ -63,7 +63,7 @@ export function OutsideDatabases() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        Postgres or MySQL that roll doesn&apos;t run (RDS, Supabase, PlanetScale, your own server). Managed: two login roles take turns, roll sets the free one&apos;s password on each rotation, and the
+        Postgres, MySQL or Redis that roll doesn&apos;t run (RDS, Supabase, PlanetScale, ElastiCache, Upstash, your own server). Managed: two login roles take turns, roll sets the free one&apos;s password on each rotation, and the
         one in use keeps working through the grace period. Dynamic: each lease gets a login of its own in a group role, valid until the lease ends. Link <span className="font-mono">DB_USER</span> and{" "}
         <span className="font-mono">DB_PASSWORD</span> to it.
       </p>
@@ -82,7 +82,7 @@ export function OutsideDatabases() {
           </label>
           <label>
             <span className="mb-1 block text-[11px] font-medium text-subtle">Admin URL (kept sealed; a user that may alter these roles)</span>
-            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="postgres://admin:…@db.example.com:5432/app or mysql://…" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[12px]`} />
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="postgres://admin:…@db.example.com:5432/app, mysql://… or rediss://…" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[12px]`} />
           </label>
           <div className="sm:col-start-2 flex flex-wrap gap-2">
             {roles.map((r, i) => (
