@@ -1157,7 +1157,11 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   Once #26 and #28 are both on main, rolld calls `apps.set_feedback_notes(…)` with an adapter
   over previews' `Engine::notes_for(env, path)` (`p.engine` in `rolld/src/previews/mod.rs`),
   mapping its `Note` onto apps' (`path, selector, note, by, at`, ms).
-- **roll-secrets** (see "Secrets and environments"). Ours on wiring:
+- **roll-secrets** (see "Secrets and environments"). The wiring is #31
+  (`feature/roll-secrets-apps`, after #20 and #26): rolld's `secrets` becomes secrets' `ForApps`
+  (resolve with `linked` from `Values.linked`, nothing where secrets has no environment, the
+  project's trust of the service; `may_reveal` by `Secrets::caller_of(operator, user, grant)`
+  and `allows(Reveal, Scope::at(project, env, "/"))`). Ours on wiring:
   - apps never ensures a secrets environment: an apps environment roll secrets doesn't have
     reads as no secrets (previews ensures its `pv-` ones with their base and trust; ensuring
     again with other values would be a 409 `mismatch`), and a person adds one in roll secrets
