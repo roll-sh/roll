@@ -755,6 +755,18 @@ impl Store {
         Ok(self.db.read(|c| c.query(&format!("SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.kind <> 'workload' ORDER BY g.created_at DESC, g.id"), (), grant_row))?)
     }
 
+    /// Revoke workload grant `id` (and only a workload grant), with why. Whether it was live.
+    pub fn revoke_workload(&self, id: &str, why: &str) -> Result<bool> {
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            let n = c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND kind = 'workload' AND revoked_at IS NULL", params![now, why, id])?;
+            if n > 0 {
+                c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [id])?;
+            }
+            Ok::<_, Error>(n > 0)
+        })
+    }
+
     /// Workload grants, newest first, at most `limit`: a person's own (`user`), or everyone's.
     pub fn workloads(&self, limit: usize, user: Option<&str>) -> Result<Vec<Grant>> {
         Ok(self.db.read(|c| match user {
