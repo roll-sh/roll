@@ -119,13 +119,18 @@ pub struct Source {
     pub fields: &'static [&'static str],
 }
 
+/// Workspace projects, by id and name (a prompt's `project`, a project page's).
+pub fn workspace_projects() -> Source {
+    Source { tool: "workspace_list_projects", args: |_| json!({}), fields: &["id", "name"] }
+}
+
 /// The completion source for argument `arg` of prompt `prompt`, when it has one.
 pub fn source(prompt: &str, arg: &str) -> Option<Source> {
     PROMPTS.iter().find(|p| p.name == prompt)?.args.iter().find(|a| a.name == arg)?;
     match arg {
         // A Postgres project is Postgres's own, not a workspace project.
         "project" if prompt == "try_migration_on_branch" => Some(Source { tool: "postgres_list_projects", args: |_| json!({}), fields: &["id", "name"] }),
-        "project" => Some(Source { tool: "workspace_list_projects", args: |_| json!({}), fields: &["id", "name"] }),
+        "project" => Some(workspace_projects()),
         "service" => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id", "name"] }),
         "env" => Some(Source { tool: "apps_list_environments", args: |ctx| json!({ "service": ctx["service"] }), fields: &["name"] }),
         _ => None,

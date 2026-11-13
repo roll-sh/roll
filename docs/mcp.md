@@ -188,6 +188,13 @@ Two resources an agent can read before it acts (`resources/list`, `resources/rea
 `roll://access/me` is read from `GET /v1/access` through the gated router with the caller's token,
 as a tool is, so it says what the gate decides and the read is in the audit log.
 
+One template (`resources/templates/list`), listed when the connection may list workspace projects:
+`roll://projects/{project}` is a project and every resource on its canvas (kind and id, names
+quoted), read from `GET /v1/workspace/projects/{project}` the same way, for a client to attach
+before acting on a project. Its id completes like a prompt's (`completion/complete` with
+`ref/resource`); an id that isn't letters, digits, `_` and `-` is "resource not found", so a URI
+never reaches another route.
+
 ## Prompts
 
 roll's workflows as prompts a client offers as slash commands (`prompts/list`, `prompts/get`;
@@ -410,8 +417,9 @@ name no caller; the expiry digest leaves out tokens made for a day or less); wor
 (`Access::mint_workload`: minutes, within an identity's scope, owned by its maker, out of the list
 and caps) for secrets' identity logins; a person's own tokens' news is mailed to them (an approval
 waiting on them, used from a new network, revoked as leaked, about to expire; only their own, never
-a secret); progress while a call waits (`notifications/progress` every 10 s for a call with a
-`progressToken`, checked with the TypeScript SDK; both SDKs' end-to-end runs pass);
+a secret); a project's page as a resource template (`roll://projects/{project}`, read through the
+gate, its id completed); progress while a call waits (`notifications/progress` every 10 s for a call
+with a `progressToken`, checked with the TypeScript SDK; both SDKs' end-to-end runs pass);
 `secrets_list_aws_roles` (secrets #38); read-only connections (`?readonly=1`: only read-only tools
 listed and run, a checkbox in the connect panel); `try_migration_on_branch` (a schema change on a
 Postgres branch first, main only when it worked and you say so); prompts' arguments complete from
