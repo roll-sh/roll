@@ -668,8 +668,16 @@ fn hooks_router(apps: Arc<Apps>) -> Router {
         .with_state(apps)
 }
 
+/// The caller is anonymous: only an id shaped like a service's, of a service that exists, is
+/// routed to its owner (a made-up one would otherwise have this node take a lease for it).
 async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
-    let id = req.uri().path().strip_prefix("/v1/apps/hooks/").and_then(|r| r.split('/').next()).unwrap_or("").to_string();
+    let raw = req.uri().path().strip_prefix("/v1/apps/hooks/").and_then(|r| r.split('/').next()).unwrap_or("");
+    let id = percent_encoding::percent_decode_str(raw).decode_utf8_lossy().into_owned();
+    let shaped = id.strip_prefix("svc_").is_some_and(|r| r.len() == 12 && r.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)));
+    let sid = id.clone();
+    if !shaped || apps.db(move |s| s.service(&sid)).await.is_err() {
+        return Error::NotFound("no such hook".into()).into_response();
+    }
     let cluster = apps.deps.cluster.clone();
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }

@@ -2,7 +2,9 @@
 //! updates): an environment with `follow_tag` deploys again when its image's tag points at a new
 //! digest. Every five minutes, on the service's owner, a manifest `HEAD` per watched
 //! environment (no pull), compared with the digest its live deployment pinned. A deploy that's
-//! already on its way is left alone; the new one goes through everything a deploy does
+//! already on its way is left alone. Each environment remembers the digest it last acted on, so
+//! only a move past it deploys: a rollback isn't undone, and a digest whose deploy failed isn't
+//! retried; the new one goes through everything a deploy does
 //! (pulled and pinned again, health-checked, a gradual rollout if the service has one).
 
 use crate::model::{By, Source, Trigger};
@@ -28,7 +30,7 @@ impl Apps {
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
             for env in envs.into_iter().filter(|e| e.follow_tag) {
-                match self.check_tag(&svc.id, &env.name, image, env.active.as_deref()).await {
+                match self.check_tag(&svc.id, &env.name, image, env.active.as_deref(), env.tag_seen.as_deref()).await {
                     Ok(Some(d)) => started.push(d),
                     Ok(None) => {}
                     Err(e) => self.logs.sink(format!("env:{}/{}", svc.id, env.name), crate::logs::Stream::System).line(format!("watching {image}: {e}")),
@@ -38,7 +40,7 @@ impl Apps {
         started
     }
 
-    async fn check_tag(self: &Arc<Self>, service: &str, env: &str, image: &str, active: Option<&str>) -> Result<Option<String>> {
+    async fn check_tag(self: &Arc<Self>, service: &str, env: &str, image: &str, active: Option<&str>, seen: Option<&str>) -> Result<Option<String>> {
         let Some(active) = active else { return Ok(None) };
         let (sid, a) = (service.to_string(), active.to_string());
         let (live, pending) = self.db(move |s| Ok((s.deployment(&a)?, s.pending_deployments(&sid)?))).await?;
@@ -54,8 +56,16 @@ impl Apps {
             .filter(|(r, _)| crate::model::registry_key(&r.server) == crate::model::image_registry(image))
             .map(|(r, password)| crate::runtime::RegistryLogin { server: r.server, username: r.username, password });
         let now = self.deps.runtime.remote_digest(image, login.as_ref()).await.map_err(|e| crate::Error::BadRequest(format!("{e:#}")))?;
-        let Some(now) = digest(&now) else { return Ok(None) };
-        if now == have {
+        let Some(now) = digest(&now).map(str::to_string) else { return Ok(None) };
+        // Only a move past what was last acted on: a rollback (or a hook's other tag) isn't
+        // undone, and a digest whose deploy failed isn't tried again every five minutes.
+        let moved = match seen {
+            Some(s) => s != now,
+            None => now != have,
+        };
+        let (sid, e, n) = (service.to_string(), env.to_string(), now.clone());
+        self.db(move |s| s.set_tag_seen(&sid, &e, &n)).await?;
+        if !moved {
             return Ok(None);
         }
         let short: String = now.trim_start_matches("sha256:").chars().take(12).collect();

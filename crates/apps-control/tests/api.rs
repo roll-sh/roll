@@ -1406,7 +1406,7 @@ async fn a_deploy_hook_deploys_with_its_url_alone() {
     assert_eq!((d["status"].as_str(), d["actor"].as_str()), (Some("active"), Some("deploy hook")), "{d}");
     assert!(d["image"].as_str().unwrap().starts_with("nginx:1.28"), "{d}");
     assert_eq!(call(&hooks, "POST", &format!("{path}?image=evil/miner:1"), None).await.0, StatusCode::BAD_REQUEST, "only its own repository");
-    assert!(path.rsplit('/').next().unwrap().starts_with("rlh_"), "a secret scanners know: {path}");
+    assert!(path.rsplit('/').next().unwrap().starts_with("rlk_"), "a secret scanners know: {path}");
     let (_, activity) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
     assert!(activity.as_array().unwrap().iter().any(|e| e["kind"] == "audit.hook.deployed" && e["data"]["deployment"] == d["id"]), "{activity}");
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/hook"), None).await.0, StatusCode::NO_CONTENT);
@@ -1432,6 +1432,10 @@ async fn a_followed_tag_that_moves_deploys_once() {
     assert_eq!((d2["status"].as_str(), d2["actor"].as_str()), (Some("active"), Some("tag watch")), "{d2}");
     assert!(d2["image"].as_str().unwrap().ends_with(&moved) && d2["id"] != d1["id"], "{d2}");
     assert!(w.apps.watch_tags().await.is_empty(), "deployed: nothing more to do");
+    // A rollback while following isn't undone: the tag hasn't moved since.
+    let (_, r) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", d1["id"].as_str().unwrap()), None).await;
+    assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
+    assert!(w.apps.watch_tags().await.is_empty(), "the rollback stays");
 }
 
 /// A deployment has its own URL: one deployed without traffic is reached there, not on the
@@ -1455,6 +1459,10 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
     assert_eq!((st, v["deployment"].clone()), (StatusCode::OK, d2["id"].clone()), "its own URL runs it");
     assert_eq!(visit(&w, &own(&d1["id"]), "/").await.1["deployment"], d1["id"], "the live one has its own URL too");
     assert_eq!(visit(&w, &format!("aaaaaaaaaaaa--{h}"), "/").await.0, StatusCode::NOT_FOUND);
+    // No environment's hostname can look like a deployment's: slugs never hold `--`.
+    let (other, _) = image_service(&w, "abcdefghijkl--victim", json!({"port": 80})).await;
+    let (_, oenv) = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", other["id"].as_str().unwrap()), None).await;
+    assert!(!oenv["url"].as_str().unwrap_or_else(|| panic!("{oenv}")).contains("--"), "{oenv}");
     // Put live: its image again, no build.
     let (_, d3) = call(&w.api, "POST", &format!("{base}/deploys/{}/rollback", d2["id"].as_str().unwrap()), None).await;
     let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;

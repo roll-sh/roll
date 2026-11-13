@@ -237,7 +237,7 @@ pub struct EnvLive {
     served: Mutex<HashMap<String, Served>>,
     /// Deployments asked for by their own URL (not the active one): their templates, one
     /// instance each at most, gone a minute after their last request.
-    viewed: Mutex<HashMap<String, Arc<Template>>>,
+    viewed: Mutex<HashMap<String, (Arc<Template>, Instant)>>,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
     /// The last failed wake, of which deployment, and how many failed in a row: the requests
@@ -328,7 +328,7 @@ impl EnvLive {
         if let Some(t) = self.template().filter(|t| t.deployment == deployment) {
             return Some(t);
         }
-        self.viewed.lock().get(deployment).cloned()
+        self.viewed.lock().get(deployment).map(|(t, _)| t.clone())
     }
 
     /// The canary's deployment and share, while a gradual rollout runs.
@@ -520,17 +520,25 @@ impl EnvLive {
     /// (one at most), which goes a minute after its last request.
     pub async fn acquire_deployment(self: &Arc<Self>, tpl: Template) -> Result<Lease, WakeError> {
         self.may_wake()?;
-        let tpl = match self.serving(&tpl.deployment) {
+        let tpl = match self.serving(&tpl.deployment).filter(|_| !self.viewed.lock().contains_key(&tpl.deployment)) {
+            // The active one or the canary: theirs.
             Some(t) => t,
             None => {
                 let mut t = tpl;
                 t.run.min_instances = 0;
                 t.run.max_instances = 1;
-                let t = Arc::new(t);
-                self.viewed.lock().entry(t.deployment.clone()).or_insert(t).clone()
+                let mut viewed = self.viewed.lock();
+                let e = viewed.entry(t.deployment.clone()).or_insert_with(|| (Arc::new(t), Instant::now()));
+                e.1 = Instant::now();
+                e.0.clone()
             }
         };
-        self.acquire_tpl(tpl).await
+        self.acquire_pinned(tpl, true).await
+    }
+
+    /// Whether `deployment` serves only through its own URL (not the active one or the canary).
+    fn only_viewed(&self, deployment: &str) -> bool {
+        self.viewed.lock().contains_key(deployment) && self.template().is_none_or(|t| t.deployment != deployment) && self.canary.lock().as_ref().is_none_or(|(c, _)| c.deployment != deployment)
     }
 
     pub fn may_wake(&self) -> Result<(), WakeError> {
@@ -547,14 +555,19 @@ impl EnvLive {
     }
 
     pub async fn acquire_tpl(self: &Arc<Self>, tpl: Arc<Template>) -> Result<Lease, WakeError> {
+        self.acquire_pinned(tpl, false).await
+    }
+
+    /// `pinned`: the request asked for this deployment (its own URL), and gets it or nothing.
+    async fn acquire_pinned(self: &Arc<Self>, tpl: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {
         let h2c = tpl.run.h2c;
-        self.acquire_inner(tpl).await.map(|mut l| {
+        self.acquire_inner(tpl, pinned).await.map(|mut l| {
             l.h2c = h2c;
             l
         })
     }
 
-    async fn acquire_inner(self: &Arc<Self>, tpl: Arc<Template>) -> Result<Lease, WakeError> {
+    async fn acquire_inner(self: &Arc<Self>, tpl: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {
         let began = Instant::now();
         if tpl.run.kind != RunType::Web {
             return Err(WakeError::NotWeb);
@@ -582,7 +595,7 @@ impl EnvLive {
         let this = self.clone();
         let routed = tpl.deployment.clone();
         let r = tokio::spawn(async move {
-            let r = this.wake_slow(began, tpl).await;
+            let r = this.wake_slow(began, tpl, pinned).await;
             this.waiters.fetch_sub(1, Ordering::SeqCst);
             r
         })
@@ -598,7 +611,7 @@ impl EnvLive {
         r
     }
 
-    async fn wake_slow(self: &Arc<Self>, began: Instant, routed: Arc<Template>) -> Result<Lease, WakeError> {
+    async fn wake_slow(self: &Arc<Self>, began: Instant, routed: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {
         let deadline = began + self.cfg.wake_timeout;
         let _g = tokio::time::timeout_at(deadline.into(), self.wake.lock()).await.map_err(|_| WakeError::Timeout(self.cfg.wake_timeout))?;
         if self.closed.load(Ordering::SeqCst) {
@@ -608,6 +621,8 @@ impl EnvLive {
         // promoted or rolled back meanwhile.
         let tpl = match self.serving(&routed.deployment) {
             Some(t) => t,
+            // A deployment's own URL never quietly answers with another deployment.
+            None if pinned => return Err(WakeError::NoDeployment),
             None => self.template().ok_or(WakeError::NoDeployment)?,
         };
         let dep = tpl.deployment.as_str();
@@ -1019,47 +1034,16 @@ impl EnvLive {
     /// `min_instances` up, scale down what's no longer needed, restart crashed workers.
     pub async fn tick(self: &Arc<Self>) {
         if self.template().is_none() {
-            // Nothing live, but a deployment's own URL may have woken one.
-            self.reap_viewed().await;
+            // Nothing live, but a deployment's own URL may have woken one: metered and reaped.
+            if !self.viewed.lock().is_empty() {
+                self.meter_tick(Instant::now()).await;
+                let _g = self.wake.lock().await;
+                self.reap_viewed().await;
+            }
             return;
         }
         let now = Instant::now();
-        let elapsed = {
-            let mut last = self.last_tick.lock();
-            let e = last.map(|l| now.duration_since(l).as_secs_f64()).unwrap_or(0.0).min(10.0);
-            *last = Some(now);
-            e
-        };
-        // Metering: only running instances use anything.
-        let insts = self.instances();
-        let (mut cpu, mut mem, mut up) = (0.0, 0u64, 0usize);
-        for i in &insts {
-            if !matches!(i.phase(), Phase::Running(_)) {
-                continue;
-            }
-            up += 1;
-            match self.runtime.usage(&i.name).await {
-                Some(u) => {
-                    let mut seen = i.cpu_seen.lock();
-                    if let Some(prev) = *seen {
-                        cpu += u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
-                    }
-                    *seen = Some(u.cpu_ns);
-                    mem += u.memory_bytes;
-                }
-                // A runtime that can't say what an instance uses (Fargate, which bills by size ×
-                // time) meters what it was given: its CPU for the interval and its memory.
-                None => {
-                    if let Some(tpl) = self.template() {
-                        cpu += tpl.run.cpu * elapsed;
-                        mem += (tpl.run.memory_mb as u64) << 20;
-                    }
-                }
-            }
-        }
-        if up > 0 || elapsed > 0.0 {
-            self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
-        }
+        let insts = self.meter_tick(now).await;
         let due = {
             let mut last = self.last_health.lock();
             let due = last.is_none_or(|t| now.duration_since(t) >= self.cfg.health_every);
@@ -1103,6 +1087,46 @@ impl EnvLive {
         self.reap_viewed().await;
     }
 
+    /// Metering, once a tick: only running instances use anything. Its instances.
+    async fn meter_tick(&self, now: Instant) -> Vec<Arc<Inst>> {
+        let elapsed = {
+            let mut last = self.last_tick.lock();
+            let e = last.map(|l| now.duration_since(l).as_secs_f64()).unwrap_or(0.0).min(10.0);
+            *last = Some(now);
+            e
+        };
+        let insts = self.instances();
+        let (mut cpu, mut mem, mut up) = (0.0, 0u64, 0usize);
+        for i in &insts {
+            if !matches!(i.phase(), Phase::Running(_)) {
+                continue;
+            }
+            up += 1;
+            match self.runtime.usage(&i.name).await {
+                Some(u) => {
+                    let mut seen = i.cpu_seen.lock();
+                    if let Some(prev) = *seen {
+                        cpu += u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                    }
+                    *seen = Some(u.cpu_ns);
+                    mem += u.memory_bytes;
+                }
+                // A runtime that can't say what an instance uses (Fargate, which bills by size ×
+                // time) meters what it was given: its CPU for the interval and its memory.
+                None => {
+                    if let Some(tpl) = self.serving(&i.deployment) {
+                        cpu += tpl.run.cpu * elapsed;
+                        mem += (tpl.run.memory_mb as u64) << 20;
+                    }
+                }
+            }
+        }
+        if up > 0 || elapsed > 0.0 {
+            self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
+        }
+        insts
+    }
+
     /// Instances of deployments asked for by their own URL go a minute after their last
     /// request, and the deployment is forgotten once none is left.
     async fn reap_viewed(&self) {
@@ -1121,7 +1145,7 @@ impl EnvLive {
             self.insts.lock().retain(|x| !Arc::ptr_eq(x, i));
         }
         let left: std::collections::HashSet<String> = self.instances().into_iter().map(|i| i.deployment.clone()).collect();
-        self.viewed.lock().retain(|d, _| left.contains(d));
+        self.viewed.lock().retain(|d, (_, asked)| left.contains(d) || asked.elapsed() < Duration::from_secs(60));
     }
 
     /// Health checks while running (Render's, Fly's `checks`): every running instance's
@@ -1158,7 +1182,8 @@ impl EnvLive {
 
     async fn reap_web(self: &Arc<Self>, tpl: &Arc<Template>) {
         let run = &tpl.run;
-        let insts = self.instances();
+        // A deployment's own URL's instances are reap_viewed's, not part of the scale.
+        let insts: Vec<Arc<Inst>> = self.instances().into_iter().filter(|i| !self.only_viewed(&i.deployment)).collect();
         let suspend_after = Duration::from_secs(run.suspend_after_s as u64);
         let sleep_after = Duration::from_secs(run.sleep_after_s as u64);
         let mut awake = insts.iter().filter(|i| i.awake()).count() as u32;

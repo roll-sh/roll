@@ -203,9 +203,16 @@ pub(crate) fn env_key(service: &str, env: &str) -> String {
     format!("{service}/{env}")
 }
 
-/// A hostname label from `s`: lowercase, `[a-z0-9-]`, at most `max`.
+/// A hostname label from `s`: lowercase, `[a-z0-9-]`, at most `max`, and never `--`: that's
+/// how a deployment's own hostname (`<id>--<slug>`) is told apart, so no environment's slug may
+/// look like another's deployment.
 fn label(s: &str, max: usize) -> String {
-    let mut out: String = s.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let mut out = String::new();
+    for c in s.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }) {
+        if !(c == '-' && out.ends_with('-')) {
+            out.push(c);
+        }
+    }
     out.truncate(max);
     out.trim_matches('-').to_string()
 }

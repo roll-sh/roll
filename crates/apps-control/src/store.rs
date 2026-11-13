@@ -320,6 +320,9 @@ pub struct EnvRow {
     pub hook_hash: Option<String>,
     /// An image service's tag is watched: it deploys when the tag moves.
     pub follow_tag: bool,
+    /// The digest the watched tag pointed at when it was last acted on (deployed, or found
+    /// where the live deployment already is): only a move past it deploys.
+    pub tag_seen: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -347,6 +350,9 @@ pub struct NewDeployment {
     pub status: DeployStatus,
     /// Who asked for it ([`crate::model::Deployment::actor`]).
     pub actor: Option<String>,
+    /// Stops when it's healthy, never switched to: neither supersedes a queued deploy nor is
+    /// superseded by one.
+    pub no_traffic: bool,
 }
 
 /// One minute of one environment's metrics.
@@ -400,7 +406,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen";
 const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
@@ -452,6 +458,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         run: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
         hook_hash: r.get(10)?,
         follow_tag: r.get::<_, i64>(11)? != 0,
+        tag_seen: r.get(12)?,
     })
 }
 
@@ -522,6 +529,7 @@ impl Store {
         db.add_column("environments", "run", "TEXT NOT NULL DEFAULT '{}'")?;
         db.add_column("environments", "hook_hash", "TEXT")?;
         db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("environments", "tag_seen", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
         Ok(Store { db, sealer })
     }
@@ -662,7 +670,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -946,10 +954,14 @@ impl Store {
                 }
                 c.execute("INSERT INTO deploy_keys (service, env, key, deployment, created_at) VALUES (?, ?, ?, ?, ?)", params![service, env, k, id, now])?;
             }
-            c.execute(
-                "UPDATE deployments SET status = 'superseded', finished_at = ? WHERE service = ? AND env = ? AND status = 'queued'",
-                params![now, service, env],
-            )?;
+            // A newer deploy replaces a queued one; a no-traffic one (a try-out) neither replaces
+            // nor is replaced.
+            if !d.no_traffic {
+                c.execute(
+                    "UPDATE deployments SET status = 'superseded', finished_at = ? WHERE service = ? AND env = ? AND status = 'queued' AND id NOT IN (SELECT deployment FROM deploy_no_traffic)",
+                    params![now, service, env],
+                )?;
+            }
             c.execute(
                 &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, ?)"),
                 params![
@@ -970,6 +982,9 @@ impl Store {
                     d.upload
                 ],
             )?;
+            if d.no_traffic {
+                c.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?)", [&id])?;
+            }
             Ok(c.query_row(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE id = ?"), [&id], deploy_row)?)
         })
     }
@@ -1049,12 +1064,6 @@ impl Store {
 
     pub fn site(&self, key: &str) -> Result<Option<u64>> {
         Ok(self.db.query_row("SELECT size FROM apps_sites WHERE key = ?", [key], |r| r.get::<_, i64>(0)).optional()?.map(|n| n as u64))
-    }
-
-    /// A deployment that stops when it's healthy, never switched to (`no_traffic`).
-    pub fn set_no_traffic(&self, id: &str) -> Result<()> {
-        self.db.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?) ON CONFLICT (deployment) DO NOTHING", [id])?;
-        Ok(())
     }
 
     pub fn no_traffic(&self, id: &str) -> Result<bool> {
@@ -1474,7 +1483,13 @@ impl Store {
     // ── pushes waiting for their checks ──
 
     pub fn set_follow_tag(&self, service: &str, env: &str, on: bool) -> Result<()> {
-        self.db.execute("UPDATE environments SET follow_tag = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        // Turned on or off, it starts again from what the tag points at then.
+        self.db.execute("UPDATE environments SET follow_tag = ?, tag_seen = NULL WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_tag_seen(&self, service: &str, env: &str, digest: &str) -> Result<()> {
+        self.db.execute("UPDATE environments SET tag_seen = ? WHERE service = ? AND name = ?", params![digest, service, env])?;
         Ok(())
     }
 
