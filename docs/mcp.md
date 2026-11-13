@@ -264,10 +264,14 @@ previews are listed once those products are on.
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_remove_domain` | Remove a domain. | `DELETE /v1/apps/services/{service}/environments/{env}/domains/{host}` |
 | `previews_list` | Preview environments. | `GET /v1/previews` |
-| `previews_get` | A preview with its branched resources. | `GET /v1/previews/{id}` |
+| `previews_get` | A preview with its branched resources and its schema changes. | `GET /v1/previews/{id}` |
 | `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
 | `previews_logs` | A preview's deploy and service logs. | `GET /v1/previews/{id}/logs` |
+| `previews_reset` | Branch a preview's resources again from their parents. | `POST /v1/previews/{id}/reset` |
+| `previews_sleep` | Stop a preview's services until it's woken. | `POST /v1/previews/{id}/sleep` |
+| `previews_wake` | Start a sleeping preview's services again. | `POST /v1/previews/{id}/wake` |
+| `previews_usage` | What a project's previews used and cost this month. | `GET /v1/previews/projects/{project}/usage` |
 | `previews_delete` | Tear a preview down with its branches. | `DELETE /v1/previews/{id}` |
 | `code_…`, `agents_…` | roll code's tools (docs/code/mcp.md), under product names | as there |
 
