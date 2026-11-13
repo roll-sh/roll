@@ -552,18 +552,18 @@ grace period (its revocation goes through the rotator).
 
 ### Databases outside roll
 
-A Postgres server roll doesn't run (Amazon RDS, Supabase, Neon, a server of the customer's own)
+A Postgres or MySQL server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, a server of the customer's own)
 has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
 does, and issues a login per lease, as Vault's database engine does. A project registers it
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
 NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
-(`postgres://admin:…@host:5432/db`, a user that may alter both roles and create roles in the
-group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
+(`postgres://admin:…@host:5432/db` or `mysql://admin:…@host:3306/db`, a user that may alter both
+roles and create roles in the group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
 two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
 Registering connects once and checks the roles exist (and can log in).
 
-It's the link kind `outside_postgres` with fields `username` and `password`, one credential
+It's the link kind `outside_database` with fields `username` and `password`, one credential
 (`login`), `managed` or `dynamic`.
 
 **Managed** (two roles taking turns): each issue (linking, every `rotate_days`, `…/rotate`) gives the role not
@@ -593,8 +593,15 @@ verified) and `sslmode=disable` works only where private addresses do. The new p
 SCRAM-SHA-256 verifier (`ALTER ROLE … PASSWORD 'SCRAM-SHA-256$4096:…'`), so neither the connection
 nor the server's statement log ever holds it. One project can't register the same role on one host
 twice (the two would undo each other's passwords), and a database a key links to, or with a
-retired password still to replace, can't be deleted. MySQL is next (`ALTER USER … IDENTIFIED BY`,
-whose statement does carry the password).
+retired password still to replace, can't be deleted.
+
+**MySQL** works the same way through the same guards (`mysql://…`; the URL may set `ssl-mode` and
+nothing else; TLS verified against the URL's host, never a socket). Accounts are `'<name>'@'%'`:
+rotation is `ALTER USER … IDENTIFIED BY` (the password in the statement, over TLS; MySQL rewrites it
+out of its logs), and a dynamic login is `CREATE USER`, `GRANT <group>` and `SET DEFAULT ROLE
+<group>`. MySQL has no `VALID UNTIL`, so a dynamic login lasts until roll ends its lease (renewing
+changes nothing on the server); ending it kills its sessions where the admin may
+(`CONNECTION_ADMIN`) and drops the account.
 
 ## Consumption
 
@@ -1638,8 +1645,9 @@ under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
 Ranked (work that can start now):
 
-1. **MySQL outside roll**, next to Postgres ("Databases outside roll"): the same two roles taking
-   turns, `ALTER USER … IDENTIFIED BY` over TLS through the same guarded connection.
+1. **Rotating AWS IAM users' access keys** (on #38's registered roles), as Infisical's AWS IAM
+   rotation: an IAM user's two key slots take turns like a database's two roles
+   (`CreateAccessKey`, then `DeleteAccessKey` after the grace period), for what can't use a role.
 2. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
    customer-managed keys, and the deploy notice when apps reads secrets (#31), once those land.
 3. **Products say who owns a resource**, so a person's project can link their own databases,

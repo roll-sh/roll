@@ -1024,7 +1024,7 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require", "roles": ["app_blue", "app_green"], "group": "app_rw" });
     let d = api.ok(Method::POST, "/outside-databases", Some(new)).await;
     assert_eq!((d["host"].as_str(), d.get("url")), (Some("db.example:5432"), None), "the admin URL stays sealed: {d}");
-    let link = |field: &str| json!({ "kind": "outside_postgres", "ref": d["id"], "field": field, "mode": "managed" });
+    let link = |field: &str| json!({ "kind": "outside_database", "ref": d["id"], "field": field, "mode": "managed" });
     api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "DB_USER", "link": link("username") }, { "op": "set", "key": "DB_PASSWORD", "link": link("password") }] }))).await;
     let login = || async {
         let v = api.values("production", "/").await["values"].clone();
@@ -1061,7 +1061,7 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
 
     // Dynamic: each resolve is a login of its own in the group, valid until its lease ends (the
     // server enforces it), renewed with the lease, dropped when it ends.
-    let dynamic = |field: &str| json!({ "kind": "outside_postgres", "ref": d["id"], "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15 } });
+    let dynamic = |field: &str| json!({ "kind": "outside_database", "ref": d["id"], "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15 } });
     api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "TMP_USER", "link": dynamic("username") }, { "op": "set", "key": "TMP_PASSWORD", "link": dynamic("password") }] }))).await;
     let a = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
     let b = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;

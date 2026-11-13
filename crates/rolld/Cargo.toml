@@ -33,6 +33,7 @@ libc.workspace = true
 libmimalloc-sys.workspace = true
 mimalloc.workspace = true
 mq-amqp.workspace = true
+mysql_async.workspace = true
 mq-amqp10.workspace = true
 mq-cluster.workspace = true
 mq-control.workspace = true

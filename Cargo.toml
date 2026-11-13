@@ -22,6 +22,8 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"
+# roll secrets: MySQL servers outside roll (rotation and dynamic logins); rustls with ring, no zlib.
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"] }
 tower = { version = "0.5", features = ["util"] }
 hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio", "server", "server-auto"] }

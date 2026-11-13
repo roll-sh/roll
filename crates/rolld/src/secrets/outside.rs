@@ -1,8 +1,10 @@
-//! Postgres servers outside roll (roll-secrets' outside.rs): the address is the tenant's, so the
-//! host is resolved here, private addresses are refused (unless rolld allows them for local
-//! development), and the connection goes to the address that was checked. TLS is required off
-//! private addresses; the new password goes as a SCRAM verifier, so neither the wire nor the
-//! server's statement log ever sees it.
+//! Databases outside roll (roll-secrets' outside.rs), Postgres or MySQL by the URL's scheme: the
+//! address is the tenant's, so the host is resolved here, private addresses are refused (unless
+//! rolld allows them for local development), and the connection goes to the address that was
+//! checked. TLS is required off private addresses. Postgres gets a new password as a SCRAM
+//! verifier, so neither the wire nor the server's statement log ever sees it (MySQL: mysql.rs).
+
+mod mysql;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -22,6 +24,9 @@ pub(crate) struct Guarded {
 impl roll_secrets::outside::OutsideDb for Guarded {
     fn check(&self, url: &str, ca: Option<&str>, roles: &[String], group: Option<&str>) -> Result<(), String> {
         let (roles, group) = (roles.to_vec(), group.map(str::to_string));
+        if let Some(u) = self.mysql(url)? {
+            return self.my(u, ca, async move |c| mysql::check(c, &roles, group.as_deref()).await);
+        }
         self.run(url, ca, move |c| {
             Box::pin(async move {
                 let rows = c.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND rolcanlogin", &[&roles]).await.map_err(db_error)?;
@@ -40,22 +45,35 @@ impl roll_secrets::outside::OutsideDb for Guarded {
     }
 
     fn set_password(&self, url: &str, ca: Option<&str>, role: &str, password: &str) -> Result<(), String> {
+        if let Some(u) = self.mysql(url)? {
+            return self.my(u, ca, async move |c| mysql::set_password(c, role, password).await);
+        }
         // Checked by roll-secrets (lowercase letters, digits, _), quoted anyway.
         let sql = format!("ALTER ROLE {} PASSWORD '{}'", ident(role), postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
     fn create_login(&self, url: &str, ca: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+        if let Some(u) = self.mysql(url)? {
+            return self.my(u, ca, async move |c| mysql::create_login(c, name, password, group).await);
+        }
         let sql = format!("CREATE ROLE {} LOGIN PASSWORD '{}' VALID UNTIL '{}' IN ROLE {}", ident(name), postgres_protocol::password::scram_sha_256(password.as_bytes()), stamp(until)?, ident(group));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
     fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> Result<(), String> {
+        // MySQL has no VALID UNTIL: its logins last until roll ends the lease.
+        if self.mysql(url)?.is_some() {
+            return Ok(());
+        }
         let sql = format!("ALTER ROLE {} VALID UNTIL '{}'", ident(name), stamp(until)?);
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
     fn drop_login(&self, url: &str, ca: Option<&str>, name: &str) -> Result<(), String> {
+        if let Some(u) = self.mysql(url)? {
+            return self.my(u, ca, async move |c| mysql::drop_login(c, name).await);
+        }
         let name = name.to_string();
         self.run(url, ca, move |c| {
             Box::pin(async move {
@@ -85,6 +103,18 @@ fn stamp(ms: i64) -> Result<String, String> {
 type Done = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
 
 impl Guarded {
+    /// A `mysql://` URL's settings; `None` for Postgres.
+    fn mysql(&self, url: &str) -> Result<Option<mysql::Url>, String> {
+        if url.starts_with("mysql://") { mysql::parse(url, self.allow_private).map(Some) } else { Ok(None) }
+    }
+
+    fn my<T>(&self, u: mysql::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut mysql_async::Conn) -> Result<T, String>) -> Result<T, String> {
+        // mysql_async builds its TLS config with the process's provider; rolld has two compiled
+        // in, so name one (as roll-edge does).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        tokio::runtime::Handle::current().block_on(mysql::run(u, ca.map(str::to_string), self.allow_private, work))
+    }
+
     fn run(&self, url: &str, ca: Option<&str>, work: impl FnOnce(tokio_postgres::Client) -> Done + Send + 'static) -> Result<(), String> {
         let (config, host, tls) = self.config(url, ca)?;
         let allow_private = self.allow_private;
@@ -207,6 +237,10 @@ mod tests {
         refused("postgres://a:b@db.example.com/x?hostaddr=10.0.0.1");
         let (c, host, tls) = g.config("postgres://a:b@db.example.com/x?sslmode=prefer", None).unwrap();
         assert_eq!((host.as_str(), c.get_ssl_mode(), tls.is_some()), ("db.example.com", SslMode::Require, true));
+        // MySQL: TLS unless private addresses are allowed, and no other settings.
+        assert!(g.mysql("mysql://a:b@db.example.com/x?ssl-mode=DISABLED").err().unwrap().contains("TLS"));
+        assert!(g.mysql("mysql://a:b@db.example.com/x?local_infile=1").err().unwrap().contains("local_infile"));
+        assert!(g.mysql("mysql://a:b@db.example.com/x?ssl-mode=VERIFY_IDENTITY").unwrap().is_some());
         assert!(resolve("127.0.0.1", 5432, false).await.unwrap_err().contains("private"));
         assert!(resolve("10.1.2.3", 5432, false).await.unwrap_err().contains("private"));
     }
