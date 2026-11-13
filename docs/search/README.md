@@ -204,16 +204,14 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Benchmarks against ES 9.5.5 and OpenSearch 3.9** (docs/benchmarks/search.md, round 7):
-   footprint, micro suite and Rally http_logs, geonames and nyc_taxis are done for all three
-   targets, plus a roll rerun after the aggregation work. roll now wins or ties nearly every
-   task. Still behind the best of the two: nyc_taxis `autohisto_agg` (39.6 ms against ES 32.2
-   and OpenSearch 13.0) and `distance_amount_agg` (98 against ES 86); http_logs `hourly_agg`
-   (32.9 against OpenSearch 14.0; 7 ms locally on the same data, so find what Rally's index has
-   that the local load doesn't, likely segment count) and `terms_enum` (1.14 against 0.57);
-   geonames `decay_geo_gauss_script_score` (78 against ES 71). Then: `so`, a full rerun of every
-   track with variance, and one allocator policy (rolld's against search-dev's purge governor,
-   by a matched benchmark).
+1. **Merge main and wire roll-access** (#19 and #18 landed): a dry merge conflicts in
+   `ci.yml`, rolld's `cluster.rs`, `main.rs`, `tests/auth.rs`, docs/cloud and docs/workspace;
+   then `r.by_fn("cluster", …)` in `rolld/src/access.rs` with `Control::resolve_id`, so rules
+   name clusters by id even when a path uses the name. Then the remaining benchmark work
+   (docs/benchmarks/search.md, round 7 summary: roll ahead of both on every measure but
+   `autohisto_agg` and `terms_enum`, where OpenSearch is): a full rerun of every track with
+   variance on a quiet host, and one allocator policy (rolld's against search-dev's purge
+   governor, by a matched benchmark).
 2. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
    leases, MinIO) and roll cloud's fleet test (`rolld/tests/fleet_e2e.rs`, `pnpm test:fleet`:
    three nodes from the fleet image behind HAProxy, DynamoDB leases, every product under load)
