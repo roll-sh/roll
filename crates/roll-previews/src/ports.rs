@@ -269,6 +269,10 @@ pub trait Apps: Send + Sync {
     async fn seed(&self, _job: &SeedJob) -> anyhow::Result<(i32, String)> {
         anyhow::bail!("this server can't run seed commands")
     }
+    /// A PNG of the service's page as it first shows (`None`: this backend can't take one).
+    async fn screenshot(&self, _preview: &str, _service: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
     /// What it's doing on this node (`None`: never started here).
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState>;
 }

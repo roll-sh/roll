@@ -23,6 +23,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}", get(one).delete(delete))
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
+        .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/reset", post(reset))
         // These act on running services, which live on the preview's holder in a cluster.
         .merge(
@@ -150,6 +151,16 @@ async fn keep(AxState(e): S, Path(id): Path<String>, b: Bytes) -> crate::Result<
     check_id(&id)?;
     let k: KeepBody = body(&b)?;
     blocking(e, move |e| e.keep(&id, k.hours)).await.map(Json)
+}
+
+/// The preview's screenshot (a PNG), taken once per head when the project's rules ask.
+async fn screenshot(AxState(e): S, Path(id): Path<String>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let shot = blocking(e, move |e| e.store.screenshot(&id)).await?;
+    match shot.filter(|(_, png)| !png.is_empty()) {
+        Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
+        None => Err(Error::NotFound("the preview has no screenshot".into())),
+    }
 }
 
 async fn sleep(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Preview>> {

@@ -394,11 +394,35 @@ impl Engine {
         if was != row.state || was == State::Creating || was == State::Updating {
             self.store.log(&r.id, row.state.as_str())?;
         }
+        let ready = row.state == State::Ready;
         self.report(row).await;
+        // 6. A screenshot of the first service, once per head (best effort; it wakes the service).
+        if ready && s.github.screenshot && self.store.screenshot_head(&r.id)?.as_deref() != Some(r.head.as_str()) {
+            self.take_screenshot(r).await;
+        }
         Ok(())
     }
 
     /// The project's column masks for a fresh branch, if it has any for this resource.
+    async fn take_screenshot(&self, r: &Row) {
+        let Ok(Some(first)) = self.store.services(&r.id).map(|v| v.into_iter().next()) else { return };
+        match self.apps.screenshot(&r.id, &first.name).await {
+            Ok(Some(png)) => {
+                if self.store.set_screenshot(&r.id, &r.head, &png).is_ok() {
+                    let _ = self.store.log(&r.id, &format!("took a screenshot of {}", first.name));
+                }
+            }
+            // This backend can't: don't ask again at this head.
+            Ok(None) => {
+                let _ = self.store.set_screenshot(&r.id, &r.head, &[]);
+            }
+            Err(e) => {
+                let _ = self.store.log(&r.id, &format!("couldn't take a screenshot of {}: {e:#}", first.name));
+                let _ = self.store.set_screenshot(&r.id, &r.head, &[]);
+            }
+        }
+    }
+
     /// Run the project's seed or release to its end on the preview's tree: its secrets
     /// environment (as services get it: untrusted unless the project allows production and the
     /// change is trusted), the branches and overrides on top.

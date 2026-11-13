@@ -258,6 +258,13 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.seed(job).await
     }
 
+    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        match self.apps.find(preview, service).await? {
+            Some(_) => Ok(None),
+            None => self.runtime.screenshot(preview, service).await,
+        }
+    }
+
     fn status(&self, preview: &str, service: &str) -> Option<roll_previews::ServiceState> {
         self.runtime.status(preview, service)
     }

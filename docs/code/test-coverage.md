@@ -1098,6 +1098,7 @@ otherwise. The module docs give the client retry policy and exactly what is asse
 | roll previews: a service host reaches its container, other hosts the API; link access (401, the token's redirect and cookie, public); the project's bypass secret in `x-roll-preview-bypass` (never passed on, refused once rotated), never for a fork's preview | `roll-previews/src/runtime.rs::service_hosts_reach_their_containers` |
 | roll previews on GitHub: one PR comment edited in place, a `roll/preview` status on the head, a deployment that goes inactive when the preview is removed | `github.rs::connect_import_webhooks_and_mirror` |
 | `roll preview` settings (by project name, nested `--set`, production refused), create from a branch, ls, rm, `wait` failing on a timeout or a deleted preview | `roll-cli/tests/preview.rs::settings_create_list_and_remove_a_branch_preview` |
+| roll previews: a screenshot of the first service at a head (a headless browser in the service container's network) | `scripts/preview-cost.sh` (manual: needs Docker and the browser image) |
 | roll previews end to end against every product (a real rolld and Docker), and what a preview costs | `scripts/preview-cost.sh` (manual) |
 
 ## control.db on SQLite and Postgres (`code-control/tests/concurrency.rs`, `code-sql/tests/backends.rs`)

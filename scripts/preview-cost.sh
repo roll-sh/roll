@@ -187,6 +187,16 @@ RSS1=$(ps -o rss= -p "$PID")
 api POST "/v1/previews/$PV/refresh" >/dev/null; sleep 3
 ACTIVE=$(api GET "/v1/previews/$PV" | jq_ "d['cost']")
 
+say "a screenshot of the service (github.screenshot), once per head"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true}}' >/dev/null
+for _ in $(seq 1 120); do
+  [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
+  sleep 0.5
+done
+curl -sS -o "$HOME_DIR/screenshot.png" "http://$API/v1/previews/$PV/screenshot"
+SHOT=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print(f'{len(b)} bytes, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')" "$HOME_DIR/screenshot.png")
+case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1;; esac
+
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null
 sleep 1
@@ -238,5 +248,6 @@ cat <<EOF
 | Object storage of the whole daemon after the preview (parents included) | ${OBJ_KB} KiB |
 | Cost while running (from the preview) | $ACTIVE |
 | Cost while asleep (from the preview) | $SLEEPING |
+| The first service's screenshot (taken in the service container's own network) | $SHOT |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 3 / $BRANCHES_LEFT |
 EOF

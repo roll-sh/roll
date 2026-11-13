@@ -539,6 +539,7 @@ Bodies are JSON. Every error is `{"error": string}`.
 | `POST /v1/previews/{id}/sleep` | | `Preview`: stop its services now |
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
+| `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none) |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}` |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come. `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
@@ -569,6 +570,7 @@ type Preview = {
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
   kept_until: number | null;          // kept past its TTL until then (POST …/keep)
+  screenshot_at: number | null;       // when GET …/screenshot was taken (github.screenshot)
   last_reset_at: number | null; last_active_at: number; expires_at: number | null;
   created_by: string; created_at: number; updated_at: number;
 };
@@ -593,7 +595,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean };   // all true
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean };   // all true but screenshot
   access: "link" | "public";          // "link": a preview's URLs need its link ("link")
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
@@ -613,6 +615,13 @@ type Settings = {
   - a commit status `roll/preview` on the head;
   - a GitHub deployment to the environment `preview/<slug>` with the URL, marked `inactive` when
     the preview is deleted.
+  - with `github.screenshot`, a screenshot of the first service at each new head (Vercel's
+    preview images): a headless Chromium (`ROLL_PREVIEW_SCREENSHOT_IMAGE`, Playwright's image by
+    default) runs in the service container's own network namespace, so it reaches exactly what
+    the service does and nothing on the host, within 1 GiB, one CPU and 90 s, and the PNG (at
+    most 2 MiB) is kept with the preview. It's on the preview sheet and at `GET …/screenshot`;
+    the pull request comment shows it once roll can hand GitHub a signed public URL for it (see
+    `## Next`). It wakes the service once per push, so it's off by default.
 - **Dashboard**: a Previews tab on each project, with the list, status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
@@ -676,6 +685,8 @@ Ranked by what a person notices first. Done so far:
   stays);
 - unresolved secrets named in the preview's activity;
 - `roll preview wait` for CI outside GitHub (and `create --wait`);
+- screenshots of the first service at each head (taken in the service container's network), on
+  the sheet and at `GET …/screenshot`;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
 - a fourth adversarial review and its fixes (masks
@@ -686,10 +697,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
-   first service's page through the bypass, and the comment shows it (Vercel does). Store it in
-   roll storage and drop it with the preview. Needs a host whose containers reach rolld (not
-   ai-server's firewall) to verify.
+1. **The screenshot in the pull request comment**: GitHub fetches images anonymously, so the
+   comment needs a public URL for it: a signed, expiring route on roll's public address
+   (`/v1/previews/{id}/screenshot?sig=…`, HMAC of the preview, head and expiry under the
+   deployment's key), served before the operator token, and refreshed in the comment as it nears
+   expiry. A private preview's screenshot is then readable by whoever can read the pull request,
+   so it follows `access`: shown for `public` previews, a link to roll for private ones.
 2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
 3. **Postgres without a reflinking file system**: a branch that starts from the parent's base

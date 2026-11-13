@@ -297,6 +297,7 @@ function Form({
         <Toggle label="A comment with the URLs and cost" checked={s.github.comment} onChange={(v) => set("github", { ...s.github, comment: v })} />
         <Toggle label="A commit status (roll/preview)" checked={s.github.status} onChange={(v) => set("github", { ...s.github, status: v })} />
         <Toggle label="A deployment" checked={s.github.deployment} onChange={(v) => set("github", { ...s.github, deployment: v })} />
+        <Toggle label="A screenshot of the first service at each push" checked={!!s.github.screenshot} onChange={(v) => set("github", { ...s.github, screenshot: v })} />
       </Section>
 
       {error && <p className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</p>}

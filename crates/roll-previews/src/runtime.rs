@@ -64,7 +64,15 @@ pub struct RuntimeConfig {
     /// The dashboard (`https://roll.example`): a private preview's 401 page links there, where a
     /// signed-in person is sent on with the preview's link.
     pub dashboard: Option<String>,
+    /// A headless browser for screenshots: an image, and a shell command in it that writes a
+    /// PNG of `$URL` to `$OUT` (`chrome --headless --screenshot`).
+    pub screenshot_image: String,
+    pub screenshot_command: String,
 }
+
+/// Playwright's image has a headless Chromium shell (its path names its version).
+pub const SCREENSHOT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.64.1-noble";
+pub const SCREENSHOT_COMMAND: &str = r#""$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" --no-sandbox --hide-scrollbars --window-size=1280,800 --screenshot="$OUT" "$URL""#;
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -74,6 +82,8 @@ impl Default for RuntimeConfig {
             wait: Duration::from_secs(60),
             start_timeout: Duration::from_secs(600),
             dashboard: None,
+            screenshot_image: SCREENSHOT_IMAGE.into(),
+            screenshot_command: SCREENSHOT_COMMAND.into(),
         }
     }
 }
@@ -452,6 +462,9 @@ impl Runtime {
     }
 }
 
+/// The biggest screenshot kept (a 1280×800 PNG of an ordinary page is 10–200 KiB).
+pub const SCREENSHOT_MAX: usize = 2 << 20;
+
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
 
@@ -583,6 +596,45 @@ impl Apps for Runtime {
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
         let host = self.store.services(preview).ok()?.into_iter().find(|s| s.name == service)?.host;
         self.iso.follow(&container_name(&host), lines.clamp(1, 2000)).await
+    }
+
+    /// The service's page as a browser first shows it (a PNG): the browser runs in the service
+    /// container's own network (it reaches nothing the service can't), bounded in memory, CPU and
+    /// time, and goes when done.
+    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        if self.iso.name() != "docker" {
+            return Ok(None);
+        }
+        let Some(host) = self.store.services(preview)?.into_iter().find(|s| s.name == service).map(|s| s.host) else { return Ok(None) };
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        match me.ready(preview, service, self.cfg.start_timeout).await {
+            Ok(_) => {}
+            Err(Unavailable::Failed(e)) => anyhow::bail!("the service didn't start: {e}"),
+            Err(_) => anyhow::bail!("the service didn't start in time"),
+        }
+        let name = container_name(&host);
+        let ports = code_preview::docker::docker(&["inspect", "-f", "{{range $p, $_ := .NetworkSettings.Ports}}{{$p}} {{end}}", &name]).await?;
+        let port = ports.split_whitespace().next().and_then(|p| p.split('/').next()).ok_or_else(|| anyhow::anyhow!("the service publishes no port"))?.to_string();
+        let shot = format!("roll-previews-shot-{host}");
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
+        if let Some(l) = code_preview::docker::home_label() {
+            args.extend(["--label".into(), l]);
+        }
+        args.extend(code_preview::docker::limits(1024, 1.0));
+        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into()]);
+        args.extend([self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), format!("{} >/dev/null 2>&1 && base64 -w0 /tmp/s.png", self.cfg.screenshot_command)]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = match tokio::time::timeout(Duration::from_secs(90), code_preview::docker::docker(&argv)).await {
+            Ok(r) => r?,
+            Err(_) => {
+                code_preview::docker::remove(&shot).await;
+                anyhow::bail!("the screenshot took over 90 s");
+            }
+        };
+        let png = base64::engine::general_purpose::STANDARD.decode(out.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
+        anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
+        Ok(Some(png))
     }
 
     async fn seed(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {

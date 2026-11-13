@@ -90,6 +90,12 @@ CREATE TABLE IF NOT EXISTS activity (
     message TEXT NOT NULL,
     PRIMARY KEY (preview_id, seq)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS screenshots (
+    preview_id TEXT PRIMARY KEY,
+    head TEXT NOT NULL,
+    png TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS budget_alerts (
     project_id TEXT NOT NULL,
     month INTEGER NOT NULL,
@@ -563,7 +569,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "activity", "previews"] {
+            for t in ["resources", "services", "activity", "screenshots", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -834,6 +840,34 @@ impl Store {
         })
     }
 
+    /// The head the preview's screenshot was taken at.
+    pub fn screenshot_head(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT head FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional())?)
+    }
+
+    pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8]) -> Result<()> {
+        use base64::Engine as _;
+        let (b64, now) = (base64::engine::general_purpose::STANDARD.encode(png), self.now_ms()?);
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO screenshots (preview_id, head, png, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at",
+                params![id, head, b64, now],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The preview's screenshot: (when it was taken, the PNG).
+    pub fn screenshot(&self, id: &str) -> Result<Option<(i64, Vec<u8>)>> {
+        use base64::Engine as _;
+        let row: Option<(i64, String)> = self.db.read(|c| c.query_row("SELECT at, png FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        Ok(row.and_then(|(at, b64)| base64::engine::general_purpose::STANDARD.decode(b64).ok().map(|png| (at, png))))
+    }
+
+    fn screenshot_at(&self, id: &str) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT at FROM screenshots WHERE preview_id = ? AND png <> ''", [id], |r| r.get(0)).optional())?)
+    }
+
     /// No schema changes shown (the head they were read at stays, so they're read again).
     pub fn clear_schema_changes(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
@@ -942,6 +976,7 @@ impl Store {
         let share_url = url.as_deref().map(share);
         let schema_changes = self.schema_changes(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
+        let screenshot_at = self.screenshot_at(&r.id)?;
         Ok(Preview {
             id: r.id,
             project: r.project_id,
@@ -973,6 +1008,7 @@ impl Store {
             cost: cost.rounded(),
             schema_changes,
             kept_until,
+            screenshot_at,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,

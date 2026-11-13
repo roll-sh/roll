@@ -196,6 +196,8 @@ pub struct Preview {
     pub schema_changes: Option<Vec<String>>,
     /// Kept past its TTL until then (`POST …/keep`); a landed or closed change still ends it.
     pub kept_until: Option<i64>,
+    /// When its screenshot was taken (`GET …/screenshot`), if it has one.
+    pub screenshot_at: Option<i64>,
     pub last_reset_at: Option<i64>,
     pub last_active_at: i64,
     pub expires_at: Option<i64>,

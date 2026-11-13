@@ -1,7 +1,7 @@
 import { Boxes, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Sun, Trash2, Waves, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Confirm } from "@/components/ui";
-import { followLogs, openUrl, previewsApi, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
+import { followLogs, openUrl, previewsApi, screenshotUrl, resourceId, type Preview, type PreviewActivity, type PreviewKind } from "@/lib/previews-api";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot } from "./previews-common";
@@ -194,6 +194,8 @@ export function PreviewSheet({
               </>
             )}
 
+            {p.screenshot_at ? <Screenshot id={p.id} at={p.screenshot_at} /> : null}
+
             <Label>Cost</Label>
             <div className="grid grid-cols-3 gap-2">
               <Stat label="Asleep" value={money(p.cost.sleeping_usd_month)} note="a month" />
@@ -329,6 +331,34 @@ function useVisible() {
     return () => document.removeEventListener("visibilitychange", on);
   }, []);
   return visible;
+}
+
+/** The first service's page as the preview's last push left it. */
+function Screenshot({ id, at }: { id: string; at: number }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let url: string | null = null;
+    let live = true;
+    screenshotUrl(id).then(
+      (u) => {
+        url = u;
+        if (live) setSrc(u);
+        else URL.revokeObjectURL(u);
+      },
+      () => live && setSrc(null),
+    );
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [id, at]);
+  if (!src) return null;
+  return (
+    <>
+      <Label>Screenshot</Label>
+      <img src={src} alt="The first service's page" className="w-full rounded-lg border border-line-2" />
+    </>
+  );
 }
 
 /** Lines a followed log keeps. */

@@ -99,6 +99,9 @@ pub struct GithubRule {
     pub comment: bool,
     pub status: bool,
     pub deployment: bool,
+    /// A screenshot of the first service at each new head (it wakes the service once per push).
+    #[serde(default)]
+    pub screenshot: bool,
 }
 
 impl Default for Settings {
@@ -134,7 +137,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false }
     }
 }
 

@@ -45,7 +45,8 @@ pub fn set_home(home: &Path) {
     let _ = HOME.set(home.display().to_string());
 }
 
-fn home_label() -> Option<String> {
+/// `sh.roll.code.home=<home>` for containers this daemon makes, when [`set_home`] was called.
+pub fn home_label() -> Option<String> {
     HOME.get().map(|h| format!("{LABEL}.home={h}"))
 }
 

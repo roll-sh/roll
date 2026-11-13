@@ -73,6 +73,8 @@ export interface Preview {
   schema_changes?: string[] | null;
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
+  /** When its screenshot was taken (`screenshot` below), if it has one. */
+  screenshot_at?: number | null;
   last_reset_at: number | null;
   last_active_at: number;
   expires_at: number | null;
@@ -115,7 +117,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). */
   access: "link" | "public";
   /** Run once on fresh data (after branching or a reset) before the services deploy. */
@@ -163,6 +165,15 @@ function query(params: Record<string, string | number | undefined>) {
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") q.set(k, String(v));
   const s = q.toString();
   return s ? `?${s}` : "";
+}
+
+/** The preview's screenshot as an object URL (the operator's headers, which an <img> can't send);
+ * revoke it when done. */
+export async function screenshotUrl(id: string): Promise<string> {
+  const res = await fetch(`${ROLL_API}${one(id)}/screenshot`, { headers: apiHeaders(), cache: "no-store" });
+  onApiStatus(res.status);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
+  return URL.createObjectURL(await res.blob());
 }
 
 export const previewsApi = {
