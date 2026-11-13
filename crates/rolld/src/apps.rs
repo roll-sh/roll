@@ -283,24 +283,27 @@ impl Sources for CodeSources {
 struct RollResources {
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
-    streams: Option<Arc<stream_broker::broker::Broker>>,
+    /// rolld's own API (its address and the operator's token): a stream's routes answer there
+    /// on any node, forwarded to the stream's owner on a fleet.
+    api: (String, Option<String>, reqwest::Client),
 }
 
 #[async_trait]
 impl Resources for RollResources {
-    /// A group's lag on a stream: its committed offset on every partition against the
-    /// partition's high watermark, as the broker's own `GET …/groups/{g}` adds it up.
+    /// A group's lag on a stream, as the broker's `GET /v1/streams/{s}/groups/{g}` adds it up
+    /// (committed offsets against high watermarks), asked of rolld's own API: on a fleet that
+    /// forwards to the stream's owner, the only node whose numbers are right.
     async fn backlog(&self, stream: &str, group: &str) -> anyhow::Result<u64> {
-        let b = self.streams.clone().ok_or_else(|| anyhow::anyhow!("roll streams isn't on this node"))?;
-        let s = b.find_stream(stream).ok_or_else(|| anyhow::anyhow!("no stream {stream}"))?;
-        let rows = b.store.offsets(&s.id, group)?;
-        let mut lag = 0u64;
-        for r in rows {
-            if let Some(end) = s.topic(&r.topic).and_then(|t| t.partition(r.partition).and_then(|p| b.log(&t, &p).ok())).map(|l| l.high_watermark()) {
-                lag += (end - r.offset).max(0) as u64;
-            }
+        let (base, token, http) = &self.api;
+        let enc = |s: &str| urlencoding::encode(s).into_owned();
+        let mut req = http.get(format!("{base}/v1/streams/{}/groups/{}", enc(stream), enc(group)));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
         }
-        Ok(lag)
+        let resp = req.send().await?;
+        anyhow::ensure!(resp.status().is_success(), "the stream answered {}", resp.status());
+        let v: serde_json::Value = resp.json().await?;
+        Ok(v["lag"].as_i64().unwrap_or(0).max(0) as u64)
     }
 
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
@@ -372,7 +375,6 @@ pub async fn start(
     code: Option<Arc<code_control::Code>>,
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
-    streams: Option<Arc<stream_broker::broker::Broker>>,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -433,7 +435,15 @@ pub async fn start(
         builder,
         sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         secrets: Arc::new(NoSecrets),
-        resources: Arc::new(RollResources { postgres, redis, streams }),
+        resources: Arc::new(RollResources {
+            postgres,
+            redis,
+            api: {
+                let ip = if args.api.ip().is_unspecified() { std::net::IpAddr::from([127, 0, 0, 1]) } else { args.api.ip() };
+                let token = std::env::var("ROLL_ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty());
+                (format!("http://{}", std::net::SocketAddr::new(ip, args.api.port())), token, reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).no_proxy().build()?)
+            },
+        }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
         objects,
