@@ -19,6 +19,7 @@
 /v1/apps/services/{id}/environments/{env}/promote
 /v1/apps/services/{id}/environments/{env}/redeploy
 /v1/apps/services/{id}/environments/{env}/restart
+/v1/apps/services/{id}/environments/{env}/rollback
 /v1/apps/services/{id}/environments/{env}/runs
 /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize
 /v1/apps/services/{id}/environments/{env}/sleep
