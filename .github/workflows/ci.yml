@@ -102,6 +102,17 @@ jobs:
           test -z "$(gofmt -l .)"
           go vet ./...
           go test -race -count=1 ./...
+      - name: Kubernetes operator
+        working-directory: sdk/kubernetes-operator
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: The operator's Helm chart
+        run: helm lint sdk/kubernetes-operator/chart --set roll.identity=idn_ci
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
