@@ -143,6 +143,7 @@ impl Apps {
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
+        self.changed(service);
         if let Some(up) = ours {
             let id = dep.id.clone();
             if self.db(move |s| s.deployment_upload(&id)).await.ok().flatten().as_deref() != Some(up.as_str()) {
@@ -330,9 +331,10 @@ impl Apps {
     }
 
     /// A deployment's step began (for its summary; a failed write only loses the summary).
-    async fn step(self: &Arc<Self>, deployment: &str, step: &str) {
+    async fn step(self: &Arc<Self>, service: &str, deployment: &str, step: &str) {
         let (id, step) = (deployment.to_string(), step.to_string());
         let _ = self.db(move |s| s.mark_step(&id, &step)).await;
+        self.changed(service);
     }
 
     async fn run(self: &Arc<Self>, d: Deployment) {
@@ -356,7 +358,7 @@ impl Apps {
             }
             Err(e) => {
                 self.report(&d, "failure", &e.to_string()).await;
-                self.step(&d.id, "failed").await;
+                self.step(&d.service, &d.id, "failed").await;
                 let msg = e.to_string();
                 log.stream(Stream::System).line(format!("failed: {msg}"));
                 let _ = self.db(move |s| s.fail_deployment(&id, &msg)).await;
@@ -365,6 +367,7 @@ impl Apps {
         }
         self.logs.flush().await;
         self.logs.retire(&format!("build:{}", d.id));
+        self.changed(&d.service);
     }
 
     /// A repo deployment's progress as a commit status on its revision (`roll/apps/<service>/<env>`,
@@ -395,7 +398,7 @@ impl Apps {
         // The environment's own size and scale over the service's, before roll.toml.
         let svc = svc.for_env(&env)?;
         let id = d.id.clone();
-        self.step(&d.id, "build").await;
+        self.step(&d.service, &d.id, "build").await;
         let (image, run) = match &d.image {
             // A rollback, a redeploy or a promotion: an image roll already has, nothing to build
             // or pull.
@@ -450,10 +453,10 @@ impl Apps {
         }
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
         if let Some(cmd) = tpl.run.pre_deploy.clone() {
-            self.step(&d.id, "pre_deploy").await;
+            self.step(&d.service, &d.id, "pre_deploy").await;
             self.pre_deploy(&tpl, &cmd, log, &cancel).await?;
         }
-        self.step(&d.id, "rollout").await;
+        self.step(&d.service, &d.id, "rollout").await;
         let vars_hash = {
             let r = self.resolve_vars(&svc, &env, &dep.id).await?;
             fingerprint(&r.vars_for_hash(), &svc)
@@ -539,7 +542,7 @@ impl Apps {
         for &share in &r.steps {
             live.set_share(share);
             live.take_served();
-            self.step(id, &format!("canary_{share}")).await;
+            self.step(service, id, &format!("canary_{share}")).await;
             sys.line(format!("canary: the new deployment takes {share}% of requests for {} s", r.step_s));
             let until = tokio::time::Instant::now() + Duration::from_secs(r.step_s as u64);
             let (mut new, mut old) = (crate::live::Served::default(), crate::live::Served::default());

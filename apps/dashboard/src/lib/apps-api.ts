@@ -541,6 +541,17 @@ export interface AccessLine {
   waited_ms: number;
 }
 
+/** Follows a service's changes (`…/changes`): `onChange` for each tick, `onOpen` as the stream comes and goes. */
+export function followChanges(service: string, opts: { onChange: () => void; onOpen?: (open: boolean) => void }): () => void {
+  return streamSse(`${ROLL_API}/v1/apps/services/${encodeURIComponent(service)}/changes`, {
+    headers: operatorHeaders,
+    onOpen: opts.onOpen,
+    onEvent: (e) => {
+      if (e.event === "changed") opts.onChange();
+    },
+  });
+}
+
 export function followLog(
   kind: { runtime: { service: string; env: string; http?: boolean } } | { build: { service: string; env: string; deployment: string } } | { job: { service: string; env: string; job: string } },
   opts: { tail?: number; onLine: (l: LogLine) => void; onReset: () => void; onOpen?: (open: boolean) => void },

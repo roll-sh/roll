@@ -59,7 +59,7 @@ vi.mock("@/lib/apps-api", async (orig) => {
         deploys: async () => [deploy],
       })[key as string] ?? (() => later()),
   });
-  return { ...real, appsApi: fake };
+  return { ...real, appsApi: fake, followChanges: () => () => {} };
 });
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 vi.mock("@/components/link", () => ({ Link: ({ href, children, className }: { href: string; children: ReactNode; className?: string }) => <a href={href} className={className}>{children}</a> }));

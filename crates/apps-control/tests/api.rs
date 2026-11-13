@@ -1311,3 +1311,31 @@ async fn a_gradual_rollout_shares_requests_and_rolls_back_a_deployment_that_erro
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(w.fake.instances(&id).iter().all(|(_, dep, _)| *dep == d2["id"]), "the canary's instances are gone");
 }
+
+/// The service page follows a service instead of polling it: a tick when someone changes it,
+/// and when an instance wakes with nobody changing anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_services_changes_are_streamed_as_they_happen() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let req = Request::builder().uri(format!("/v1/apps/services/{id}/changes")).body(Body::empty()).unwrap();
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    async fn next(body: &mut Body) -> String {
+        loop {
+            let f = body.frame().await.unwrap().unwrap();
+            if let Some(e) = f.data_ref().and_then(|d| String::from_utf8_lossy(d).lines().find_map(|l| l.strip_prefix("event:").map(|e| e.trim().to_string()))) {
+                return e;
+            }
+        }
+    }
+    assert_eq!(tokio::time::timeout(Duration::from_secs(3), next(&mut body)).await.unwrap(), "ready");
+    let (st, _) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"concurrency": 10}}))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(tokio::time::timeout(Duration::from_secs(3), next(&mut body)).await.expect("a tick for the change"), "changed");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    assert_eq!(visit(&w, &host(&env["url"]), "/").await.0, StatusCode::OK);
+    assert_eq!(tokio::time::timeout(Duration::from_secs(3), next(&mut body)).await.expect("a tick for the wake"), "changed");
+}

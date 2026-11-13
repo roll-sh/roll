@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "@/components/link";
 import {
   appsApi,
+  followChanges,
   hostOf,
   mainEnvironment,
   PRODUCTION,
@@ -22,7 +23,7 @@ import { Deployments } from "./deployments";
 import { DomainsTab } from "./domains";
 import { JobsTab } from "./jobs";
 import { ShellTab } from "./shell";
-import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, useDeployMark, usePageVisible } from "./live";
+import { anyPending, POLL_BUSY_MS, POLL_IDLE_MS, POLL_STREAMED_MS, useDeployMark, usePageVisible } from "./live";
 import { RuntimeLogs } from "./logs";
 import { MetricsTab } from "./metrics";
 import { SettingsTab } from "./settings";
@@ -51,11 +52,16 @@ interface Loaded {
   deploys: Deployment[] | null;
 }
 
-/** The service, the environment shown, and its deployments; polled quickly while a deploy is on its way. */
+/**
+ * The service, the environment shown, and its deployments: read again on each of the service's
+ * changes (`…/changes`), and polled only as a safety net while that stream is up; without it,
+ * polled quickly while a deploy is on its way.
+ */
 function useService(id: string, envName: string | undefined) {
   const [data, setData] = useState<Loaded | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "missing" | "offline">("loading");
   const [poke, setPoke] = useState(0);
+  const [streamed, setStreamed] = useState(false);
   const visible = usePageVisible();
 
   const load = useCallback(async (): Promise<Loaded | null> => {
@@ -85,14 +91,32 @@ function useService(id: string, envName: string | undefined) {
       const got = await load();
       if (!alive) return;
       const busy = got && (anyPending([got.service]) || got.deploys?.some((d) => ["queued", "building", "deploying"].includes(d.status)));
-      timer = setTimeout(loop, busy ? POLL_BUSY_MS : POLL_IDLE_MS);
+      timer = setTimeout(loop, streamed ? POLL_STREAMED_MS : busy ? POLL_BUSY_MS : POLL_IDLE_MS);
     };
     void loop();
     return () => {
       alive = false;
       clearTimeout(timer);
     };
-  }, [load, poke, visible]);
+  }, [load, poke, visible, streamed]);
+
+  // A burst of ticks (a deploy's steps) is one read.
+  useEffect(() => {
+    if (!visible) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const stop = followChanges(id, {
+      onOpen: setStreamed,
+      onChange: () => {
+        clearTimeout(t);
+        t = setTimeout(() => void load(), 250);
+      },
+    });
+    return () => {
+      clearTimeout(t);
+      stop();
+      setStreamed(false);
+    };
+  }, [id, load, visible]);
 
   return { data, state, refresh: () => setPoke((n) => n + 1) };
 }

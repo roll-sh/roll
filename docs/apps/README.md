@@ -755,6 +755,11 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 - Idle cost: a service asleep (stopped) meters nothing: no CPU-seconds, no GB-seconds, $0.00.
   The only idle cost is the image on disk (roll's, not the user's). Suspended instances keep their
   memory on the host (roll's cost, not billed) for `sleep_after` (10 minutes by default).
+- The service page follows `GET …/changes` (server-sent ticks from the owner: a deploy's steps
+  and end, every audited change, and its instances' states, compared in memory each second) and
+  reads the service again 250 ms after a burst of them; while that stream is up it polls once a
+  minute as a safety net instead of every 3 s during a deploy and every 15 s otherwise, and
+  nothing at all while the tab is hidden.
 - An environment's read (the dashboard's every few seconds) worked out `needs_deploy` each
   time: every variable decrypted and every link resolved, then the fingerprint. It's cached per
   environment, keyed by the active deployment and a generation every settings, variables, link
@@ -870,19 +875,16 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`), and
-   an environment's `needs_deploy` is cached (see "Measured"); next, the service page from the
-   event log (SSE after a cursor) instead of three requests every 15 s.
-2. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+1. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-3. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+2. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-4. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-5. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+3. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+4. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-6. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+5. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-7. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+6. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

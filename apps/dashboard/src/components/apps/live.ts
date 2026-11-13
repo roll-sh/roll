@@ -7,6 +7,8 @@ import { useMarkState } from "../mark-state";
 /** How often services are looked at: quickly while a deploy is on its way, calmly otherwise. */
 export const POLL_BUSY_MS = 3000;
 export const POLL_IDLE_MS = 15000;
+/** While a page follows the service's changes: only a safety net. */
+export const POLL_STREAMED_MS = 60000;
 
 /**
  * Whether the page is visible. Polling waits while it's hidden (a background tab costs rolld

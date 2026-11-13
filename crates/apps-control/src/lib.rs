@@ -172,6 +172,9 @@ pub struct Apps {
     needs: Mutex<HashMap<String, (std::time::Instant, u64, String, bool)>>,
     /// Bumped by every change a deployment's fingerprint reads (settings, variables, links).
     settings_gen: std::sync::atomic::AtomicU64,
+    /// A service changed (a deploy moved, someone changed something): its id, for the pages
+    /// that follow it (`GET …/changes`). On the owner, as every such change is.
+    changes: tokio::sync::broadcast::Sender<String>,
     /// Environments in a crash loop whose event is written (one per loop).
     looping: Mutex<std::collections::HashSet<String>>,
     /// For notification targets: public addresses only, no redirects.
@@ -241,6 +244,7 @@ impl Apps {
             access_gen: std::sync::atomic::AtomicU64::new(0),
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
+            changes: tokio::sync::broadcast::channel(256).0,
             sessions: Mutex::new(HashMap::new()),
             ws_shells: Mutex::new(HashMap::new()),
             notify_client: net::client(cfg_allow, Duration::from_secs(10)),
@@ -632,6 +636,30 @@ impl Apps {
             self.needs.lock().insert(key, (std::time::Instant::now(), seen, active.to_string(), v));
         }
         Ok(v)
+    }
+
+    /// `service` changed: whoever follows it reads it again.
+    pub fn changed(&self, service: &str) {
+        let _ = self.changes.send(service.to_string());
+    }
+
+    pub fn subscribe_changes(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.changes.subscribe()
+    }
+
+    /// What its instances are doing, in memory: a follower compares it each second (instances
+    /// wake, sleep and crash without anyone changing anything).
+    pub fn instances_digest(&self, service: &str) -> String {
+        let mut lives: Vec<Arc<EnvLive>> = self.lives.lock().values().filter(|l| l.service == service).cloned().collect();
+        lives.sort_by(|a, b| a.env.cmp(&b.env));
+        let mut out = String::new();
+        for l in lives {
+            out.push_str(&format!("{}:{:?}:{:?};", l.env, l.state(), l.canary()));
+            for i in l.instances() {
+                out.push_str(&format!("{}={:?},", i.name, i.state()));
+            }
+        }
+        out
     }
 
     /// Something a deployment's fingerprint reads changed: every cached `needs_deploy` is stale.
@@ -1255,6 +1283,7 @@ impl Apps {
         if let Err(err) = self.db(move |s| s.add_event(&kind, &sid, &e, None, &data)).await {
             tracing::warn!(service, error = %err, "apps: an audit entry wasn't written");
         }
+        self.changed(service);
     }
 
     /// `GET /v1/apps/services/{id}/activity`: its audit trail, newest first.

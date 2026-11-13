@@ -60,6 +60,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/activity", get(activity))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
         .route("/v1/apps/events", get(events))
+        .route("/v1/apps/services/{id}/changes", get(changes))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
@@ -328,6 +329,47 @@ async fn events(State(apps): S, Query(q): Query<EventsQuery>) -> R {
     let events = apps.db(move |s| s.events(after, limit)).await?;
     let next = events.last().map_or(after, |e| e.seq);
     ok(json!({ "events": events, "next": next }))
+}
+
+/// `GET /v1/apps/services/{id}/changes`: server-sent `changed` events, one when something about
+/// the service changed (a deploy moved, an instance woke or slept, a setting changed), so a page
+/// reads it again instead of polling. `ready` first; nothing in them but the event.
+async fn changes(State(apps): S, Path(id): Path<String>) -> R {
+    apps.service(&id).await?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<&'static str>(4);
+    tokio::spawn(async move {
+        let mut sub = apps.subscribe_changes();
+        let mut last = apps.instances_digest(&id);
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        if tx.send("ready").await.is_err() {
+            return;
+        }
+        loop {
+            let changed = tokio::select! {
+                r = sub.recv() => match r {
+                    Ok(s) => s == id,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(_) => return,
+                },
+                _ = tick.tick() => {
+                    let now = apps.instances_digest(&id);
+                    let moved = now != last;
+                    last = now;
+                    moved
+                }
+                _ = tx.closed() => return,
+            };
+            // A full channel is a viewer behind on ticks it would read as one anyway.
+            if changed && let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = tx.try_send("changed") {
+                return;
+            }
+        }
+    });
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        let e = rx.recv().await?;
+        Some((Ok::<_, Infallible>(Event::default().event(e).data("{}")), rx))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
 }
 
 async fn put_registry(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
