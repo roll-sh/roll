@@ -210,6 +210,9 @@ async fn prompt_arguments_complete_from_what_it_may_read() {
     values.retain(|v| !v.starts_with("prj_"));
     values.sort();
     assert_eq!(values, vec!["billing", "blog"], "{got}");
+    // A Postgres project completes from Postgres's own list, not the workspace's.
+    let pg = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/prompt", "name": "try_migration_on_branch" }, "argument": { "name": "project", "value": "" } })).await;
+    assert_eq!(pg["completion"]["values"], json!(["pa"]), "{pg}");
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
     let none = d.rpc(&reader, "completion/complete", ask("")).await;
     assert_eq!(none["completion"]["values"], json!([]), "{none}");
