@@ -285,6 +285,23 @@ fn link_role() -> Value {
     })
 }
 
+/// [`link_role`] in OpenSearch Security's terms (the opensearch dialect): the same action
+/// groups and actions (ISM for ILM), no `restapi:` permission.
+fn os_link_role() -> Value {
+    json!({
+        "description": "roll: an app's link (data, templates, pipelines, ISM; no security)",
+        "cluster_permissions": [
+            "cluster_monitor",
+            "cluster_composite_ops",
+            "indices:data/read/scroll*",
+            "cluster_manage_index_templates",
+            "cluster_manage_pipelines",
+            "cluster:admin/opendistro/ism/*"
+        ],
+        "index_permissions": [{ "index_patterns": ["*"], "allowed_actions": ["indices_all"] }]
+    })
+}
+
 /// A link's credential ([`Control::mint_link`]): its variables (unprefixed) and what revoking
 /// it takes.
 #[derive(Clone, Debug)]
@@ -1097,15 +1114,15 @@ impl Control {
     /// what a service needs to use the cluster's data, never the cluster's password and never
     /// its security (the [`link_role`]). An Elasticsearch-flavor cluster gets an API key with that
     /// role (`ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY`, sent as `Authorization: ApiKey`).
-    /// An OpenSearch-flavor cluster isn't linked yet (its clients need a user, which the
-    /// opensearch dialect can't make). `kept` is what [`Self::revoke_link`] takes.
+    /// An OpenSearch-flavor cluster (whose clients don't send API keys) gets an internal user of
+    /// its own with a role of its own ([`os_link_role`]), in `OPENSEARCH_URL` as
+    /// `<user>@<cluster>:<password>@` (the node routes a Basic user named `user@cluster` to the
+    /// cluster). `kept` is what [`Self::revoke_link`] takes.
     pub async fn mint_link(&self, id: &str, owner: &str) -> Result<LinkCredential> {
         let c = self.get(id).await?;
         let url = connection_of(&self.cfg, &c.name)["url"].as_str().unwrap_or_default().to_string();
-        // OpenSearch clients don't send API keys, and the opensearch dialect has no security API
-        // to make a native user through: never fall back to the cluster's password.
         if c.flavor == "opensearch" {
-            return Err(ControlError::Invalid(format!("links to the OpenSearch-flavor cluster {} aren't supported yet: use roll secrets' search link", c.name)));
+            return self.mint_os_link(&c, &url).await;
         }
         let body = serde_json::to_vec(&json!({ "name": format!("link {owner}"), "role_descriptors": { "roll_link": link_role() } })).unwrap_or_default();
         let resp = self.call(&c, EsRequest::json("POST", "/_security/api_key", body)).await;
@@ -1115,6 +1132,30 @@ impl Control {
         };
         let api_key = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{key}", c.name));
         Ok(LinkCredential { vars: vec![("ELASTICSEARCH_URL".into(), url), ("ELASTICSEARCH_API_KEY".into(), api_key)], kept: format!("key:{key_id}") })
+    }
+
+    /// An OpenSearch-flavor cluster's link: a role and an internal user named
+    /// `roll-link-<random>`, the user holding only that role.
+    async fn mint_os_link(&self, c: &SearchCluster, url: &str) -> Result<LinkCredential> {
+        let name = format!("roll-link-{}", random_string(12));
+        let password = random_string(40);
+        let api = "/_plugins/_security/api";
+        let role = self.call(c, EsRequest::json("PUT", &format!("{api}/roles/{name}"), serde_json::to_vec(&os_link_role()).unwrap_or_default())).await;
+        if role.status >= 300 {
+            return Err(ControlError::Internal(anyhow::anyhow!("making a link role of cluster {} failed ({})", c.name, role.status)));
+        }
+        let user = json!({ "password": password, "opendistro_security_roles": [name], "description": "roll: an app's link" });
+        let resp = self.call(c, EsRequest::json("PUT", &format!("{api}/internalusers/{name}"), serde_json::to_vec(&user).unwrap_or_default())).await;
+        if resp.status >= 300 {
+            let _ = self.call(c, EsRequest::new("DELETE", &format!("{api}/roles/{name}"))).await;
+            return Err(ControlError::Internal(anyhow::anyhow!("making a link user of cluster {} failed ({})", c.name, resp.status)));
+        }
+        let mut u = reqwest::Url::parse(url).map_err(|e| ControlError::Internal(anyhow::anyhow!("cluster {} has no URL: {e}", c.name)))?;
+        let userinfo = (u.set_username(&format!("{name}@{}", c.name)), u.set_password(Some(&password)));
+        if userinfo != (Ok(()), Ok(())) {
+            return Err(ControlError::Internal(anyhow::anyhow!("cluster {}'s URL takes no credentials", c.name)));
+        }
+        Ok(LinkCredential { vars: vec![("OPENSEARCH_URL".into(), u.to_string().trim_end_matches('/').to_string())], kept: format!("osuser:{name}") })
     }
 
     /// Revokes what [`Self::mint_link`] made (`kept`), at once. Gone already (the key, the
@@ -1130,6 +1171,16 @@ impl Control {
                 Ok(()) | Err(ControlError::NotFound(_)) => Ok(()),
                 Err(e) => Err(e),
             },
+            Some(("osuser", name)) => {
+                let api = "/_plugins/_security/api";
+                for path in [format!("{api}/internalusers/{name}"), format!("{api}/roles/{name}")] {
+                    let r = self.call(&c, EsRequest::new("DELETE", &path)).await;
+                    if r.status >= 300 && r.status != 404 {
+                        return Err(ControlError::Internal(anyhow::anyhow!("removing link user {name} of cluster {} failed ({})", c.name, r.status)));
+                    }
+                }
+                Ok(())
+            }
             Some(("user", user)) => {
                 let r = self.call(&c, EsRequest::new("DELETE", &format!("/_security/user/{}", urlencoding::encode(user)))).await;
                 if r.status < 300 || r.status == 404 { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("removing link user {user} of cluster {} failed ({})", c.name, r.status))) }

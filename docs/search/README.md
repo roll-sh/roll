@@ -219,10 +219,11 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    now branches a search cluster too (the branch reads the parent's document, its writes stay
    in it, the service gets its `ELASTICSEARCH_URL`, landing deletes it). Apps' links to search:
    search's side is `Control::mint_link` / `revoke_link` (an API key with a data-only role,
-   `ELASTICSEARCH_URL` + `ELASTICSEARCH_API_KEY`; never the cluster's password or security);
+   `ELASTICSEARCH_URL` + `ELASTICSEARCH_API_KEY`; on an OpenSearch-flavor cluster an internal
+   user of OpenSearch Security with a data-only role of its own, `OPENSEARCH_URL` with
+   `<user>@<cluster>:<password>@`; never the cluster's password or security);
    rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` (PR #26) once #22 and
-   #26 are on main. OpenSearch-flavor clusters refuse links until the opensearch dialect can make
-   a native user for one.
+   #26 are on main.
    Secrets' link provider once #20 stacks; the fleet test with every product on.
 2. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
    both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is): a full

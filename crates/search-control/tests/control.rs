@@ -1042,16 +1042,17 @@ async fn field_security_hides_a_field_on_every_read_path() {
 }
 
 /// An app's link to a cluster gets a credential of its own (apps' `Resources::link`): it reads and
-/// writes the data, can't manage the cluster's security, and stops working once revoked. An
-/// OpenSearch-flavor cluster refuses a link rather than hand out its password.
+/// writes the data, can't manage the cluster's security, and stops working once revoked: an API
+/// key on an Elasticsearch-flavor cluster, an internal user of OpenSearch Security on an
+/// OpenSearch-flavor one (which has no API keys).
 #[tokio::test]
 async fn a_link_credential_uses_the_data_and_is_revoked() {
     let e = env().await;
-    e.post("/v1/search/clusters", json!({"name": "os-link", "flavor": "opensearch"})).await;
-    assert!(e.control.mint_link("os-link", "svc_1").await.is_err());
-    assert_eq!(e.call(reqwest::Method::POST, "/v1/search/clusters/os-link/keys", Some(json!({"name": "k"}))).await.0, 400);
-    for (name, flavor) in [("es-link", "elasticsearch")] {
+    for (name, flavor) in [("es-link", "elasticsearch"), ("os-link", "opensearch")] {
         e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        if flavor == "opensearch" {
+            assert_eq!(e.call(reqwest::Method::POST, "/v1/search/clusters/os-link/keys", Some(json!({"name": "k"}))).await.0, 400);
+        }
         let cred = e.control.mint_link(name, "svc_1").await.unwrap();
         let vars: std::collections::HashMap<_, _> = cred.vars.iter().cloned().collect();
         let send = |method: reqwest::Method, path: &str, body: Option<Value>| {
@@ -1072,7 +1073,11 @@ async fn a_link_credential_uses_the_data_and_is_revoked() {
         };
         assert_eq!(send(reqwest::Method::PUT, "/items/_doc/1?refresh=true", Some(json!({"n": 1}))).await, 201, "{name}");
         assert_eq!(send(reqwest::Method::GET, "/items/_doc/1", None).await, 200, "{name}");
-        assert_eq!(send(reqwest::Method::PUT, "/_security/user/intruder", Some(json!({"password": "intruder-pass-1", "roles": ["superuser"]}))).await, 403, "{name}: no security");
+        let (path, user) = match flavor {
+            "opensearch" => ("/_plugins/_security/api/internalusers/intruder", json!({"password": "correcthorsebattery", "opendistro_security_roles": ["all_access"]})),
+            _ => ("/_security/user/intruder", json!({"password": "intruder-pass-1", "roles": ["superuser"]})),
+        };
+        assert_eq!(send(reqwest::Method::PUT, path, Some(user)).await, 403, "{name}: no security");
         e.control.revoke_link(name, &cred.kept).await.unwrap();
         assert_eq!(send(reqwest::Method::GET, "/items/_doc/1", None).await, 401, "{name}: revoked");
         e.control.revoke_link(name, &cred.kept).await.unwrap();
