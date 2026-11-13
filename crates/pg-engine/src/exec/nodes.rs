@@ -2875,6 +2875,19 @@ impl Node for GateNode {
 
 
 impl Node for ProjectNode {
+    /// (What the first row decided stays: the input rescanned is the same node, making the
+    /// same columns; not when a parallel scan below computes its expressions.)
+    fn rescan(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        if self.computed.is_some() || self.piped {
+            return Ok(false);
+        }
+        self.input.rescan(ctx)
+    }
+
+    fn can_rescan(&self) -> bool {
+        self.computed.is_none() && !self.piped && self.input.can_rescan()
+    }
+
     /// (Its expressions are its plan's, merged as `merge_moves` merges them again; what the
     /// first row decided, and a node above asked for, start over.)
     fn restartable(&self, ctx: &ExecCtx) -> bool {

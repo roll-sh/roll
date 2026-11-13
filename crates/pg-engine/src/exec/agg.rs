@@ -2574,6 +2574,9 @@ pub struct AggNode {
     split: std::cell::OnceCell<bool>,
     /// Running as a GroupAggregate over its input's order (`Stream`).
     stream: Option<Box<Stream>>,
+    /// The input a run of a plain aggregation read, for a rescan (ExecReScanAgg) to read
+    /// again.
+    spent: Option<BoxNode>,
 }
 
 impl AggNode {
@@ -2592,6 +2595,7 @@ impl AggNode {
             plan: None,
             split: std::cell::OnceCell::new(),
             stream: None,
+            spent: None,
         }
     }
 
@@ -2922,6 +2926,7 @@ impl AggNode {
             })
             && let Some(n) = input.count_rest(ctx)?
         {
+            self.spent = Some(input);
             return Ok(vec![vec![Value::Int8(n as i64); self.aggs.len()]]);
         }
         let colls = nondeterministic_keys(&self.groups, ctx);
@@ -3300,6 +3305,9 @@ impl AggNode {
                 }
             }
             }
+            if self.rescans_plain() {
+                self.spent = Some(input);
+            }
             return Ok(out);
         };
         // Grouping sets: buffer the input, then group once per set.
@@ -3545,7 +3553,38 @@ impl AggNode {
     }
 }
 
+impl AggNode {
+    /// A plain aggregation of no groups whose input is read as it comes (no aggregate sorts
+    /// it first): a rescan reads the input again and makes the one row again.
+    fn rescans_plain(&self) -> bool {
+        self.groups.is_empty() && self.sets.is_none() && self.aggs.iter().all(|a| !a.distinct && a.order_by.is_empty())
+    }
+}
+
 impl Node for AggNode {
+    /// ExecReScanAgg of a plain aggregation (`rescans_plain`): its input rescanned, its
+    /// row made again from what that reads.
+    fn rescan(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        if !self.rescans_plain() || self.stream.is_some() {
+            return Ok(false);
+        }
+        let Some(input) = self.input.as_mut().or(self.spent.as_mut()) else {
+            return Ok(false);
+        };
+        if !input.rescan(ctx)? {
+            return Ok(false);
+        }
+        if self.input.is_none() {
+            self.input = self.spent.take();
+        }
+        self.out = Vec::new().into_iter();
+        Ok(true)
+    }
+
+    fn can_rescan(&self) -> bool {
+        self.rescans_plain() && self.stream.is_none() && self.input.as_ref().or(self.spent.as_ref()).is_some_and(|i| i.can_rescan())
+    }
+
     /// A streaming grouping's groups come in its input's order: by the sorted keys (a
     /// group's key columns first in its row).
     fn output_order(&self, ctx: &ExecCtx) -> Option<Vec<(usize, bool, bool)>> {

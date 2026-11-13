@@ -1,0 +1,130 @@
+> create table a227_sp (k int, s int, q int, d date)
+-- CREATE TABLE
+
+> create index a227_sp_ks on a227_sp (k, s)
+-- CREATE INDEX
+
+> insert into a227_sp select g % 50, g % 7, g, date '2024-01-01' + (g % 90) from generate_series(1, 4000) g
+-- INSERT 0 4000
+
+> create table a227_so (k int, s int, lim int)
+-- CREATE TABLE
+
+> insert into a227_so select g % 60, g % 9, g * 3 from generate_series(1, 300) g
+-- INSERT 0 300
+
+> analyze a227_sp, a227_so
+-- ANALYZE
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> set enable_bitmapscan = off
+-- SET
+
+> set enable_seqscan = off
+-- SET
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> explain (costs off)
+> select o.k, o.s, (select 0.5 * sum(p.q) from a227_sp p where p.k = o.k and p.s = o.s and p.d >= date '2024-02-01') from a227_so o
+QUERY PLAN:text
+Seq Scan on a227_so o
+  Disabled: true
+  SubPlan 1
+    ->  Aggregate
+          ->  Index Scan using a227_sp_ks on a227_sp p
+                Index Cond: ((k = o.k) AND (s = o.s))
+                Filter: (d >= '2024-02-01'::date)
+-- EXPLAIN
+
+> select o.k, o.s, (select 0.5 * sum(p.q) from a227_sp p where p.k = o.k and p.s = o.s and p.d >= date '2024-02-01') as half
+>   from a227_so o order by o.k, o.s, half limit 40
+k:int4 | s:int4 | half:numeric
+0 | 0 | 6300.0
+0 | 3 | 9000.0
+0 | 3 | 9000.0
+0 | 6 | 6000.0
+0 | 6 | 6000.0
+1 | 1 | 7354.0
+1 | 1 | 7354.0
+1 | 4 | 7604.0
+1 | 7 | NULL
+1 | 7 | NULL
+2 | 2 | 7358.0
+2 | 2 | 7358.0
+2 | 5 | 7608.0
+2 | 8 | NULL
+2 | 8 | NULL
+3 | 0 | 6384.0
+3 | 0 | 6384.0
+3 | 3 | 7362.0
+3 | 3 | 7362.0
+3 | 6 | 7612.0
+4 | 1 | 6387.0
+4 | 1 | 6387.0
+4 | 4 | 7366.0
+4 | 4 | 7366.0
+4 | 7 | NULL
+5 | 2 | 6390.0
+5 | 2 | 6390.0
+5 | 5 | 7370.0
+5 | 5 | 7370.0
+5 | 8 | NULL
+6 | 0 | 9702.0
+6 | 3 | 6393.0
+6 | 3 | 6393.0
+6 | 6 | 7374.0
+6 | 6 | 7374.0
+7 | 1 | 9706.5
+7 | 4 | 6396.0
+7 | 4 | 6396.0
+7 | 7 | NULL
+7 | 7 | NULL
+-- SELECT 40
+
+> select count(*), sum(c) from (select (select count(*) from a227_sp p where p.k = o.k and p.s = o.s) as c from a227_so o) t
+count:int8 | sum:numeric
+300 | 2226
+-- SELECT 1
+
+> select o.k, o.s, o.lim from a227_so o
+>   where o.lim > (select max(p.q) from a227_sp p where p.k = o.k and p.s = o.s) order by 1, 2, 3 limit 20
+k:int4 | s:int4 | lim:int4
+-- SELECT 0
+
+> select count(*) from a227_so o where exists (select 1 from a227_sp p where p.k = o.k and p.s = o.s and p.q > o.lim)
+count:int8
+195
+-- SELECT 1
+
+> select count(*) from a227_so o where o.lim > all (select p.q from a227_sp p where p.k = o.k and p.s = o.s)
+count:int8
+105
+-- SELECT 1
+
+> select o.k, (select min(p.q) + (select max(p2.q) from a227_sp p2 where p2.k = o.k and p2.s = p.s)
+>                from a227_sp p where p.k = o.k and p.s = o.s)
+>   from a227_so o order by 1, 2 limit 15
+ERROR 42803: subquery uses ungrouped column "p.s" from outer query (at 94)
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> reset enable_bitmapscan
+-- RESET
+
+> reset enable_seqscan
+-- RESET
+
+> reset max_parallel_workers_per_gather
+-- RESET
+

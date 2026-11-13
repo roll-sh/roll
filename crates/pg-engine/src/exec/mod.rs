@@ -148,6 +148,12 @@ pub trait Node {
         Ok(false)
     }
 
+    /// Whether `rescan` may succeed on this node as it is now (what it would ask of the
+    /// context aside): a SubPlan's tree that can't is dropped after its run, not kept.
+    fn can_rescan(&self) -> bool {
+        false
+    }
+
     /// Whether `restart` can make this node, which ran to its end, what opening its plan
     /// node again would (ExecutorStart over a kept tree: `collect_kept`), this node and
     /// every node below it. Asked before anything restarts: false changes nothing.
@@ -448,6 +454,11 @@ pub struct ExecCtx<'a> {
     /// Initplans reading the enclosing queries' rows: the rows of each with the outer rows
     /// they were made for (`outer`'s, kept alive so they are told apart by address).
     enclosing_cache: RefCell<HashMap<usize, (Vec<Rc<Row>>, Rc<Vec<Row>>)>>,
+    /// Correlated SubPlans' executor trees, by subquery id, kept from one run to the next
+    /// in the statement and rescanned (ExecReScan) for the next outer row: the plan and the
+    /// snapshot each was opened for (another plan at the id's address, or another snapshot,
+    /// opens its own).
+    subplan_trees: RefCell<HashMap<usize, KeptSubplan>>,
     pub ctes: RefCell<HashMap<usize, Rc<RefCell<nodes::CteState>>>>,
     pub work: RefCell<HashMap<usize, Rc<Vec<Row>>>>,
     /// Shared with child contexts: a COMMIT inside a procedure starts a new transaction time.
@@ -815,6 +826,13 @@ pub struct Kept {
     enrs: Vec<Rc<Enr>>,
 }
 
+/// A correlated SubPlan's tree between its runs (`ExecCtx::subplan_trees`).
+struct KeptSubplan {
+    plan: Arc<Plan>,
+    snap: Rc<crate::txn::Snap>,
+    node: BoxNode,
+}
+
 /// A named set of rows visible to queries like a table (REFERENCING OLD / NEW TABLE).
 #[derive(Debug)]
 pub struct Enr {
@@ -931,6 +949,7 @@ impl<'a> ExecCtx<'a> {
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
             enclosing_cache: RefCell::new(HashMap::default()),
+            subplan_trees: RefCell::new(HashMap::default()),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: Rc::new(Cell::new(txn_time)),
@@ -1064,6 +1083,7 @@ impl<'a> ExecCtx<'a> {
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
             enclosing_cache: RefCell::new(HashMap::default()),
+            subplan_trees: RefCell::new(HashMap::default()),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: self.txn_time.clone(),
@@ -1501,7 +1521,43 @@ impl<'a> ExecCtx<'a> {
         for p in &s.params {
             params.push(eval(p, row, self)?);
         }
-        self.with_outer(Rc::new(params), || collect(&s.plan, self, limit))
+        self.with_outer(Rc::new(params), || self.subplan_rows(s, limit))
+    }
+
+    /// `collect` of a correlated SubPlan's plan under the outer row pushed now, through the
+    /// tree its last run in this statement read, rescanned (ExecReScan, as ExecScanSubPlan
+    /// rescans its plan for each outer row) when it can be; else opened, and kept for the
+    /// next run when it can rescan. Not under EXPLAIN ANALYZE (each open counts its loops),
+    /// outside a running statement, or for a plan that writes or frames a function's context.
+    fn subplan_rows(&self, s: &Subquery, limit: Option<usize>) -> Result<Vec<Row>> {
+        let Some(snap) = self.snapshot().filter(|_| {
+            !self.instrumented()
+                && self.temp_cleanup.active()
+                && !s.plan.writes()
+                && !matches!(s.plan.as_ref(), crate::sql::plan::Plan::Context { .. })
+        }) else {
+            return collect(&s.plan, self, limit);
+        };
+        let kept = self.subplan_trees.borrow_mut().remove(&s.id);
+        let rescanned = match kept {
+            Some(mut k) if Arc::ptr_eq(&k.plan, &s.plan) && Rc::ptr_eq(&k.snap, &snap) => k.node.rescan(self)?.then_some(k.node),
+            _ => None,
+        };
+        let mut node = match rescanned {
+            Some(n) => n,
+            None => nodes::open(&s.plan, self)?,
+        };
+        let mut out = Vec::new();
+        while let Some(r) = node.next(self)? {
+            out.push(r);
+            if limit.is_some_and(|l| out.len() >= l) {
+                break;
+            }
+        }
+        if node.can_rescan() {
+            self.subplan_trees.borrow_mut().insert(s.id, KeptSubplan { plan: s.plan.clone(), snap, node });
+        }
+        Ok(out)
     }
 
     /// An uncorrelated `x = ANY (subquery)` whose `=` compares equal values of one type

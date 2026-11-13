@@ -5548,6 +5548,21 @@ impl Node for ScanNode {
         self.rescan_index(ctx)
     }
 
+    /// (`rescan_index`'s checks of the scan itself.)
+    fn can_rescan(&self) -> bool {
+        let s: &ScanPlan = &self.plan;
+        let Some((ix, b)) = &s.index else { return false };
+        self.keys.is_none()
+            && self.am.is_none()
+            && self.only.is_none()
+            && self.sample.is_none()
+            && self.par.is_none()
+            && !self.ios
+            && matches!(ix.method.as_str(), "btree" | "hash")
+            && matches!(s.access, Access::Index { .. })
+            && b.order.is_empty()
+    }
+
     /// (A serial or parallel index scan by its entries checking no filter on the rows it
     /// makes, nor locking them: they are only read.)
     fn project_columns(&mut self, cols: &[u32], ctx: &ExecCtx) -> bool {
