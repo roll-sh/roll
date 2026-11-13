@@ -66,6 +66,10 @@ export interface Run {
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
   rollout?: { steps: number[]; step_s: number; error_pct: number };
+  /** The app speaks HTTP/2 without TLS (a gRPC server). */
+  h2c?: boolean;
+  /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
+  scale?: { stream: string; group: string; per_instance?: number };
 }
 
 export type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -214,6 +218,8 @@ export interface Environment extends EnvironmentSummary {
   run?: Partial<Record<EnvRunField, number>>;
   /** It has a deploy hook. */
   hook?: boolean;
+  /** A worker that follows its work: the backlog it last read and the instances that wants. */
+  scaling?: { backlog: number | null; wanted: number } | null;
   /** An image service's tag is watched: a new digest behind it deploys. */
   follow_tag?: boolean;
   /** A push deploys only once its commit's checks pass. */

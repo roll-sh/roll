@@ -784,7 +784,10 @@ stops one (the newest, given the drain to finish its work) only after fewer were
 `scale_down_after`. rolld reads the lag from its own API (`GET /v1/streams/{s}/groups/{g}`, the
 operator's token), which on a fleet forwards to the stream's owner, the only node whose numbers
 are right (checked against a live rolld: 30 records, a group committed at 5, lag 25). Queues
-follow once a queue is a workspace resource (its project is what keeps it a tenant's).
+follow once a queue is a workspace resource (its project is what keeps it a tenant's). Settings
+picks the stream from the project's own, with the group and messages per instance (`roll apps
+set --scale <stream>:<group>[:<per instance>]`), and the environment shows the backlog last read
+and the instances it wants (`Environment.scaling`).
 
 ## HTTP/2 and gRPC
 

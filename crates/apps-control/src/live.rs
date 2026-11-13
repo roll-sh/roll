@@ -231,6 +231,8 @@ pub struct EnvLive {
     held: AtomicBool,
     /// A scaling worker's instances for its backlog ([`crate::model::Scale`]); 0: its floor.
     wanted: AtomicU32,
+    /// The backlog it last read (`u64::MAX`: not read yet).
+    backlog: AtomicU64,
     /// Since when it has wanted fewer than run (a scale-in waits `scale_down_after`).
     fewer_since: Mutex<Option<Instant>>,
     /// A gradual rollout's new deployment and the percent of requests it takes.
@@ -281,6 +283,7 @@ impl EnvLive {
             capped: AtomicBool::new(false),
             held: AtomicBool::new(false),
             wanted: AtomicU32::new(0),
+            backlog: AtomicU64::new(u64::MAX),
             fewer_since: Mutex::new(None),
             canary: Mutex::new(None),
             routed: AtomicU64::new(0),
@@ -982,8 +985,18 @@ impl EnvLive {
     }
 
     /// A scaling worker's instances for its backlog now.
-    pub fn set_wanted(&self, n: u32) {
+    pub fn set_wanted(&self, n: u32, backlog: Option<u64>) {
         self.wanted.store(n, Ordering::SeqCst);
+        self.backlog.store(backlog.unwrap_or(u64::MAX), Ordering::SeqCst);
+    }
+
+    /// What a scaling worker follows now: its backlog as last read, and the instances it wants.
+    pub fn scaling(&self) -> Option<(Option<u64>, u32)> {
+        let tpl = self.template()?;
+        let run = &tpl.run;
+        run.scale.as_ref()?;
+        let b = self.backlog.load(Ordering::SeqCst);
+        Some(((b != u64::MAX).then_some(b), self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances))))
     }
 
     /// Hold it asleep (a restore of its volume) until the guard drops: what runs stops, and no

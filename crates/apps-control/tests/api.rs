@@ -1547,6 +1547,8 @@ async fn a_worker_follows_its_streams_backlog() {
     w.apps.scale_workers().await;
     live.tick().await;
     assert_eq!(up(&w), 4, "35 behind at 10 each: 4 (the ceiling)");
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
+    assert_eq!(env["scaling"], json!({"backlog": 35, "wanted": 4}), "{env}");
     BACKLOG.store(0, Ordering::SeqCst);
     w.apps.scale_workers().await;
     live.tick().await;

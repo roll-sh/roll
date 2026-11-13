@@ -257,6 +257,7 @@ type Environment = EnvironmentSummary & {
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
+  scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
   created_at: number;
