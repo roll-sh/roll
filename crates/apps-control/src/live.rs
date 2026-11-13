@@ -193,6 +193,8 @@ pub struct EnvLive {
     closed: AtomicBool,
     /// Its project reached its spend limit: nothing starts, and the tick stops what runs.
     capped: AtomicBool,
+    /// Its volume is being restored: nothing starts until it's done.
+    held: AtomicBool,
     /// Requests waiting on a wake.
     waiters: AtomicU32,
     /// The last failed wake and how many failed in a row: the requests behind it get its error
@@ -227,6 +229,7 @@ impl EnvLive {
             wake: Arc::new(tokio::sync::Mutex::new(())),
             closed: AtomicBool::new(false),
             capped: AtomicBool::new(false),
+            held: AtomicBool::new(false),
             waiters: AtomicU32::new(0),
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
@@ -385,6 +388,9 @@ impl EnvLive {
         }
         if self.capped.load(Ordering::SeqCst) {
             return Err(WakeError::Capped);
+        }
+        if self.held.load(Ordering::SeqCst) {
+            return Err(WakeError::Busy);
         }
         let tpl = self.template().ok_or(WakeError::NoDeployment)?;
         if tpl.run.kind != RunType::Web {
@@ -692,6 +698,11 @@ impl EnvLive {
         self.capped.store(on, Ordering::SeqCst);
     }
 
+    /// Hold it asleep (a restore of its volume): no request or floor starts an instance.
+    pub fn set_held(&self, on: bool) {
+        self.held.store(on, Ordering::SeqCst);
+    }
+
     /// Stop every instance (they stay created); the next request wakes one.
     pub async fn sleep(self: &Arc<Self>) {
         let _g = self.wake.lock().await;
@@ -788,6 +799,9 @@ impl EnvLive {
             if due {
                 self.check_health(&insts, path, tpl.run.concurrency).await;
             }
+        }
+        if self.held.load(Ordering::SeqCst) {
+            return;
         }
         if self.capped.load(Ordering::SeqCst) {
             // Capped: stop what still runs, keep no floor.

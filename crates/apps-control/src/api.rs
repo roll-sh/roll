@@ -77,6 +77,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
         .route(&format!("{env}/promote"), post(promote))
+        .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
+        .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
@@ -574,6 +576,22 @@ fn actor(ext: &Extensions) -> Option<String> {
 async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext)).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+async fn backups(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.backups(&id, &env).await?)
+}
+
+async fn backup_volume(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    let b = apps.backup_volume(&id, &env).await?;
+    apps.audit("volume.backed_up", &id, &env, actor(&ext), json!({ "backup": b.id })).await;
+    Ok((StatusCode::CREATED, Json(b)).into_response())
+}
+
+async fn restore_volume(State(apps): S, Path((id, env, bid)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let b = apps.restore_volume(&id, &env, &bid).await?;
+    apps.audit("volume.restored", &id, &env, actor(&ext), json!({ "backup": b.id })).await;
+    ok(b)
 }
 
 async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {

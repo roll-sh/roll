@@ -57,6 +57,8 @@ pub struct Fake {
     sick: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Instances the kernel killed for their memory ([`Fake::oom`]).
     oom: Mutex<std::collections::HashSet<String>>,
+    /// Volumes' contents (what a backup reads and a restore writes).
+    volumes: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl Fake {
@@ -78,6 +80,15 @@ impl Fake {
     /// The app breaks while it runs: every path answers 500 from now on, its port still open.
     pub fn sicken(&self, name: &str) {
         self.sick.lock().insert(name.to_string());
+    }
+
+    /// What a volume holds, as the app wrote it.
+    pub fn put_volume(&self, name: &str, data: &[u8]) {
+        self.volumes.lock().insert(name.to_string(), data.to_vec());
+    }
+
+    pub fn volume(&self, name: &str) -> Option<Vec<u8>> {
+        self.volumes.lock().get(name).cloned()
     }
 
     /// The kernel kills it for its memory limit: [`Fake::crash`], reported as out of memory.
@@ -250,6 +261,18 @@ impl Runtime for Fake {
             }
             rx.changed().await?;
         }
+    }
+
+    async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {
+        let data = self.volumes.lock().get(name).cloned().unwrap_or_default();
+        Ok(Box::new(std::io::Cursor::new(data)))
+    }
+
+    async fn write_volume(&self, name: &str, mut tar: super::VolumeStream) -> anyhow::Result<()> {
+        let mut data = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut tar, &mut data).await?;
+        self.volumes.lock().insert(name.to_string(), data);
+        Ok(())
     }
 
     async fn running(&self, name: &str) -> bool {

@@ -385,6 +385,40 @@ impl Runtime for Docker {
         let _ = docker(&["volume", "rm", "-f", name]).await;
     }
 
+    async fn read_volume(&self, name: &str) -> anyhow::Result<super::VolumeStream> {
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps volume");
+        let mount = format!("{name}:/data:ro");
+        let mut child = Command::new("docker")
+            .args(["run", "--rm", "--network", "none", "--label", &format!("{LABEL}=backup"), "-v", &mount, VOLUME_IMAGE, "tar", "c", "-C", "/data", "."])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running docker for a volume's backup")?;
+        let out = child.stdout.take().context("no stdout")?;
+        Ok(Box::new(ChildReader { _child: child, out }))
+    }
+
+    async fn write_volume(&self, name: &str, mut tar: super::VolumeStream) -> anyhow::Result<()> {
+        anyhow::ensure!(name.starts_with(super::PREFIX), "{name} isn't a roll apps volume");
+        let mount = format!("{name}:/data");
+        let mut child = Command::new("docker")
+            .args(["run", "--rm", "-i", "--network", "none", "--label", &format!("{LABEL}=restore"), "-v", &mount, VOLUME_IMAGE, "sh", "-c", RESTORE])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("running docker for a volume's restore")?;
+        let mut stdin = child.stdin.take().context("no stdin")?;
+        tokio::io::copy(&mut tar, &mut stdin).await.context("streaming the backup in")?;
+        drop(stdin);
+        let out = child.wait_with_output().await?;
+        anyhow::ensure!(out.status.success(), "the restore failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        Ok(())
+    }
+
     fn reach(&self, url: &str) -> String {
         for_container(url)
     }
@@ -488,6 +522,23 @@ async fn write_private(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()
 /// What the `docker` CLI of a build keeps of rolld's environment: how to reach the daemon and
 /// where its configuration is, nothing a build's variables could set.
 const CLI_ENV: [&str; 8] = ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "XDG_RUNTIME_DIR"];
+
+/// The small image that reads or writes a volume for a backup or a restore.
+const VOLUME_IMAGE: &str = "busybox:1.37";
+/// A restore: empty the volume, then the backup's files (the tar on stdin).
+const RESTORE: &str = "find /data -mindepth 1 -delete && tar x -C /data";
+
+/// A child's stdout, read while the child (killed when this drops) runs.
+struct ChildReader {
+    _child: tokio::process::Child,
+    out: tokio::process::ChildStdout,
+}
+
+impl tokio::io::AsyncRead for ChildReader {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.out).poll_read(cx, buf)
+    }
+}
 
 /// Builds with BuildKit on this host (`docker build`), at most `slots` at once: one tenant's
 /// burst of pushes queues instead of taking every CPU and all memory of the node.

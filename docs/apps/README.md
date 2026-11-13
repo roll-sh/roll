@@ -632,6 +632,18 @@ does the same, as `heroku rollback`. A failed or timed-out cron run is a `cron.f
 notified by default; a failed one-off job is `job.failed`, off by default (someone ran it and saw
 it). Both carry the exit code.
 
+## Volume backups
+
+A volume is backed up to object storage as a tar (`apps/volumes/<service>/<env>/<unix ms>.tar`),
+on demand (`POST …/volume/backups`) and once a day by its owner, the newest seven kept, as
+Railway's volume backups and Render's and Fly's snapshots. A throwaway busybox container with no
+network mounts the volume read-only and streams `tar c` into `Objects::upload`, so nothing holds
+the volume in memory; it's the disk at that moment, so an app mid-write can leave a file half
+written, as any snapshot of a running disk. A restore (`…/backups/{id}/restore`) holds the
+environment asleep (requests get a 503 for that moment), empties the volume and untars the
+backup into it from `Objects::download`, then the next request wakes it. Both are in the audit
+trail. Without object storage on the node, backups answer 409. (Fargate has no volumes yet.)
+
 ## Log drains
 
 A project can send its services' runtime output to up to five HTTPS endpoints
@@ -805,24 +817,23 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 
 1. **Templates**: a service and its database in one step (Railway's templates, Render's
    blueprints). (Done: New service links the project's databases before the first deploy; the
    canvas draws a service's links.)
-2. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).
-3. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
+2. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
     (Vercel's rolling releases, Cloud Run's traffic splits).
-4. Then: per-environment run settings in the dashboard, (done: `roll apps metrics --range`, `roll apps drains`, `notifications`, `activity`).
-5. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+3. Then: per-environment run settings in the dashboard, (done: `roll apps metrics --range`, `roll apps drains`, `notifications`, `activity`).
+4. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+8. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-10. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+9. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+10. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

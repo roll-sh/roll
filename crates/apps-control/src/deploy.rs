@@ -994,6 +994,7 @@ impl Apps {
                 }
             }
             if n.is_multiple_of(3600) {
+                self.scheduled_backups().await;
                 let before = code_sql::now_ms() / 60_000 - 7 * 24 * 60;
                 let _ = self.db(move |s| s.prune_metrics(before)).await;
                 let day_ago = code_sql::now_ms() - 24 * 3_600_000;

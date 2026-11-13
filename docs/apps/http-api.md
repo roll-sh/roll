@@ -58,6 +58,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | | 202 `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/redeploy` | `{ message? }` | 202 `Deployment` (trigger `settings`) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/promote` | `{ from, message? }` | 202 `Deployment` (trigger `promote`: `from`'s live image, no build, with `env`'s variables; `rollback_of` names the promoted deployment) | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/volume/backups` | | `Backup[]`, newest first (7 kept) | read |
+| `POST /v1/apps/services/{id}/environments/{env}/volume/backups` | | 201 `Backup` (now) | write |
+| `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` | | `Backup` (the volume as it was; the environment asleep meanwhile) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
@@ -313,6 +316,8 @@ type SpendLimits = { alert_usd: number | null; hard_usd: number | null; month_us
 type LogDrain = { id: string; project: string; host: string; created_at: number; secret?: string };
 /** A request through the proxy (`stream: "http"` lines' text, JSON). The path has no query string. */
 type AccessLine = { method: string; path: string; status: number; ms: number; bytes: number; instance: string; request_id: string; cold: boolean; waited_ms: number };
+/** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
+type Backup = { id: string; at: number; size: number };
 type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord"; host: string; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "cron.failed" | "job.failed")[]; created_at: number; secret?: string };
 type Delivery = { id: string; event: number; kind: string; status: "pending" | "delivered" | "failed"; attempts: number; code: number | null; error: string | null; at: number };
 type RunStatus = "running" | "succeeded" | "failed" | "skipped" | "timed_out" | "canceled";

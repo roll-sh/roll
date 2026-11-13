@@ -146,6 +146,11 @@ async fn world() -> World {
 }
 
 async fn world_with(setup: impl FnOnce(&mut AppsConfig)) -> World {
+    world_full(setup, false).await
+}
+
+/// `objects`: a directory as object storage (log chunks, volume backups).
+async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool) -> World {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let project = ws.create("acme", "", None).unwrap().id;
@@ -171,7 +176,7 @@ async fn world_with(setup: impl FnOnce(&mut AppsConfig)) -> World {
         resources: Arc::new(FakeResources),
         resolver: dns.clone(),
         tls: tls.clone(),
-        objects: None,
+        objects: objects.then(|| pg_storage::Objects::new(&pg_storage::StorageConfig::Local(dir.path().join("objects"))).unwrap()),
         cluster,
         workspace: Some(ws),
     };
@@ -652,6 +657,13 @@ async fn deploys_report_on_their_commit_and_can_wait_for_ci() {
     let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
     let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
     assert_eq!(settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await["status"], "active");
+    // "success" follows the switch by a moment.
+    for _ in 0..200 {
+        if w.code.statuses.lock().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let posted: Vec<(String, String)> = w.code.statuses.lock().iter().map(|(_, c, s)| (c.clone(), s.clone())).collect();
     assert_eq!(posted, [("roll/apps/site/production".to_string(), "pending".to_string()), ("roll/apps/site/production".to_string(), "success".to_string())]);
     // Waiting for CI: a push whose checks are still running waits, then deploys once they pass.
@@ -671,6 +683,30 @@ async fn deploys_report_on_their_commit_and_can_wait_for_ci() {
     let (_, log) = (0, get_until(&w.api, &format!("{base}/logs"), |l| l.to_string().contains("its check ci/test failed")).await);
     assert!(log.to_string().contains("d2d2d2d2d2d2"));
     assert_eq!(call(&w.api, "GET", &base, None).await.1["active"]["revision"], "c1c1c1c1c1c1");
+}
+
+/// A volume is backed up to object storage and restored from it, the environment asleep
+/// meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_volume_is_backed_up_and_restored() {
+    let w = world_full(|_| {}, true).await;
+    let (svc, _) = image_service(&w, "db", json!({"type": "worker", "volume": {"mount": "/data", "size_gb": 1}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let volume = apps_control::volume_name(&id, "production");
+    w.fake.put_volume(&volume, b"the first state");
+    let base = format!("/v1/apps/services/{id}/environments/production/volume/backups");
+    let (st, b) = call(&w.api, "POST", &base, None).await;
+    assert_eq!((st, b["size"].as_u64()), (StatusCode::CREATED, Some(15)), "{b}");
+    w.fake.put_volume(&volume, b"what went wrong later");
+    let (_, list) = call(&w.api, "GET", &base, None).await;
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    let (st, _) = call(&w.api, "POST", &format!("{base}/{}/restore", b["id"].as_str().unwrap()), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(w.fake.volume(&volume).as_deref(), Some(&b"the first state"[..]));
+    let (_, trail) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert!(trail.to_string().contains("audit.volume.restored"), "{trail}");
+    let (st, _) = call(&w.api, "POST", &format!("{base}/123/restore"), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 /// Changes people make are an audit trail: what changed and who, never a value.

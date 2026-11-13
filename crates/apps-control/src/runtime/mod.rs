@@ -63,6 +63,9 @@ impl std::fmt::Debug for InstanceSpec {
     }
 }
 
+/// A volume's files as a tar stream.
+pub type VolumeStream = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
+
 /// How an instance's process ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exit {
@@ -142,6 +145,14 @@ pub trait Runtime: Send + Sync {
     async fn ensure_network(&self, name: &str, service: &str) -> anyhow::Result<()>;
     /// Remove a volume (an environment's teardown).
     async fn remove_volume(&self, name: &str);
+    /// A volume's files as a tar stream, read-only (a backup).
+    async fn read_volume(&self, _name: &str) -> anyhow::Result<VolumeStream> {
+        anyhow::bail!("this runtime has no volume backups")
+    }
+    /// Replace a volume's files with a tar stream's (a restore): nothing may run on it meanwhile.
+    async fn write_volume(&self, _name: &str, _tar: VolumeStream) -> anyhow::Result<()> {
+        anyhow::bail!("this runtime has no volume backups")
+    }
     /// A URL to a roll database as instances reach it.
     fn reach(&self, url: &str) -> String;
     /// An interactive shell in a running instance (`bash`, else `sh`) on a terminal of
