@@ -603,6 +603,13 @@ before any environment is protected, so a restore isn't a change request; what c
 (a link to a resource that project doesn't have, an import of another project's folder) comes back
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
 
+### Finding a key
+
+`roll secrets find STRIPE_KEY` (or `GET /v1/secrets/search?key=`) lists every project, environment
+and folder that holds a key, among those the caller may read (a token, its own project's), with its
+version, when it changed and whether it's linked: never its value. `STRIPE_*` finds every key that
+starts with `STRIPE_`. For rotating an organisation-wide key: where is it, so nothing is missed.
+
 ### Sharing a value once
 
 `roll secrets share STRIPE_KEY [--views 1] [--ttl 24h] [--note …]` (or a value on stdin) prints a
@@ -1053,6 +1060,7 @@ isn't in the workspace is 404.
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
+| `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 
 - 400: a bad slug, path, key, value, body or query.
 - 401: no credential, or a token that doesn't exist, is revoked or expired.
@@ -1195,6 +1203,8 @@ Done and in PR #20:
   suggested links for the canvas's resources, and one key set in several environments from the
   overview (one change each, a request where protected), and each environment's activity (its
   changes, reads, requests and syncs' pushes as one timeline, by key);
+- finding a key across every project the caller may read (`roll secrets find`, the dashboard's
+  "Find a key"), for rotating an organisation-wide key;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1215,11 +1225,11 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Find a key across projects**: `GET /v1/secrets/search?key=` lists every project, environment
-   and folder holding a key (names and versions, never values) among those the caller may read, for
-   rotating an organisation-wide key; `roll secrets find KEY` and the dashboard's search.
-3. **More export formats**: a Docker `--env-file` (no quoting, one line each) and a Kubernetes
+2. **More export formats**: a Docker `--env-file` (no quoting, one line each) and a Kubernetes
    Secret manifest (`kubectl apply -f -`), next to dotenv, shell, JSON and YAML.
+3. **Templates** (Doppler's `secrets substitute`, Infisical's `export --template`): `roll secrets
+   render FILE` fills `${KEY}` in a config file from an environment, failing on a key that isn't
+   set, for tools that read a file rather than the environment.
 4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
 5. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed

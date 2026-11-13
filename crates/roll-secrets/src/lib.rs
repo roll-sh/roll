@@ -18,6 +18,7 @@ pub mod crypto;
 pub mod dotenv;
 mod envs;
 pub mod exports;
+pub mod find;
 pub mod identities;
 pub mod insights;
 pub mod leaks;

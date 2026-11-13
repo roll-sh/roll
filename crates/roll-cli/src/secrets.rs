@@ -190,6 +190,8 @@ pub enum Secrets {
     /// Scoped tokens for CI and services: list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
+    /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
+    Find { key: String },
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -652,6 +654,22 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     if let Secrets::Open { link } = &cmd {
         return open_share(api, link).await;
     }
+    // Finding a key spans projects.
+    if let Secrets::Find { key } = &cmd {
+        let v = api.get(&format!("/v1/secrets/search?key={}", enc(key))).await?;
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        let rows = v.as_array().cloned().unwrap_or_default();
+        if rows.is_empty() {
+            println!("{key} isn't set anywhere you can read");
+        }
+        for p in rows {
+            println!("{:<20} {:<14} {:<16} {:<28} v{:<4} {}{}", s(&p["project_name"]), s(&p["environment"]), s(&p["path"]), s(&p["key"]), p["version"], ago(p["updated_at"].as_i64().unwrap_or(0)), if p["linked"] == true { "  linked" } else { "" });
+        }
+        return Ok(());
+    }
     // A key pair is this machine's, not a project's.
     if let Secrets::Keygen { out } = &cmd {
         let (secret, public) = crate::seal::keypair();
@@ -906,7 +924,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Find { .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;

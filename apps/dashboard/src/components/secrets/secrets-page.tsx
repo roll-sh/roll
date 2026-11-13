@@ -14,6 +14,7 @@ import { AuditView } from "./audit";
 import { CompareView } from "./compare";
 import { EnvView } from "./env-view";
 import { EnvironmentsView } from "./environments";
+import { FindKey } from "./find";
 import { OverviewGrid } from "./grid";
 import { SyncsView } from "./syncs";
 import { ErrorNote, useLoad } from "./ui";
@@ -123,10 +124,13 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
           </>
         }
         actions={
-          <Link href={`/dashboard/projects/${project.id}`} className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted transition-colors hover:bg-white/[0.05] hover:text-fg">
-            <LayoutGrid className="size-3.5" />
-            Canvas
-          </Link>
+          <>
+            <FindKey />
+            <Link href={`/dashboard/projects/${project.id}`} className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted transition-colors hover:bg-white/[0.05] hover:text-fg">
+              <LayoutGrid className="size-3.5" />
+              Canvas
+            </Link>
+          </>
         }
       >
         <div className="absolute inset-0 flex flex-col">

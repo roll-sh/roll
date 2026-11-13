@@ -29,6 +29,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
     Router::new()
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
+        .route("/v1/secrets/search", get(find))
         .route(P, get(overview).patch(project_settings))
         .route(&format!("{P}/grid"), get(grid))
         .route(&format!("{P}/compare"), get(compare))
@@ -172,6 +173,12 @@ fn int(q: &HashMap<String, String>, k: &str) -> crate::Result<Option<i64>> {
 
 async fn health(State(s): S) -> crate::Result<Response> {
     Ok(ok(blocking(s, |s| s.health()).await?))
+}
+
+/// Where a key is set, across the projects the caller may read.
+async fn find(State(s): S, Who(c): Who, Query(q): Q) -> crate::Result<Response> {
+    let key = q.get("key").cloned().unwrap_or_default();
+    Ok(ok(blocking(s, move |s| s.find(key.trim(), &c)).await?))
 }
 
 async fn whoami(State(s): S, Who(c): Who) -> Response {
