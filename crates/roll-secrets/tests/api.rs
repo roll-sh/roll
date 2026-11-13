@@ -984,3 +984,28 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let (s, _) = api.call(Method::POST, &to("/restore"), Some(archive)).await;
     assert_eq!(s, StatusCode::CONFLICT, "only into a project with no secrets");
 }
+
+#[tokio::test]
+async fn a_key_is_found_in_every_project_the_caller_may_read() {
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live_1").await;
+    api.set("staging", "STRIPE_WEBHOOK", "whsec_1").await;
+    api.set("staging", "STRIPEXKEY", "not a prefix match").await;
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "billing" }))).await;
+    let theirs = format!("/v1/secrets/projects/{}/environments/development/secrets/STRIPE_KEY", other["id"].as_str().unwrap());
+    api.ok(Method::PUT, &theirs, Some(json!({ "value": "sk_test_2" }))).await;
+
+    let found = api.ok(Method::GET, "/v1/secrets/search?key=STRIPE_KEY", None).await;
+    let places: Vec<(&str, &str)> = found.as_array().unwrap().iter().map(|p| (p["project_name"].as_str().unwrap(), p["environment"].as_str().unwrap())).collect();
+    assert_eq!(places.len(), 2, "{found}");
+    assert!(places.contains(&("shop", "production")) && places.contains(&("billing", "development")));
+    assert!(!found.to_string().contains("sk_"), "never a value");
+    // `_` is a character, not LIKE's wildcard.
+    let prefix = api.ok(Method::GET, "/v1/secrets/search?key=STRIPE_*", None).await;
+    let keys: Vec<&str> = prefix.as_array().unwrap().iter().map(|p| p["key"].as_str().unwrap()).collect();
+    assert!(keys.contains(&"STRIPE_WEBHOOK") && !keys.contains(&"STRIPEXKEY"), "{keys:?}");
+    // A token for one project finds only there.
+    let t = api.ok(Method::POST, "/tokens", Some(json!({ "name": "ro", "actions": ["read"] }))).await;
+    let (_, mine) = api.req(Method::GET, "/v1/secrets/search?key=STRIPE_KEY", None, t["token"].as_str()).await;
+    assert_eq!(mine.as_array().unwrap().len(), 1);
+}

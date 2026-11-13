@@ -29,6 +29,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
     Router::new()
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
+        .route("/v1/secrets/search", get(find))
         .route(P, get(overview).patch(project_settings))
         .route(&format!("{P}/grid"), get(grid))
         .route(&format!("{P}/compare"), get(compare))
@@ -172,6 +173,12 @@ fn int(q: &HashMap<String, String>, k: &str) -> crate::Result<Option<i64>> {
 
 async fn health(State(s): S) -> crate::Result<Response> {
     Ok(ok(blocking(s, |s| s.health()).await?))
+}
+
+/// Where a key is set, across the projects the caller may read.
+async fn find(State(s): S, Who(c): Who, Query(q): Q) -> crate::Result<Response> {
+    let key = q.get("key").cloned().unwrap_or_default();
+    Ok(ok(blocking(s, move |s| s.find(key.trim(), &c)).await?))
 }
 
 async fn whoami(State(s): S, Who(c): Who) -> Response {
@@ -416,14 +423,19 @@ async fn rotate(State(s): S, Who(c): Who, Path((project, env, key)): Path<(Strin
 async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
     let resolve = flag(&q, "resolve", true);
     let format = match q.get("format") {
-        Some(f) => Some(dotenv::Format::parse(f).ok_or_else(|| Error::BadRequest("format is dotenv, shell, json or yaml".into()))?),
+        Some(f) => Some(dotenv::Format::parse(f).ok_or_else(|| Error::BadRequest("format is dotenv, shell, json, yaml, docker or kubernetes".into()))?),
         None => None,
     };
+    // A Kubernetes Secret is named after the environment unless `name` says otherwise.
+    let manifest = dotenv::Manifest { name: q.get("name").cloned().unwrap_or_else(|| env.to_ascii_lowercase().replace('_', "-")), namespace: q.get("namespace").cloned() };
+    if format == Some(dotenv::Format::Kubernetes) && (!dotenv::k8s_name(&manifest.name, 253) || manifest.namespace.as_deref().is_some_and(|n| !dotenv::k8s_name(n, 63))) {
+        return Err(Error::BadRequest("a Secret's name is lowercase letters, digits, '-' and '.' (253 at most), and a namespace lowercase letters, digits and '-' (63 at most)".into()));
+    }
     let v = blocking(s, move |s| s.values(&project, &env, &path_of(&q), resolve, None, &c)).await?;
     let r = match format {
         None => ok(&v),
         Some(f) => {
-            let text = dotenv::format(&v.values, f);
+            let text = dotenv::format(&v.values, f, &manifest).map_err(Error::BadRequest)?;
             ([(header::CONTENT_TYPE, f.content_type())], text.to_string()).into_response()
         }
     };

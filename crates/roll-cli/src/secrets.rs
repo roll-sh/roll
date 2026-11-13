@@ -150,10 +150,16 @@ pub enum Secrets {
         #[arg(long)]
         request: bool,
     },
-    /// Print the resolved values: dotenv, json, shell or yaml.
+    /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
         format: String,
+        /// kubernetes: the Secret's name (default: the environment's).
+        #[arg(long)]
+        name: Option<String>,
+        /// kubernetes: its namespace.
+        #[arg(long)]
+        namespace: Option<String>,
     },
     /// Environments: list, add, rename, delete, order, protect.
     #[command(subcommand, alias = "env")]
@@ -190,6 +196,8 @@ pub enum Secrets {
     /// Scoped tokens for CI and services: list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
+    /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
+    Find { key: String },
     /// A key pair for backups: the secret key written to a file only you can read, the public key
     /// printed (give it to `backup --to`).
     Keygen {
@@ -652,6 +660,22 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     if let Secrets::Open { link } = &cmd {
         return open_share(api, link).await;
     }
+    // Finding a key spans projects.
+    if let Secrets::Find { key } = &cmd {
+        let v = api.get(&format!("/v1/secrets/search?key={}", enc(key))).await?;
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        let rows = v.as_array().cloned().unwrap_or_default();
+        if rows.is_empty() {
+            println!("{key} isn't set anywhere you can read");
+        }
+        for p in rows {
+            println!("{:<20} {:<14} {:<16} {:<28} v{:<4} {}{}", s(&p["project_name"]), s(&p["environment"]), s(&p["path"]), s(&p["key"]), p["version"], ago(p["updated_at"].as_i64().unwrap_or(0)), if p["linked"] == true { "  linked" } else { "" });
+        }
+        return Ok(());
+    }
     // A key pair is this machine's, not a project's.
     if let Secrets::Keygen { out } = &cmd {
         let (secret, public) = crate::seal::keypair();
@@ -772,8 +796,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Skipped {} existing (use --overwrite): {}", sk.len(), sk.iter().map(s).collect::<Vec<_>>().join(", "));
             }
         }
-        Secrets::Export { format } => {
-            let url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
+        Secrets::Export { format, name, namespace } => {
+            let mut url = format!("{}{env}/values?{}&format={}", c.api.base, c.q(), enc(&format));
+            for (k, v) in [("name", name), ("namespace", namespace)] {
+                if let Some(v) = v {
+                    url.push_str(&format!("&{k}={}", enc(&v)));
+                }
+            }
             let mut req = c.api.http.get(url);
             if let Some(k) = &c.api.key {
                 req = req.bearer_auth(k);
@@ -906,7 +935,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Find { .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;

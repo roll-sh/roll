@@ -433,7 +433,7 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
-roll secrets export  [--format dotenv|json|shell|yaml]
+roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging
@@ -593,12 +593,22 @@ opens it; `POST …/backup {recipient}` (admin, audited `project.backup`) is the
 carry their link and no value: a restore issues its own credentials. Personal values, history,
 leases, tokens and identities aren't in it.
 
+Environments → Backup downloads the same file from the dashboard, sealed to a public key pasted
+there: the browser never holds the secret key.
+
 `roll secrets restore shop.backup --key roll-secrets-backup.key` opens it on the CLI's machine and
 loads it into the selected project, which must have no secrets yet (`POST …/restore` with the
 opened archive; admin, audited `project.restore`), on this server or another. Values are written
 before any environment is protected, so a restore isn't a change request; what can't be restored
 (a link to a resource that project doesn't have, an import of another project's folder) comes back
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
+
+### Finding a key
+
+`roll secrets find STRIPE_KEY` (or `GET /v1/secrets/search?key=`) lists every project, environment
+and folder that holds a key, among those the caller may read (a token, its own project's), with its
+version, when it changed and whether it's linked: never its value. `STRIPE_*` finds every key that
+starts with `STRIPE_`. For rotating an organisation-wide key: where is it, so nothing is missed.
 
 ### Sharing a value once
 
@@ -1005,7 +1015,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=` | | `Values` or text |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&name=&namespace=` | | `Values`, or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` |
@@ -1050,6 +1060,7 @@ isn't in the workspace is 404.
 | `POST /audit/sinks` | `{url, from_start?}` | 201 `Sink & {secret}` (shown once) |
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
+| `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |
 
 - 400: a bad slug, path, key, value, body or query.
 - 401: no credential, or a token that doesn't exist, is revoked or expired.
@@ -1190,7 +1201,12 @@ Done and in PR #20:
   identities pinned to client addresses; encrypted project backup and restore;
 - the dashboard's Secrets surface, with the deployment key's source and a rotation's progress,
   suggested links for the canvas's resources, and one key set in several environments from the
-  overview (one change each, a request where protected);
+  overview (one change each, a request where protected), and each environment's activity (its
+  changes, reads, requests and syncs' pushes as one timeline, by key);
+- finding a key across every project the caller may read (`roll secrets find`, the dashboard's
+  "Find a key"), for rotating an organisation-wide key;
+- exports as a Docker `--env-file` and a Kubernetes Secret manifest, next to dotenv, shell, JSON and
+  YAML;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1211,14 +1227,11 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Backup and restore in the dashboard**: Environments offers a backup sealed to a public key
-   pasted there (the secret key never touches the browser), and restoring stays in the CLI, which
-   holds the key.
-3. **A change's activity in one place**: the audit log, change requests and syncs' pushes as one
-   per-environment timeline in the environment view, filterable by key, so "who changed what, and
-   where did it go" is one page.
-4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Templates** (Doppler's `secrets substitute`, Infisical's `export --template`): `roll secrets
+   render FILE` fills `${KEY}` in a config file from an environment, failing on a key that isn't
+   set, for tools that read a file rather than the environment.
+3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-5. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

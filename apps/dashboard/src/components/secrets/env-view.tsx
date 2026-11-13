@@ -13,6 +13,7 @@ import { ImportDialog } from "./import-dialog";
 import { ImportsPanel } from "./imports";
 import { RefInput, useRefSource, useRefWarnings, type RefSource } from "./ref-input";
 import { ShareDialog, type ShareSource } from "./share-dialog";
+import { Activity } from "./activity";
 import { BulkBar } from "./bulk";
 import { LinkDialog } from "./link-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
@@ -47,7 +48,7 @@ import {
 export function EnvView({ env }: { env: Environment }) {
   const { api, search, go, project, reloadEnvs, standard } = useSecrets();
   const path = search.path || "/";
-  const tab = search.tab === "requests" ? "requests" : "secrets";
+  const tab = search.tab === "requests" ? "requests" : search.tab === "activity" ? "activity" : "secrets";
   const list = useLoad(() => api.secrets(env.slug, path), [api, env.slug, path]);
   const folders = useLoad(() => api.folders(env.slug, path), [api, env.slug, path]);
   const open = useLoad(() => api.requests(env.slug, "open"), [api, env.slug]);
@@ -142,7 +143,8 @@ export function EnvView({ env }: { env: Environment }) {
   const exportAs = async (format: ExportFormat) => {
     setError(null);
     try {
-      saveText(`${project.name}.${env.slug}${format === "dotenv" ? ".env" : format === "shell" ? ".sh" : `.${format}`}`, await api.exportText(env.slug, format, path));
+      const ext = { dotenv: ".env", shell: ".sh", json: ".json", yaml: ".yaml", docker: ".docker.env", kubernetes: ".secret.yaml" }[format];
+      saveText(`${project.name}.${env.slug}${ext}`, await api.exportText(env.slug, format, path));
     } catch (e) {
       setError(errorText(e));
     }
@@ -187,9 +189,9 @@ export function EnvView({ env }: { env: Environment }) {
                 <Download className="size-3.5" /> Export
               </MenuTrigger>
               <MenuPopup align="end" className="w-48">
-                {(["dotenv", "json", "shell", "yaml"] as const).map((f) => (
+                {(["dotenv", "json", "shell", "yaml", "docker", "kubernetes"] as const).map((f) => (
                   <MenuItem key={f} onClick={() => exportAs(f)}>
-                    {f === "dotenv" ? ".env" : f} <span className="ml-auto text-[10.5px] text-subtle">audited</span>
+                    {{ dotenv: ".env", json: "json", shell: "shell", yaml: "yaml", docker: "Docker env file", kubernetes: "Kubernetes Secret" }[f]} <span className="ml-auto text-[10.5px] text-subtle">audited</span>
                   </MenuItem>
                 ))}
               </MenuPopup>
@@ -204,7 +206,7 @@ export function EnvView({ env }: { env: Environment }) {
           <Segmented
             label="Show"
             value={tab}
-            onChange={(t) => go({ env: env.slug, path: p, tab: t === "requests" ? "requests" : undefined }, true)}
+            onChange={(t) => go({ env: env.slug, path: p, tab: t === "secrets" ? undefined : t }, true)}
             options={[
               { value: "secrets", label: <span className="px-1.5 text-[11.5px]">Secrets</span> },
               {
@@ -216,6 +218,7 @@ export function EnvView({ env }: { env: Environment }) {
                   </span>
                 ),
               },
+              { value: "activity", label: <span className="px-1.5 text-[11.5px]">Activity</span> },
             ]}
           />
           {tab === "secrets" && (
@@ -293,7 +296,9 @@ export function EnvView({ env }: { env: Environment }) {
             }}
           />
         )}
-        {tab === "requests" ? (
+        {tab === "activity" ? (
+          <Activity env={env} />
+        ) : tab === "requests" ? (
           <RequestsPanel env={env} onChanged={() => (open.reload(), refresh())} />
         ) : (
           <div className="px-3 pt-2 pb-8">

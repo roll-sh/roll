@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place } from "@roll/secrets/types";
 import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
@@ -113,6 +113,8 @@ export function secretsApi(project: string) {
     setImports: (env: string, path: string, imports: Import[]) => req<Import[]>("PUT", `${E(env)}/imports${qs({ path })}`, imports),
     shared: () => req<Import[]>("GET", `${P}/shared`),
     suggestions: () => req<Suggestion[]>("GET", `${P}/suggestions`),
+    /** The whole project sealed to `recipient` (an X25519 public key): only its holder opens it. */
+    backup: (recipient: string) => req<{ sealed: unknown; context: string }>("POST", `${P}/backup`, { recipient }),
     exports: (env: string, path = "/") => req<Export[]>("GET", `${E(env)}/exports${qs({ path })}`),
     setExports: (env: string, path: string, projects: string[]) => req<Export[]>("PUT", `${E(env)}/exports${qs({ path })}`, projects.map((project) => ({ project }))),
 
@@ -194,6 +196,8 @@ export type SecretsApi = ReturnType<typeof secretsApi>;
 
 export const secretsHealth = () => req<Health>("GET", "/v1/secrets/health");
 export const secretsWhoami = () => req<WhoAmI>("GET", "/v1/secrets/whoami");
+/** Every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read. */
+export const findSecret = (key: string) => req<Place[]>("GET", `/v1/secrets/search?key=${encodeURIComponent(key)}`);
 
 /** The rule for keys (docs/secrets.md, "Secrets"). */
 export const SECRET_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;

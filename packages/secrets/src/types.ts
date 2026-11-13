@@ -194,7 +194,8 @@ export type AuditFormat = "csv" | "jsonl";
 export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 export type Imported = Applied & { skipped: string[] };
 export type ImportedAsRequest = { request: ChangeRequest; skipped: string[] };
-export type ExportFormat = "dotenv" | "json" | "shell" | "yaml";
+/** `docker`: Docker's `--env-file`; `kubernetes`: a Secret manifest (`name`, `namespace`). */
+export type ExportFormat = "dotenv" | "json" | "shell" | "yaml" | "docker" | "kubernetes";
 /** A one-way push of an environment's values to a platform outside roll (docs/secrets.md, "Syncs"). Never holds a value. */
 export type Sync = {
   id: string;
@@ -220,6 +221,8 @@ export type SyncField = { name: string; label: string; required: boolean; placeh
 export type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: SyncField[] };
 /** `resealed`: "all", or how many projects still need the previous key (null without a key); `links`, `syncs`: the kinds registered. */
 export type Health = { ok: boolean; key: "env" | "kms" | "file" | "missing"; resealed: "all" | number | null; links: string[]; syncs: string[] };
+/** Where a key is set (`GET /v1/secrets/search?key=`): names and versions, never a value. */
+export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */
