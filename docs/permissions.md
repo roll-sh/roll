@@ -143,6 +143,12 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
 - An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
   with its variables: `admin` in every environment, as an agent's shell is.
+- Linking another resource to an apps service (`PUT …/services/{id}/links/{kind}/{ref}`, or
+  `links` in a new service's body) puts its address and password in the service's variables, where
+  the service's code reads them: it also needs `reveal` on each linked resource (a `postgres` link
+  on that Postgres project, `redis` on that database, `bucket`, `stream`, `queue`, `nosql` likewise;
+  a kind roll doesn't know is refused). When that decides, the approval is about the linked
+  resource, so remembering it allows revealing that one.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
   `admin`, as in secrets itself.
 - Secrets' imports (`PUT …/environments/{env}/imports`, `[{project?, environment, path}]`) are a
@@ -388,7 +394,8 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
 - A while never becomes for good: a token makes tokens covered by its own rules only, never by
   what it's allowed for now.
 - Each rule for a while names the approval that allowed it. The operator takes it back before it
-  lapses from the token's page (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
+  lapses from the token's page or `roll token take-back <id> <approval>`
+  (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
   the approval when its request hasn't used it (the rule may have run that request instead).
 
 ### Approvals in chat
@@ -485,7 +492,8 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 
 ### Tighten to what it used
 
-A token's page proposes its rules narrowed to what its allowed requests used in the last 30 days
+A token's page (or `roll token tighten <id> [--apply]`) proposes its rules narrowed to what its
+requests used in the last 30 days, allowed ones and ones that ran on an approval
 (`GET /v1/access/tokens/{id}/tighten?days=`, `roll_access::tighten`), as AWS's access analyzer
 writes a policy from activity:
 

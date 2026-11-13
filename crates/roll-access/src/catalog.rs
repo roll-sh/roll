@@ -73,6 +73,31 @@ pub struct Row {
     /// The path parameter naming indices of the resource (search's `{index}`): rules can grant
     /// some indices of it (`{"id": "cl_1", "index": "logs-*"}`).
     pub index: Option<&'static str>,
+    /// Other resources whose credentials the request hands to this one (apps' links put a
+    /// database's address and password in a service's variables): it also needs `reveal` on each.
+    pub lends: Option<Lend>,
+}
+
+/// Where a request names the resources it links ([`Row::lends`]), as `(kind, ref)`.
+#[derive(Clone, Copy, Debug)]
+pub enum Lend {
+    /// Two path parameters: the kind and the ref.
+    Path(&'static str, &'static str),
+    /// A top-level JSON array of `{kind, ref}`.
+    Body(&'static str),
+}
+
+/// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
+pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
+    Some(match kind {
+        "postgres" => ("postgres", "postgres-project"),
+        "redis" => ("redis", "database"),
+        "bucket" => ("storage", "bucket"),
+        "stream" => ("streams", "stream"),
+        "queue" => ("queues", "vhost"),
+        "nosql" => ("nosql", "nosql-database"),
+        _ => return None,
+    })
 }
 
 /// Where a copying request names the environment it copies from.
@@ -91,7 +116,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_)))
+        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Body(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -115,7 +140,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -151,6 +176,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn lends(mut self, l: Lend) -> Row {
+        self.lends = Some(l);
         self
     }
     const fn index(mut self, param: &'static str) -> Row {
@@ -913,6 +942,9 @@ static ROWS: &[Row] = &[
         .env(EnvFrom::Param("env"))
         .path_query("path")
         .copies_from(CopyFrom::Query("from")),
+    // Findings across every environment (expired, missing, exposed, weak, …), names only: read on
+    // the project. Secrets keeps only what the caller may read (weak ones: may reveal).
+    row("GET", "/v1/secrets/projects/{project}/health", "secrets", R, one(&["project"], "project")),
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")),
@@ -956,9 +988,11 @@ static ROWS: &[Row] = &[
     // ── apps (feature/roll-apps, docs/apps/http-api.md) ──
     row("GET", "/v1/apps/services", "apps", R, list("id")),
     // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
-    row("POST", "/v1/apps/services", "apps", Act::Body(apps_create_action), Tgt::Product).env(EnvFrom::Fixed("production")),
+    // Its `links` hand each linked resource's credentials to the service: reveal on each too.
+    row("POST", "/v1/apps/services", "apps", Act::Body(apps_create_action), Tgt::Product).env(EnvFrom::Fixed("production")).lends(Lend::Body("links")),
     row("POST", "/v1/apps/projects/{project}/services", "apps", Act::Body(apps_create_action), Tgt::Create { project: Some("project"), place: None, id_field: "id" })
-        .env(EnvFrom::Fixed("production")),
+        .env(EnvFrom::Fixed("production"))
+        .lends(Lend::Body("links")),
     row("GET", "/v1/apps/events", "apps", R, Tgt::Product),
     // A project's notifications: the URL is stored sealed and never answered; a webhook's signing
     // secret comes back once, so making one is reveal (Slack and Discord ones are write).
@@ -979,6 +1013,9 @@ static ROWS: &[Row] = &[
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    // A link puts the linked resource's address and password in the service's variables, where
+    // its code reads them: reveal on that resource too.
+    row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),

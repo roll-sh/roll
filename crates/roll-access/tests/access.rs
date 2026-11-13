@@ -64,6 +64,8 @@ fn postgres() -> Router {
         .route("/git/{owner}/{repo}/git-receive-pack", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/storage/buckets/{name}", get(|| async { axum::Json(json!({ "name": "logs" })) }))
         .route("/v1/storage/buckets", get(|| async { axum::Json(json!([{ "name": "logs" }, { "name": "media" }])) }))
+        .route("/v1/apps/services", post(|| async { axum::Json(json!({ "id": "svc_new" })) }))
+        .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
@@ -928,4 +930,34 @@ async fn a_rule_can_grant_some_indices() {
     assert_eq!(search(&asker, "logs-a").await, StatusCode::OK);
     let (_, again) = d.call(&asker, Method::POST, "/v1/search/clusters/cl_1/indices/logs-b/search", Some(json!({}))).await;
     assert_eq!(again["code"], "approval_pending", "logs-b still asks: {again}");
+}
+
+/// A link hands the linked resource's credentials to a service (its variables): it needs reveal
+/// on that resource, by path or in a new service's body, and an approval for it is about that
+/// resource (remembering it allows revealing exactly that one).
+#[tokio::test]
+async fn a_link_needs_reveal_on_what_it_links() {
+    let d = Daemon::new(50);
+    let (apps, _) = d.token(json!([{ "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } }]), json!({})).await;
+    let link = |t: &str, kind: &str, r: &str| {
+        let (d, t, path) = (&d, t.to_string(), format!("/v1/apps/services/svc_a/links/{kind}/{r}"));
+        async move { d.call(&t, Method::PUT, &path, Some(json!({}))).await }
+    };
+    let (s, e) = link(&apps, "postgres", "prj_x").await;
+    assert_eq!((s, e["needs"]["product"].as_str(), e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("postgres"), Some("reveal")), "{e}");
+    assert_eq!(link(&apps, "mystery", "x").await.0, StatusCode::FORBIDDEN, "a kind roll doesn't know");
+    let create = json!({ "project": "p", "name": "web", "source": { "image": "nginx" }, "links": [{ "kind": "redis", "ref": "rdb_9" }] });
+    let (s, e) = d.call(&apps, Method::POST, "/v1/apps/services", Some(create)).await;
+    assert_eq!((s, e["needs"]["product"].as_str()), (StatusCode::FORBIDDEN, Some("redis")), "{e}");
+
+    let (both, _) = d.token(json!([
+        { "product": "apps", "resources": "*", "actions": { "write": "allow" } },
+        { "product": "postgres", "resources": [{ "id": "prj_x" }], "actions": { "reveal": "allow" } },
+        { "product": "postgres", "resources": [{ "id": "prj_y" }], "actions": { "reveal": "ask" } },
+    ]), json!({})).await;
+    assert_eq!(link(&both, "postgres", "prj_x").await.0, StatusCode::OK);
+    let (_, pending) = link(&both, "postgres", "prj_y").await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
+    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["resource"].as_str()), (Some("postgres"), Some("reveal"), Some("prj_y")), "{asked}");
 }

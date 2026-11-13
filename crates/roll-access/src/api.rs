@@ -177,6 +177,11 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     {
         (outcome, action) = (copied, Action::Reveal);
     }
+    if let Some((lent, ..)) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope).await
+        && crate::evaluate::rank(lent) < crate::evaluate::rank(outcome)
+    {
+        (outcome, action) = (lent, Action::Reveal);
+    }
     if outcome == Outcome::Deny && ask_otherwise && catalog::placement(row, &params).is_none() {
         outcome = Outcome::Ask;
     }
