@@ -208,8 +208,13 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let p = e.engine.accept_visual(&chg.id, "ada", true).await.unwrap();
     assert_eq!(p.visual_review.map(|v| (v.state, v.by)), Some((VisualState::Accepted, Some("ada".into()))));
     assert_eq!(e.code.last_report("chg_1").visual_review.map(|v| v.state), Some(VisualState::Accepted), "the change is told at once");
-    // The next head is reviewed again.
+    // A push that changes nothing visible keeps it; the next one that does is reviewed again.
     shoot("cs_1c");
+    assert!(e.engine.store.carry_acceptance(&chg.id).unwrap());
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Accepted), "pixel-identical to what was accepted");
+    e.engine.store.set_screenshot(&chg.id, "cs_1d", &png(128), None, None).unwrap();
+    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+    assert!(!e.engine.store.carry_acceptance(&chg.id).unwrap());
     assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
 }
 

@@ -516,6 +516,9 @@ impl Engine {
                     && self.store.set_page_shots(&r.id, r.build(), &shot.pages, &pages).is_ok();
                 if kept && r.change_id.is_some() {
                     self.compare_with_default_branch(r).await;
+                    if self.store.carry_acceptance(&r.id).unwrap_or(false) {
+                        let _ = self.store.log(&r.id, "its pages look exactly as when they were accepted: the acceptance carries over");
+                    }
                 } else if kept {
                     // A branch's preview may be a baseline: its screenshots are kept by head.
                     if let Err(e) = self.store.keep_base_history(&r.id, r.build()) {

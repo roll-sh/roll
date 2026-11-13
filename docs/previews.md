@@ -808,7 +808,9 @@ type Settings = {
     pending while a page differs and nobody has accepted it ("Differs from main by 8.0%: accept it
     in roll"), and success once someone has (the sheet's Accept, `roll preview accept`, `POST
     …/visual/accept`; "Accepted by ada"), or when the pages look the same. An acceptance is of one
-    screenshot's head: the next push is reviewed again. GitHub's branch protection can require
+    screenshot's head: the next push is reviewed again, unless every page (desktop, phone, the
+    other pages) looks exactly as at the accepted head, when the acceptance carries over (as
+    Chromatic carries accepted baselines forward). GitHub's branch protection can require
     `roll/visual`; with `required` roll's own landing does too (a `visual` blocker in
     `Code::blockers`, from the project's rule, never the change's). A required review is a
     person's: its author's acceptance doesn't count (as with approvals), and a scoped or OAuth
@@ -944,6 +946,7 @@ Ranked by what a person notices first. Done so far:
 - where a page changed, as a diff image (`?diff=base|previous`, the sheet's Diff);
 - a speed budget per project (`github.budget`, the `roll/speed` status);
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
+- an acceptance carried over a push that changes nothing visible;
 - a look at the sheet and the change page from screenshots of a live preview (the screenshot's
   modes spaced apart, roll's baseline tagged in the list);
 - a screenshot cut short by a redeploy or a sleep tried again once, and turning a project

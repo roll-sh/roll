@@ -1232,6 +1232,28 @@ impl Store {
         Ok(Some(head))
     }
 
+    /// After a screenshot: an acceptance of the head just before moves to this one when every page
+    /// looks exactly as it did there (Chromatic carries accepted baselines forward), so a push that
+    /// changes nothing visible isn't reviewed again. `true` when it moved.
+    pub fn carry_acceptance(&self, id: &str) -> Result<bool> {
+        self.db.write(|c| {
+            let accepted: Option<String> = c.query_row("SELECT head FROM visual_accepts WHERE preview_id = ?", [id], |r| r.get(0)).optional()?;
+            let shot: Option<(String, Option<String>, Option<i64>, Option<i64>)> =
+                c.query_row("SELECT head, prev_head, change_bp, phone_change_bp FROM screenshots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            let (Some(accepted), Some((head, Some(prev), Some(0), phone))) = (accepted, shot) else { return Ok(false) };
+            if accepted != prev || head == accepted || phone.is_some_and(|p| p != 0) {
+                return Ok(false);
+            }
+            // Every other page was taken at both heads and is unchanged too.
+            let pages: Vec<(Option<String>, Option<i64>)> = c.query("SELECT prev_head, change_bp FROM page_shots WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if pages.iter().any(|(h, bp)| h.as_deref() != Some(prev.as_str()) || *bp != Some(0)) {
+                return Ok(false);
+            }
+            c.execute("UPDATE visual_accepts SET head = ? WHERE preview_id = ?", [head.as_str(), id])?;
+            Ok::<_, Error>(true)
+        })
+    }
+
     /// The visual review of a change's preview (`github.visual_review`), once its pages were
     /// compared with the baseline's: the most any of them differs, and who accepted that head.
     fn visual_review(&self, r: &Row, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck]) -> Result<Option<crate::VisualReview>> {
