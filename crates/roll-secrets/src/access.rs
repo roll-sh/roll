@@ -41,19 +41,28 @@ pub struct Scope<'a> {
     pub project: &'a str,
     pub env: Option<&'a str>,
     pub path: Option<&'a str>,
+    /// About the project as a whole and not filtered per environment or folder afterwards (its
+    /// shares, required keys, rotators, the keys other environments have): only a rule over all of
+    /// it reaches it. A plain project-wide read answers per environment and folder instead.
+    pub whole: bool,
 }
 
 impl<'a> Scope<'a> {
     pub fn project(project: &'a str) -> Self {
-        Scope { project, env: None, path: None }
+        Scope { project, env: None, path: None, whole: false }
+    }
+
+    /// The project as a whole, unfiltered (see [`Scope::whole`]).
+    pub fn whole(project: &'a str) -> Self {
+        Scope { project, env: None, path: None, whole: true }
     }
 
     pub fn env(project: &'a str, env: &'a str) -> Self {
-        Scope { project, env: Some(env), path: None }
+        Scope { project, env: Some(env), path: None, whole: false }
     }
 
     pub fn at(project: &'a str, env: &'a str, path: &'a str) -> Self {
-        Scope { project, env: Some(env), path: Some(path) }
+        Scope { project, env: Some(env), path: Some(path), whole: false }
     }
 }
 
@@ -266,11 +275,12 @@ impl Grants for GrantGrants {
             Action::Delete => scope::Action::Delete,
             Action::Admin => scope::Action::Admin,
         };
-        // A read of the project as a whole (its environments' names, health, findings) answers only
-        // what the grant reaches in each environment and folder: a rule limited to some of them
-        // takes part in it, as roll-access's `filters_itself` routes do.
-        let whole = at.env.is_none() && action == scope::Action::Read;
-        let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: whole, ..Default::default() };
+        // A project-wide read that answers per environment and folder (its environments' names,
+        // health, findings, the audit log) answers only what the grant reaches in each: a rule
+        // limited to some of them takes part in it, as roll-access's `filters_itself` routes do.
+        // One about the project as a whole (`Scope::whole`) needs a rule over all of it.
+        let filtered = at.env.is_none() && action == scope::Action::Read && !at.whole;
+        let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
     }

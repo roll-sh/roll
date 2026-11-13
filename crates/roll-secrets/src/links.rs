@@ -204,7 +204,7 @@ pub struct Target {
 impl crate::Secrets {
     /// The project's resources a provider can link, with their fields.
     pub fn link_targets(&self, project: &str, caller: &crate::Caller) -> Result<Vec<Target>> {
-        caller.need(crate::Action::Read, &crate::Scope::project(project))?;
+        caller.need(crate::Action::Read, &crate::Scope::whole(project))?;
         self.project(project)?;
         let members = self.members(project)?;
         let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;

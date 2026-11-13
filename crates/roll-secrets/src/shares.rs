@@ -107,7 +107,7 @@ impl Secrets {
     }
 
     pub fn shares(&self, project: &str, caller: &Caller) -> Result<Vec<Share>> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        caller.need(Action::Read, &Scope::whole(project))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.read(|c| {

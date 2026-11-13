@@ -188,8 +188,9 @@ impl Secrets {
                 add(Issue::Unread, format!("not read in {UNREAD_DAYS} days"));
             }
         }
-        // Required keys a standard environment doesn't define (its imports and base included).
-        for r in self.required(project, caller)? {
+        // Required keys a standard environment doesn't define (its imports and base included): each
+        // reported only in environments the caller may read.
+        for r in self.db.read(|c| crate::required::of(c, project))? {
             for e in &envs {
                 if have.contains(&(e.slug.clone(), r.path.clone(), r.key.clone())) || !caller.allows(Action::Read, &Scope::at(project, &e.slug, &r.path)) {
                     continue;
