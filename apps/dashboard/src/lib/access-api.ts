@@ -45,7 +45,8 @@ export interface OAuthClient {
 export interface Grant {
   id: string;
   name: string;
-  kind: "token" | "oauth";
+  /** `workload`: a short-lived token a workload got by proving who it is (roll secrets' identity logins). */
+  kind: "token" | "oauth" | "workload";
   rules: Rule[];
   expires_at: number | null;
   ip_allow: string[];
@@ -300,6 +301,8 @@ export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
+  /** The latest workload tokens (they're not in `tokens`). */
+  workloads: () => call<Grant[]>("GET", "/v1/access/tokens?kind=workload"),
   token: (id: string) => call<Grant>("GET", token(id)),
   /** The token is in the answer this once. */
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
