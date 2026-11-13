@@ -183,7 +183,8 @@ decided by the gate, and a connection is offered only the prompts whose tools it
 one line of printable text, at most 200 characters.
 
 A prompt's `project`, `service` and `env` complete as the person types (`completion/complete`): the
-values come from the list tool the connection would call (`workspace_list_projects`,
+values come from the list tool the connection would call (`workspace_list_projects`; a Postgres
+project's from `postgres_list_projects`;
 `apps_list_services`, `apps_list_environments` for the `service` already given), through the gate
 with the caller's token, so a suggestion is only what it may read, and each is an audited read.
 Nothing completes for a prompt the connection isn't offered.
@@ -193,6 +194,7 @@ Nothing completes for a prompt the connection isn't offered.
 | `what_can_i_do` | | What this connection may do, in words, and which rule would allow what's missing. | `access_whoami` |
 | `check_diff_for_secrets` | `project` | Before a commit: whether any added value is one of the project's stored secrets (by key and environment, never the value). | `secrets_scan` |
 | `fix_secrets_health` | `project` | What needs fixing in a project's secrets, most urgent first, asking before changing anything. | `secrets_health` |
+| `try_migration_on_branch` | `project` | A schema change tried on a branch first (create, migrate, compare), then on main only when it worked and you say so. | `postgres_get_project`, `postgres_create_branch`, `postgres_describe_schema`, `postgres_execute`, `postgres_delete_branch` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (deploys, deploy logs, failing requests, metrics), then a fix or a rollback it asks about first. | `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
 
 ## Tools
@@ -391,25 +393,26 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); prompts' arguments complete
-from what the connection may list (`completion/complete`, through the gate); MCP prompts (roll's
-workflows as slash commands: what this connection may do, checking a diff for secrets, fixing
-secrets health, debugging a failing service; offered only with their tools); the integration branch
-on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a person's own token
-over MCP reads their own secrets project, the operator's answers 404, disabled it stops;
-`users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant dead for
-products' background work once they can't sign in (`Sessions::person_now`), hops carrying only their
-own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put back a
-deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every open
-sibling's routes classified, built with #25 (apps-next #26, previews-next #28 and search #29 pass
-rolld's route test); a preview's share link is reveal (`previews_share`); search's index mapping,
-settings, refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own tokens
-for its caller through the token route's own function) and tokens listed by what they were made for
-(`?product=&resource=`), for secrets retiring `rlst_`; taking an apps web service off the internet
-or putting it on (`run.public`) is deploy; a token's rate is the fleet's (each node enforces its
-share, the rate over the live nodes), not N times it; a worker's scaling stream needs read on it; a
-spent OAuth refresh token used again revokes the connection (OAuth 2.1; 30 seconds of grace for a
-retry); only token and access secrets sign a request in.
+revoked as leaked, about to expire; only their own, never a secret); `try_migration_on_branch` (a
+schema change on a Postgres branch first, main only when it worked and you say so); prompts'
+arguments complete from what the connection may list (`completion/complete`, through the gate); MCP
+prompts (roll's workflows as slash commands: what this connection may do, checking a diff for
+secrets, fixing secrets health, debugging a failing service; offered only with their tools); the
+integration branch on Postgres 18 (roll-access, roll-mcp, roll-workspace, roll-secrets) and live (a
+person's own token over MCP reads their own secrets project, the operator's answers 404, disabled it
+stops; `users-live/secrets.sh`); the tenth review (access with secrets): a person's stored grant
+dead for products' background work once they can't sign in (`Sessions::person_now`), hops carrying
+only their own product's routes, `Access::revoke_workload`; apps' rollbacks as tools say they put
+back a deploy's variables (`keep_variables`), and `apps_rollback_previous` (apps-next #26); every
+open sibling's routes classified, built with #25 (apps-next #26, previews-next #28 and search #29
+pass rolld's route test); a preview's share link is reveal (`previews_share`); search's index
+mapping, settings, refresh and analyze as MCP tools; `Access::create_grant` (a product makes its own
+tokens for its caller through the token route's own function) and tokens listed by what they were
+made for (`?product=&resource=`), for secrets retiring `rlst_`; taking an apps web service off the
+internet or putting it on (`run.public`) is deploy; a token's rate is the fleet's (each node
+enforces its share, the rate over the live nodes), not N times it; a worker's scaling stream needs
+read on it; a spent OAuth refresh token used again revokes the connection (OAuth 2.1; 30 seconds of
+grace for a retry); only token and access secrets sign a request in.
 
 Done before (oldest last): the consent screen says what a client's identity is worth (a metadata
 document's address vouches for it; a registered name doesn't); the access page's checkup and

@@ -73,6 +73,19 @@ const PROMPTS: &[Prompt] = &[
         },
     },
     Prompt {
+        name: "try_migration_on_branch",
+        title: "Try a migration on a branch",
+        description: "A schema change tried on a copy-on-write branch of a Postgres project first, then applied to main only when it works and you say so.",
+        args: &[Arg { name: "project", description: "Postgres project", required: true }],
+        needs: &["postgres_get_project", "postgres_create_branch", "postgres_describe_schema", "postgres_execute", "postgres_delete_branch"],
+        text: |a| {
+            format!(
+                "I want to change the schema of Postgres project {}. Ask me for the migration if I haven't given                  it. Then: postgres_create_branch from main (name it after the change), postgres_get_project for                  the branch's endpoint, postgres_describe_schema there, run the migration with postgres_execute                  on the branch, and describe the schema again. Show me what changed and anything that failed.                  Only if it worked and I say so, run the same migration on main's endpoint (it may ask a person                  first); then offer postgres_delete_branch. Never run it on main first.",
+                a("project")
+            )
+        },
+    },
+    Prompt {
         name: "debug_failing_service",
         title: "Debug a failing service",
         description: "Why an app service's environment is failing: its last deploys, errors and metrics, then a fix or a rollback.",
@@ -109,6 +122,8 @@ pub struct Source {
 pub fn source(prompt: &str, arg: &str) -> Option<Source> {
     PROMPTS.iter().find(|p| p.name == prompt)?.args.iter().find(|a| a.name == arg)?;
     match arg {
+        // A Postgres project is Postgres's own, not a workspace project.
+        "project" if prompt == "try_migration_on_branch" => Some(Source { tool: "postgres_list_projects", args: |_| json!({}), fields: &["id", "name"] }),
         "project" => Some(Source { tool: "workspace_list_projects", args: |_| json!({}), fields: &["id", "name"] }),
         "service" => Some(Source { tool: "apps_list_services", args: |_| json!({}), fields: &["id", "name"] }),
         "env" => Some(Source { tool: "apps_list_environments", args: |ctx| json!({ "service": ctx["service"] }), fields: &["name"] }),
