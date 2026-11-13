@@ -1116,32 +1116,49 @@ Every lookup by key inside a request is a hash map (a grid of ~11k keys over 5 e
 
 ## Next
 
-Done and in PR #20: the store and crypto, rolld's mount and link providers (Postgres, Redis,
-streams, buckets, NoSQL, search), `roll secrets`, `roll secrets setup`, `roll run [--watch]`,
-checks and sandboxes, leaked secrets don't land, required keys, one-time sharing, syncs (GitHub,
-sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store,
-Kubernetes, GitLab CI, Render, Netlify), audit
-sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
-previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
-for stored values, typed keys, sharing across projects, and the fixes from a third security review (of identities, sharing,
-typed keys and scans) and a phone-width pass from two security reviews.
-Reviewed on 2026-11-13 against Infisical, Doppler, Vault, Vercel and 1Password Developer, and
-against the apps, previews, MCP and search branches (previews resolves untrusted; apps refuses
-dynamic links for services and uses the digest for `needs_deploy`). Ranked:
+Done and in PR #20:
+- the store and its crypto (the deployment key from the environment, a file, or AWS KMS);
+- rolld's mount and link providers (Postgres, Redis, streams, buckets, NoSQL, search);
+- `roll secrets`, `roll secrets setup` and `roll run [--watch]`;
+- checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
+- leaked secrets don't land, plus scans of a repo's default branch and history;
+- required and typed keys; insights and rotation reminders;
+- one-time sharing, and sharing across projects;
+- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Cloudflare Workers, AWS Parameter Store,
+  Kubernetes, sealed webhooks and deploy notifications;
+- audit sinks, purge and retention, workload identities (OIDC logins for CI);
+- the dashboard's Secrets surface;
+- the fixes from three security reviews and a phone-width pass.
 
-1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands: done and
-   tested on `wip/secrets-on-mcp` (kept merged with both branches): `Secrets::caller` reads
-   `roll_auth::Grant` before the operator marker, `GrantGrants` answers second resources through
-   `Grant::allows`, whoami's project comes from the grant's rules, a sync made by a grant re-checks
-   it through `roll_auth::Grants`. Merge it in when #19 is on main; then `rlst_` tokens, and the
-   tokens identities mint, become roll-access's. Also roll apps' `SecretSource` wired to
-   `Secrets::values` as `app:<svc>` (whichever of #20 and #21 merges second).
-2. **Search links live** once roll search (#22) lands its workspace kind: check the provider
-   against a real cluster. AWS Secrets Manager and session tokens for `aws-ssm`.
-3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
-   approver grants it for minutes (Infisical's access requests), audited; built on the change
-   request approvals.
-4. **Fly.io and Railway as sync targets** (their APIs are GraphQL; checked against their docs
-   before they ship), and Render environment groups alongside a service's own variables.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
-   so the roll-access swap is ready the day #19 lands.
+Reviewed again on 2026-11-13:
+- against Infisical, Doppler, Vault, Vercel and 1Password Developer;
+- across the apps, previews, MCP and search branches (findings sent to each thread; this branch's
+  part is done: untrusted preview environments, `linked` keys, the Access table).
+
+Ranked:
+
+1. **`PUT …/environments/{env}`: ensure an environment in one call.** It creates the environment
+   if it's missing, and otherwise brings its labels, expiry and overrides to what's given in one
+   change (the keys given, and deletes for overrides no longer wanted with `replace`). It's
+   idempotent. previews' create, then 409, then GET, then changes, and apps' "an apps environment
+   is a secrets environment", both become one call. In progress.
+2. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
+   prepared on `wip/secrets-on-mcp`. Also, on that branch:
+   - list `secrets` among MCP's products, so its tools aren't filtered out;
+   - map ephemeral environments to roll-access's `preview` environment class;
+   - get the catalogue rows reported to the MCP thread (identities, lease renew, exports, admin
+     listings) into place.
+   Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
+   `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
+   second.
+3. **Errors from in-process product calls carry the HTTP status.** rolld's `Api` (link providers,
+   syncs) reads a status, not "404" or "no " in an error's text.
+4. **One table of every secrets route and its action**, generated from the router and checked by a
+   test against roll-access's `classify`, so a catch-all row can't hide a misclassified route.
+5. **Fly.io and Railway syncs**, checked against their own clients' sources. Fly is GraphQL
+   `setSecrets`/`unsetSecrets` `{appId, secrets: [{key, value}]}` / `{appId, keys}`.
+6. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+   real cluster.
+7. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+   `reveal` on a protected environment, and an approver grants it for minutes.
+8. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
