@@ -81,6 +81,8 @@ impl Apps {
             this.running_jobs.lock().remove(&id);
             let id2 = id.clone();
             let _ = this.db(move |s| s.finish_job(&id2, status, code)).await;
+            // Whoever follows the service sees it end.
+            this.changed(&sid);
             // A job that failed (not one canceled) is an event: `job.failed`, off by default.
             if matches!(status, RunStatus::Failed | RunStatus::TimedOut) {
                 let data = serde_json::json!({ "job": id, "status": status.as_str(), "exit_code": code });

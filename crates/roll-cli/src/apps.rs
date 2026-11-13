@@ -121,6 +121,15 @@ pub enum Domains {
         #[command(flatten)]
         target: Target,
     },
+    /// Make a custom domain redirect to another of the environment's hostnames (308), or serve
+    /// again with `--to none`.
+    Redirect {
+        hostname: String,
+        #[arg(long)]
+        to: String,
+        #[command(flatten)]
+        target: Target,
+    },
 }
 
 #[derive(Subcommand)]
@@ -312,6 +321,29 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Take a link out: its variables leave the next deploy.
+    Unlink {
+        kind: String,
+        r#ref: String,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Stop a queued or running deploy (the live one keeps serving).
+    Cancel {
+        deployment: String,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// An image service's private registry login: `--username` with the password or token on
+    /// stdin, or `--remove`. Sealed, sent only to that image's registry, never shown again.
+    Registry {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with = "remove")]
+        username: Option<String>,
+        #[arg(long)]
+        remove: bool,
+    },
     /// Scale to zero now.
     Sleep {
         #[command(flatten)]
@@ -322,6 +354,7 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Replace the instances with fresh ones (the same deployment).
     Restart {
         #[command(flatten)]
         target: Target,
@@ -433,6 +466,12 @@ pub enum AppsCmd {
         /// An image service: deploy when its tag points at a new image (`true`), or not.
         #[arg(long)]
         follow_tag: Option<bool>,
+        /// Only visitors with its link get in (a new link, printed once; the old one stops).
+        #[arg(long, conflicts_with = "open")]
+        private: bool,
+        /// Anyone with its URL gets in again.
+        #[arg(long)]
+        open: bool,
     },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
@@ -1448,6 +1487,11 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             api.call(reqwest::Method::DELETE, &format!("{}/domains/{}", env_path(&svc, &target.env), enc(&hostname)), None).await?;
             json!({ "removed": hostname })
         }
+        Domains::Redirect { hostname, to, target } => {
+            let svc = service(api, &target).await?;
+            let to = if to == "none" { Value::Null } else { json!(to) };
+            api.call(reqwest::Method::PATCH, &format!("{}/domains/{}", env_path(&svc, &target.env), enc(&hostname)), Some(json!({ "redirect_to": to }))).await?
+        }
     };
     if json_out {
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -1700,25 +1744,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
         }
         AppsCmd::Rollback { deployment, target, keep_variables } => {
             let svc = service(api, &target).await?;
-            let deployment = match deployment {
-                Some(d) => d,
-                None => {
-                    let env = api.get(&env_path(&svc, &target.env)).await?;
-                    let all = api.get(&format!("{}/deploys", env_path(&svc, &target.env))).await?;
-                    let live = s(&env["active"]["id"]);
-                    let prev = all
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .find(|d| d["status"] == "inactive" && s(&d["id"]) != live && !d["image"].is_null())
-                        .ok_or_else(|| anyhow::anyhow!("nothing was live in {} before {live}", target.env))?;
-                    if !json_out {
-                        eprintln!("rolling back to {} ({})", s(&prev["id"]), s(&prev["message"]));
-                    }
-                    s(&prev["id"])
-                }
+            // No id: the server picks the one before what's live, walking back through rollbacks.
+            let path = match &deployment {
+                Some(d) => format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(d)),
+                None => format!("{}/rollback", env_path(&svc, &target.env)),
             };
-            let dep = api.post(&format!("{}/deploys/{}/rollback", env_path(&svc, &target.env), enc(&deployment)), json!({ "keep_variables": keep_variables })).await?;
+            let dep = api.post(&path, json!({ "keep_variables": keep_variables })).await?;
+            if deployment.is_none() && !json_out {
+                eprintln!("rolling back to {}", s(&dep["rollback_of"]));
+            }
             if !json_out {
                 return watch(api, &svc, &target.env, &dep).await;
             }
@@ -1765,6 +1799,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/services/{}/links/{}/{}", enc(&s(&svc["id"])), enc(&kind), enc(&r#ref));
             api.call(reqwest::Method::PUT, &path, Some(json!({ "prefix": prefix }))).await?
+        }
+        AppsCmd::Unlink { kind, r#ref, target } => {
+            let svc = service(api, &target).await?;
+            api.call(reqwest::Method::DELETE, &format!("/v1/apps/services/{}/links/{}/{}", enc(&s(&svc["id"])), enc(&kind), enc(&r#ref)), None).await?;
+            json!({ "unlinked": format!("{kind}/{ref}") })
+        }
+        AppsCmd::Cancel { deployment, target } => {
+            let svc = service(api, &target).await?;
+            api.post(&format!("{}/deploys/{}/cancel", env_path(&svc, &target.env), enc(&deployment)), json!({})).await?
+        }
+        AppsCmd::Registry { target, username, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/services/{}/registry", enc(&s(&svc["id"])));
+            if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?
+            } else {
+                let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the password or token on stdin (or --remove)"))?;
+                let mut password = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut password)?;
+                let password = password.trim_end_matches(['\r', '\n']).to_string();
+                anyhow::ensure!(!password.is_empty(), "the password or token goes on stdin (never argv)");
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": password }))).await?
+            }
         }
         AppsCmd::Sleep { target } => {
             let svc = service(api, &target).await?;
@@ -1998,7 +2055,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag } => {
+        AppsCmd::Env { target, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, private, open } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -2016,6 +2073,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));
             }
+            // A new access token, made here: only its link shows it, once.
+            let token = private.then(new_token);
+            if let Some(t) = &token {
+                body.insert("access".into(), json!({ "token": t }));
+            } else if open {
+                body.insert("access".into(), Value::Null);
+            }
             if !run.is_empty() {
                 let mut r = serde_json::Map::new();
                 for kv in &run {
@@ -2028,7 +2092,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 body.insert("run".into(), Value::Object(r));
             }
-            api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(Value::Object(body))).await?
+            let e = api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(Value::Object(body))).await?;
+            if let (Some(t), Some(url)) = (&token, e["url"].as_str()) {
+                println!("{url}/?roll_access={t}");
+                eprintln!("shown once: only visitors with this link get in (it sets a cookie)");
+                return Ok(());
+            }
+            e
         }
         AppsCmd::EnvDelete { target, yes } => {
             let svc = service(api, &target).await?;
@@ -2043,6 +2113,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
         human(&out)?;
     }
     Ok(())
+}
+
+/// An environment's access token: 32 characters of lowercase base32 from the OS's randomness
+/// (the dashboard's are the same shape).
+pub(crate) fn new_token() -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut b = [0u8; 32];
+    getrandom::fill(&mut b).expect("system randomness");
+    b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect()
 }
 
 #[cfg(test)]

@@ -1633,3 +1633,30 @@ async fn a_rollback_restores_its_deployments_variables() {
     assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
     assert_eq!(vals(&w).await["MODE"], "old", "kept");
 }
+
+/// "Roll back" with no deployment walks back in time, through earlier rollbacks too, and never
+/// forward to what it just left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rolling_back_again_goes_further_back() {
+    let w = world().await;
+    let (svc, d1) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let mut deploy = Vec::new();
+    for _ in 0..2 {
+        let (_, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+        deploy.push(settled(&w, &id, "production", d["id"].as_str().unwrap()).await);
+    }
+    let back = |w: &World| {
+        let (api, base) = (w.api.clone(), base.clone());
+        async move { call(&api, "POST", &format!("{base}/rollback"), None).await }
+    };
+    let (st, r1) = back(&w).await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    assert_eq!(r1["rollback_of"], deploy[0]["id"], "from d3 to d2");
+    settled(&w, &id, "production", r1["id"].as_str().unwrap()).await;
+    let (_, r2) = back(&w).await;
+    assert_eq!(r2["rollback_of"], d1["id"], "then to d1, not forward to d3");
+    settled(&w, &id, "production", r2["id"].as_str().unwrap()).await;
+    assert_eq!(back(&w).await.0, StatusCode::CONFLICT, "nothing before d1");
+}
