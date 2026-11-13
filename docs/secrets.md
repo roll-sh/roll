@@ -1055,7 +1055,8 @@ checks and sandboxes, leaked secrets don't land, required keys, one-time sharing
 sealed webhooks, deploy notifications, Vercel, Cloudflare Workers, AWS Parameter Store), audit
 sinks, purge and retention, insights, the dashboard's Secrets surface, untrusted consumers for
 previews, workload identities (OIDC logins for CI), scanning a repo's default branch and history
-for stored values, typed keys, sharing across projects, and the fixes from two security reviews.
+for stored values, typed keys, sharing across projects, and the fixes from a third security review (of identities, sharing,
+typed keys and scans) and a phone-width pass from two security reviews.
 Reviewed on 2026-11-13 against Infisical, Doppler, Vault, Vercel and 1Password Developer, and
 against the apps, previews, MCP and search branches (previews resolves untrusted; apps refuses
 dynamic links for services and uses the digest for `needs_deploy`). Ranked:
@@ -1072,7 +1073,8 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **A second look at the whole surface**: another security review of identities, sharing,
-   typed keys and scans, then a pass over every screen at phone width.
+4. **Kubernetes as a sync target**: push an environment into a cluster's Secret (its API server and
+   a service account token kept sealed, like the other platforms' credentials), so workloads that
+   don't run `roll run` read roll secrets without an operator to install.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.
