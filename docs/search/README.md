@@ -207,45 +207,40 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Merge main and wire roll-access** (#19 and #18 landed): a dry merge conflicts in
-   `ci.yml`, rolld's `cluster.rs`, `main.rs`, `tests/auth.rs`, docs/cloud and docs/workspace;
-   then `r.by_fn("cluster", …)` in `rolld/src/access.rs` with `Control::resolve_id`, so rules
-   name clusters by id even when a path uses the name. Then the remaining benchmark work
-   (docs/benchmarks/search.md, round 7 summary: roll ahead of both on every measure but
-   `autohisto_agg` and `terms_enum`, where OpenSearch is): a full rerun of every track with
-   variance on a quiet host, and one allocator policy (rolld's against search-dev's purge
-   governor, by a matched benchmark).
-2. **Fleet under load**: done. `rolld/tests/search_cluster_e2e.rs` (two real `rolld`, Postgres
-   leases, MinIO) and roll cloud's fleet test (`rolld/tests/fleet_e2e.rs`, `pnpm test:fleet`:
-   three nodes from the fleet image behind HAProxy, DynamoDB leases, every product under load)
-   both pass with search: through the edge's `<cluster>.search.…` hostname, 7,116 documents
-   written, acknowledged and verified across a SIGKILL, a rolling restart and a scale-out (4 ×
-   502, 3 × 503, the longest stall 11.1 s at the SIGKILL). Next there: shorten that stall (the
-   lease takeover after a SIGKILL).
-3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`,
-   ES|QL, watcher. Downsampling's last one is allocation filtering
-   (`index.routing.allocation.include.*` leaving a target unassigned). `logsdb`'s last 9 are decisions:
-   `_ignored_source` returned as Elasticsearch's binary entries (7 tests; it needs a stored field
-   per document on the synthetic-source indexing path, so measure it first), `@timestamp`
-   indexed with a doc-values skipper instead of points (changes range queries: needs a
-   benchmark plan), and one columnar template Elasticsearch rejects for a reason not yet found. Runtime fields' last 5:
-   `geo_bounds` on a geo_point runtime field (a hook in `search-aggs`' parser), ip terms tie
-   order (runtime ip values reach aggregations as strings), highlighting a runtime-field query
-   (`search-index`'s highlighter). KQL is done (34 of 34); check its parse-error wording against the
-   reference. In the opensearch dialect, count `auto_date_histogram` from the points tree as
-   OpenSearch does (`filter_rewrite`'s replay already picks OpenSearch's rounding).
-4. **Dashboard polish**: the index browser and console on the per-index routes where they fit;
-   checked against Elastic Cloud's and OpenSearch Dashboards' consoles.
-5. **Metering on the fleet**: a cluster that moves mid-interval is metered once (lists already
-   read where a cluster is loaded from the catalog). `own_bytes` (what a branch adds over its
-   parent) is on `GET /v1/search/clusters/{id}` for previews.
-6. **Previews, secrets, apps**: a `roll_previews::Brancher` for search (branch and reset);
-   private networking for apps; wire `resolve_id` into roll-access once #19 lands. roll secrets'
-   search link provider is built on feature/roll-secrets (`crates/rolld/src/secrets.rs`): it
-   issues the cluster's own API keys (`POST /v1/search/clusters/{id}/keys`, dynamic with an
-   expiry or managed), never the cluster password, and works once `Kind::Search` is on main.
-7. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`: 1m24s on a cold
-   cache with `search-analysis` too, so that one was dropped; measure it again once main's
-   cache exists). The extended workflow (`search.yml`) runs on demand. `search-store`'s
-   `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once` failed once on the loaded
-   host while four crates' tests ran together (it passes alone): find what it races on.
+1. **Field level security everywhere a field's content can come out.** Role `field_security`
+   hides fields from queries, aggregations, sorts, `fields` and `_source`, but not yet from
+   highlighting, runtime fields and scripts (which read `_source` and doc values), term vectors,
+   `field_caps`, `get_mapping`, `explain`, suggesters, inner hits' sources and ES|QL columns.
+   The first ones leak a hidden field's content, not only its name. Elasticsearch filters all of
+   them through the same `FieldPermissions`: route every read through `dls::FieldFilter`, and a
+   test per read path in one table (role, request, what must not appear).
+2. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall is 11.1 s at the
+   SIGKILL (redis, nosql and tasks ~10 s in the same run): a dead owner's lease expires before
+   another node loads its clusters. Measure where the time goes (lease TTL, detection, load from
+   S3) and cut it, keeping fencing by ownership markers.
+3. **Integration with the stacked branches** once the stacking agent's merge of previews (#21,
+   #23), apps and secrets (#20) lands on this branch: run previews' search brancher against the
+   current branch API (`own_bytes`, branch delete), secrets' search link provider (keys routes),
+   and apps' bindings of a `search` resource end to end (`ELASTICSEARCH_URL`, the cluster's
+   hostname); the fleet test with every product on.
+4. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
+   both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is): a full
+   rerun of every Rally track with variance for all three targets; one allocator policy (rolld's
+   against search-dev's purge governor, by a matched benchmark); `terms_enum`'s per-request
+   overhead.
+5. **Compatibility gaps** from the extended suites (4,699+ of the 5,541 Elasticsearch passes),
+   largest first: platinum's machine learning (278, a product decision: anomaly detection and
+   trained models), rollup (52), security's last 13, watcher (43 of 89), ES|QL's last 5
+   (TOP_SNIPPETS, CATEGORIZE, approximation, `unsigned_long` past `i64::MAX`). `logsdb`'s last 9 are
+   decisions (`_ignored_source` binary entries, `@timestamp` doc-values skipper); runtime fields'
+   last 5 (`geo_bounds` on geo_point runtime fields, ip terms tie order, highlighting runtime
+   fields); downsample's last one (allocation filtering). In the opensearch dialect, count
+   `auto_date_histogram` from the points tree as OpenSearch does.
+6. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
+   (#18) seeing only the clusters and indices their access allows; checked against Elastic
+   Cloud's and OpenSearch Dashboards' consoles.
+7. **Metering on the fleet**: a cluster that moves mid-interval is metered once; job wakes billed
+   as loaded time are visible in usage.
+8. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`); measure it once
+   main's cache exists. `search-store`'s `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once`
+   failed once on the loaded host (it passes alone): find what it races on.
