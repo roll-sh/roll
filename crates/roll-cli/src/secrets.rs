@@ -125,6 +125,20 @@ pub enum Secrets {
         request: bool,
         #[arg(short, long)]
         message: Option<String>,
+        /// When the value stops working outside roll: a date (2027-03-31), RFC 3339, how long from
+        /// now (90d), or `never`. Insights flag it and reminders announce it two weeks ahead.
+        #[arg(long, value_name = "WHEN")]
+        expires: Option<String>,
+    },
+    /// Date when keys' values stop working outside roll (a vendor's key, a certificate), keeping
+    /// the values: `roll secrets expire STRIPE_KEY --on 2027-03-31` (or `90d`, or `never`).
+    Expire {
+        #[arg(required = true)]
+        keys: Vec<String>,
+        #[arg(long, value_name = "WHEN")]
+        on: String,
+        #[arg(long)]
+        request: bool,
     },
     /// Delete secrets.
     #[command(alias = "delete")]
@@ -149,6 +163,22 @@ pub enum Secrets {
         overwrite: bool,
         #[arg(long)]
         request: bool,
+    },
+    /// Fill `${KEY}` in a config file (`-`: stdin) from the environment; a key that isn't set fails.
+    /// `\${KEY}` stays as written. Prints it, or writes `--out` (0600).
+    Render {
+        file: String,
+        #[arg(long)]
+        out: Option<String>,
+        /// Keep running: write `--out` again when the environment changes (checked every
+        /// `--interval` seconds), renewing dynamic credentials' leases meanwhile.
+        #[arg(long, requires = "out")]
+        watch: bool,
+        #[arg(long, default_value_t = 5, requires = "watch")]
+        interval: u64,
+        /// With --watch: a command run (through `sh -c`) after each new file, such as a reload.
+        #[arg(long, requires = "watch", value_name = "COMMAND")]
+        exec: Option<String>,
     },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
@@ -645,6 +675,26 @@ fn when(s: &str) -> anyhow::Result<i64> {
     Ok(chrono::Utc::now().timestamp_millis() - minutes(s)? * 60_000)
 }
 
+/// An expiry: a date (its start, UTC), RFC 3339, how long from now (`90d`), or `never` (None).
+fn expiry(s: &str) -> anyhow::Result<Option<i64>> {
+    if s == "never" || s == "none" {
+        return Ok(None);
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(Some(d.and_hms_opt(0, 0, 0).expect("midnight").and_utc().timestamp_millis()));
+    }
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(Some(t.timestamp_millis()));
+    }
+    let m = minutes(s).map_err(|_| anyhow::anyhow!("{s}: a date (2027-03-31), RFC 3339, how long from now (90d), or never"))?;
+    Ok(Some(chrono::Utc::now().timestamp_millis() + m * 60_000))
+}
+
+/// 2027-03-31
+fn day(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default()
+}
+
 fn approval_hint(e: anyhow::Error) -> anyhow::Error {
     if e.to_string().contains("is protected") {
         return e.context("the environment is protected: add --request to open a change request");
@@ -738,7 +788,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             println!("{}", s(&v["value"]));
         }
-        Secrets::Set { pairs, comment, tags, personal, generate, request, message } => {
+        Secrets::Set { pairs, comment, tags, personal, generate, request, message, expires } => {
+            let expires = expires.as_deref().map(expiry).transpose()?;
             let mut ops = vec![];
             for p in &pairs {
                 let (key, value) = split_pair(p)?;
@@ -763,9 +814,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if personal {
                     op["type"] = json!("personal");
                 }
+                if let Some(e) = expires {
+                    op["expires_at"] = json!(e);
+                }
                 ops.push(op);
             }
             write(&c, &env, ops, message, request, json_out).await?;
+        }
+        Secrets::Expire { keys, on, request } => {
+            let at = expiry(&on)?;
+            // A set without a value would make a missing key, empty: only keys already here.
+            let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
+            let here: Vec<&str> = list.as_array().into_iter().flatten().filter(|x| x["source"]["kind"] == "own").filter_map(|x| x["key"].as_str()).collect();
+            if let Some(k) = keys.iter().find(|k| !here.contains(&k.as_str())) {
+                bail!("{k} isn't set in {}:{} (an imported or inherited key is dated where it's set)", c.at.env, c.at.path);
+            }
+            let ops = keys.iter().map(|k| json!({ "op": "set", "key": k, "expires_at": at })).collect();
+            write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Rm { keys, request } => {
             let ops = keys.iter().map(|k| json!({ "op": "delete", "key": k })).collect();
@@ -794,6 +859,24 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             if let Some(sk) = v["skipped"].as_array().filter(|a| !a.is_empty()) {
                 println!("Skipped {} existing (use --overwrite): {}", sk.len(), sk.iter().map(s).collect::<Vec<_>>().join(", "));
+            }
+        }
+        Secrets::Render { file, out, watch, interval, exec } => {
+            let tpl = if file == "-" {
+                let mut t = String::new();
+                std::io::stdin().read_to_string(&mut t)?;
+                t
+            } else {
+                std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
+            };
+            let (text, leases) = render_env(&c, &env, &file, &tpl).await?;
+            let Some(out) = out else {
+                print!("{text}");
+                return Ok(());
+            };
+            replace_private(&out, &text)?;
+            if watch {
+                render_watch(&c, &env, &file, &tpl, &out, text, leases, interval, exec.as_deref()).await?;
             }
         }
         Secrets::Export { format, name, namespace } => {
@@ -1176,7 +1259,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 let read = k["last_read_at"].as_i64().map(|at| format!("read {} by {}", ago(at), s(&k["last_read_by"]))).unwrap_or_else(|| "not read in 90 days".into());
                 let stale = if k["stale"] == true { "  STALE" } else { "" };
-                println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
+                let expiry = match k["expires_at"].as_i64() {
+                    Some(t) if t <= chrono::Utc::now().timestamp_millis() => format!("  EXPIRED {}", day(t)),
+                    Some(t) if k["expiring"] == true => format!("  EXPIRES {}", day(t)),
+                    Some(t) => format!("  expires {}", day(t)),
+                    None => String::new(),
+                };
+                let exposed: Vec<String> = k["exposed_in"].as_array().into_iter().flatten().map(s).collect();
+                let exposed = if exposed.is_empty() { String::new() } else { format!("  ALSO IN {}", exposed.join(", ")) };
+                println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}{expiry}{exposed}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
             }
         }
         Secrets::Shares { revoke } => {
@@ -1675,6 +1766,128 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
     let file = setup::save(&all)?;
     println!("{key} → {display}, {env}{}  (kept in {})", if path == "/" { String::new() } else { format!(" {path}") }, file.display());
     Ok(())
+}
+
+/// The template filled from the environment, and the leases of the dynamic credentials in it.
+async fn render_env(c: &Client<'_>, env: &str, file: &str, tpl: &str) -> anyhow::Result<(String, Vec<String>)> {
+    let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
+    let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
+    let text = render(tpl, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
+        let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
+        anyhow::anyhow!("{file} names keys that have no value:\n  {}", why.join("\n  "))
+    })?;
+    let leases = v["leases"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect();
+    Ok((text, leases))
+}
+
+/// Replace `path` whole (a file beside it, then a rename), readable only by its owner: a reader
+/// never sees half a file.
+fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let target = std::path::Path::new(path);
+    let name = target.file_name().with_context(|| format!("{path}: not a file name"))?.to_string_lossy();
+    let tmp = target.with_file_name(format!(".{name}.roll-{}", std::process::id()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let written = o.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all())).and_then(|_| std::fs::rename(&tmp, target));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("writing {path}"))
+}
+
+/// `roll secrets render --watch`: write the file again when the environment's digest changes and
+/// the text with it, then run `exec`; renew dynamic credentials' leases every 10 minutes.
+#[allow(clippy::too_many_arguments)]
+async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
+    let digest_path = format!("{env}/digest?{}", c.q());
+    let mut last = c.call(Method::GET, &digest_path, None).await?["digest"].clone();
+    let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = renew.tick(), if !leases.is_empty() => {
+                for l in &leases {
+                    if let Err(e) = c.call(Method::POST, &format!("{}/leases/{}/renew", c.base(), enc(l)), None).await {
+                        eprintln!("roll secrets render: couldn't renew lease {l} ({e})");
+                    }
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))) => {
+                let now = match c.call(Method::GET, &digest_path, None).await {
+                    Ok(v) => v["digest"].clone(),
+                    Err(e) => {
+                        eprintln!("roll secrets render: couldn't check {} ({e}); {out} stays as it is", c.at.env);
+                        continue;
+                    }
+                };
+                if now == last {
+                    continue;
+                }
+                last = now;
+                let (next, next_leases) = match render_env(c, env, file, tpl).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("roll secrets render: {} changed, but {e}; {out} stays as it is", c.at.env);
+                        continue;
+                    }
+                };
+                leases = next_leases;
+                if next == text {
+                    continue;
+                }
+                replace_private(out, &next)?;
+                text = next;
+                eprintln!("roll secrets render: {}:{} changed, wrote {out}", c.at.env, c.at.path);
+                if let Some(cmd) = exec {
+                    match tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await {
+                        Ok(st) if st.success() => {}
+                        Ok(st) => eprintln!("roll secrets render: {cmd} exited with {st}"),
+                        Err(e) => eprintln!("roll secrets render: running {cmd}: {e}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `${KEY}` → its value; `\${` is a literal `${`. Anything else (`$KEY`, `${a:-b}`) stays as
+/// written, so shell snippets in the file survive. Fails with every key that has no value.
+fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec<String>> {
+    let (mut out, mut missing, mut rest) = (String::with_capacity(tpl.len()), Vec::new(), tpl);
+    while let Some(i) = rest.find("${") {
+        if rest[..i].ends_with('\\') {
+            out.push_str(&rest[..i - 1]);
+            out.push_str("${");
+            rest = &rest[i + 2..];
+            continue;
+        }
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let end = after.find('}').filter(|&e| {
+            let k = &after[..e];
+            k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        match end {
+            Some(e) => {
+                let k = &after[..e];
+                match get(k) {
+                    Some(v) => out.push_str(&v),
+                    None if !missing.iter().any(|m| m == k) => missing.push(k.to_string()),
+                    None => {}
+                }
+                rest = &after[e + 1..];
+            }
+            None => {
+                out.push_str("${");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    if missing.is_empty() { Ok(out) } else { Err(missing) }
 }
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell

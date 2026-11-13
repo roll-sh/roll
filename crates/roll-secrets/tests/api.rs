@@ -764,15 +764,26 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     api.ok(Method::PUT, "/environments/production/secrets/IDLE?path=/old", Some(json!({ "value": "i" }))).await;
     api.values("production", "/").await;
     api.ok(Method::PATCH, "/environments/production", Some(json!({ "max_age_days": 90 }))).await;
+    // A vendor's key that stops working in three days: flagged, and its date outlives a new value.
+    let soon = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64 + 3 * 86_400_000;
+    api.ok(Method::PUT, "/environments/production/secrets/CERT", Some(json!({ "value": "c1", "expires_at": soon }))).await;
+    let kept = api.ok(Method::PUT, "/environments/production/secrets/CERT", Some(json!({ "value": "c2" }))).await;
+    assert_eq!(kept["secret"]["expires_at"].as_i64(), Some(soon));
     let i = api.ok(Method::GET, "/environments/production/insights", None).await;
     assert_eq!(i["max_age_days"], 90);
-    let used = &i["keys"][0];
+    let cert = &i["keys"][0];
+    assert_eq!((cert["key"].as_str(), cert["expiring"].as_bool()), (Some("CERT"), Some(true)));
+    let used = &i["keys"][1];
     assert_eq!((used["key"].as_str(), used["reads_30d"].as_i64(), used["last_read_by"].as_str(), used["stale"].as_bool()), (Some("USED"), Some(1), Some("operator"), Some(false)));
     let idle = api.ok(Method::GET, "/environments/production/insights?path=/old", None).await;
     assert_eq!((idle["keys"][0]["key"].as_str(), idle["keys"][0]["last_read_at"].clone()), (Some("IDLE"), Value::Null));
 
     // An environment with a limit and somewhere to say so is reminded of its stale keys, once a day.
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    // Production's value pasted into staging, where more people and less vetted code read it.
+    api.set("staging", "USED", "u").await;
+    let i = api.ok(Method::GET, "/environments/production/insights", None).await;
+    assert_eq!((i["keys"][1]["key"].as_str(), i["keys"][1]["exposed_in"].clone(), i["keys"][0]["exposed_in"].clone()), (Some("USED"), json!(["staging"]), json!([])));
     api.db.write(|c| c.execute("UPDATE secrets SET updated_at = updated_at - 8640000000 WHERE key = 'USED'", ())).unwrap();
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || {
@@ -784,7 +795,44 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
     let sent = api.sent.0.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "one reminder a day");
     assert_eq!((sent[0]["stale"].clone(), sent[0]["max_age_days"].as_i64()), (json!(["USED"]), Some(90)));
-    assert!(!sent[0].to_string().contains("\"u\""), "names, never values");
+    assert_eq!(sent[0]["expiring"], json!([{ "key": "CERT", "expires_at": soon }]));
+    assert!(sent[0]["text"].as_str().unwrap().contains("CERT in 3 days"), "{}", sent[0]["text"]);
+    assert!(!sent[0].to_string().contains("\"u\"") && !sent[0].to_string().contains("c2"), "names, never values");
+}
+
+#[tokio::test]
+async fn reads_unlike_the_reader_are_alerted() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    sweep().await;
+    // Reads as the audit log records them: a CI token from its usual address, then another; a
+    // person revealing values one by one.
+    let read = |actor: &str, action: &str, ip: &str| {
+        let (p, actor, action, ip) = (api.project.clone(), actor.to_string(), action.to_string(), ip.to_string());
+        api.db
+            .write(move |c| {
+                c.execute(
+                    "INSERT INTO audit (project_id, at, actor, action, env, path, keys, summary, ip) VALUES (?, (SELECT COALESCE(MAX(at), 0) + 1 FROM audit), ?, ?, 'production', '/', '[\"API_KEY\"]', '', ?)",
+                    code_sql::params![p, actor, action, ip],
+                )
+            })
+            .unwrap();
+    };
+    read("token:tok_ci", "secrets.resolve", "10.0.0.1");
+    read("token:tok_ci", "secrets.resolve", "10.0.0.1");
+    for _ in 0..30 {
+        read("alice", "secrets.reveal", "10.0.0.9");
+    }
+    read("token:tok_ci", "secrets.resolve", "203.0.113.7");
+    sweep().await;
+    sweep().await;
+    let sent = api.sent.0.lock().unwrap().clone();
+    let alerts: Vec<Value> = sent.iter().map(|n| n["alert"].clone()).collect();
+    assert_eq!(alerts, vec![json!({ "kind": "many_reveals", "actor": "alice", "count": 30 }), json!({ "kind": "new_address", "actor": "token:tok_ci", "ip": "203.0.113.7" })], "{sent:?}");
 }
 
 #[tokio::test]

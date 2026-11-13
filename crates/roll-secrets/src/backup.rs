@@ -63,6 +63,8 @@ pub struct ArchivedSecret {
     #[serde(default)]
     pub tags: Vec<String>,
     pub link: Option<Link>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
 /// What a restore did.
@@ -82,7 +84,7 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::project(project))?;
         let dek = self.project(project)?;
         let now = self.db.now_ms()?;
-        type Row = (String, String, i64, Option<Vec<u8>>, String, String, String, Option<String>);
+        type Row = (String, String, i64, Option<Vec<u8>>, String, String, String, Option<String>, Option<i64>);
         let archive = self.db.read(|c| {
             let rows = envs::all(c, project)?;
             let slugs: BTreeMap<String, String> = rows.iter().map(|e| (e.id.clone(), e.slug.clone())).collect();
@@ -97,18 +99,18 @@ impl Secrets {
                     }
                 }
                 let secrets: Vec<Row> = c.query(
-                    "SELECT id, path, version, value, key, comment, tags, link FROM secrets WHERE env_id = ? AND owner = '' ORDER BY path, key",
+                    "SELECT id, path, version, value, key, comment, tags, link, expires_at FROM secrets WHERE env_id = ? AND owner = '' ORDER BY path, key",
                     [&e.id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
                 )?;
                 let mut out = vec![];
-                for (id, path, version, ct, key, comment, tags, link) in secrets {
+                for (id, path, version, ct, key, comment, tags, link, expires_at) in secrets {
                     let link: Option<Link> = link.and_then(|l| serde_json::from_str(&l).ok());
                     let value = match (&link, ct) {
                         (None, Some(ct)) => Some(dek.open(&crate::crypto::value_aad(project, &id, version), &ct)?),
                         _ => None,
                     };
-                    out.push(ArchivedSecret { path, key, value, comment, tags: from_json(&tags), link });
+                    out.push(ArchivedSecret { path, key, value, comment, tags: from_json(&tags), link, expires_at });
                 }
                 environments.push(ArchivedEnvironment {
                     slug: e.slug.clone(),
@@ -177,6 +179,7 @@ impl Secrets {
                     kind: None,
                     link: s.link.clone().map(Some),
                     path: None,
+                    expires_at: s.expires_at.map(Some),
                 });
             }
             for (path, ops) in by_path {

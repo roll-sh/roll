@@ -382,6 +382,8 @@ struct SetBody {
     link: Option<Option<crate::Link>>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default, deserialize_with = "some")]
+    expires_at: Option<Option<i64>>,
 }
 
 fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
@@ -389,8 +391,8 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<O
 }
 
 async fn set_secret(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
-    let SetBody { value, comment, tags, kind, link, message } = body(&b)?;
-    let op = Op::Set { key: key.clone(), value, comment, tags, kind, link, path: None };
+    let SetBody { value, comment, tags, kind, link, message, expires_at } = body(&b)?;
+    let op = Op::Set { key: key.clone(), value, comment, tags, kind, link, path: None, expires_at };
     Ok(ok(blocking(s, move |s| s.set_secret(&project, &env, &path_of(&q), &key, op, message, &c)).await?))
 }
 
@@ -588,6 +590,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
                 kind: None,
                 link: None,
                 path: None,
+                expires_at: None,
             })
             .chain(removed)
             .collect();

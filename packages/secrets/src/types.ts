@@ -72,11 +72,14 @@ export type Secret = {
   source: Source;
   /** A personal value of the caller replaces it. */
   overridden: boolean;
+  /** When the value stops working outside roll (ms), if someone said. */
+  expires_at: number | null;
 };
-export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string };
+/** `expires_at`: null clears it; absent keeps it. */
+export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null };
 /** `path`: another folder for this one operation (default: the batch's). */
 export type Op =
-  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; path?: string }
+  | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; path?: string; expires_at?: number | null }
   | { op: "delete"; key: string; type?: SecretType; path?: string };
 export type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
 export type ChangeKind = "write" | "rollback" | "promote" | "rotate" | "request" | "rename";
@@ -87,9 +90,9 @@ export type Written = { change: Change | null; secret: Secret | null; warnings: 
 /** `change` is null when nothing changed. */
 /** `request`: the change request opened instead (a promotion into a protected environment). */
 export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };
-export type StateRow = { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number };
+export type StateRow = { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number; expires_at: number | null };
 export type ChangeDetail = Change & { items: Item[]; state?: StateRow[] };
-export type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
+export type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string; expires_at: number | null };
 export type Problem = { key: string; problem: string };
 /** `leases`: ids of dynamic credentials issued. */
 /** `dynamic`: the keys holding a dynamic link's short-lived credential. */
@@ -97,7 +100,7 @@ export type Problem = { key: string; problem: string };
 export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[] };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
-export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string };
+export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string; expires_at?: number };
 export type RowStatus = "same" | "different" | "missing";
 export type GridRow = { key: string; cells: Record<string, Cell | null>; status: RowStatus };
 export type Grid = { path: string; environments: string[]; rows: GridRow[]; folders: string[]; previews: number };
@@ -109,7 +112,10 @@ export type Review = { by: string; verdict: "approve" | "reject"; comment: strin
 /** One item of a change request with its values: `now` is null for a new key or a live/dynamic link. */
 export type RequestValue = { key: string; path: string; type: "shared" | "personal"; delete: boolean; now: string | null; now_link: Link | null; proposed: string | null; proposed_link: Link | null };
 
-export type KeyInsight = { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean };
+export type KeyInsight = { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean; expires_at: number | null; expiring: boolean;
+  /** In a protected environment: unprotected environments holding the very same value. */
+  exposed_in: string[];
+};
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
 export type ChangeRequest = {

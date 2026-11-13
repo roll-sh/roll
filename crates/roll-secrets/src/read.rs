@@ -36,6 +36,7 @@ pub(crate) struct Row {
     pub updated_by: String,
     /// The references in the value, as written (`None`: a row from before they were kept).
     pub refs: Option<Vec<String>>,
+    pub expires_at: Option<i64>,
 }
 
 impl Row {
@@ -49,7 +50,7 @@ impl Row {
     }
 }
 
-const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id";
+const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id, expires_at";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     Ok(Row {
@@ -68,6 +69,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         updated_by: r.get(12)?,
         refs: r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()),
         project_id: r.get(14)?,
+        expires_at: r.get(15)?,
     })
 }
 
@@ -114,6 +116,8 @@ pub struct Secret {
     pub updated_by: String,
     pub source: Source,
     pub overridden: bool,
+    /// When the value stops working outside roll (ms), if someone said.
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -150,6 +154,8 @@ pub struct Cell {
     /// who may reveal it; a value with a reference is checked when it's resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub misfit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -184,6 +190,7 @@ pub struct Version {
     pub by: String,
     /// Its value was purged (it can't be revealed or rolled back to).
     pub purged: bool,
+    pub expires_at: Option<i64>,
 }
 
 /// Whether entries of another environment's folder may show through an import or a base.
@@ -294,6 +301,7 @@ impl Secrets {
             updated_by: e.row.updated_by,
             source: e.source,
             overridden: e.overridden,
+            expires_at: e.row.expires_at,
         }
     }
 
@@ -438,7 +446,7 @@ impl Secrets {
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let v = c.query(
-                "SELECT version, seq, op, what, fp, comment, tags, link, at, by, purged_at IS NOT NULL FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? ORDER BY seq DESC LIMIT 500",
+                "SELECT version, seq, op, what, fp, comment, tags, link, at, by, purged_at IS NOT NULL, expires_at FROM versions WHERE env_id = ? AND path = ? AND key = ? AND owner = ? ORDER BY seq DESC LIMIT 500",
                 [&env.id, &path, key, &owner],
                 |r| {
                     Ok(Version {
@@ -453,6 +461,7 @@ impl Secrets {
                         at: r.get(8)?,
                         by: r.get(9)?,
                         purged: r.get::<_, i64>(10)? != 0,
+                        expires_at: r.get(11)?,
                     })
                 },
             )?;
@@ -566,6 +575,7 @@ impl Secrets {
                             comment: !e.row.comment.is_empty(),
                             personal: !e.row.owner.is_empty(),
                             misfit,
+                            expires_at: e.row.expires_at,
                         }
                     });
                     cells.insert(env.slug.clone(), cell);

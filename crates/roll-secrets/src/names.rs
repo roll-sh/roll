@@ -13,6 +13,8 @@ pub const SEGMENT_MAX: usize = 64;
 pub const DEPTH_MAX: usize = 8;
 pub const LABELS_MAX: usize = 16;
 pub const MESSAGE_MAX: usize = 500;
+/// The last millisecond of 9999: times callers send (an expiry) stay below it.
+pub const MAX_TIME: i64 = 253_402_300_799_999;
 
 fn bad(m: impl Into<String>) -> Error {
     Error::BadRequest(m.into())

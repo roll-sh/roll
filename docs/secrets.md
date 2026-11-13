@@ -339,6 +339,37 @@ protection policy's `notify_url`) gets one notice a day while it has stale keys:
 Live and dynamic links don't count (they change on their own); managed ones do. Two nodes never
 both remind: the day is claimed in the same write that queues the notice.
 
+**Expiry dates.** Some values stop working on a date roll can't see: a vendor's API key, a TLS
+certificate, a trial token. A secret's optional `expires_at` (ms; set in any write's `set`
+operation, `null` clears it, leaving it out keeps it) records that date. It's versioned like the
+comment, so history, rollback, promote, change requests and backups carry it, and a new value
+keeps the date until someone changes it. Insights add `expires_at` and `expiring` (within 14 days,
+or past); the grid and the environment's list show a clock, with the days left inside two weeks
+and "expired" in red after. The daily reminder above also lists expiring and expired keys (soonest
+first, names and dates only), for any environment with a notify URL, limit or not. Like
+staleness, it's only flagged: nothing stops working in roll. `roll secrets set KEY=v --expires
+2027-03-31`, `roll secrets expire KEY --on 90d` (or `never`) and the editor's date field set it.
+
+**Protected values set elsewhere** (1Password Watchtower's reuse check). In a protected
+environment, each key's `exposed_in` names the unprotected environments that hold the very same
+value: production's database password pasted into staging, where more people, previews and less
+vetted code can read it. Values are compared by fingerprint (per project; nothing is decrypted),
+plain values only: links and references are expected to match, and the empty value is skipped.
+Only environments the caller may read are named. The environment's list marks the key "also in
+staging", and `roll secrets insights` prints `ALSO IN staging`.
+
+**Read alerts** (Doppler's and 1Password's activity alerts). The environment's notify URL also
+hears of reads that look unlike the reader, from the audit log, within a sweep of happening:
+- a token or workload identity reading from an address it hasn't read from before (its first
+  address isn't news: that's where it runs);
+- one principal revealing 30 or more of the environment's values within an hour (someone copying
+  it out by hand).
+
+An alert names the principal, the address or the count, the environment and a link to its
+activity: never a value. The sweep walks the audit log after a cursor; advancing the cursor,
+recording the addresses seen and queueing the notices are one write, so two nodes never both
+alert, and history from before the first sweep isn't alerted on.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -433,6 +464,7 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
+roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
@@ -602,6 +634,23 @@ opened archive; admin, audited `project.restore`), on this server or another. Va
 before any environment is protected, so a restore isn't a change request; what can't be restored
 (a link to a resource that project doesn't have, an import of another project's folder) comes back
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
+
+### Templates
+
+For a tool that reads a config file rather than its environment, `roll secrets render
+config.tpl --out config.yml` fills each `${KEY}` from the environment (resolved, so references,
+imports and links count) and writes the file 0600; without `--out` it prints it. A key with no
+value fails the whole render, naming every such key, so a half-filled file is never written.
+`\${KEY}` stays a literal `${KEY}`, and anything else (`$KEY`, `${KEY:-default}`) is left as
+written, so shell snippets in the file survive. The values are read through the same audited
+`values` route `roll run` uses; nothing new runs on the server.
+
+With `--watch` it keeps running, like `roll run --watch`: it checks the environment's digest every
+`--interval` seconds (default 5), renders again when it changes, and replaces the file whole (a
+file beside it, then a rename, so a reader never sees half of one) only when the text changed;
+then `--exec "systemctl reload nginx"` runs through `sh -c`. A render that fails (a key deleted)
+leaves the last good file in place and says why. Dynamic credentials' leases are renewed every 10
+minutes.
 
 ### Finding a key
 
@@ -1193,7 +1242,9 @@ Done and in PR #20:
 - `roll secrets`, `roll secrets setup` and `roll run [--watch]`;
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history;
-- required and typed keys; insights and rotation reminders;
+- required and typed keys; insights, rotation reminders and expiry dates for values that expire
+  outside roll; a protected environment's values that are also set in an unprotected one; read
+  alerts (a machine's new address, many reveals in an hour);
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
   Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
@@ -1206,7 +1257,7 @@ Done and in PR #20:
 - finding a key across every project the caller may read (`roll secrets find`, the dashboard's
   "Find a key"), for rotating an organisation-wide key;
 - exports as a Docker `--env-file` and a Kubernetes Secret manifest, next to dotenv, shell, JSON and
-  YAML;
+  YAML; `roll secrets render [--watch --exec]` fills `${KEY}` in a config file and keeps it current;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1227,11 +1278,8 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Templates** (Doppler's `secrets substitute`, Infisical's `export --template`): `roll secrets
-   render FILE` fills `${KEY}` in a config file from an environment, failing on a key that isn't
-   set, for tools that read a file rather than the environment.
-3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

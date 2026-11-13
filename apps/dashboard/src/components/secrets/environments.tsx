@@ -224,11 +224,11 @@ function Notify({ env, onError }: { env: Environment; onError: (e: string) => vo
           <button type="button" className={ghost} onClick={() => (setEditing(false), setUrl(""))}>
             Cancel
           </button>
-          <span className="basis-full pl-5 text-[11px] text-subtle">A Slack or Discord incoming webhook, or any HTTPS URL. It gets the request&apos;s id, author, message and key names, never values. roll keeps the URL sealed.</span>
+          <span className="basis-full pl-5 text-[11px] text-subtle">A Slack or Discord incoming webhook, or any HTTPS URL. It hears of new change requests, stale and expiring keys, and odd reads (a token from a new address, many values revealed in an hour): names, never values. roll keeps the URL sealed.</span>
         </form>
       ) : env.notify ? (
         <span className="flex flex-wrap items-center gap-1.5">
-          <Bell className="size-3.5 text-accent" /> New change requests are announced to <span className="font-mono text-soft">{env.notify}</span>
+          <Bell className="size-3.5 text-accent" /> Change requests, reminders and read alerts go to <span className="font-mono text-soft">{env.notify}</span>
           <button className={`${ghost} h-6`} onClick={() => setEditing(true)}>
             Change
           </button>

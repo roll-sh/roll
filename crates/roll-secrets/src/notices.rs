@@ -61,12 +61,14 @@ impl Secrets {
     /// claimed and the notice queued together, so two nodes never both remind). Returns how many.
     pub(crate) fn sweep_reminders(&self) -> Result<usize> {
         let now = self.db.now_ms()?;
-        type Due = (String, String, String, i64, Option<i64>);
+        let horizon = now + crate::insights::EXPIRING_DAYS * 86_400_000;
+        type Due = (String, String, String, Option<i64>, Option<i64>);
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
                 "SELECT id, project_id, slug, max_age_days, reminded_at FROM environments
-                 WHERE max_age_days IS NOT NULL AND notify_url IS NOT NULL AND COALESCE(reminded_at, 0) <= ? LIMIT 100",
-                params![now - REMIND_EVERY_MS],
+                 WHERE notify_url IS NOT NULL AND COALESCE(reminded_at, 0) <= ?
+                 AND (max_age_days IS NOT NULL OR EXISTS (SELECT 1 FROM secrets s WHERE s.env_id = environments.id AND s.owner = '' AND s.expires_at < ?)) LIMIT 100",
+                params![now - REMIND_EVERY_MS, horizon],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
         })?;
@@ -78,21 +80,47 @@ impl Secrets {
                     return Ok::<_, crate::Error>(0);
                 }
                 // Values that only change when someone changes them: not live or dynamic links.
-                let stale: Vec<String> = c.query(
-                    "SELECT key FROM secrets WHERE env_id = ? AND owner = '' AND updated_at < ? AND (link IS NULL OR link LIKE '%\"mode\":\"managed\"%') ORDER BY key",
-                    params![env_id, now - days * 86_400_000],
-                    |r| r.get(0),
+                let stale: Vec<String> = match days {
+                    Some(days) => c.query(
+                        "SELECT key FROM secrets WHERE env_id = ? AND owner = '' AND updated_at < ? AND (link IS NULL OR link LIKE '%\"mode\":\"managed\"%') ORDER BY key",
+                        params![env_id, now - days * 86_400_000],
+                        |r| r.get(0),
+                    )?,
+                    None => vec![],
+                };
+                // Values that stop working outside roll soon (or already have), soonest first.
+                let expiring: Vec<(String, i64)> = c.query(
+                    "SELECT key, expires_at FROM secrets WHERE env_id = ? AND owner = '' AND expires_at < ? ORDER BY expires_at, key",
+                    params![env_id, horizon],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
-                if stale.is_empty() {
+                if stale.is_empty() && expiring.is_empty() {
                     return Ok(0);
                 }
-                let shown = stale.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
-                let more = if stale.len() > 20 { format!(" and {} more", stale.len() - 20) } else { String::new() };
-                let mut text = format!("roll secrets: {} in {slug} unchanged for over {days} days ({shown}{more}). Rotate them, or raise the limit.", crate::write::plural(stale.len(), "key"));
+                let list = |keys: Vec<String>| {
+                    let more = if keys.len() > 20 { format!(" and {} more", keys.len() - 20) } else { String::new() };
+                    format!("{}{more}", keys.into_iter().take(20).collect::<Vec<_>>().join(", "))
+                };
+                let mut parts = vec![];
+                if !expiring.is_empty() {
+                    let (gone, soon): (Vec<_>, Vec<_>) = expiring.iter().partition(|e| e.1 <= now);
+                    if !gone.is_empty() {
+                        parts.push(format!("{} in {slug} expired ({})", crate::write::plural(gone.len(), "key"), list(gone.iter().map(|e| e.0.clone()).collect())));
+                    }
+                    if !soon.is_empty() {
+                        let shown = soon.iter().map(|(k, t)| format!("{k} in {}", in_days(*t - now))).collect();
+                        parts.push(format!("{} in {slug} expire soon ({})", crate::write::plural(soon.len(), "key"), list(shown)));
+                    }
+                }
+                if let (false, Some(days)) = (stale.is_empty(), days) {
+                    parts.push(format!("{} in {slug} unchanged for over {days} days ({}): rotate them, or raise the limit", crate::write::plural(stale.len(), "key"), list(stale.clone())));
+                }
+                let mut text = format!("roll secrets: {}.", parts.join("; "));
                 if let Some(l) = &link {
                     text.push_str(&format!(" {l}"));
                 }
-                let body = json!({ "text": text, "content": text, "allowed_mentions": { "parse": [] }, "project": project, "environment": slug, "stale": stale, "max_age_days": days, "link": link });
+                let expiring: Vec<_> = expiring.iter().map(|(k, t)| json!({ "key": k, "expires_at": t })).collect();
+                let body = json!({ "text": text, "content": text, "allowed_mentions": { "parse": [] }, "project": project, "environment": slug, "stale": stale, "max_age_days": days, "expiring": expiring, "link": link });
                 c.execute(
                     "INSERT INTO notices (id, project_id, env_id, body, attempts, next_at, sent_at, created_at) VALUES (?, ?, ?, ?, 0, ?, NULL, ?)",
                     params![names::new_id("ntc", 16), project, env_id, body.to_string(), now, now],
@@ -158,4 +186,12 @@ impl Secrets {
 /// The associated data of an environment's sealed notify URL.
 pub(crate) fn notify_aad(project: &str, env_id: &str) -> String {
     format!("roll-secrets:notify:{project}:{env_id}")
+}
+
+/// "3 days" (rounded up: 2.5 days is 3), "1 day".
+fn in_days(ms: i64) -> String {
+    match (ms + 86_399_999) / 86_400_000 {
+        ..=1 => "1 day".into(),
+        n => format!("{n} days"),
+    }
 }

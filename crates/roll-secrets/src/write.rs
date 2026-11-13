@@ -33,6 +33,9 @@ pub enum Op {
         /// Another folder for this one operation (promote, rollback; default the batch's).
         #[serde(default)]
         path: Option<String>,
+        /// When the value stops working outside roll (ms); `null` clears it, absent keeps it.
+        #[serde(default, deserialize_with = "some")]
+        expires_at: Option<Option<i64>>,
     },
     Delete {
         key: String,
@@ -80,13 +83,13 @@ pub(crate) struct Item {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ItemAction {
-    Set { value: Option<Value>, comment: Option<String>, tags: Option<Vec<String>>, link: Option<Option<Link>>, link_state: Option<Json> },
+    Set { value: Option<Value>, comment: Option<String>, tags: Option<Vec<String>>, link: Option<Option<Link>>, link_state: Option<Json>, expires_at: Option<Option<i64>> },
     Delete,
 }
 
 impl ItemAction {
     pub fn set_value(v: Value) -> ItemAction {
-        ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: None }
+        ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: None, expires_at: None }
     }
 }
 
@@ -155,8 +158,13 @@ pub(crate) fn items(path: &str, ops: &[Op], caller: &Caller) -> Result<Vec<Item>
     let mut out = Vec::with_capacity(ops.len());
     for op in ops {
         let item = match op {
-            Op::Set { key, value, comment, tags, kind, link, path: p } => {
+            Op::Set { key, value, comment, tags, kind, link, path: p, expires_at } => {
                 names::key(key)?;
+                if let Some(Some(t)) = expires_at
+                    && !(0..=names::MAX_TIME).contains(t)
+                {
+                    return Err(Error::BadRequest(format!("{key}: expires_at is a time in ms since 1970")));
+                }
                 if let Some(v) = value {
                     names::value(v)?;
                 }
@@ -174,7 +182,7 @@ pub(crate) fn items(path: &str, ops: &[Op], caller: &Caller) -> Result<Vec<Item>
                     path: names::path(p.as_deref().unwrap_or(path))?,
                     key: key.clone(),
                     owner,
-                    action: ItemAction::Set { value: value.clone().map(Value::new), comment: comment.clone(), tags: tags.clone(), link: link.clone(), link_state: None },
+                    action: ItemAction::Set { value: value.clone().map(Value::new), comment: comment.clone(), tags: tags.clone(), link: link.clone(), link_state: None, expires_at: *expires_at },
                 }
             }
             Op::Delete { key, kind, path: p } => {
@@ -201,11 +209,12 @@ pub(crate) struct Current {
     pub tags: Vec<String>,
     pub link: Option<Link>,
     pub link_state: Option<Json>,
+    pub expires_at: Option<i64>,
 }
 
 pub(crate) fn current(c: &Conn<'_>, env_id: &str, path: &str, key: &str, owner: &str) -> Result<Option<Current>> {
     Ok(c.query_row(
-        "SELECT id, version, value, fp, comment, tags, link, link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?",
+        "SELECT id, version, value, fp, comment, tags, link, link_state, expires_at FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ?",
         [env_id, path, key, owner],
         |r| {
             Ok(Current {
@@ -217,6 +226,7 @@ pub(crate) fn current(c: &Conn<'_>, env_id: &str, path: &str, key: &str, owner: 
                 tags: from_json(&r.get::<_, String>(5)?),
                 link: r.get::<_, Option<String>>(6)?.and_then(|s| serde_json::from_str(&s).ok()),
                 link_state: r.get::<_, Option<String>>(7)?.and_then(|s| serde_json::from_str(&s).ok()),
+                expires_at: r.get(8)?,
             })
         },
     )
@@ -242,9 +252,9 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
             ItemAction::Delete => {
                 let cur = cur.ok_or_else(|| Error::NotFound(format!("no secret {} in {}:{}", item.key, env.slug, item.path)))?;
                 c.execute(
-                    "INSERT INTO versions (secret_id, version, seq, project_id, env_id, path, key, owner, op, what, value, fp, comment, tags, link, at, by)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'delete', 'deleted', NULL, NULL, ?, ?, ?, ?, ?)",
-                    params![cur.id, cur.version + 1, seq, project, env.id, item.path, item.key, item.owner, cur.comment, json(&cur.tags), cur.link.as_ref().map(json), now, caller.principal],
+                    "INSERT INTO versions (secret_id, version, seq, project_id, env_id, path, key, owner, op, what, value, fp, comment, tags, link, at, by, expires_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'delete', 'deleted', NULL, NULL, ?, ?, ?, ?, ?, ?)",
+                    params![cur.id, cur.version + 1, seq, project, env.id, item.path, item.key, item.owner, cur.comment, json(&cur.tags), cur.link.as_ref().map(json), now, caller.principal, cur.expires_at],
                 )?;
                 c.execute("DELETE FROM secrets WHERE id = ?", [&cur.id])?;
                 if let (Some(l), Some(id)) = (&cur.link, credential_id(&cur.link_state)) {
@@ -252,7 +262,7 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 }
                 diffs.push(ItemDiff { key: item.key.clone(), path: item.path.clone(), kind: kind_of, what: vec!["deleted".into()], from_fp: Some(cur.fp), to_fp: None });
             }
-            ItemAction::Set { value, comment, tags, link, link_state } => {
+            ItemAction::Set { value, comment, tags, link, link_state, expires_at } => {
                 let link_now: Option<Link> = match link {
                     Some(l) => l.clone(),
                     None => cur.as_ref().and_then(|c| c.link.clone()),
@@ -281,6 +291,7 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 };
                 let comment_now = comment.clone().or_else(|| cur.as_ref().map(|c| c.comment.clone())).unwrap_or_default();
                 let tags_now = tags.clone().or_else(|| cur.as_ref().map(|c| c.tags.clone())).unwrap_or_default();
+                let expires_now = expires_at.unwrap_or_else(|| cur.as_ref().and_then(|c| c.expires_at));
                 let mut what = vec![];
                 match &cur {
                     None => what.push("added".to_string()),
@@ -293,6 +304,9 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                         }
                         if cur.tags != tags_now {
                             what.push("tags".into());
+                        }
+                        if cur.expires_at != expires_now {
+                            what.push("expiry".into());
                         }
                         if link_changed {
                             what.push("link".into());
@@ -331,23 +345,23 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind:
                 match &cur {
                     Some(_) => {
                         c.execute(
-                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ? WHERE id = ?",
-                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, id],
+                            "UPDATE secrets SET version = ?, value = ?, fp = ?, comment = ?, tags = ?, link = ?, link_state = ?, refs = ?, updated_at = ?, updated_by = ?, expires_at = ? WHERE id = ?",
+                            params![version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now, id],
                         )?;
                     }
                     None => {
                         c.execute(
-                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal],
+                            "INSERT INTO secrets (id, project_id, env_id, path, key, owner, version, value, fp, comment, tags, link, link_state, refs, updated_at, updated_by, expires_at)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            params![id, project, env.id, item.path, item.key, item.owner, version, ct, fp, comment_now, tags_json, link_json, state_json, refs_json, now, caller.principal, expires_now],
                         )?;
                         envs::ensure_folders(c, &env.id, &item.path, now)?;
                     }
                 }
                 c.execute(
-                    "INSERT INTO versions (secret_id, version, seq, project_id, env_id, path, key, owner, op, what, value, fp, comment, tags, link, at, by)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'set', ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![id, version, seq, project, env.id, item.path, item.key, item.owner, what.join(","), ct, fp, comment_now, tags_json, link_json, now, caller.principal],
+                    "INSERT INTO versions (secret_id, version, seq, project_id, env_id, path, key, owner, op, what, value, fp, comment, tags, link, at, by, expires_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'set', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![id, version, seq, project, env.id, item.path, item.key, item.owner, what.join(","), ct, fp, comment_now, tags_json, link_json, now, caller.principal, expires_now],
                 )?;
                 diffs.push(ItemDiff { key: item.key.clone(), path: item.path.clone(), kind: kind_of, what, from_fp: cur.map(|c| c.fp), to_fp: Some(fp) });
             }
@@ -651,16 +665,16 @@ impl Secrets {
                 _ => return Err(Error::BadRequest("rollback takes to (a change) or at (a time)".into())),
             };
             let state = state_at(c, &env.id, target)?;
-            // (path, key, owner, fp, comment, tags, link) of every key now.
+            // (path, key, owner, fp, comment, tags, link, expires_at) of every key now.
             #[allow(clippy::type_complexity)]
-            let now: Vec<(String, String, String, String, String, String, Option<String>)> = c.query(
-                "SELECT path, key, owner, fp, comment, tags, link FROM secrets WHERE env_id = ?",
+            let now: Vec<(String, String, String, String, String, String, Option<String>, Option<i64>)> = c.query(
+                "SELECT path, key, owner, fp, comment, tags, link, expires_at FROM secrets WHERE env_id = ?",
                 [&env.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
             )?;
             let mut items = vec![];
             for v in &state {
-                let same = now.iter().any(|n| n.0 == v.path && n.1 == v.key && n.2 == v.owner && n.3 == v.fp && n.4 == v.comment && n.5 == v.tags && n.6 == v.link);
+                let same = now.iter().any(|n| n.0 == v.path && n.1 == v.key && n.2 == v.owner && n.3 == v.fp && n.4 == v.comment && n.5 == v.tags && n.6 == v.link && n.7 == v.expires_at);
                 if same {
                     continue;
                 }
@@ -682,7 +696,7 @@ impl Secrets {
                     path: v.path.clone(),
                     key: v.key.clone(),
                     owner: v.owner.clone(),
-                    action: ItemAction::Set { value, comment: Some(v.comment.clone()), tags: Some(from_json(&v.tags)), link: Some(link), link_state: None },
+                    action: ItemAction::Set { value, comment: Some(v.comment.clone()), tags: Some(from_json(&v.tags)), link: Some(link), link_state: None, expires_at: Some(v.expires_at) },
                 });
             }
             for n in &now {
@@ -745,7 +759,7 @@ impl Secrets {
                 continue;
             }
             let t = shared.get(e.row.key.as_str()).copied();
-            if keys.is_none() && t.is_some_and(|t| t.row.fp == e.row.fp && t.row.comment == e.row.comment && t.row.tags == e.row.tags) {
+            if keys.is_none() && t.is_some_and(|t| t.row.fp == e.row.fp && t.row.comment == e.row.comment && t.row.tags == e.row.tags && t.row.expires_at == e.row.expires_at) {
                 continue;
             }
             let link = e.row.link.clone();
@@ -758,7 +772,7 @@ impl Secrets {
                 path: path.to_string(),
                 key: e.row.key.clone(),
                 owner: String::new(),
-                action: ItemAction::Set { value, comment: Some(e.row.comment.clone()), tags: Some(e.row.tags.clone()), link: Some(link), link_state: None },
+                action: ItemAction::Set { value, comment: Some(e.row.comment.clone()), tags: Some(e.row.tags.clone()), link: Some(link), link_state: None, expires_at: Some(e.row.expires_at) },
             });
         }
         if let Some(keys) = keys
@@ -819,7 +833,7 @@ impl Secrets {
                 let state: Vec<Json> = state_at(c, &env.id, seq)?
                     .into_iter()
                     .filter(|v| v.owner.is_empty() && caller.allows(Action::Read, &Scope::at(project, slug, &v.path)))
-                    .map(|v| serde_json::json!({ "key": v.key, "path": v.path, "version": v.version, "fp": v.fp, "comment": v.comment, "tags": from_json::<Vec<String>>(&v.tags), "link": v.link.as_deref().and_then(|l| serde_json::from_str::<Json>(l).ok()), "at": v.at }))
+                    .map(|v| serde_json::json!({ "key": v.key, "path": v.path, "version": v.version, "fp": v.fp, "comment": v.comment, "tags": from_json::<Vec<String>>(&v.tags), "link": v.link.as_deref().and_then(|l| serde_json::from_str::<Json>(l).ok()), "at": v.at, "expires_at": v.expires_at }))
                     .collect();
                 out["state"] = Json::Array(state);
             }
@@ -841,12 +855,13 @@ pub(crate) struct StateRow {
     pub link: Option<String>,
     pub at: i64,
     pub purged: bool,
+    pub expires_at: Option<i64>,
 }
 
 /// Every key of an environment as it was after change `seq`.
 pub(crate) fn state_at(c: &Conn<'_>, env_id: &str, seq: i64) -> Result<Vec<StateRow>> {
     let rows = c.query(
-        "SELECT v.secret_id, v.version, v.op, v.path, v.key, v.owner, v.value, v.fp, v.comment, v.tags, v.link, v.at, v.purged_at IS NOT NULL FROM versions v
+        "SELECT v.secret_id, v.version, v.op, v.path, v.key, v.owner, v.value, v.fp, v.comment, v.tags, v.link, v.at, v.purged_at IS NOT NULL, v.expires_at FROM versions v
          JOIN (SELECT path, key, owner, MAX(seq) AS top FROM versions WHERE env_id = ? AND seq <= ? GROUP BY path, key, owner) t
            ON t.path = v.path AND t.key = v.key AND t.owner = v.owner AND v.seq = t.top
          WHERE v.env_id = ? ORDER BY v.path, v.key",
@@ -866,6 +881,7 @@ pub(crate) fn state_at(c: &Conn<'_>, env_id: &str, seq: i64) -> Result<Vec<State
                 link: r.get(10)?,
                 at: r.get(11)?,
                 purged: r.get::<_, i64>(12)? != 0,
+                expires_at: r.get(13)?,
             }))
         },
     )?;

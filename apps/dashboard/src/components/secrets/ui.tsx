@@ -1,4 +1,4 @@
-import { AtSign, Braces, Check, Copy, CornerDownRight, Eye, EyeOff, Import as ImportIcon, Link2, MessageSquare, User } from "lucide-react";
+import { AtSign, Braces, Check, Clock, Copy, CornerDownRight, Eye, EyeOff, Import as ImportIcon, Link2, MessageSquare, User } from "lucide-react";
 import { useWorkspace } from "@/lib/workspace-store";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Cell, Link, Problem, Secret } from "@/lib/secrets-api";
@@ -190,6 +190,25 @@ export const CommentMark = ({ text }: { text?: string }) => (
     <MessageSquare className="size-3" />
   </span>
 );
+/** A value that stops working outside roll: quiet when far off, a count of days within two weeks, red once it has. */
+export function ExpiryMark({ at, now = Date.now() }: { at: number; now?: number }) {
+  const days = Math.ceil((at - now) / 86_400_000);
+  const date = new Date(at).toISOString().slice(0, 10);
+  if (at <= now)
+    return (
+      <span title={`Expired ${date}`} className="inline-flex shrink-0 items-center gap-0.5 font-mono text-[10.5px] text-danger">
+        <Clock className="size-3" />
+        expired
+      </span>
+    );
+  return (
+    <span title={`Expires ${date}`} className={`inline-flex shrink-0 items-center gap-0.5 font-mono text-[10.5px] ${days <= 14 ? "text-fg" : "text-subtle"}`}>
+      <Clock className="size-3" />
+      {days <= 14 && `${days}d`}
+    </span>
+  );
+}
+
 export const ActorMark = ({ who }: { who: string }) => (
   <span className="inline-flex min-w-0 items-center gap-1 truncate">
     <AtSign className="size-3 shrink-0 text-faint" />

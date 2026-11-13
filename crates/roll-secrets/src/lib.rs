@@ -11,6 +11,7 @@
 //! called outside it. [`api::router`] serves it under `/v1/secrets`.
 
 pub mod access;
+mod alerts;
 pub mod api;
 mod audit;
 pub mod backup;
@@ -363,7 +364,11 @@ impl Secrets {
         // Client addresses tokens and identities work from (tokens.rs).
         db.add_column("tokens", "allowed_ips", "TEXT")?;
         db.add_column("identities", "allowed_ips", "TEXT")?;
+        // When a value stops working outside roll (a vendor's key, a certificate): ms, or null.
+        db.add_column("secrets", "expires_at", "INTEGER")?;
+        db.add_column("versions", "expires_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
+        db.ensure_schema(alerts::SCHEMA)?;
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links: opts.links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default() })
     }
 

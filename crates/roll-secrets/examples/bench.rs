@@ -23,14 +23,14 @@ fn main() {
         println!("{backend:>8} {n:>6} keys  {what:<24} {:>8.1} ms", t.elapsed().as_secs_f64() * 1000.0);
     };
     let ops: Vec<Op> = (0..n)
-        .map(|i| Op::Set { key: format!("K{i:05}"), value: Some(format!("value-{i:05}-abcdefghijklmnop")), comment: None, tags: None, kind: None, link: None, path: None })
-        .chain((0..n / 10).map(|i| Op::Set { key: format!("R{i:05}"), value: Some(format!("${{K{i:05}}}/x")), comment: None, tags: None, kind: None, link: None, path: None }))
+        .map(|i| Op::Set { key: format!("K{i:05}"), value: Some(format!("value-{i:05}-abcdefghijklmnop")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None })
+        .chain((0..n / 10).map(|i| Op::Set { key: format!("R{i:05}"), value: Some(format!("${{K{i:05}}}/x")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None }))
         .collect();
     time("one change (all keys)", &mut || {
         s.batch(&project, "production", Batch { path: None, message: None, ops: ops.clone(), if_seq: None }, &c).unwrap();
     });
     time("one key", &mut || {
-        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some("1".into()), comment: None, tags: None, kind: None, link: None, path: None }], if_seq: None }, &c).unwrap();
+        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some("1".into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None }], if_seq: None }, &c).unwrap();
     });
     for _ in 0..2 {
         time("grid", &mut || drop(s.grid(&project, "/", &c).unwrap()));
