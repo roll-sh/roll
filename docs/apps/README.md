@@ -797,8 +797,8 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 
 2. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).
 3. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
     (Vercel's rolling releases, Cloud Run's traffic splits).
-4. Then: an audit trail from the event log (variables, settings, domains, reveals), cost
-    estimates in Settings, per-environment run settings in the dashboard, `roll apps metrics
+4. Then: an audit trail from the event log (variables, settings, domains, reveals),
+    per-environment run settings in the dashboard, `roll apps metrics
     --range`, CLI commands for drains and notifications.
 5. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every

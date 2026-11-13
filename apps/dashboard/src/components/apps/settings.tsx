@@ -1,6 +1,6 @@
 import { Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, primary } from "../ui";
 import { DrainsPanel } from "./drains";
@@ -146,9 +146,12 @@ export function SettingsTab({
   runner,
   onDeleted,
   onEnvDeleted,
+  prices,
 }: {
   service: Service;
   env: Environment | null;
+  /** roll's prices, for the estimate under the size. */
+  prices?: Prices | null;
   projectName: string;
   runner: Runner;
   onDeleted: () => void;
@@ -304,6 +307,7 @@ export function SettingsTab({
               ))}
             </select>
           </Field>
+          {prices && <Estimate prices={prices} cpu={form.cpu} memoryMb={form.memory} min={form.type === "cron" ? 0 : Number(form.min) || 0} />}
           {web && (
             <>
               <Field label="Health check path" hint="checked at each deploy and every 10 s while running; none: the port accepting">
@@ -380,6 +384,30 @@ export function SettingsTab({
           )}
         </div>
       </Panel>
+    </div>
+  );
+}
+
+/** What the size costs: an instance's hour at its limits (CPU is metered as used, so this is
+ *  the most), and the month the minimum kept up costs. */
+function Estimate({ prices, cpu, memoryMb, min }: { prices: Prices; cpu: number; memoryMb: number; min: number }) {
+  const hour = (cpu * prices.cpu_second + (memoryMb / 1024) * prices.gb_second) * 3600;
+  const month = hour * 730 * min;
+  const usd = (v: number) => (v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`);
+  return (
+    <div className="flex flex-col justify-end gap-1 text-[11px] text-subtle sm:col-span-2 lg:col-span-1">
+      <span>
+        At most <span className="font-mono text-muted">{usd(hour)}</span> an hour per running instance
+      </span>
+      <span>
+        {min > 0 ? (
+          <>
+            {min} kept up: about <span className="font-mono text-muted">{usd(month)}</span> a month, before traffic
+          </>
+        ) : (
+          "Scales to zero: nothing while it's asleep"
+        )}
+      </span>
     </div>
   );
 }

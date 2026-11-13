@@ -412,6 +412,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
           <SettingsTab
             service={service}
             env={env}
+            prices={overview?.prices ?? null}
             onEnvDeleted={() => go({ env: PRODUCTION })}
             projectName={project?.name ?? service.project}
             runner={runner}
