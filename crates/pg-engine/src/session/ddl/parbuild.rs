@@ -1,7 +1,7 @@
 //! Parallel btree builds (PostgreSQL's `_bt_parallel_build`): a big table's rows are cut into
 //! key ranges that the leader and `max_parallel_maintenance_workers`' workers read, each
 //! decoding its rows, measuring them (`Ddl::measure_rows_with`'s numbers) and sorting its
-//! entries; the sorted entries go in as linked runs (`Txn::put_index_runs`), and a unique
+//! entries; the sorted entries go in merged, as one linked run (`Txn::put_index_run`), and a unique
 //! index's duplicates are found merging them, the one reported the serial build's (the key
 //! whose second row comes first in the table's order). Only for an index of plain columns
 //! without a predicate on a table too big to model (`Ddl::measures_in_build`).
@@ -673,13 +673,26 @@ impl Ddl<'_, '_> {
         Ok(Some(ParBuilt::Measured(measure)))
     }
 
-    /// The participants' sorted entries in as linked runs (`Txn::put_index_runs`).
+    /// The participants' sorted entries merged into one run (`Entries::sort`'s order).
     fn put_runs(&self, start: &[u8], sorted: Vec<Entries>) -> Result<()> {
-        let runs: Vec<(Vec<u8>, Vec<(u32, u32, u32)>)> = sorted
-            .into_iter()
-            .map(|e| (e.data, e.ents.into_iter().map(|(_, o, l)| (o, l & 0xffff, (l & !CHECKED) >> 16)).collect()))
-            .collect();
-        self.ctx.txn.borrow_mut().put_index_runs(start, runs)
+        let mut at = vec![0usize; sorted.len()];
+        let mut merged = std::iter::from_fn(|| {
+            let mut min: Option<usize> = None;
+            for (i, e) in sorted.iter().enumerate() {
+                let Some(&x) = e.ents.get(at[i]) else { continue };
+                if min.is_none_or(|m| {
+                    let y = sorted[m].ents[at[m]];
+                    x.0.cmp(&y.0).then_with(|| e.key(x).cmp(sorted[m].key(y))).is_lt()
+                }) {
+                    min = Some(i);
+                }
+            }
+            let m = min?;
+            let x = sorted[m].ents[at[m]];
+            at[m] += 1;
+            Some((sorted[m].key(x), sorted[m].tail(x).len()))
+        });
+        self.ctx.txn.borrow_mut().put_index_run(start, &mut merged)
     }
 
     /// A unique index's duplicates, merging the participants' sorted entries (entries of
