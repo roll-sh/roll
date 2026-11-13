@@ -1206,8 +1206,8 @@ Ranked:
    link them all (`GET …/suggestions`). Something only roll can do, since it knows the canvas.
 3. **Edit one key across environments** from the overview grid: a row's editor sets the key in
    every environment it's chosen for, as one change each, with protected ones opening requests.
-3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-4. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+5. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
