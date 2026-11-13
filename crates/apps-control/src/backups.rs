@@ -91,9 +91,10 @@ impl Apps {
         let (reader, writer) = tokio::io::duplex(1 << 20);
         let download = tokio::spawn(async move { objects.download(&key, writer).await });
         let wrote = self.deps.runtime.write_volume(&volume, Box::new(reader)).await;
-        let read = download.await.map_err(|e| Error::Internal(e.to_string()))?;
+        let read = download.await;
+        // Whatever happened, the environment wakes on its next request again.
         live.set_held(false);
-        read.map_err(|e| Error::Internal(format!("reading the backup: {e:#}")))?;
+        read.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::Internal(format!("reading the backup: {e:#}")))?;
         wrote.map_err(|e| Error::Internal(format!("writing the volume: {e:#}")))?;
         self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System).line(format!("volume restored from the backup of {}", b.id));
         Ok(b)
