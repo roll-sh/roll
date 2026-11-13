@@ -198,6 +198,18 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     let (fenced, _) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ip_allow": ["10.0.0.0/8"] })).await;
     assert_eq!(d.call(&fenced, Method::GET, "/v1/projects", None).await.1["code"], "ip_not_allowed");
 
+    // A token limited to 2 requests a minute: told how many are left, then 429 with when to retry.
+    let (slow, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "rate_per_minute": 2 })).await;
+    let get = || async {
+        let req = Request::get("/v1/projects").header("authorization", format!("Bearer {slow}")).body(Body::empty()).unwrap();
+        let resp = d.router.clone().oneshot(req).await.unwrap();
+        let h = |n: &str| resp.headers().get(n).map(|v| v.to_str().unwrap().to_string());
+        (resp.status(), h("ratelimit-remaining"), h("retry-after"))
+    };
+    assert_eq!(get().await, (StatusCode::OK, Some("1".into()), None));
+    assert_eq!(get().await, (StatusCode::OK, Some("0".into()), None));
+    assert_eq!(get().await, (StatusCode::TOO_MANY_REQUESTS, Some("0".into()), Some("30".into())));
+
     // Secrets are per project and environment: a rule for the project's development environment
     // reaches those and only those, names but not values.
     let (secrets, _) = d
@@ -392,6 +404,12 @@ async fn a_token_never_makes_a_stronger_one() {
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({}))).await.0, StatusCode::OK);
     assert_eq!(make(json!([{ "product": "postgres", "resources": "*", "actions": { "write": "allow" } }]), Some(end)).await.0, StatusCode::FORBIDDEN);
     assert_eq!(make(read.clone(), None).await.0, StatusCode::FORBIDDEN, "outlives its maker");
+    // A limited maker makes only tokens limited as tightly.
+    let (limited, _) = d.token(json!([{ "product": "access", "resources": "*", "actions": { "admin": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "rate_per_minute": 60 })).await;
+    let child = |rate: Value| d.call(&limited, Method::POST, "/v1/access/tokens", Some(json!({ "name": "child", "rules": read, "rate_per_minute": rate })));
+    assert_eq!(child(Value::Null).await.0, StatusCode::FORBIDDEN, "unlimited from a limited maker");
+    assert_eq!(child(json!(61)).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(child(json!(60)).await.0, StatusCode::CREATED);
     assert_eq!(make(read, Some(end - 1000)).await.0, StatusCode::CREATED);
 
     let project = d.workspace.create("", "app", "", None).unwrap();
@@ -539,4 +557,97 @@ async fn oauth_connects_an_mcp_client() {
     d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{grant}"), None).await;
     let (s, _) = d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+/// A delivery: its headers and body.
+type Sent = (Vec<(String, String)>, Vec<u8>);
+
+/// Records what a sink would be sent; fails while `fail` is set.
+#[derive(Default)]
+struct FakeSink {
+    sent: std::sync::Mutex<Vec<Sent>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+impl roll_access::sinks::SinkTransport for FakeSink {
+    fn check(&self, url: &str) -> Result<(), String> {
+        if url.starts_with("https://") { Ok(()) } else { Err("a sink is an https URL".into()) }
+    }
+    fn seal(&self, id: &str, secret: &str) -> Result<String, String> {
+        Ok(format!("{id}|{secret}"))
+    }
+    fn open(&self, id: &str, sealed: &str) -> Result<String, String> {
+        sealed.strip_prefix(&format!("{id}|")).map(str::to_string).ok_or_else(|| "sealed for another sink".into())
+    }
+    fn post(&self, _url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let failing = self.fail.load(std::sync::atomic::Ordering::SeqCst);
+        if !failing {
+            self.sent.lock().unwrap().push((headers, body));
+        }
+        Box::pin(async move { if failing { Err("siem.example answered 503".to_string()) } else { Ok(()) } })
+    }
+}
+
+/// The audit log streams to a SIEM: only the operator adds a sink; rows arrive in order, signed
+/// with the secret shown once, each once; a failed batch is kept for later.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audit_log_streams_to_a_sink() {
+    let d = Daemon::new(50);
+    let fake = Arc::new(FakeSink::default());
+    let _ = d.access.sinks.set(fake.clone());
+    let (token, _) = d.token(json!([{ "product": "access", "resources": "*", "actions": { "admin": "allow", "read": "allow" } }]), json!({})).await;
+    let new = json!({ "url": "https://siem.example/roll", "from_start": true });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/audit/sinks", Some(new.clone())).await.0, StatusCode::FORBIDDEN, "a token never moves the log");
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/audit/sinks", Some(json!({ "url": "http://siem.example" }))).await.0, StatusCode::BAD_REQUEST);
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/audit/sinks", Some(new)).await;
+    assert_eq!(s, StatusCode::CREATED, "{made}");
+    let (id, secret) = (made["sink"]["id"].as_str().unwrap().to_string(), made["secret"].as_str().unwrap().to_string());
+    assert!(!d.call(OPERATOR, Method::GET, "/v1/access/audit/sinks", None).await.1.to_string().contains(&secret), "the secret is shown once");
+
+    // Rows old enough to have settled (a row is written just after its request).
+    let old = code_sql::now_ms() - 60_000;
+    let row = |n: i64| roll_access::store::AuditEvent {
+        id: format!("aud_{n:03}"),
+        at: old + n,
+        grant_id: None,
+        grant_name: None,
+        source: "api".into(),
+        tool: None,
+        method: "GET".into(),
+        route: "/v1/projects".into(),
+        product: Some("postgres".into()),
+        action: Some("read".into()),
+        resource: None,
+        decision: "allow".into(),
+        approval: None,
+        status: 200,
+        args: None,
+        ip: None,
+        duration_ms: 1,
+    };
+    for n in 0..3 {
+        d.access.store.audit(&row(n));
+    }
+    fake.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 1));
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/audit/sinks", None).await;
+    assert_eq!((list[0]["status"].as_str(), list[0]["error"].as_str()), (Some("error"), Some("siem.example answered 503")));
+    // Kept for later: once the retry is due, the same rows go.
+    fake.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 0), "not before its retry");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/audit/sinks/{id}/retry"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (1, 0));
+    let (headers, body) = fake.sent.lock().unwrap()[0].clone();
+    let h = |n: &str| headers.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap();
+    assert_eq!(h("x-roll-sink"), id);
+    assert_eq!(h("x-roll-signature"), roll_access::sinks::signature(&secret, h("x-roll-timestamp").parse().unwrap(), &body));
+    let sent: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(ids(&sent["events"]), vec!["aud_000", "aud_001", "aud_002"]);
+    // Nothing twice; the next rows next time.
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (0, 0));
+    d.access.store.audit(&row(3));
+    assert_eq!(d.access.sweep_sinks().await.unwrap(), (1, 0));
+    let sent: Value = serde_json::from_slice(&fake.sent.lock().unwrap()[1].1).unwrap();
+    assert_eq!(ids(&sent["events"]), vec!["aud_003"]);
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/audit/sinks/{id}"), None).await.0, StatusCode::NO_CONTENT);
 }

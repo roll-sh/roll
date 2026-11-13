@@ -208,6 +208,7 @@ function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
             {g.id} · used {relative(g.last_used_at)}
             {g.last_used_ip ? ` from ${g.last_used_ip}` : ""} · {g.expires_at === null ? "never expires" : `expires ${relative(g.expires_at)}`}
             {g.ip_allow.length > 0 ? ` · only ${g.ip_allow.join(", ")}` : ""}
+            {g.rate_per_minute ? ` · ${g.rate_per_minute.toLocaleString("en")}/min` : ""}
           </p>
           {g.activity && g.activity.allowed + g.activity.denied + g.activity.asked > 0 && (
             <p className="mt-0.5 font-mono text-[11px] text-subtle">

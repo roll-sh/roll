@@ -170,6 +170,9 @@ pub struct Consent {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub ip_allow: Vec<String>,
+    /// Requests a minute the connection may make.
+    #[serde(default)]
+    pub rate_per_minute: Option<u32>,
 }
 
 /// The consent screen's answer, from the signed-in operator: a code for the client, in the
@@ -197,7 +200,7 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
     a.check_policy(c.expires_at)?;
-    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, ip_allow: c.ip_allow.clone() };
+    let new = NewGrant { name: c.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()), rules: c.rules.clone(), expires_at: c.expires_at, ip_allow: c.ip_allow.clone(), rate_per_minute: c.rate_per_minute };
     let (a2, cl, uri, ch, res, by) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)), crate::api::actor(&ext));
     let code = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, &by, &uri, &ch, res.as_deref())).await.map_err(|e| Error::Internal(e.to_string()))??;
     let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;

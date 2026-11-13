@@ -72,6 +72,7 @@ type Grant = {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: { id: string; name: string; uri?: string }; // OAuth only
+  rate_per_minute?: number; // 1–100,000 requests a minute, per node; absent: no limit
 };
 
 type Rule = {
@@ -346,12 +347,34 @@ type AuditEvent = {
 - The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
 
+### Audit sinks
+
+The operator can stream the log to a SIEM (Datadog, Splunk, a Lambda): the audit page's "Stream to
+a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url, from_start?}`
+(`roll-access/src/sinks.rs`).
+
+- A sink is a public HTTPS URL (roll-net's guard, no redirects, 10 s, the answer read to 64 KiB).
+  It gets new rows in order, in batches of up to 200: `{sink, source: "access", events:
+  AuditEvent[]}`, signed as roll secrets' sinks and roll's webhooks are, so one receiver takes all
+  of them: `X-Roll-Sink: <id>`, `X-Roll-Timestamp: <unix seconds>`, `X-Roll-Signature:
+  sha256=<hex HMAC-SHA256 of "{timestamp}.{body}">`.
+- The signing secret (`whsec_…`) is shown once and kept sealed with `ROLL_SECRET_KEY`, bound to
+  its sink; without the key, streaming is off. `ROLL_ACCESS_SINK_ALLOW_PRIVATE` allows plain http
+  on a private address (local development only).
+- Each sink keeps a cursor (the last row's time and id). Every node sweeps every 10 seconds, sending batches until a
+  sink has no full one waiting (up to 5,000 rows a sink a sweep); a claim in the store keeps a
+  batch to one node, and only rows 30 seconds old go (a row is written
+  just after its request, so a cursor never passes one still being written). A failed batch is
+  sent again 5 minutes later, or at once with "Retry now" (`POST …/sinks/{id}/retry`). Rows the
+  log prunes before a sink catches up are gone. At most 10 sinks.
+
 ## Managing grants
 
 - The operator manages grants. A grant may too when it has `admin` on product `access`, and then
   only grants it covers entirely, before and after a change: rules within its own, an expiry no
-  later than its own, and (when it has an IP allowlist) addresses within its own. It can never make
-  a token more powerful than it is, one that outlives it, or one usable from elsewhere, and never
+  later than its own, (when it has an IP allowlist) addresses within its own, and (when it has a
+  rate limit) a limit no higher than its own. It can never make a token more powerful than it is,
+  one that outlives it, one usable from elsewhere or one that may make more requests, and never
   changes its own addresses.
 - A grant reviews and comments in roll code only as itself (`token:<name>`): the gate drops
   `X-Roll-User` and sets `X-Roll-Agent`.
@@ -360,6 +383,23 @@ type AuditEvent = {
   OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs).
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
+
+## Rate limits
+
+A grant may have `rate_per_minute` (the builder's "Requests a minute", `roll token create --rate`,
+the consent screen), like Stripe's and GitHub's per-key limits. It protects roll from a runaway
+agent loop; it isn't billing.
+
+- A GCRA per grant (`roll-access/src/rate.rs`): a full minute's worth may come at once, then one
+  request every `60 s / rate`. Counted in memory on each node, so a fleet of N nodes allows up to
+  N times the rate.
+- An MCP message counts once, not again for the route its tool calls; a hop to an owner counts
+  where it was decided.
+- Allowed answers carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds).
+  Over the limit the answer is `429` `{code: "rate_limited", retry_after, limit}` with
+  `Retry-After`, before anything is looked up or written: no audit row, no `last_used_at`, so a
+  flood stays cheap. Over MCP the `/v1/mcp` request itself answers that `429` (the MCP SDKs raise it
+  with its body, so the agent sees when to retry).
 
 ## Storage
 
@@ -387,9 +427,9 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}` |
-| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?}` → 201 `{grant, token}`; `token` is shown this once |
+| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
-| `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?}`: narrow or widen (within the caller's own) |
+| `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | `?state=pending` |
@@ -397,6 +437,10 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/approvals/{id}/approve` | operator | |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
 | `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
+| `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
+| `POST /v1/access/audit/sinks/{id}/retry` | operator | a failed sink's batch at the next sweep → 204 |
+| `DELETE /v1/access/audit/sinks/{id}` | operator | stop streaming → 204 |
 | `GET /v1/access/policy` | operator | `{max_days, require_expiry}`: roll's rules for every grant |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
@@ -427,7 +471,7 @@ this list:
 | `/v1/code/review-apps` | review apps' own tokens |
 | `/v1/accounts` | people's accounts (docs/accounts.md): sign-in, sessions and invites are a person's, never a token's |
 | `/v1/code/mcp` | roll code's MCP server calls roll code without the gate; grants use `/v1/mcp` |
-| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify` | the operator decides |
+| `/v1/access/approvals/{id}/approve` and `/deny`, `/v1/access/oauth/authorize`, `/v1/access/notify`, `/v1/access/policy`, `/v1/access/audit/sinks` | the operator decides |
 
 Rows match a route by its shape, not its parameters' names (`…/secrets/{key}/value` finds the row
 written `…/secrets/{name}/value`), so renaming a parameter can never change an action. To check a
