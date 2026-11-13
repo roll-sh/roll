@@ -35,7 +35,6 @@ use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
-use crate::xpack::security::{AuthKind, Principal};
 use crate::xpack::{enc, internal, store};
 use exec::fmt_ms;
 
@@ -159,51 +158,6 @@ fn next_seq(st: &mut crate::meta::ClusterState, now: i64) -> EsResult<i64> {
     Ok(seq)
 }
 
-// --- the watch's user ---------------------------------------------------------------------------
-
-/// The user a watch runs as, kept with it: `None` for a superuser (the watch runs with the
-/// cluster's authority).
-fn stored_user(p: &Principal) -> Option<Value> {
-    if p.is_superuser() {
-        return None;
-    }
-    let mut m = Map::new();
-    m.insert("username".into(), p.username.clone().into());
-    m.insert("roles".into(), Value::Arr(p.roles.iter().map(Value::from).collect()));
-    m.insert("realm_name".into(), p.realm_name.into());
-    m.insert("realm_type".into(), p.realm_type.into());
-    if let AuthKind::ApiKey(a) = &p.kind {
-        m.insert("api_key".into(), obj! { "id" => a.id.clone(), "name" => a.name.clone(), "role_descriptors" => a.role_descriptors.clone(), "limited_by" => a.limited_by.clone(), "cross_cluster" => a.cross_cluster });
-    }
-    Some(Value::Obj(m))
-}
-
-fn principal_of(u: &Value) -> Option<Principal> {
-    const REALMS: [&str; 8] = ["reserved", "default_native", "native", "default_file", "file", "_es_api_key", "_service_account", "__attach"];
-    let known = |s: Option<&str>, d: &'static str| -> &'static str { s.and_then(|s| REALMS.iter().find(|r| **r == s).copied()).unwrap_or(d) };
-    let kind = match u.get("api_key") {
-        Some(a) => AuthKind::ApiKey(Box::new(crate::xpack::security::ApiKeyAuth {
-            id: a.get("id").map(Value::to_es_string).unwrap_or_default(),
-            name: a.get("name").cloned().unwrap_or(Value::Null),
-            role_descriptors: a.get("role_descriptors").cloned().unwrap_or(Value::Null),
-            limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
-            cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
-        })),
-        None => AuthKind::Realm,
-    };
-    // Built from the owner's defaults, so fields this doesn't keep stay neutral.
-    let mut p = Principal::owner();
-    p.username = u.get("username")?.to_es_string();
-    p.roles = u.get("roles").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
-    p.full_name = Value::Null;
-    p.email = Value::Null;
-    p.metadata = Value::object();
-    p.realm_name = known(u.get("realm_name").and_then(Value::as_str), "default_native");
-    p.realm_type = known(u.get("realm_type").and_then(Value::as_str), "native");
-    p.kind = kind;
-    Some(p)
-}
-
 // --- CRUD ------------------------------------------------------------------------------------
 
 /// When an active watch next fires, from its activation.
@@ -235,7 +189,7 @@ pub async fn put_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if parse::uses_ignore_throttled(&Value::Obj(raw)) {
         ctx.warn(parse::IGNORE_THROTTLED);
     }
-    let user = stored_user(crate::xpack::security::principal(ctx));
+    let user = internal::stored_user(crate::xpack::security::principal(ctx));
     let now = ctx.now_ms;
     let (version, seq, created) = ctx
         .cluster
@@ -660,14 +614,14 @@ pub async fn execute_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if parse::uses_ignore_throttled(&watch) {
                 ctx.warn(parse::IGNORE_THROTTLED);
             }
-            let owner = w.pointer(&["_roll", "user"]).and_then(principal_of);
+            let owner = w.pointer(&["_roll", "user"]).and_then(internal::principal_of);
             (id.to_string(), watch, stored_status(w), w.get("_version").cloned().unwrap_or(Value::from(1)), owner)
         }
         None => {
             let Some(Value::Obj(w)) = body.get("watch") else { return Err(EsError::action_request_validation(&["a watch execution request must either have a watch id or an inline watch source, but both are missing".into()])) };
             let watch = parse::normalize_watch(ctx.cluster, "_inlined_", w, None)?;
             let status = initial_status(&watch, true, now);
-            let owner = stored_user(crate::xpack::security::principal(ctx)).as_ref().and_then(principal_of);
+            let owner = internal::stored_user(crate::xpack::security::principal(ctx)).as_ref().and_then(internal::principal_of);
             ("_inlined_".to_string(), Value::Obj(watch), status, Value::from(-1), owner)
         }
     };
@@ -824,7 +778,7 @@ async fn trigger(cluster: &Cluster, id: &str, scheduled_ms: i64) {
     let watch = w.get("watch").cloned().unwrap_or(Value::Null);
     let version = w.get("_version").and_then(Value::as_i64);
     let user = w.pointer(&["_roll", "user"]).cloned();
-    let owner = user.as_ref().and_then(principal_of);
+    let owner = user.as_ref().and_then(internal::principal_of);
     let execution = now_instant();
     let now = execution.millis();
     let record_id = format!("{id}_{}-{}", uuid_like(), crate::time::java_instant_string_nanos(execution));
@@ -902,18 +856,5 @@ mod tests {
         ] {
             assert_eq!(cron_problem(expr).as_deref(), msg, "{expr}");
         }
-    }
-
-    #[test]
-    fn stored_users_round_trip() {
-        let mut p = Principal::owner();
-        p.username = "watcher_manager".into();
-        p.roles = vec!["watcher_manager".into()];
-        p.realm_name = "default_file";
-        p.realm_type = "file";
-        let back = principal_of(&stored_user(&p).unwrap()).unwrap();
-        assert_eq!((back.username.as_str(), back.roles.clone(), back.realm_name, back.kind), ("watcher_manager", p.roles.clone(), "default_file", AuthKind::Realm));
-        // A superuser's watch runs with the cluster's authority.
-        assert!(stored_user(&Principal::owner()).is_none());
     }
 }

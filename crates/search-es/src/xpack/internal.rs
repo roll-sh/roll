@@ -12,7 +12,7 @@
 
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
-use crate::json::Value;
+use crate::json::{Map, Value};
 use crate::rest::EsRequest;
 use std::future::Future;
 use std::pin::Pin;
@@ -42,6 +42,51 @@ pub async fn as_principal<F: Future>(principal: Option<crate::xpack::security::P
         Some(p) => ACTING.scope(p, f).await,
         None => f.await,
     }
+}
+
+/// The user a background job (a watch, a rollup job) runs as ([`as_principal`]), kept with
+/// it: `None` for a superuser (the job runs with the cluster's authority). Only the user and
+/// its roles (an API key's role descriptors), never credentials.
+pub fn stored_user(p: &crate::xpack::security::Principal) -> Option<Value> {
+    if p.is_superuser() {
+        return None;
+    }
+    let mut m = Map::new();
+    m.insert("username".into(), p.username.clone().into());
+    m.insert("roles".into(), Value::Arr(p.roles.iter().map(Value::from).collect()));
+    m.insert("realm_name".into(), p.realm_name.into());
+    m.insert("realm_type".into(), p.realm_type.into());
+    if let crate::xpack::security::AuthKind::ApiKey(a) = &p.kind {
+        m.insert("api_key".into(), crate::obj! { "id" => a.id.clone(), "name" => a.name.clone(), "role_descriptors" => a.role_descriptors.clone(), "limited_by" => a.limited_by.clone(), "cross_cluster" => a.cross_cluster });
+    }
+    Some(Value::Obj(m))
+}
+
+/// The principal [`stored_user`] kept.
+pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
+    const REALMS: [&str; 8] = ["reserved", "default_native", "native", "default_file", "file", "_es_api_key", "_service_account", "__attach"];
+    let known = |s: Option<&str>, d: &'static str| -> &'static str { s.and_then(|s| REALMS.iter().find(|r| **r == s).copied()).unwrap_or(d) };
+    let kind = match u.get("api_key") {
+        Some(a) => crate::xpack::security::AuthKind::ApiKey(Box::new(crate::xpack::security::ApiKeyAuth {
+            id: a.get("id").map(Value::to_es_string).unwrap_or_default(),
+            name: a.get("name").cloned().unwrap_or(Value::Null),
+            role_descriptors: a.get("role_descriptors").cloned().unwrap_or(Value::Null),
+            limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
+            cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
+        })),
+        None => crate::xpack::security::AuthKind::Realm,
+    };
+    // Built from the owner's defaults, so fields this doesn't keep stay neutral.
+    let mut p = crate::xpack::security::Principal::owner();
+    p.username = u.get("username")?.to_es_string();
+    p.roles = u.get("roles").and_then(Value::as_array).map(|a| a.iter().map(Value::to_es_string).collect()).unwrap_or_default();
+    p.full_name = Value::Null;
+    p.email = Value::Null;
+    p.metadata = Value::object();
+    p.realm_name = known(u.get("realm_name").and_then(Value::as_str), "default_native");
+    p.realm_type = known(u.get("realm_type").and_then(Value::as_str), "native");
+    p.kind = kind;
+    Some(p)
 }
 
 /// Marks a [`call_system`] request, which keeps the cluster's authority inside
@@ -96,8 +141,11 @@ pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Val
         req.body = bytes::Bytes::from(b.to_json());
         req.headers.push(("Content-Type".into(), "application/json".into()));
     }
-    let _ = CALLER.try_with(|c| req.headers.extend(c.headers.iter().cloned()));
-    send(cluster, req)
+    // The caller is read when the call runs, so `as_caller(c, call(…))` calls as `c` too.
+    Box::pin(async move {
+        let _ = CALLER.try_with(|c| req.headers.extend(c.headers.iter().cloned()));
+        send(cluster, req).await
+    })
 }
 
 /// [`call`] with the cluster's own authority, also inside [`as_caller`] and [`as_principal`].
@@ -233,5 +281,19 @@ mod tests {
         assert_eq!(e, EsError::index_not_found("x"));
         let e = error_from_body(400, &obj! { "error" => obj! { "type" => "illegal_argument_exception", "reason" => "bad" } });
         assert_eq!(e, EsError::illegal_argument("bad"));
+    }
+
+    #[test]
+    fn stored_users_round_trip() {
+        use crate::xpack::security::{AuthKind, Principal};
+        let mut p = Principal::owner();
+        p.username = "watcher_manager".into();
+        p.roles = vec!["watcher_manager".into()];
+        p.realm_name = "default_file";
+        p.realm_type = "file";
+        let back = principal_of(&stored_user(&p).unwrap()).unwrap();
+        assert_eq!((back.username.as_str(), back.roles.clone(), back.realm_name, back.kind), ("watcher_manager", p.roles.clone(), "default_file", AuthKind::Realm));
+        // A superuser's job runs with the cluster's authority.
+        assert!(stored_user(&Principal::owner()).is_none());
     }
 }
