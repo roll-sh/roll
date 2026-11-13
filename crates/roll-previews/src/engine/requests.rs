@@ -5,6 +5,11 @@ use super::*;
 impl Engine {
     // ── what the API asks for ──
 
+    /// The feedback left on a change's preview pages.
+    pub async fn notes(&self, change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        self.source.feedback(change).await
+    }
+
     /// The ids of `owner`'s workspace projects (a signed-in person's).
     pub fn projects_of(&self, owner: &str) -> Result<std::collections::HashSet<String>> {
         Ok(self.workspace.list(roll_workspace::Scope::Owner(owner))?.into_iter().map(|p| p.id).collect())

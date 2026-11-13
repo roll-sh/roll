@@ -208,6 +208,20 @@ impl Source for CodeSource {
         Ok(Some(self.code.store.compare(&r.id, &a, &b)?.into_iter().map(|d| d.path.as_str().to_string()).collect()))
     }
 
+    async fn feedback(&self, change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        Ok(self
+            .code
+            .db
+            .reviews(change)?
+            .into_iter()
+            .filter(|r| !r.dismissed && r.verdict == code_control::review::Verdict::Comment)
+            .filter_map(|r| {
+                let (path, selector, note) = crate::notes::parse(&r.body)?;
+                Some(crate::notes::Note { path, selector, note, by: r.reviewer.name, at: r.created_at })
+            })
+            .collect())
+    }
+
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;

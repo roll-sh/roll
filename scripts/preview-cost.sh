@@ -194,6 +194,11 @@ BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 # The feedback button: on the page a visitor through roll opens, and its script from the same host.
 curl -sS -b "$JAR" -H "Host: $HOST" -H "Accept: text/html" "http://$API/" | grep -q '/__roll/feedback.js' || { echo "the page should carry the feedback button"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{content_type}' -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.js")" = "text/javascript; charset=utf-8" ] || { echo "the feedback script should load from the preview's host"; exit 1; }
+# A note posted from the button (a comment review in the button's shape) is listed on its page.
+NOTE_BODY='**Feedback on the preview** · [`/`](http://x/) · `body > h1`\n\nThe heading is cut off\n\n<sub>roll preview</sub>'
+api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"$NOTE_BODY\"}" >/dev/null
+NOTES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F")
+echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes should list the feedback: $NOTES"; exit 1; }
 CONTAINER="roll-previews-$(echo "$HOST" | cut -d. -f1)"
 STATS=$(docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$CONTAINER")
 RSS1=$(ps -o rss= -p "$PID")

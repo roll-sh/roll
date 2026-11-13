@@ -371,6 +371,22 @@ impl Runtime {
         self.store.service_for_host(label).ok().flatten()
     }
 
+    /// The notes left on `path` of the preview's pages, as JSON (the latest 50; for whoever has
+    /// the button: link access, through roll).
+    async fn feedback_notes(&self, preview: &str, path: &str) -> Response {
+        let notes = match (self.engine(), self.store.row(preview)) {
+            (Ok(e), Ok(row)) => match &row.change_id {
+                Some(change) => e.notes(change).await.unwrap_or_default(),
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let mut here: Vec<_> = notes.into_iter().filter(|n| n.path == path).collect();
+        let skip = here.len().saturating_sub(50);
+        here.drain(..skip);
+        ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-store")], axum::Json(here)).into_response()
+    }
+
     /// Where a visitor's feedback goes (the preview in roll's dashboard), when they get the button:
     /// they came in through roll (the link access cookie), the preview is a change's, the rules
     /// have `feedback` on and roll's dashboard is known.
@@ -508,6 +524,8 @@ impl Runtime {
 /// Where a preview's pages load the feedback button from (its own host, so `script-src 'self'`
 /// allows it), and the tag that loads it.
 pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
+/// The feedback already left on a page (`?path=`), for the button to list.
+pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
@@ -593,6 +611,30 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
 
 /// A private preview's answer to a request without its link: where to get in, if roll knows.
+/// `%xx` and `+` in a query value, as a browser's `URLSearchParams` writes them.
+fn percent_decode(v: &str) -> String {
+    let b = v.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' => match (b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+                (Some(h), Some(l)) => {
+                    out.push(h * 16 + l);
+                    i += 3;
+                    continue;
+                }
+                _ => out.push(b'%'),
+            },
+            b'+' => out.push(b' '),
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Whether `req` carries the preview's link access cookie.
 fn has_access_cookie(preview: &str, token: &str, req: &Request) -> bool {
     let cookie = format!("roll_access_{preview}");
@@ -861,6 +903,10 @@ pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> 
     {
         return feedback_script(t);
     }
+    if req.uri().path() == FEEDBACK_NOTES_PATH && target.is_some() {
+        let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
+        return rt.feedback_notes(&preview, &path).await;
+    }
     // A page load: a browser says so (`Sec-Fetch-Dest: document`, so not a fetch, a fragment or
     // an iframe); without that header, one that asks for HTML.
     let page_load = {
@@ -998,6 +1044,10 @@ mod tests {
         let script = raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(script.contains("text/javascript") && script.contains(&format!(r#""https://roll.test/dashboard/projects/prj_1/previews?preview={}""#, row.id)), "{script}");
         assert!(raw("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
+        // The notes already left on a page: for the same visitors only.
+        let notes = raw(format!("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(notes.contains("application/json") && notes.ends_with("[]"), "{notes}");
+        assert!(raw("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
         rt.store.put_settings("prj_1", &crate::Settings { feedback: false, ..Default::default() }).unwrap();
         assert!(raw(page("text/html")).await.ends_with("<p>asked for any</p></BODY></html>"), "the rule turns it off");
         let (secret, _) = rt.store.rotate_bypass("prj_1").unwrap();
@@ -1030,6 +1080,14 @@ mod tests {
         assert_eq!(run(&["<p>a</p>", "</BODY>", "<script>late()</script></body>"]), format!("<p>a</p>{tag}</BODY><script>late()</script></body>"));
         assert_eq!(run(&["<p>fragment</p>"]), format!("<p>fragment</p>{tag}"));
         assert_eq!(run(&["a", "b", "c"]), format!("abc{tag}"));
+    }
+
+    #[test]
+    fn query_values_are_decoded_as_browsers_encode_them() {
+        assert_eq!(percent_decode("%2Fcheckout%3Fstep%3D2"), "/checkout?step=2");
+        assert_eq!(percent_decode("a+b%20c"), "a b c");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
     }
 
     #[test]

@@ -154,6 +154,11 @@ pub trait Source: Send + Sync {
     async fn paths_between(&self, _repo: &str, _from: &str, _to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
+    /// The feedback left on the change's preview pages (its feedback reviews, not dismissed),
+    /// oldest first.
+    async fn feedback(&self, _change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        Ok(Vec::new())
+    }
     /// The git commit of a changeset.
     async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
         Ok(None)

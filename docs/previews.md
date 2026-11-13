@@ -582,6 +582,11 @@ land on the change.
 - roll posts it as a `comment` review on the change ("**Feedback on the preview** · `/checkout`
   linked to the preview · `button.pay`", then the note), which reaches the pull request like any
   review. The page's own names are kept to one inert line each.
+- The button also lists what's been said about the page already (Vercel's comment pins): the
+  proxy answers `/__roll/feedback.json?path=…` for the same visitors only (link access, through
+  roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
+  dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
+  who and when, and outlines its element on hover; all of it is text, never HTML.
 - Previews deployed on roll apps go through apps' own proxy, which doesn't add it yet.
 - Public previews don't get it (anyone could see the button), and a branch's preview has no
   change to post on.
@@ -843,6 +848,7 @@ Ranked by what a person notices first. Done so far:
   its e2e test, which previews use;
 - this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
   `[skip preview]`);
+- the page's feedback listed by its button (who, what, its element outlined);
 - a visual change per push (the screenshot against the one before, Before/After on the sheet,
   the share of pixels changed in the pull request comment);
 - per-branch project variables (`env_for`);
@@ -882,10 +888,7 @@ Ranked by what a person notices first. Done so far:
    wired into apps (apps resolves `pv-<id>` itself), send only the links' redirects, not a
    second copy of the project's variables. (A preview's cost now uses the memory its live
    deployment runs with: `[app.previews.run]` and the environment's own size over the service's.)
-3. **Feedback shown on the page** (Vercel's comment pins): the button lists the change's
-   feedback for that page. That needs a read path the preview's origin can use without a
-   credential (a signed, expiring list per page), which is why it waits.
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

@@ -18,6 +18,7 @@ pub mod engine;
 pub mod glob;
 pub mod ports;
 pub mod mask;
+pub mod notes;
 pub mod runtime;
 pub mod schema;
 pub mod settings;
