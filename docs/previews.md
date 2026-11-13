@@ -438,46 +438,55 @@ own rates (the same ones its usage page shows).
    preview through its link (without it: 401);
 4. sleeps it and lands the change.
 
-These are the numbers from 2026-11-12 on ai-server (36 threads, ext4, load 25–30 from other
-sessions, debug build).
+These are the numbers from 2026-11-12 and 2026-11-13 on ai-server (36 threads, ext4, load 25–35
+from other sessions, debug build). It also checks, each run: the link access (401 without it,
+the bypass secret's header, a wrong secret refused), the NoSQL and Postgres masks, the service's
+Postgres role, the schema diff after a migration, a pushed log line, and `roll preview wait`.
 
 | What | Measured |
 | --- | --- |
-| Change opened → preview ready (7 branches, 1 service deployed) | 12.3–12.8 s with Postgres, most of it the parent compute's own first start (a branch of a running parent is a file-system copy under the backup API); 1.2–2.1 s without |
+| Change opened → preview ready (7 branches, 1 service deployed) | 4.6–6.8 s with Postgres when its parent's compute is running (a branch of a running parent is a file-system copy under the backup API); 9.6–16.8 s when the parent has to start first; 1.2–2.1 s without Postgres |
 | The bucket branch: parent's bytes / its own after writing 1 MiB / objects it sees | 20 MiB / 1 MiB / 21 |
-| The Postgres branch's data directory (a full copy on ext4; the parent's: 94 MiB) | 62 MiB |
-| First request (cold start of the service's container, image cached) | 3.6–13.6 s (13.6 under the heaviest load) |
-| Next request (warm) | 16–27 ms |
+| The Postgres branch's data directory (a full copy on ext4; the parent's: 80–94 MiB) | 62–80 MiB |
+| Postgres `users.email` in the branch / in the parent (rule `email`) | `user-c58bca0f6be4@example.invalid` / `ada@example.com` |
+| The service's Postgres role / reading the WAL with it | `pv_<id>` / permission denied |
+| First request (cold start of the service's container, image cached) | 3.6–5.1 s (13.6 under the heaviest load) |
+| Next request (warm) | 13–27 ms |
 | The service's container while running | 12–30 MiB of 128 MiB, 0.01% CPU |
-| rolld while the preview runs (its Redis branch and NoSQL database loaded) | +86 to +96 MiB RSS |
+| rolld while the preview runs (its Redis branch and NoSQL database loaded) | +86 to +106 MiB RSS |
 | Containers left once it sleeps | 0 |
-| **Cost asleep** | **$0.0007 a month** once idle for an hour (the Postgres branch evicted to a ~4 MB base backup; Redis $0.0006); $0.006 a month in its first idle hour (the 62 MiB directory) |
+| **Cost asleep** | **$0.0006–0.0007 a month** once idle for an hour (the Postgres branch evicted to a ~4 MB base backup; Redis $0.0006); $0.006 a month in its first idle hour (the directory) |
 | **Cost running** | **$0.012 an hour**: the container's 128 MiB, $0.002; Postgres at 0.25 CU, $0.010; Redis memory |
 | After landing | every branch gone, every parent intact |
 
-So a hundred sleeping previews of this project cost about 7 cents a month.
+So a hundred sleeping previews of this project cost about 7 cents a month, and an hour of
+someone clicking through one costs about a cent.
 
-**With roll apps** (a scratch merge of `feature/roll-apps`, 2026-11-12): a repo with a
-Dockerfile as a roll apps service, plus a Redis database.
+**With roll apps** (a scratch merge of `feature/roll-apps`, `wip/previews-on-apps`): a repo with
+a Dockerfile as a roll apps service, plus a Redis database. Since 2026-11-13 a preview is ready
+only once its deploy is live.
 
 | What | Measured |
 | --- | --- |
-| Change opened → preview ready (Redis branched, the `pv-…` environment made, its deploy queued) | 678 ms |
-| … → the deploy active (a Docker build of the change's commit) | 4.0 s |
-| First request through roll apps' waking proxy | 444 ms |
+| Change opened → preview ready, its deploy live (a Docker build of the change's commit) | 2.3–4.0 s |
+| First request through roll apps' waking proxy | 382–444 ms |
 | The Redis the service reached | the preview's branch, not the parent |
-| After landing | the environment gone (404), nothing left: no containers, images, volumes or networks | An hour of someone
-clicking through one costs about a cent.
+| After landing | the environment gone (404), nothing left: no containers, images, volumes or networks |
+
+**With roll secrets** (`wip/previews-on-secrets`): the service saw development's `API_KEY`, not
+production's; the preview's environment was untrusted and expiring in 24.0 h; an override
+dropped from the rules left it; a reference to a missing key was named in the activity; nothing
+was left after landing. **With roll search** (`wip/previews-on-search`): the branch read the
+parent's document, its own writes stayed in it, and it was gone after landing.
 
 What dominates, from most to least:
 
 - **Postgres while connected.** A compute at its minimum size.
-
-An hour after a preview's last request, with nothing running, its branches are told it's idle:
-a Postgres branch is evicted (its directory goes to object storage as a base backup, and the
-next connection restores it). That's what keeps a sleeping preview's Postgres cheap on ext4.
 - **The Postgres branch's local directory on ext4** in the hour before it's evicted: a full copy
-  (see `## Next`).
+  (see `## Next`). An hour after a preview's last request, with nothing running, its branches are
+  told it's idle: a Postgres branch is evicted (its directory goes to object storage as a base
+  backup, and the next connection restores it). That's what keeps a sleeping preview's Postgres
+  cheap on ext4.
 - **The service's container while it runs.**
 - **A Redis branch.** It reports its loaded dataset, which includes the parent's keys.
 - **Bytes the preview writes.** Everything else branches copy-on-write and pays only for those
