@@ -1366,6 +1366,10 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Health where people already look**: the Health tab carries a count of serious findings
+   (expired, missing, exposed), so they're seen without opening it.
+2. **One daily notice from health**: the reminder an environment's notify URL gets once a day lists
+   every finding there (missing, exposed and weak too, not only stale and expiring), names only.
 
 Waiting on other pull requests:
 
