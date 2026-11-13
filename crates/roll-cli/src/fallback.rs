@@ -22,6 +22,9 @@ const INFO: &[u8] = b"roll-fallback-v1";
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Header {
     pub v: u8,
+    /// The project as `roll run` was asked for it (`-p`, or empty for the token's own): a file kept
+    /// for one project can't stand in when another is asked for, even when rolld can't say which.
+    pub asked: String,
     pub project: String,
     pub environment: String,
     pub path: String,
@@ -41,6 +44,8 @@ struct File {
 /// The secret the file's key comes from: `ROLL_FALLBACK_KEY`, else the token in use.
 pub fn secret(token: Option<&str>) -> anyhow::Result<String> {
     match std::env::var("ROLL_FALLBACK_KEY").ok().filter(|k| !k.trim().is_empty()) {
+        // A file can be copied and tried offline: no key a person would choose.
+        Some(k) if k.trim().chars().count() < 32 => bail!("ROLL_FALLBACK_KEY is at least 32 characters (openssl rand -base64 32)"),
         Some(k) => Ok(k),
         None => token.map(str::to_string).context("--fallback needs ROLL_TOKEN or ROLL_FALLBACK_KEY (a workload identity's tokens change at every login)"),
     }
@@ -92,7 +97,7 @@ pub fn header(file: &Path) -> anyhow::Result<Header> {
 pub fn read(file: &Path, secret: &str, want: &Header, now: i64, max_age_ms: i64) -> anyhow::Result<(Map<String, Value>, Header)> {
     let f: File = serde_json::from_slice(&std::fs::read(file).with_context(|| format!("reading {}", file.display()))?).context("the fallback file isn't one")?;
     let h = &f.header;
-    if h.v != 1 || (h.project.as_str(), h.environment.as_str(), h.path.as_str()) != (want.project.as_str(), want.environment.as_str(), want.path.as_str()) {
+    if h.v != 1 || (h.asked.as_str(), h.project.as_str(), h.environment.as_str(), h.path.as_str()) != (want.asked.as_str(), want.project.as_str(), want.environment.as_str(), want.path.as_str()) {
         bail!("{} is for {} {}:{}, not this", file.display(), h.project, h.environment, h.path);
     }
     if now - h.fetched_at > max_age_ms {
@@ -129,7 +134,7 @@ mod tests {
     use super::*;
 
     fn header(at: i64) -> Header {
-        Header { v: 1, project: "prj_a".into(), environment: "production".into(), path: "/".into(), fetched_at: at }
+        Header { v: 1, asked: "shop".into(), project: "prj_a".into(), environment: "production".into(), path: "/".into(), fetched_at: at }
     }
 
     #[test]
@@ -149,6 +154,7 @@ mod tests {
         assert_eq!((got, h.fetched_at), (values, 1_000));
         assert!(read(&file, "rlt_other", &header(0), 2_000, day).is_err(), "another token");
         assert!(read(&file, "rlt_token", &Header { environment: "staging".into(), ..header(0) }, 2_000, day).is_err(), "another environment");
+        assert!(read(&file, "rlt_token", &Header { asked: "billing".into(), ..header(0) }, 2_000, day).is_err(), "another project asked for");
         assert!(read(&file, "rlt_token", &header(0), 1_000 + 2 * day, day).is_err(), "too old");
         // Its header can't be edited to look fresher: it's bound to the values.
         let edited = std::fs::read_to_string(&file).unwrap().replace("\"fetched_at\":1000", "\"fetched_at\":2000");

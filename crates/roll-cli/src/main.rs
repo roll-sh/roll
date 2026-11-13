@@ -224,6 +224,22 @@ enum Db {
     Sql { endpoint: String, sql: String },
 }
 
+/// An answer that wasn't a success: its message, and its status for whoever needs to tell a
+/// refusal from a failing server (`roll run --fallback`).
+#[derive(Debug)]
+pub(crate) struct ApiStatus {
+    pub status: reqwest::StatusCode,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiStatus {}
+
 struct Api {
     base: String,
     http: reqwest::Client,
@@ -257,7 +273,7 @@ impl Api {
     }
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
-        self.answer(method, path, body).await?.map_err(|(_, message)| anyhow::anyhow!(message))
+        self.answer(method, path, body).await?.map_err(|(status, message)| anyhow::Error::new(ApiStatus { status, message }))
     }
 
     /// What `call` answers, telling no answer at all (the outer error: rolld unreachable) from an
@@ -477,7 +493,23 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Search(cmd) => return search::run(&api, cli.json, cmd).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
         Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
-        Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
+        Cmd::Run(r) => {
+            if r.fallback.is_none() {
+                return secrets::run_command(&secrets_api(&api).await?, r).await;
+            }
+            // Through an outage: don't wait on a hung rolld, and a workload identity's login that
+            // gets no answer goes on to the fallback (whose key is ROLL_FALLBACK_KEY then).
+            let timed = Api { http: reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5)).timeout(std::time::Duration::from_secs(30)).build()?, ..api };
+            let api = match secrets_api(&timed).await {
+                Ok(a) => a,
+                Err(e) if secrets::no_answer(&e) => {
+                    eprintln!("roll run: logging in: {e}");
+                    Api { key: None, ..timed }
+                }
+                Err(e) => return Err(e),
+            };
+            return secrets::run_command(&api, r).await;
+        }
         Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,

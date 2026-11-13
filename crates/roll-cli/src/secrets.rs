@@ -2364,13 +2364,14 @@ fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec
 /// already sets (unless `--override`). Fails on a problem unless `--allow-unresolved`.
 async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
     let path = format!("{}/values?{}", c.env(&at.env), c.q());
-    let header = |fetched_at| crate::fallback::Header { v: 1, project: c.project.clone(), environment: at.env.clone(), path: at.path.clone(), fetched_at };
+    let header = |fetched_at| crate::fallback::Header { v: 1, asked: at.project.clone().unwrap_or_default(), project: c.project.clone(), environment: at.env.clone(), path: at.path.clone(), fetched_at };
     let v = match (c.api.answer(Method::GET, &path, None).await, &r.fallback) {
         (Ok(Ok(v)), _) => v,
         // Refused (a revoked token, no such environment): never the fallback.
         (Ok(Err((status, message))), _) if !status.is_server_error() => bail!("{message}"),
         (Ok(Err((_, message))), None) => bail!("{message}"),
         (Err(e), None) => return Err(e),
+        (Err(e), Some(_)) if !no_answer(&e) => return Err(e),
         // No answer, or rolld failing: start from the last values fetched, saying so.
         (failed, Some(file)) => {
             let why = match failed {
@@ -2404,9 +2405,10 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run) -> anyhow::Result<(Vec<(Strin
     Ok((env, leases))
 }
 
-/// No answer from rolld at all (a refusal has an answer).
-fn unreachable(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some())
+/// No answer from rolld, or a failing one (a 5xx): what `--fallback` starts through. A refusal
+/// (a 4xx: a revoked token, a customer's key that refused, 423) never is.
+pub(crate) fn no_answer(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some() || c.downcast_ref::<crate::ApiStatus>().is_some_and(|s| s.status.is_server_error()))
 }
 
 /// The variables to set: the shell's own win unless `--override`.
@@ -2422,7 +2424,7 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     // file's own (checked again when it's opened) for the environment and folder asked.
     let project = match (project(api, at.project.as_deref()).await, &r.fallback) {
         (Ok(p), _) => p,
-        (Err(e), Some(file)) if unreachable(&e) => crate::fallback::header(file).map(|h| h.project).map_err(|_| e)?,
+        (Err(e), Some(file)) if no_answer(&e) => crate::fallback::header(file).map(|h| h.project).map_err(|_| e)?,
         (Err(e), _) => return Err(e),
     };
     let c = Client { project, api, at: at.clone() };
@@ -2453,7 +2455,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<(String, String)>,
     // Started from a fallback: the first digest rolld answers reloads the command.
     let mut last = match c.call(Method::GET, &digest_path, None).await {
         Ok(v) => v["digest"].clone(),
-        Err(e) if r.fallback.is_some() && unreachable(&e) => Value::Null,
+        Err(e) if r.fallback.is_some() && no_answer(&e) => Value::Null,
         Err(e) => return Err(e),
     };
     let every = std::time::Duration::from_secs(r.interval.max(1));

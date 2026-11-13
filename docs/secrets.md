@@ -616,10 +616,14 @@ the file, saying how old it is. A refusal (a revoked token, a 403, an environmen
 exist) never falls back, and neither does a file older than `--fallback-max-age` (default 7 days).
 
 - The file is AES-256-GCM, with a key derived (HKDF-SHA256, the file's own salt, info
-  `roll-fallback-v1`) from `ROLL_FALLBACK_KEY`, else from the token. A workload identity's tokens
-  change at every login, so it needs `ROLL_FALLBACK_KEY`.
-- The project, environment, folder and fetch time are associated data: a file can't be swapped
-  for another environment's or edited to look fresher.
+  `roll-fallback-v1`) from `ROLL_FALLBACK_KEY` (at least 32 characters: a copied file can be tried
+  offline), else from the token. A workload identity's tokens change at every login, so it needs
+  `ROLL_FALLBACK_KEY`, and a login that gets no answer goes on to the file.
+- "Can't be reached" is a network error or a 5xx, from the login, the project's lookup or the
+  values; a 4xx (a revoked token, a customer's key that refused: 423) or an answer that isn't
+  roll's never falls back. With `--fallback`, rolld gets 5 s to connect and 30 s to answer.
+- The project as asked for (`-p`), the project, environment, folder and fetch time are associated
+  data: a file can't be swapped for another project's or environment's, or edited to look fresher.
 - It's written 0600 through a new file renamed over the old one. Only what resolved cleanly is
   kept. A dynamic credential in it may have ended with its lease.
 - When the project can only be found by asking rolld (a name, or the token's own), the file's own
