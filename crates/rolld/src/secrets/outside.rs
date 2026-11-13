@@ -20,25 +20,66 @@ pub(crate) struct Guarded {
 }
 
 impl roll_secrets::outside::OutsideDb for Guarded {
-    fn check(&self, url: &str, ca: Option<&str>, roles: &[String]) -> Result<(), String> {
-        let roles = roles.to_vec();
+    fn check(&self, url: &str, ca: Option<&str>, roles: &[String], group: Option<&str>) -> Result<(), String> {
+        let (roles, group) = (roles.to_vec(), group.map(str::to_string));
         self.run(url, ca, move |c| {
             Box::pin(async move {
                 let rows = c.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND rolcanlogin", &[&roles]).await.map_err(db_error)?;
                 let found: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
-                match roles.iter().find(|r| !found.contains(r)) {
-                    Some(r) => Err(format!("there's no role {r} that can log in")),
-                    None => Ok(()),
+                if let Some(r) = roles.iter().find(|r| !found.contains(r)) {
+                    return Err(format!("there's no role {r} that can log in"));
                 }
+                if let Some(g) = group
+                    && c.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&g]).await.map_err(db_error)?.is_none()
+                {
+                    return Err(format!("there's no role {g}"));
+                }
+                Ok(())
             })
         })
     }
 
     fn set_password(&self, url: &str, ca: Option<&str>, role: &str, password: &str) -> Result<(), String> {
         // Checked by roll-secrets (lowercase letters, digits, _), quoted anyway.
-        let sql = format!("ALTER ROLE \"{}\" PASSWORD '{}'", role.replace('"', "\"\""), postgres_protocol::password::scram_sha_256(password.as_bytes()));
+        let sql = format!("ALTER ROLE {} PASSWORD '{}'", ident(role), postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
+
+    fn create_login(&self, url: &str, ca: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+        let sql = format!("CREATE ROLE {} LOGIN PASSWORD '{}' VALID UNTIL '{}' IN ROLE {}", ident(name), postgres_protocol::password::scram_sha_256(password.as_bytes()), stamp(until)?, ident(group));
+        self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
+    }
+
+    fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> Result<(), String> {
+        let sql = format!("ALTER ROLE {} VALID UNTIL '{}'", ident(name), stamp(until)?);
+        self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
+    }
+
+    fn drop_login(&self, url: &str, ca: Option<&str>, name: &str) -> Result<(), String> {
+        let name = name.to_string();
+        self.run(url, ca, move |c| {
+            Box::pin(async move {
+                // Its sessions end where the admin may signal them (pg_signal_backend); a login
+                // past VALID UNTIL can't start new ones either way.
+                let _ = c.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1", &[&name]).await;
+                if c.batch_execute(&format!("DROP ROLE IF EXISTS {}", ident(&name))).await.is_ok() {
+                    return Ok(());
+                }
+                // It owns something (a table the app made): keep it, unable to log in.
+                c.batch_execute(&format!("ALTER ROLE {} NOLOGIN PASSWORD NULL VALID UNTIL '-infinity'", ident(&name))).await.map_err(db_error)
+            })
+        })
+    }
+}
+
+/// A quoted identifier (roll-secrets checked it: lowercase letters, digits and _).
+fn ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// A `VALID UNTIL` timestamp from unix ms.
+fn stamp(ms: i64) -> Result<String, String> {
+    chrono::DateTime::from_timestamp_millis(ms).map(|t| t.format("%Y-%m-%d %H:%M:%S+00").to_string()).ok_or_else(|| "a bad expiry".to_string())
 }
 
 type Done = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;

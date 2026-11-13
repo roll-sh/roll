@@ -244,8 +244,8 @@ export type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "exp
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
-/** A Postgres server outside roll whose two login roles take turns (the admin URL stays sealed). */
-export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; ca?: string; created_at: number; created_by: string };
+/** A Postgres server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
+export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 

@@ -554,15 +554,19 @@ grace period (its revocation goes through the rotator).
 
 A Postgres server roll doesn't run (Amazon RDS, Supabase, Neon, a server of the customer's own)
 has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
-does. A project registers it (`POST …/outside-databases {name, url, roles, ca?}`, `admin`;
-`roll secrets databases add NAME --role a --role b`, the URL on stdin): `url` is an admin connection
-(`postgres://admin:…@host:5432/db`, a user that may `ALTER ROLE` both roles), sealed with the
-project's data key like a rotator's (only `host:port` is shown); `roles` are two login roles that
-take turns; `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
-Registering connects once and checks both roles exist and can log in.
+does, and issues a login per lease, as Vault's database engine does. A project registers it
+(`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
+NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
+(`postgres://admin:…@host:5432/db`, a user that may alter both roles and create roles in the
+group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
+two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
+one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
+Registering connects once and checks the roles exist (and can log in).
 
 It's the link kind `outside_postgres` with fields `username` and `password`, one credential
-(`login`), `managed` only. Each issue (linking, every `rotate_days`, `…/rotate`) gives the role not
+(`login`), `managed` or `dynamic`.
+
+**Managed** (two roles taking turns): each issue (linking, every `rotate_days`, `…/rotate`) gives the role not
 handed out last a new 40-character password and hands it out, so the role in use keeps working
 until its grace period ends; then its password is replaced by one nobody knows. Each role's
 generation is kept with the database and carried in the credential's handle, so a retirement that
@@ -572,6 +576,14 @@ one in use. A rotation the server refuses changes nothing: the turn goes back. R
 one grace period cuts the older login's grace short (both roles are then in their newest hands).
 The two roles serve one credential, so a database is linked in one environment only (409 elsewhere;
 a link provider says so with `exclusive()`): give staging and production a pair of roles each.
+
+**Dynamic** (a login per lease): each resolve creates `roll_<random>` with `CREATE ROLE … LOGIN
+PASSWORD <verifier> VALID UNTIL <lease end + 5 min> IN ROLE <group>`, so it has the group's grants
+and the server refuses it after the lease even if roll is down; the username and password keys share
+it. Renewing the lease moves `VALID UNTIL`. Ending it (expiry, `DELETE …/leases/{id}`) ends the
+login's sessions where the admin may (`pg_signal_backend`) and drops the role; a role that owns
+something the app made (a table) is kept, unable to log in (`NOLOGIN`, `VALID UNTIL '-infinity'`), for
+the customer to reassign. Dynamic links work in any number of environments.
 
 rolld connects the way it fetches anything a tenant chose: it resolves the host itself, refuses a
 private address (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE` allows them for local development), and connects
@@ -612,7 +624,7 @@ roll secrets sinks   ls | add URL [--from-start] | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
-roll secrets databases ls | add NAME --role A --role B [--ca FILE] (admin URL on stdin) | rm ID
+roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
 roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] -- <command…>
 ```
 
@@ -1450,7 +1462,7 @@ isn't in the workspace is 404.
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
-| `POST /outside-databases` | `{name, url, roles: [a, b], ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks both roles first: 400 with the server's reason) |
+| `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
 | `GET /v1/secrets/whoami` | | `{principal, project?, scopes?}` |
 | `GET /v1/secrets/search?key=` | | `Place[]`: every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read; never values |

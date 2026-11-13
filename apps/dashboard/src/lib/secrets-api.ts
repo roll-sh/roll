@@ -203,7 +203,7 @@ export function secretsApi(project: string) {
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
     /** Postgres outside roll: registering one connects to it and checks both roles. */
     outsideDatabases: () => req<OutsideDatabase[]>("GET", `${P}/outside-databases`),
-    addOutsideDatabase: (d: { name: string; url: string; roles: [string, string]; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
+    addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
     deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
     rotators: () => req<Rotator[]>("GET", `${P}/rotators`),
     /** The answer holds its signing secret, once. */

@@ -126,12 +126,13 @@ impl roll_secrets::Deliver for Sent {
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 
-/// A Postgres server outside roll: each role's current password; `down` refuses every change.
+/// A Postgres server outside roll: each role's current password and, for a dynamic login, its
+/// group and `VALID UNTIL`; the flag refuses every change.
 #[derive(Default)]
-struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool);
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>);
 
 impl roll_secrets::outside::OutsideDb for Outside {
-    fn check(&self, url: &str, _: Option<&str>, roles: &[String]) -> Result<(), String> {
+    fn check(&self, url: &str, _: Option<&str>, roles: &[String], _: Option<&str>) -> Result<(), String> {
         if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
     }
     fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
@@ -139,6 +140,20 @@ impl roll_secrets::outside::OutsideDb for Outside {
             return Err("connection refused".into());
         }
         self.0.lock().unwrap().insert(role.into(), password.into());
+        Ok(())
+    }
+    fn create_login(&self, _: &str, _: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> Result<(), String> {
+        self.0.lock().unwrap().insert(name.into(), password.into());
+        self.2.lock().unwrap().insert(name.into(), (group.into(), until));
+        Ok(())
+    }
+    fn extend_login(&self, _: &str, _: Option<&str>, name: &str, until: i64) -> Result<(), String> {
+        self.2.lock().unwrap().get_mut(name).ok_or("no such role")?.1 = until;
+        Ok(())
+    }
+    fn drop_login(&self, _: &str, _: Option<&str>, name: &str) -> Result<(), String> {
+        self.0.lock().unwrap().remove(name);
+        self.2.lock().unwrap().remove(name);
         Ok(())
     }
 }
@@ -1004,9 +1019,9 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 }
 
 #[tokio::test]
-async fn a_database_outside_roll_hands_out_two_logins_in_turn() {
+async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     let api = Api::new().await;
-    let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require", "roles": ["app_blue", "app_green"] });
+    let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require", "roles": ["app_blue", "app_green"], "group": "app_rw" });
     let d = api.ok(Method::POST, "/outside-databases", Some(new)).await;
     assert_eq!((d["host"].as_str(), d.get("url")), (Some("db.example:5432"), None), "the admin URL stays sealed: {d}");
     let link = |field: &str| json!({ "kind": "outside_postgres", "ref": d["id"], "field": field, "mode": "managed" });
@@ -1043,6 +1058,24 @@ async fn a_database_outside_roll_hands_out_two_logins_in_turn() {
     // Its two roles serve one environment.
     let (s, v) = api.call(Method::PUT, "/environments/staging/secrets/DB_USER", Some(json!({ "link": link("username") }))).await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
+
+    // Dynamic: each resolve is a login of its own in the group, valid until its lease ends (the
+    // server enforces it), renewed with the lease, dropped when it ends.
+    let dynamic = |field: &str| json!({ "kind": "outside_postgres", "ref": d["id"], "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15 } });
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "TMP_USER", "link": dynamic("username") }, { "op": "set", "key": "TMP_PASSWORD", "link": dynamic("password") }] }))).await;
+    let a = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    let b = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    let user = a["values"]["TMP_USER"].as_str().unwrap().to_string();
+    assert_ne!(user, b["values"]["TMP_USER"].as_str().unwrap());
+    assert_eq!(password(&user).as_deref(), a["values"]["TMP_PASSWORD"].as_str());
+    let (group, until) = api.outside.2.lock().unwrap()[&user].clone();
+    let lease = a["leases"][0].as_str().unwrap();
+    let expires = api.ok(Method::GET, "/leases", None).await.as_array().unwrap().iter().find(|l| l["id"] == lease).unwrap()["expires_at"].as_i64().unwrap();
+    assert!(group == "app_rw" && until > expires && until <= expires + 10 * 60_000, "{group} {until} {expires}");
+    let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
+    assert!(api.outside.2.lock().unwrap()[&user].1 > renewed["expires_at"].as_i64().unwrap());
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert_eq!(password(&user), None);
 
     let (s, _) = api.call(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");

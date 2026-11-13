@@ -6,8 +6,12 @@
 //! use and hands it out (`managed` links, username and password as one credential), while the
 //! other keeps working through the grace period; then its password is replaced by one nobody
 //! knows. A role's generation travels in each issued credential's handle, so a late revocation
-//! never undoes the role's next issue. The address is the tenant's: rolld connects only to public
-//! addresses it resolved itself ([`OutsideDb`]).
+//! never undoes the role's next issue.
+//!
+//! A database registered with a group role also issues `dynamic` logins, as Vault's database
+//! engine: each lease gets a role of its own in the group (`VALID UNTIL` the lease's end, so the
+//! server enforces it too), renewing moves that, and ending the lease drops the role. The address
+//! is the tenant's: rolld connects only to public addresses it resolved itself ([`OutsideDb`]).
 
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::Keyring;
@@ -28,6 +32,7 @@ CREATE TABLE IF NOT EXISTS outside_dbs (
     url BLOB NOT NULL,
     ca TEXT,
     roles TEXT NOT NULL,
+    grp TEXT,
     state TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     created_by TEXT NOT NULL,
@@ -41,10 +46,19 @@ pub(crate) const KIND: &str = "outside_postgres";
 /// itself, the password sent as a SCRAM verifier). Calls block; errors never carry a password.
 /// `ca` is the server's CA certificates (PEM), trusted as well as the system's.
 pub trait OutsideDb: Send + Sync {
-    /// Connect with the admin URL and check both roles exist and can log in.
-    fn check(&self, url: &str, ca: Option<&str>, roles: &[String]) -> std::result::Result<(), String>;
+    /// Connect with the admin URL and check the roles exist and can log in, and the group (for
+    /// dynamic logins) exists.
+    fn check(&self, url: &str, ca: Option<&str>, roles: &[String], group: Option<&str>) -> std::result::Result<(), String>;
     /// `ALTER ROLE <role> PASSWORD <password>`.
     fn set_password(&self, url: &str, ca: Option<&str>, role: &str, password: &str) -> std::result::Result<(), String>;
+    /// `CREATE ROLE <name> LOGIN PASSWORD <password> VALID UNTIL <until> IN ROLE <group>`
+    /// (`until`: unix ms).
+    fn create_login(&self, url: &str, ca: Option<&str>, name: &str, password: &str, group: &str, until: i64) -> std::result::Result<(), String>;
+    /// `ALTER ROLE <name> VALID UNTIL <until>`.
+    fn extend_login(&self, url: &str, ca: Option<&str>, name: &str, until: i64) -> std::result::Result<(), String>;
+    /// End `name`'s sessions and drop it (one that owns objects is left unable to log in). A role
+    /// that's gone already is fine.
+    fn drop_login(&self, url: &str, ca: Option<&str>, name: &str) -> std::result::Result<(), String>;
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -54,6 +68,9 @@ pub struct OutsideDatabase {
     /// Where it is (the URL itself is sealed: it holds the admin's password).
     pub host: String,
     pub roles: Vec<String>,
+    /// The role dynamic logins join (their grants), if it issues them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// The server's CA certificates (PEM), when the system's don't cover it (Amazon RDS).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ca: Option<String>,
@@ -67,10 +84,22 @@ pub struct NewOutsideDatabase {
     pub name: String,
     /// `postgres://admin:…@host:5432/db?sslmode=require`: a user that may `ALTER ROLE` both roles.
     pub url: String,
-    /// Two login roles that take turns.
+    /// Two login roles that take turns (managed links), or none.
+    #[serde(default)]
     pub roles: Vec<String>,
+    /// A role each dynamic login joins, so it has the group's grants (dynamic links).
+    #[serde(default)]
+    pub group: Option<String>,
     #[serde(default)]
     pub ca: Option<String>,
+}
+
+/// What a database's provider needs to reach it.
+struct Opened {
+    url: Value,
+    ca: Option<String>,
+    roles: Vec<String>,
+    group: Option<String>,
 }
 
 /// Which role is handed out next, and each role's generation.
@@ -104,9 +133,12 @@ fn password() -> String {
 }
 
 const FIELDS: &[Field] = &[
-    Field { field: "username", label: "Username", modes: &[Mode::Managed], secret: false, suggest: "DB_USER", credential: Some("login") },
-    Field { field: "password", label: "Password", modes: &[Mode::Managed], secret: true, suggest: "DB_PASSWORD", credential: Some("login") },
+    Field { field: "username", label: "Username", modes: &[Mode::Managed, Mode::Dynamic], secret: false, suggest: "DB_USER", credential: Some("login") },
+    Field { field: "password", label: "Password", modes: &[Mode::Managed, Mode::Dynamic], secret: true, suggest: "DB_PASSWORD", credential: Some("login") },
 ];
+
+/// How long past its lease a dynamic login's `VALID UNTIL` lasts (the lease's end drops it).
+const SLACK_MS: i64 = 5 * 60_000;
 
 pub(crate) struct Provider {
     pub db: Db,
@@ -115,20 +147,31 @@ pub(crate) struct Provider {
 }
 
 impl Provider {
-    /// The database's admin URL, CA and roles.
-    fn open(&self, id: &str) -> Result<(Value, Option<String>, Vec<String>)> {
-        type Row = (String, Vec<u8>, Option<String>, String, String);
+    fn open(&self, id: &str) -> Result<Opened> {
+        type Row = (String, Vec<u8>, Option<String>, String, Option<String>, String);
         let row: Option<Row> = self.db.read(|c| {
             Ok::<_, Error>(
-                c.query_row("SELECT o.project_id, o.url, o.ca, o.roles, p.dek FROM outside_dbs o JOIN projects p ON p.project_id = o.project_id WHERE o.id = ?", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                c.query_row("SELECT o.project_id, o.url, o.ca, o.roles, o.grp, p.dek FROM outside_dbs o JOIN projects p ON p.project_id = o.project_id WHERE o.id = ?", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
                 })
                 .optional()?,
             )
         })?;
-        let (project, url, ca, roles, dek) = row.ok_or_else(|| Error::Link(format!("database {id} doesn't exist any more")))?;
+        let (project, url, ca, roles, group, dek) = row.ok_or_else(|| Error::Link(format!("database {id} doesn't exist any more")))?;
         let (dek, _) = self.keys.open_dek(&project, &dek)?;
-        Ok((dek.open(&aad(&project, id), &url)?, ca, serde_json::from_str(&roles).unwrap_or_default()))
+        Ok(Opened { url: dek.open(&aad(&project, id), &url)?, ca, roles: serde_json::from_str(&roles).unwrap_or_default(), group })
+    }
+
+    /// A dynamic login of its own, in the group, valid until the lease ends.
+    fn issue_dynamic(&self, r#ref: &str, ttl_minutes: u64) -> Result<Issued> {
+        let o = self.open(r#ref)?;
+        let group = o.group.ok_or_else(|| Error::BadRequest(format!("database {ref} has no group role for dynamic logins: register it with one", ref = r#ref)))?;
+        let name = names::new_id("roll", 16);
+        let pw = Value::new(password());
+        let until = self.db.now_ms()? + ttl_minutes as i64 * 60_000 + SLACK_MS;
+        self.outside.create_login(o.url.expose(), o.ca.as_deref(), &name, pw.expose(), &group, until).map_err(|why| Error::Link(format!("creating a login: {why}")))?;
+        let parts = BTreeMap::from([("username".to_string(), Value::new(name.clone())), ("password".to_string(), pw)]);
+        Ok(Issued { parts, handle: json!({ "login": name }) })
     }
 
     fn state(&self, id: &str) -> Result<State> {
@@ -170,9 +213,13 @@ impl LinkProvider for Provider {
         Err(Error::BadRequest("a database outside roll's login is managed: roll keeps what it set".into()))
     }
 
-    /// The role not in use gets a new password and is handed out.
-    fn issue(&self, r#ref: &str, _credential: &str, _link: &Link, _label: &str, _ttl: Option<u64>) -> Result<Issued> {
-        let (url, ca, roles) = self.open(r#ref)?;
+    /// Managed: the role not in use gets a new password and is handed out. Dynamic: a login of
+    /// the lease's own.
+    fn issue(&self, r#ref: &str, _credential: &str, link: &Link, _label: &str, ttl: Option<u64>) -> Result<Issued> {
+        if link.mode == Mode::Dynamic {
+            return self.issue_dynamic(r#ref, ttl.unwrap_or(60));
+        }
+        let Opened { url, ca, roles, .. } = self.open(r#ref)?;
         if roles.len() != 2 {
             return Err(Error::Link(format!("database {ref} needs two roles to take turns", ref = r#ref)));
         }
@@ -202,11 +249,15 @@ impl LinkProvider for Provider {
     /// After the grace period: the old role's password replaced by one nobody knows, unless the
     /// role was handed out again since.
     fn revoke(&self, r#ref: &str, handle: &Json) -> Result<()> {
+        if let Some(login) = handle["login"].as_str() {
+            let o = self.open(r#ref)?;
+            return self.outside.drop_login(o.url.expose(), o.ca.as_deref(), login).map_err(|why| Error::Link(format!("dropping {login}: {why}")));
+        }
         let (Some(role), Some(generation)) = (handle["role"].as_str(), handle["generation"].as_u64()) else { return Ok(()) };
         if self.state(r#ref)?.generation.get(role).copied() != Some(generation) {
             return Ok(());
         }
-        let (url, ca, roles) = self.open(r#ref)?;
+        let Opened { url, ca, roles, .. } = self.open(r#ref)?;
         self.outside.set_password(url.expose(), ca.as_deref(), role, &password()).map_err(|why| Error::Link(format!("retiring {role}'s password: {why}")))?;
         // Its latest handout is gone (a grace that ended, or an issue whose write failed): it's
         // the role to hand out next, never the other, which may be in use.
@@ -214,7 +265,15 @@ impl LinkProvider for Provider {
         self.free(r#ref, role, generation, idx, generation)
     }
 
-    /// One database's credential at a time: two environments would hand out each other's roles.
+    /// A dynamic login lives as long as its renewed lease.
+    fn renew(&self, r#ref: &str, handle: &Json, until: i64) -> Result<()> {
+        let Some(login) = handle["login"].as_str() else { return Ok(()) };
+        let o = self.open(r#ref)?;
+        self.outside.extend_login(o.url.expose(), o.ca.as_deref(), login, until + SLACK_MS).map_err(|why| Error::Link(format!("extending {login}: {why}")))
+    }
+
+    /// One database's managed credential at a time: two environments would hand out each other's
+    /// roles. (Dynamic logins are each their own.)
     fn exclusive(&self) -> bool {
         true
     }
@@ -225,8 +284,8 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         self.db.read(|c| {
-            Ok(c.query("SELECT id, name, host, roles, ca, created_at, created_by FROM outside_dbs WHERE project_id = ? ORDER BY name", [project], |r| {
-                Ok(OutsideDatabase { id: r.get(0)?, name: r.get(1)?, host: r.get(2)?, roles: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(), ca: r.get(4)?, created_at: r.get(5)?, created_by: r.get(6)? })
+            Ok(c.query("SELECT id, name, host, roles, grp, ca, created_at, created_by FROM outside_dbs WHERE project_id = ? ORDER BY name", [project], |r| {
+                Ok(OutsideDatabase { id: r.get(0)?, name: r.get(1)?, host: r.get(2)?, roles: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(), group: r.get(4)?, ca: r.get(5)?, created_at: r.get(6)?, created_by: r.get(7)? })
             })?)
         })
     }
@@ -238,8 +297,13 @@ impl Secrets {
         if n.name.is_empty() || n.name.len() > 64 || !n.name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
             return Err(Error::BadRequest("a database's name is letters, digits, - and _ (64 at most)".into()));
         }
-        if n.roles.len() != 2 || n.roles[0] == n.roles[1] || !n.roles.iter().all(|r| check_role(r)) {
-            return Err(Error::BadRequest("two different login roles take turns (lowercase letters, digits and _)".into()));
+        let group = n.group.map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
+        let pair = n.roles.len() == 2 && n.roles[0] != n.roles[1];
+        if !(pair || n.roles.is_empty()) || !n.roles.iter().chain(&group).all(|r| check_role(r)) || (n.roles.is_empty() && group.is_none()) {
+            return Err(Error::BadRequest("roles are two different login roles that take turns (managed), group a role dynamic logins join; one or both (lowercase letters, digits and _)".into()));
+        }
+        if group.as_ref().is_some_and(|g| n.roles.contains(g)) {
+            return Err(Error::BadRequest("the group role isn't one of the two that take turns".into()));
         }
         let host = names::url_host(&n.url);
         if !(n.url.starts_with("postgres://") || n.url.starts_with("postgresql://")) || host.is_empty() || n.url.len() > 2048 {
@@ -249,12 +313,12 @@ impl Secrets {
         if ca.as_ref().is_some_and(|c| c.len() > 64 * 1024 || !c.contains("-----BEGIN CERTIFICATE-----")) {
             return Err(Error::BadRequest("ca is the server's CA certificates, PEM (64 KiB at most)".into()));
         }
-        outside.check(&n.url, ca.as_deref(), &n.roles).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
+        outside.check(&n.url, ca.as_deref(), &n.roles, group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
         let dek = self.project(project)?;
         let id = names::new_id("odb", 16);
         let sealed = dek.seal(&aad(project, &id), &Value::new(n.url.clone()));
         let now = self.db.now_ms()?;
-        let d = OutsideDatabase { id: id.clone(), name: n.name, host, roles: n.roles, ca, created_at: now, created_by: caller.principal.clone() };
+        let d = OutsideDatabase { id: id.clone(), name: n.name, host, roles: n.roles, group, ca, created_at: now, created_by: caller.principal.clone() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM outside_dbs WHERE project_id = ? AND name = ?", [project, &d.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a database named {} exists", d.name)));
@@ -265,8 +329,8 @@ impl Secrets {
                 return Err(Error::Conflict("exists", format!("{other} already takes turns on these roles at {}", d.host)));
             }
             c.execute(
-                "INSERT INTO outside_dbs (id, project_id, name, host, url, ca, roles, state, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, project, d.name, d.host, sealed, d.ca, serde_json::to_string(&d.roles).expect("roles"), serde_json::to_string(&State::default()).expect("state"), now, d.created_by],
+                "INSERT INTO outside_dbs (id, project_id, name, host, url, ca, roles, grp, state, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, d.name, d.host, sealed, d.ca, serde_json::to_string(&d.roles).expect("roles"), d.group, serde_json::to_string(&State::default()).expect("state"), now, d.created_by],
             )?;
             audit::record(c, project, caller, "outside_db.add", None, None, &[], &format!("added database {} ({})", d.name, d.host), now)
         })?;
@@ -291,7 +355,7 @@ impl Secrets {
                 |r| r.get(0),
             )?;
             if waiting > 0 {
-                return Err(Error::Conflict("in_use", format!("{name} has {waiting} retired password(s) still to replace after their grace period: delete it once they're done")));
+                return Err(Error::Conflict("in_use", format!("{name} has {waiting} login(s) still to retire (a grace period, or a dynamic lease): delete it once they're done")));
             }
             c.execute("DELETE FROM outside_dbs WHERE id = ?", [id])?;
             audit::record(c, project, caller, "outside_db.delete", None, None, &[], &format!("deleted database {name}"), now)

@@ -503,12 +503,15 @@ pub enum Requests {
 pub enum DatabasesCmd {
     #[command(alias = "list")]
     Ls,
-    /// Register a database: its admin URL (postgres://admin:…@host:5432/db) on stdin, and two
-    /// login roles that take turns.
+    /// Register a database: its admin URL (postgres://admin:…@host:5432/db) on stdin; two login
+    /// roles that take turns (managed links), a group dynamic logins join, or both.
     Add {
         name: String,
-        #[arg(long = "role", num_args = 1, required = true)]
+        #[arg(long = "role", num_args = 1)]
         roles: Vec<String>,
+        /// The role each dynamic lease's login joins (its grants).
+        #[arg(long)]
+        group: Option<String>,
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
@@ -1193,10 +1196,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 for d in v.as_array().into_iter().flatten() {
                     let roles: Vec<&str> = d["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                    println!("{}  {:<16} {:<32} {}", s(&d["id"]), s(&d["name"]), s(&d["host"]), roles.join(" "));
+                    let group = d["group"].as_str().map(|g| format!("  dynamic in {g}")).unwrap_or_default();
+                    println!("{}  {:<16} {:<32} {}{group}", s(&d["id"]), s(&d["name"]), s(&d["host"]), roles.join(" "));
                 }
             }
-            DatabasesCmd::Add { name, roles, ca } => {
+            DatabasesCmd::Add { name, roles, group, ca } => {
                 // The admin URL holds a password: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     eprint!("Admin URL (postgres://admin:…@host:5432/db), then Enter and Ctrl-D: ");
@@ -1204,11 +1208,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 let mut url = String::new();
                 std::io::stdin().read_to_string(&mut url).context("reading the admin URL from stdin")?;
                 let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
-                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "ca": ca }))).await?;
+                let v = c.call(Method::POST, &format!("{}/outside-databases", c.base()), Some(json!({ "name": name, "url": url.trim(), "roles": roles, "group": group, "ca": ca }))).await?;
                 if json_out {
                     return print(&v);
                 }
-                println!("Added {} ({}): link DB_USER and DB_PASSWORD to it, managed; each rotation hands out the other role.", s(&v["name"]), s(&v["id"]));
+                println!("Added {} ({}): link DB_USER and DB_PASSWORD to it, managed (the roles take turns) or dynamic (a login per lease).", s(&v["name"]), s(&v["id"]));
             }
             DatabasesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
