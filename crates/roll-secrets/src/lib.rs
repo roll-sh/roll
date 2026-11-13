@@ -28,6 +28,8 @@ pub mod insights;
 pub mod leaks;
 pub mod links;
 pub mod names;
+pub mod clouds;
+pub mod issuer;
 mod oidc;
 mod read;
 pub mod refs;
@@ -306,6 +308,9 @@ pub struct Options {
     pub trust_forwarded_for: bool,
     /// The dashboard's address (`ROLL_WEB_URL`): a share's link is `<it>/share/<id>#<key>`.
     pub web_url: Option<String>,
+    /// roll's OIDC issuer and the clouds' token endpoints, for dynamic GCP and Azure credentials
+    /// (clouds.rs); `None` without a public URL for the issuer.
+    pub clouds: Option<clouds::Clouds>,
 }
 
 /// The secrets store.
@@ -322,6 +327,7 @@ pub struct Secrets {
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
+    clouds: Option<clouds::Clouds>,
     /// OIDC issuers' public keys (identities.rs).
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
@@ -388,12 +394,19 @@ impl Secrets {
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
+        db.ensure_schema(issuer::SCHEMA)?;
+        db.ensure_schema(clouds::SCHEMA)?;
         // Rotators are a link kind of roll secrets' own: they call out through rolld.
         let mut links = opts.links;
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), deliver: deliver.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
+        if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
+            for kind in [clouds::GCP, clouds::AZURE] {
+                links.register(Arc::new(clouds::Provider { kind, db: db.clone(), keys: keys.clone(), clouds: c.clone() }));
+            }
+        }
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, clouds: opts.clouds, oidc: Default::default(), logins: Default::default(), code_refs: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -498,7 +511,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators"];
+const REGISTRIES: &[&str] = &["rotators", "cloud_accounts"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked.
 fn forget_if_done(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {

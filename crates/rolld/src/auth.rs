@@ -71,6 +71,7 @@ pub const RULES: &[Rule] = &[
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
     Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },
+    Rule { route: "/v1/secrets/oidc", access: Access::Public("roll's OIDC issuer: its discovery document and public keys, which GCP and Azure fetch anonymously") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
     Rule { route: "/v1/tasks", access: Access::Credential("a tasks token or API key") },
     // Hosted tenants (`/t/<tenant>/v1/tasks`) take only their own API keys; the tasks token
