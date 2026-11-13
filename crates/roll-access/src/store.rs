@@ -1341,7 +1341,7 @@ impl Store {
     pub fn refresh(&self, refresh_token: &str, client_id: &str, grace_ms: i64) -> Result<(Grant, String, String)> {
         enum Outcome {
             Fresh(String),
-            Retry,
+            Retry(String),
             Reused(String),
             Bad(&'static str),
         }
@@ -1372,7 +1372,7 @@ impl Store {
             }
             if kind == "spent_refresh" {
                 if now - at < grace_ms {
-                    return Ok(Outcome::Retry);
+                    return Ok(Outcome::Retry(grant_id));
                 }
                 c.execute(
                     "UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL",
@@ -1392,7 +1392,32 @@ impl Store {
         })?;
         match outcome {
             Outcome::Fresh(grant_id) => Ok((self.get(&grant_id)?, access, refresh)),
-            Outcome::Retry => Err(Error::OAuth("invalid_grant", "this refresh token was just used: use the tokens that answer gave".into())),
+            // Refused, not revoked (a client's own retry), but on the record: a copy used inside the
+            // grace looks the same, and the token's page should show it.
+            Outcome::Retry(grant_id) => {
+                let g = self.get(&grant_id).ok();
+                self.audit(&AuditEvent {
+                    id: crate::new_id("aud"),
+                    at: now,
+                    grant_id: Some(grant_id),
+                    grant_name: g.map(|g| g.name),
+                    source: "oauth".into(),
+                    tool: None,
+                    method: "POST".into(),
+                    route: "/v1/access/oauth/token".into(),
+                    product: Some("access".into()),
+                    action: Some("admin".into()),
+                    resource: Some("a refresh token used again within its grace".into()),
+                    decision: "deny".into(),
+                    approval: None,
+                    status: 400,
+                    args: None,
+                    ip: None,
+                    duration_ms: 0,
+                    client: None,
+                });
+                Err(Error::OAuth("invalid_grant", "this refresh token was just used: use the tokens that answer gave".into()))
+            }
             Outcome::Bad(why) => Err(Error::OAuth("invalid_grant", why.into())),
             Outcome::Reused(grant_id) => {
                 tracing::warn!(grant = %grant_id, "a spent refresh token was used again: the connection was revoked");

@@ -56,7 +56,7 @@ access and refresh tokens. Revoking the grant revokes them all at once. A refres
 used, is kept as spent until it would have expired: presented again later than 30 seconds after
 its use, someone else has a copy (OAuth 2.1, section 4.3.1), so the connection is revoked, with why,
 and the audit log has it. Within those 30 seconds it's only refused (a client retrying after a lost
-answer keeps its connection).
+answer keeps its connection), and the audit log has that too.
 
 Grants are made by the operator: the operator's token, or a signed-in admin (docs/accounts.md:
 an admin's session acts as the operator). The grant records who made it (`created_by`: the admin's
