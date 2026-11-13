@@ -174,6 +174,23 @@ export interface IpRule {
   description?: string;
 }
 
+/** What the next deploy changes (names only; null variables: no snapshot to compare). */
+export interface Pending {
+  variables: { added: string[]; removed: string[]; changed: string[] } | null;
+  run: string[];
+}
+
+/** The changes as a line ("MODE changed, ADDED added, memory_mb"), or null when there are none to name. */
+export function describePending(p: Pending): string | null {
+  const parts = [
+    ...(p.variables?.changed ?? []).map((n) => `${n} changed`),
+    ...(p.variables?.added ?? []).map((n) => `${n} added`),
+    ...(p.variables?.removed ?? []).map((n) => `${n} removed`),
+    ...p.run.map((f) => `${f.replaceAll("_", " ")} set`),
+  ];
+  return parts.length ? parts.join(", ") : null;
+}
+
 export interface FirewallRule {
   action: "allow" | "deny";
   /** A path, or a prefix ending in `*`. */
@@ -576,6 +593,8 @@ export const appsApi = {
   wake: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/wake`),
 
   variables: (id: string, e: string) => call<Variables>("GET", `${env(id, e)}/variables`),
+  /** What the next deploy changes: its own variables by name, and run settings. */
+  pending: (id: string, e: string) => call<Pending>("GET", `${env(id, e)}/pending`),
   /** The values in the clear (the `reveal` action). */
   reveal: (id: string, e: string) => call<Record<string, string>>("GET", `${env(id, e)}/variables/values`),
   setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[] }) =>

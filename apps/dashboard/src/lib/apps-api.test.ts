@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deployChange, formatFirewall, parseEnv, parseFirewall, stepDurations, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, describePending, formatFirewall, parseEnv, parseFirewall, stepDurations, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -84,6 +84,13 @@ describe("firewall rules as typed", () => {
       { action: "deny", user_agent: "Bad Bot/2" },
     ]);
     expect(formatFirewall(rules)).toBe(text.replace("# a note\n", ""));
+  });
+});
+
+describe("pending changes", () => {
+  it("name what the next deploy does", () => {
+    expect(describePending({ variables: { added: ["ADDED"], removed: ["GONE"], changed: ["MODE"] }, run: ["memory_mb"] })).toBe("MODE changed, ADDED added, GONE removed, memory mb set");
+    expect(describePending({ variables: null, run: [] })).toBeNull();
   });
 });
 

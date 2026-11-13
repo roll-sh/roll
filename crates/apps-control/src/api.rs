@@ -87,6 +87,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
+        .route(&format!("{env}/pending"), get(pending))
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
@@ -738,6 +739,11 @@ async fn sleep(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
 
 async fn wake(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     ok(apps.wake(&id, &env).await?)
+}
+
+/// `GET …/pending`: what the next deploy changes (names, never values).
+async fn pending(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.pending(&id, &env).await?)
 }
 
 async fn variables(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {

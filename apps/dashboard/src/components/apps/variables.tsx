@@ -1,6 +1,6 @@
 import { ClipboardPaste, Copy, Eye, EyeOff, Link2, Plus, Rocket, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { appsApi, parseEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
+import { appsApi, describePending, parseEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
@@ -48,6 +48,16 @@ export function VariablesTab({
   const [added, setAdded] = useState<Edit[]>([]);
   const [pasting, setPasting] = useState(false);
   const [pasted, setPasted] = useState("");
+  // What the next deploy would change, named (read again whenever the environment changes).
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => {
+    if (!env.needs_deploy) return setPending(null);
+    let live = true;
+    appsApi.pending(service, env.name).then((p) => live && setPending(describePending(p)), () => live && setPending(null));
+    return () => {
+      live = false;
+    };
+  }, [service, env.name, env.needs_deploy, env.active?.id, vars]);
   const parsed = useMemo(() => parseEnv(pasted), [pasted]);
 
   /** Stage `set` for review: an existing service variable becomes an edit, a new name a row. */
@@ -103,7 +113,10 @@ export function VariablesTab({
     <div className="space-y-6">
       {env.needs_deploy && (
         <div className="rise flex flex-wrap items-center gap-3 rounded-xl border border-accent/40 bg-accent/[0.06] px-4 py-3">
-          <p className="min-w-0 flex-1 text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px]">Variables or settings changed since the live deployment. Redeploy to apply them: the same image, no build.</p>
+            {pending && <p className="mt-1 font-mono text-[11.5px] text-muted">{pending}</p>}
+          </div>
           <button className={primary} onClick={onRedeploy} disabled={runner.busy !== null || !env.active}>
             <Rocket className="size-3.5" /> Redeploy
           </button>

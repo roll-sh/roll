@@ -2396,3 +2396,21 @@ async fn firewall_rules_decide_in_order() {
     call(&w.api, "PUT", &base, Some(json!({"firewall": null}))).await;
     assert_eq!(req("GET", "/admin/users", "curl").await, StatusCode::OK);
 }
+
+/// What the next deploy changes: the environment's own variables by name (never a value) and
+/// the run settings that differ from the live deployment's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_changes_say_what_the_next_deploy_does() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "api", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "variables": {"MODE": "old", "GONE": "x"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "GET", &format!("{base}/pending"), None).await.1, json!({"variables": {"added": [], "removed": [], "changed": []}, "run": []}));
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"MODE": "new-secret-value", "ADDED": "1"}, "unset": ["GONE"]}))).await;
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"memory_mb": 1024}}))).await;
+    let (_, p) = call(&w.api, "GET", &format!("{base}/pending"), None).await;
+    assert_eq!(p, json!({"variables": {"added": ["ADDED"], "removed": ["GONE"], "changed": ["MODE"]}, "run": ["memory_mb"]}));
+    assert!(!p.to_string().contains("new-secret-value"), "names only");
+}

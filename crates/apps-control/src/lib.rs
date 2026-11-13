@@ -676,6 +676,32 @@ impl Apps {
         self.environment_view(row).await
     }
 
+    /// `GET …/pending`: what the next deploy changes (Railway's staged changes). The
+    /// environment's own variables added, removed or changed since its live deployment went
+    /// live (names only, from the snapshot kept at its switch; null when it has none, a
+    /// deployment from before snapshots), and the run settings the service sets that the live
+    /// deployment doesn't run with. Links and project secrets move `needs_deploy` too, unnamed.
+    pub async fn pending(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
+        let (svc, row) = self.service_env(service, env).await?;
+        let Some(active) = row.active.clone() else { return Ok(json!({ "variables": null, "run": [] })) };
+        let a = active.clone();
+        let (dep, then) = self.db(move |s| Ok((s.deployment(&a)?, s.snapshot(&a)?))).await?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        let now = self.db(move |s| s.variables(&sid, &e)).await?;
+        let variables = then.map(|then| {
+            let added: Vec<&String> = now.keys().filter(|k| !then.contains_key(*k)).collect();
+            let removed: Vec<&String> = then.keys().filter(|k| !now.contains_key(*k)).collect();
+            let changed: Vec<&String> = now.iter().filter(|(k, v)| then.get(*k).is_some_and(|t| t != *v)).map(|(k, _)| k).collect();
+            json!({ "added": added, "removed": removed, "changed": changed })
+        });
+        // Only what the service sets: the deployment also holds what its build worked out (a
+        // Dockerfile's port, a plan's start command).
+        let want = serde_json::to_value(&svc.run).unwrap_or_default();
+        let has = serde_json::to_value(&dep.run).unwrap_or_default();
+        let run: Vec<&String> = want.as_object().into_iter().flatten().filter(|(k, v)| has.get(k.as_str()) != Some(*v)).map(|(k, _)| k).collect();
+        Ok(json!({ "variables": variables, "run": run }))
+    }
+
     /// Whether the environment's settings, variables or links changed since its active
     /// deployment `active`: cached ([`Apps::needs`]) since working it out is the expensive part of
     /// an environment's read, and the dashboard reads it every few seconds.
