@@ -2343,3 +2343,22 @@ async fn a_tcp_service_answers_on_its_own_port() {
     assert!(got.starts_with("HTTP/1.1 200") && got.contains(r#""path":"/raw""#), "spliced to the app: {got}");
     assert_eq!(visit(&w, &host(&svc["environments"][0]["url"]), "/").await.0, StatusCode::NOT_FOUND, "not over HTTP");
 }
+
+/// An environment's metrics as a scraper reads them (Prometheus' text format).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_come_in_prometheus_text_too() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap();
+    let req = Request::builder().uri(format!("/v1/apps/services/{id}/environments/production/metrics?format=prometheus")).body(Body::empty()).unwrap();
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers()["content-type"].to_str().unwrap().starts_with("text/plain; version=0.0.4"));
+    let text = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let labels = format!(r#"service="api",service_id="{id}",environment="production""#);
+    for name in ["roll_apps_requests_per_minute", "roll_apps_errors_per_minute", "roll_apps_cpu_seconds_per_minute", "roll_apps_memory_bytes", "roll_apps_instances", "roll_apps_cold_starts_per_minute"] {
+        assert!(text.contains(&format!("# TYPE {name} gauge\n{name}{{{labels}}} ")), "{name}: {text}");
+    }
+    assert!(text.contains(&format!(r#"roll_apps_latency_ms{{{labels},quantile="0.95"}}"#)), "{text}");
+}
+

@@ -1662,6 +1662,38 @@ impl Apps {
 
     // ── logs, metrics, usage ──
 
+    /// An environment's last finished minute in Prometheus' text format (Fly's metrics, Render's
+    /// metrics streams): gauges labelled with the service, its id and the environment.
+    pub async fn metrics_prometheus(self: &Arc<Self>, service: &str, env: &str) -> Result<String> {
+        let (svc, _) = self.service_env(service, env).await?;
+        // The last finished minute once it's stored (the meters are written every 10 s).
+        let now = code_sql::now_ms();
+        let minute = now / 60_000 - if now % 60_000 >= 15_000 { 1 } else { 2 };
+        let (sid, e) = (service.to_string(), env.to_string());
+        let r = self.db(move |s| s.minutes(&sid, &e, minute)).await?.into_iter().find(|r| r.minute == minute).unwrap_or(store::MinuteRow { minute, ..Default::default() });
+        // Label values are names and ids roll made ([a-z0-9-_]), quoted as the format wants.
+        let esc = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        let labels = format!("service=\"{}\",service_id=\"{}\",environment=\"{}\"", esc(&svc.name), esc(&svc.id), esc(env));
+        let mut out = String::new();
+        let mut gauge = |name: &str, help: &str, value: f64, extra: &str| {
+            if !out.contains(&format!("# TYPE {name} ")) {
+                out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
+            }
+            out.push_str(&format!("{name}{{{labels}{extra}}} {value}\n"));
+        };
+        gauge("roll_apps_requests_per_minute", "Requests in the last finished minute.", r.requests as f64, "");
+        gauge("roll_apps_errors_per_minute", "5xx answers in the last finished minute.", r.errors as f64, "");
+        for (q, v) in [("0.5", r.p50_ms), ("0.95", r.p95_ms), ("0.99", r.p99_ms)] {
+            gauge("roll_apps_latency_ms", "Request latency in the last finished minute, by quantile.", v, &format!(",quantile=\"{q}\""));
+        }
+        gauge("roll_apps_cpu_seconds_per_minute", "CPU time its instances used in the last finished minute.", r.cpu, "");
+        gauge("roll_apps_memory_bytes", "Memory its instances held.", r.memory_bytes as f64, "");
+        gauge("roll_apps_instances", "Instances that were up.", r.instances as f64, "");
+        gauge("roll_apps_cold_starts_per_minute", "Cold starts in the last finished minute.", r.cold_starts as f64, "");
+        gauge("roll_apps_cold_start_ms", "Their mean time to answer.", r.cold_start_ms, "");
+        Ok(out)
+    }
+
     pub async fn metrics(self: &Arc<Self>, service: &str, env: &str, minutes: i64) -> Result<Value> {
         self.service_env(service, env).await?;
         let minutes = minutes.clamp(5, 7 * 24 * 60);

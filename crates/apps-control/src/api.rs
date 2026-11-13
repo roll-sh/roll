@@ -765,9 +765,16 @@ async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)
 struct Window {
     minutes: Option<i64>,
     days: Option<i64>,
+    /// `prometheus`: the metrics as a scraper reads them.
+    format: Option<String>,
 }
 
 async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
+    // For a scraper (Prometheus, Grafana Agent): the last finished minute as gauges.
+    if w.format.as_deref() == Some("prometheus") {
+        let text = apps.metrics_prometheus(&id, &env).await?;
+        return Ok(([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], text).into_response());
+    }
     ok(apps.metrics(&id, &env, w.minutes.unwrap_or(60)).await?)
 }
 
