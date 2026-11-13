@@ -246,7 +246,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    rolld's `RollResources` glue goes on apps' `Resources::link` / `unlink` with whichever of #29
    and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys;
    OpenSearch-flavor clusters have no API keys (a 400), so secrets' search link there wants a
-   link user like apps'. The fleet test with every product on.
+   link user like apps'. The fleet test with every product on passed on this branch
+   (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall 1.2 s in
+   the rolling restart).
 4. **Compatibility gaps** from the extended suites (4,912 of the 5,541 Elasticsearch passes),
    largest first: platinum's machine learning (278, a product decision: anomaly detection and
    trained models), security's last 4 (ES|QL's `METRICS_INFO` and `TS_INFO` under FLS: the two
