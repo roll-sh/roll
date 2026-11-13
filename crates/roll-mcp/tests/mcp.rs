@@ -104,6 +104,16 @@ async fn tools_follow_the_tokens_rules() {
     assert!(some.contains(&"workspace_list_projects".into()) && some.contains(&"access_wait_approval".into()) && !some.iter().any(|n| n.starts_with("postgres_")), "{some:?}");
     let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=nope", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    // Read-only (GitHub's read-only mode): only read-only tools are listed and run, even for the operator.
+    let (_, _, ro) = d.http(OPERATOR, Method::POST, "/v1/mcp?readonly=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    let ro = names(&ro["result"]);
+    assert!(ro.contains(&"postgres_query".into()) && !ro.contains(&"postgres_execute".into()) && !ro.contains(&"postgres_delete_project".into()), "{ro:?}");
+    let (_, _, refused) = d
+        .http(OPERATOR, Method::POST, "/v1/mcp?readonly=1", Some(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pa" } } })))
+        .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?readonly=maybe", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a typo never means not read-only");
 
     // A read-only token sees only tools it can use, and its calls are decided by its rules.
     let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
