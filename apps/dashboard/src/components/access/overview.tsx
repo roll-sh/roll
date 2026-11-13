@@ -165,7 +165,8 @@ const REACH_TONE: Record<ReturnType<typeof reach>, string> = {
   "can destroy or ship": "text-accent border-accent/40",
 };
 
-function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
+/** A token in a list (its name links to its page) or at the top of its own page. */
+export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () => Promise<void>; linked?: boolean }) {
   const ws = useWorkspace();
   const projectName = (id: string) => ws.projects.find((p) => p.id === id)?.name ?? id;
   const [open, setOpen] = useState(false);
@@ -209,7 +210,13 @@ function GrantRow({ g, refresh }: { g: Grant; refresh: () => Promise<void> }) {
         </button>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="truncate text-[14px] font-medium">{g.name}</span>
+            {linked ? (
+              <Link href={`/dashboard/access/tokens/${encodeURIComponent(g.id)}`} className="truncate text-[14px] font-medium hover:underline">
+                {g.name}
+              </Link>
+            ) : (
+              <span className="truncate text-[14px] font-medium">{g.name}</span>
+            )}
             <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : "token"}</span>
             {status === "active" ? (
               <span className={`rounded border px-1.5 text-[11px] ${REACH_TONE[r]}`}>{r}</span>

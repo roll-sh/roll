@@ -51,6 +51,8 @@ export interface Grant {
   revoked_why?: string;
   /** What its rules don't allow asks a person instead of being refused. */
   ask_otherwise?: boolean;
+  /** Rules a person allowed for a while when approving its requests, each until a time (Unix ms). */
+  temporary?: { rule: Rule; until: number }[];
   /** Its requests over the last day (in the list). */
   activity?: { allowed: number; denied: number; asked: number };
 }

@@ -900,6 +900,12 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/projects/{project}/notifications/{nid}", "apps", W, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
+    // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends
+    // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
+    // answered (only its host).
+    row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/drains/{did}", "apps", W, one(&["project"], "project")),
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
