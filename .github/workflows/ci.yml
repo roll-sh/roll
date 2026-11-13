@@ -91,6 +91,8 @@ jobs:
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v5
+      - name: The roll secrets GitHub Action (sdk/github-action)
+        run: node --test sdk/github-action/test.js
       - name: Validate test scripts
         run: |
           for script in scripts/test-*.sh scripts/lib/*.sh scripts/nosql-conformance.sh; do

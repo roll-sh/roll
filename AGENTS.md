@@ -333,7 +333,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - The design and the HTTP contract are `docs/secrets.md`; `apps/dashboard/src/lib/secrets-api.ts`
     is its client (change both together). `crates/roll-secrets` is the store, crypto and router
     (`/v1/secrets`); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
-    `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`.
+    `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. The GitHub Action is
+    `sdk/github-action` (no dependencies; every value masked before anything is printed).
   - Values are encrypted with the project's data key, sealed by `ROLL_SECRET_KEY`, and bound to
     their row (project, secret, version) as associated data. A value never goes in a log, a
     `Debug`, an error, an audit row, a change's or request's diff, or a command line: `Value`
