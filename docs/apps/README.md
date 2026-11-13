@@ -28,7 +28,8 @@ every deployment is immutable with instant rollback.
                └─ the meter: CPU-seconds, GB-seconds, requests, egress, cold starts
                           │
                Runtime: Docker on this host (one node, development)
-                        Fargate tasks (the roll cloud fleet; no customer code on a node)
+                        Fargate tasks, CodeBuild builds (ROLL_APPS_RUNTIME=fargate; no customer
+                        code on a node)
 ```
 
 ## What we learned from the others
@@ -88,9 +89,21 @@ every deployment is immutable with instant rollback.
   concurrent builds is what bounds them on one node. On the
   fleet, a build is customer code and never runs on a node: it is an AWS CodeBuild build
   (serverless, per-minute, privileged BuildKit inside CodeBuild's own VM) that pushes to the
-  stack's ECR repository (`apps/<service>`), behind the same `Builder` trait. CodeBuild was
-  chosen over Kaniko in Fargate (Kaniko is unmaintained since 2025 and slow on big layers) and
-  over BuildKit in Fargate (needs privileges Fargate doesn't grant).
+  service's ECR repository (`<ROLL_APPS_ECR_REPO>/<service>`, made on the first build), behind
+  the same `Builder` trait (`runtime/codebuild.rs`). CodeBuild was chosen over Kaniko in Fargate
+  (Kaniko is unmaintained since 2025 and slow on big layers) and over BuildKit in Fargate (needs
+  privileges Fargate doesn't grant).
+- **A CodeBuild build**: the context goes up as a zip (CodeBuild's S3 source takes zips;
+  symlinks stay symlinks) to `<prefix>builds/<deployment>-<random>.zip` in the stack's bucket.
+  `StartBuild` on `ROLL_APPS_CODEBUILD_PROJECT` takes it as the source with an inline buildspec
+  roll writes: log in to ECR, then `docker buildx build` in a `docker-container` builder with
+  the job's Dockerfile, `--cache-from`/`--cache-to type=registry,ref=<repo>:buildcache`
+  (mode=max, ECR's OCI form, so a rebuild on any node reuses the layers), and `--push` of
+  `<repo>:<deployment>`, the image the deployment keeps. `BatchGetBuilds` is polled until it's
+  done and its CloudWatch log is followed into the build log; the build timeout is CodeBuild's
+  timeout and a local deadline, and a cancel is `StopBuild`. Deleting a deployment's image is
+  ECR `BatchDeleteImage` of its tag (the repository and `buildcache` stay). The zip is deleted
+  when the build ends.
 - **Uploads** (`roll up`): the CLI sends what git would (`.gitignore`, a parent's too, as in a
   monorepo), less `.dockerignore` and `.rollignore`, and never a `.env` file other than
   `.env.example`/`.sample`/`.template`. rolld unpacks it under hostile-tree rules (roll-fetch:
@@ -113,7 +126,12 @@ every deployment is immutable with instant rollback.
   value rebuilds what read it and an unchanged set keeps the cache (`ROLL_DEPLOYMENT` and `PORT`
   stay out). A tree's own Dockerfile gets them as secrets and as build arguments (`ARG NAME`),
   values always through the docker CLI's environment, never argv. Names the CLI reads itself
-  (`DOCKER_*`, `BUILDKIT_*`, `PATH`, proxies) aren't passed, and the log says so.
+  (`DOCKER_*`, `BUILDKIT_*`, `PATH`, proxies) aren't passed, and the log says so. In CodeBuild
+  the values are in a Secrets Manager secret of the build's own
+  (`roll-apps/builds/<service>-<deployment>-<random>`, a JSON object), and each variable is an
+  environment override of type `SECRETS_MANAGER` naming `<secret>:<NAME>`: no value is in the
+  `StartBuild` request, the buildspec or the build's record, and the secret is deleted without
+  recovery when the build ends. `CODEBUILD_*` and `AWS_*` aren't passed there either.
 - **Private registries** (`PUT …/registry`, the settings page): an image source can pull with a
   login (a username and a password or token), sealed like variables and never returned. It goes
   to dockerd with each pull only (`X-Registry-Auth` on the Engine API), never `docker login`,
@@ -213,15 +231,50 @@ every deployment is immutable with instant rollback.
   (a user clicking around, a webhook burst), and a frozen process answers them in
   milliseconds; the long tail of idle time costs nothing because it ends stopped. This is Fly's
   suspend/stop split, done with the freezer locally.
-- **On the fleet**, instances are Fargate tasks (the sandbox pattern from docs/cloud/README.md,
-  "Isolated work": a template task definition per image, `fetch`/`guard` from roll's own image,
-  the service's image as `run`, no AWS permissions, isolated subnets, a public IP for egress).
-  Fargate can't freeze a task, so there the states are running → stopped, and a cold start is a
-  task launch (tens of seconds for a large image; SOCI indexes cut the pull). Two things keep
-  that rare: `suspend_after` becomes a **warm window** (the task keeps running, unbilled to the
-  user, for 5 minutes), and services that must answer instantly set `min_instances: 1`. The fast
-  path on the fleet is in `## Next`: Firecracker microVM hosts with snapshot restore (what Fly
-  and Lambda SnapStart do), behind the same `Runtime` trait.
+- **On the fleet** (`ROLL_APPS_RUNTIME=fargate`, `runtime/fargate.rs`), instances are Fargate
+  tasks, with the isolation of docs/cloud/README.md's "Isolated work" but no template:
+  - A task definition per deployment image, registered by roll and reused: family
+    `roll-apps-<service>-<hash>` (the hash over the image, the size, the port, whether a start
+    command replaces the image's own, the roles, the log group and the architecture). It has one
+    container, `app`, with the image's own entrypoint (or `sh -c <start>`), `awslogs` to
+    `ROLL_APPS_FARGATE_LOG_GROUP`, the execution role, and a task role only if one is set (none
+    by default: no AWS credentials in the task). `create` registers or finds it and runs nothing.
+  - `start` is `RunTask` (awsvpc, `ROLL_APPS_FARGATE_SUBNETS` and `_SECURITY_GROUP`, on demand,
+    `startedBy roll-apps-<service>`, tags `sh.roll.apps=<service id>` and
+    `sh.roll.apps.instance=<name>`). It waits for RUNNING and answers the task's private address
+    on the app's port, which the owner's proxy health-checks and forwards to as it does a
+    container's. `stop` is `StopTask` (SIGTERM, then SIGKILL after the task definition's 30 s
+    `stopTimeout`), and the next start is a new task. `wait` polls `DescribeTasks` to STOPPED and
+    answers the `app` container's exit code (cron runs, jobs, pre-deploy commands). `list` is
+    `ListTasks` by `startedBy` with tags, so a node that takes a service over finds an earlier
+    owner's tasks and stops them.
+  - **Variables never go in a `RunTask` request** (it shows in `DescribeTasks` and CloudTrail).
+    Each start writes them to an object of its own, `<prefix>env/<instance>-<random>.env` in the
+    stack's bucket, and the request names only its ARN as the `app` container's environment
+    file. ECS reads it with the execution role before the app starts, and roll deletes it as
+    soon as the task is RUNNING (or stopped, or failed to start). This is code-preview's bundle
+    with ECS as its `fetch`. It was chosen over a `fetch` container because an app keeps its
+    image's own entrypoint (sourcing an env file needs a shell, and distroless images have none)
+    and no roll image goes in the task. An environment file is one line per variable, so on the
+    fleet a value with a line break (a PEM key) is refused at deploy; base64 it.
+  - Public images are pinned by a manifest `HEAD` on their registry (anonymous, or with the
+    registry's anonymous token), through a client that refuses private addresses.
+  - Fargate can't freeze a task, so there the states are running → stopped (`can_suspend` is
+    false, and `settle` does nothing: no CPU boost, the size is the task's). A cold start is a
+    task launch (tens of seconds for a large image; SOCI indexes cut the pull), so services that
+    must answer instantly set `min_instances: 1`. A warm window (a task kept up a few minutes past
+    `suspend_after`, unbilled) isn't built: an idle task stops at `sleep_after`. The fast path on
+    the fleet is in `## Next`: Firecracker microVM hosts with snapshot restore (what Fly and
+    Lambda SnapStart do), behind the same `Runtime` trait.
+  - Metering: `usage` answers nothing on Fargate (a task's cgroup isn't read). Fargate bills size
+    × time, so the fleet's meter should charge the allocation while running; until it does, it
+    records instance counts and no CPU-seconds or GB-seconds.
+  - Settings (`runtime::aws::FleetConfig::from_lookup`): `ROLL_APPS_RUNTIME=fargate` (default
+    `docker`), `ROLL_APPS_FARGATE_CLUSTER`, `_SUBNETS` (comma separated), `_SECURITY_GROUP`,
+    `_EXECUTION_ROLE`, `_TASK_ROLE` (optional), `_LOG_GROUP`, `_PUBLIC_IP` (`1`), `_ARCH`
+    (`ARM64` or `X86_64`), `ROLL_APPS_CODEBUILD_PROJECT`, `ROLL_APPS_ECR_REPO` (`apps`),
+    `ROLL_APPS_BUCKET` (default `ROLL_S3_BUCKET`), `ROLL_APPS_PREFIX` (`apps/`) and `AWS_REGION`.
+    Unset, rolld runs and builds on Docker as before.
 - **Autoscaling**: the owner counts requests in flight per instance every second; the target is
   `concurrency` (default 50) in flight per instance. Instances needed = ceil(in flight /
   concurrency), between `min_instances` and `max_instances`, scaling up at once and down only
@@ -235,7 +288,8 @@ every deployment is immutable with instant rollback.
   this because a cron run must start an instance on the owner (a runtime action, not a webhook
   delivery), and keeping the schedule next to the deployment keeps a rollback's schedule right.
 - **Resources**: `cpu` (0.25–8 vCPU) and `memory_mb` (256–16384) per instance, as Docker
-  `--cpus`/`--memory` (no swap) and a pids limit, or the Fargate size rounded up.
+  `--cpus`/`--memory` (no swap) and a pids limit, or the Fargate size rounded up (the default
+  0.5 vCPU and 512 MB is a 0.5 vCPU, 1 GB task).
 - **Volumes**: a service may have one volume (a mount path and a size). Locally it's a named
   Docker volume `roll-apps-vol-<service>-<env>`; a service with a volume runs at most one
   instance (`max_instances` is forced to 1, as on Railway). On the fleet it's an EFS access
@@ -259,8 +313,9 @@ every deployment is immutable with instant rollback.
   the label `sh.roll.apps=<service id>`, so leftovers are found and removed by exact name.
 - A service's variables reach only its own instances. They're stored sealed
   (`ROLL_SECRET_KEY`, AES-256-GCM; locally a key file under `<home>/apps/key` made 0600 on first
-  start), never logged, never in a `RunTask` request (they go in the bundle, as sandboxes' env
-  does), and returned in the clear only by the `reveal` route.
+  start), never logged, and never in a `RunTask` or `StartBuild` request (a task's come from its
+  own environment file, a build's from its own Secrets Manager secret, each deleted once read).
+  They're returned in the clear only by the `reveal` route.
 
 ### Networking
 
@@ -355,9 +410,10 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
 - Ownership: lease `apps:service:<id>`. The owner runs the service's deploy queue, waking proxy,
   autoscaler, cron schedule and meter. Any node accepts a request for a service's hostname and
   hands it to the owner with `Cluster::dispatch` (WebSockets included). A node that takes a
-  service over starts from the store: it marks instances the previous owner had as unknown,
-  adopts Fargate tasks still running under the service's group (`roll-apps-<service>`) after
-  checking their deployment, and stops any it doesn't recognise. Deploys in flight on a lost
+  service over starts from the store: it marks instances the previous owner had as unknown and
+  stops the Fargate tasks still running as the service's (`startedBy roll-apps-<service>`);
+  the next request starts a fresh one. (Adopting them instead, after checking their deployment,
+  would save that cold start; it isn't built.) Deploys in flight on a lost
   node fail and are retried once by the new owner (builds are idempotent: same revision, same
   image tag).
 - Every catalog write that belongs to a service is a `code_sql` write closure; the switch of an
@@ -454,8 +510,22 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 
 ## Not done yet
 
-- Not run on the fleet: the Fargate runtime and the CodeBuild builder are designed above, not
-  built. The edge routes `*.up.<site domain>` and unknown hosts (custom domains) to roll apps.
+- The Fargate runtime and the CodeBuild builder are built and tested against fake AWS APIs
+  (`crates/apps-control/tests/fargate.rs`: a web service built, health-checked as a task, woken
+  and put to sleep; a failed build; a cron run's exit code; no variable in any `RunTask` or
+  `StartBuild` request), not against AWS. The stack (`deploy/cloud/aws/roll-cloud.yaml`) doesn't
+  have them yet: the CodeBuild project (privileged; its role may push to `apps/*`, read
+  `<prefix>builds/*` and the `roll-apps/builds/*` secrets), the execution role (pull `apps/*`,
+  read `<prefix>env/*`, write the log group), an apps security group that admits fleet nodes on
+  any TCP port, the fleet role's rights (`RunTask` of `roll-apps-*` families, register task
+  definitions, pass the execution role, `StartBuild`/`StopBuild`/`BatchGetBuilds` on the project,
+  ECR `CreateRepository`/`BatchDeleteImage` under `apps/`, Secrets Manager under
+  `roll-apps/builds/`), a bucket lifecycle rule expiring `<prefix>env/` and `<prefix>builds/`
+  after a day, and the `ROLL_APPS_*` node settings. Still missing on the fleet: private
+  networking (Cloud Map), volumes (EFS; a service with a volume is refused), shells (ECS Exec),
+  private registries (repository credentials), allocation-based metering, and multi-line
+  variable values.
+- The edge routes `*.up.<site domain>` and unknown hosts (custom domains) to roll apps.
 - Custom domains are verified (CNAME or TXT) and routed; their TLS is the edge's job and isn't
   issued yet (Cloudflare for SaaS on the fleet, ACME HTTP-01 self-hosted).
 - Links: Postgres and Redis are wired; buckets, streams, queues and NoSQL answer "not wired yet".
@@ -510,8 +580,9 @@ Ranked; the top item not marked *waiting* is what's being worked on.
    error or non-empty `problems`; refuse when `Values.dynamic` names a key the service doesn't
    override) and `Secrets::digest(project, env, "/", &caller)` (blocking, unaudited, decrypts
    nothing).
-2. Fargate runtime and CodeBuild builder (with a registry build cache) against fakes, like
-    `code-preview/tests/fargate.rs`.
+2. The fleet runtime in the stack: the roles, project, security group and settings listed in
+   "Not done yet", a first run against AWS with its cold starts measured, and allocation-based
+   metering for Fargate.
 3. **Notifications.** A failed deploy and a crash loop reach people: for a repo service as
    deployment events through roll code's one delivery queue (webhooks, review apps), and to chat
    through chat ops; designed with the other branches, not a second webhook system. (Done:

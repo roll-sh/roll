@@ -1,6 +1,7 @@
 //! roll apps in rolld (docs/apps/README.md): `/v1/apps` on the API, the apps listener for
 //! services' hostnames (`ROLL_APPS_LISTEN`), and each environment's own port in a range
-//! (`ROLL_APPS_PORTS`, one node only).
+//! (`ROLL_APPS_PORTS`, one node only). Instances and builds run in Docker on this host, or as
+//! Fargate tasks and CodeBuild builds with `ROLL_APPS_RUNTIME=fargate`.
 //!
 //! What roll apps needs from the other products is adapted here: trees and the land log from
 //! roll code, connection variables from roll postgres and roll redis.
@@ -273,10 +274,23 @@ pub async fn start(
         pg_storage::StorageConfig::Local(_) if !single => None,
         s => Some(pg_storage::Objects::new(s)?),
     };
-    let runtime = Arc::new(apps_control::runtime::docker::Docker::new(home.join("apps").join("scratch")));
+    // On the fleet (`ROLL_APPS_RUNTIME=fargate`): instances as Fargate tasks and builds in
+    // CodeBuild, so no customer code runs on this node. Otherwise Docker on this host.
+    let fleet = apps_control::runtime::aws::FleetConfig::from_lookup(|k| std::env::var(k).ok(), home.join("apps").join("builds"))?;
+    let (runtime, builder): (Arc<dyn apps_control::runtime::Runtime>, Arc<dyn apps_control::runtime::Builder>) = match fleet {
+        Some(f) => {
+            info!(cluster = %f.cluster, project = %f.codebuild_project, "apps: instances run as Fargate tasks, builds in CodeBuild");
+            (apps_control::runtime::fargate::Fargate::new(f.clone()).await?, apps_control::runtime::codebuild::CodeBuild::new(f).await?)
+        }
+        None => (
+            Arc::new(apps_control::runtime::docker::Docker::new(home.join("apps").join("scratch"))),
+            Arc::new(apps_control::runtime::docker::DockerBuilder::new(a.builds.max(1))),
+        ),
+    };
+    let on_docker = runtime.name() == "docker";
     let deps = Deps {
         runtime,
-        builder: Arc::new(apps_control::runtime::docker::DockerBuilder::new(a.builds.max(1))),
+        builder,
         sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         secrets: Arc::new(NoSecrets),
         resources: Arc::new(RollResources { postgres, redis }),
@@ -287,7 +301,7 @@ pub async fn start(
     };
     let apps = Apps::new(cfg, store, deps);
     apps.start();
-    if !apps_control::runtime::docker::available().await {
+    if on_docker && !apps_control::runtime::docker::available().await {
         warn!("apps: docker isn't reachable, so services can't build or run on this node");
     }
     info!(domain = %apps.cfg.domain, listen = %a.listen, "apps: services answer on <slug>.{}", apps.cfg.domain);
