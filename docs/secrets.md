@@ -1590,13 +1590,16 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **A Terraform provider** (`roll_secrets_environment`, `roll_secret` for a key's value or link,
-   `roll_secrets_token` through roll-access, data sources for values), as Doppler's and
-   Infisical's; it speaks the same HTTP API the CLI and clients do.
-2. **Products say who owns a resource**, so a person's project can link their own databases,
+1. **A GitHub Action** (`sdk/github-action`), as Doppler's and Infisical's: a workflow step logs in
+   with the job's own OIDC token through a workload identity (no stored token), masks every value
+   (`::add-mask::`) and exports the environment to the job, multi-line values safely. No
+   dependencies to bundle: Node's own `fetch`.
+2. **Terraform: identities and syncs as resources** (`roll_secrets_identity`, `roll_secrets_sync`),
+   so CI's OIDC login and a platform sync are code too; `roll_secrets_token` once #30 lands.
+3. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
    Waits on products serving signed-in people (today they're the operator's).
-3. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
+4. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
    a project has members besides its owner. Tokens already ask through roll-access (`ask` rules,
    approvals for a while); a project's one owner reaches all of it.
 
@@ -1609,6 +1612,7 @@ Open pull requests after this one:
   #30 and #31 both change `caller()`: whichever lands second keeps #30's (no `rlst_`) with
   #31's `caller_of` split.
 - **#32, Go and Python clients** (after #20): `sdk/go/secrets`, `sdk/python/roll_secrets`.
+- **#33, a Terraform provider** (after #20): environments, keys (a value or a link) and values.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
