@@ -46,6 +46,17 @@ export function Consent({ search }: { search: Record<string, unknown> }) {
   );
 }
 
+/**
+ * What the client's identity is worth: a client ID metadata document (its id an https URL) is
+ * vouched for by whoever controls that address; a client registered here chose its own name.
+ */
+export function clientIdentity(id: string): string {
+  if (id.startsWith("https://")) {
+    return `Identified by its own address, ${new URL(id).host}: whoever controls that address published this client. Check it's the app you meant.`;
+  }
+  return "Any app can register under any name: check the address it returns to below, and that you started this from that app.";
+}
+
 function Problem({ text }: { text: string }) {
   return (
     <section className="rise rounded-xl border border-line bg-panel p-6">
@@ -140,9 +151,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
           <h1 className="text-xl font-semibold tracking-[-0.04em]">
             {client.name} wants to use roll
           </h1>
-          <p className="mt-1 text-[12px] text-subtle">
-            Any app can register under any name: check the address it returns to below, and that you started this from that app.
-          </p>
+          <p className="mt-1 text-[12px] text-subtle">{clientIdentity(client.id)}</p>
           <p className="mt-1 text-[13px] text-muted">
             It will act on your behalf through roll&apos;s MCP server, and can do only what you allow below. You can narrow it now and
             revoke it any time in MCP &amp; access.
