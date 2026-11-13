@@ -273,14 +273,16 @@ async fn get_one(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate:
 const CHECKUP_TIGHTEN: usize = 200;
 
 /// The access checkup: the live tokens that need attention, each with its findings and fixes.
-async fn checkup(State(a): S) -> crate::Result<Json<Value>> {
-    let out = blocking(a, |a| {
+async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
+    // A person's checkup is of their own tokens.
+    let who = who(&a, &ext)?;
+    let out = blocking(a, move |a| {
         let now = code_sql::now_ms();
         let counts = a.store.network_counts()?;
         let since = now - crate::checkup::UNUSED_DAYS * 86_400_000;
         let mut checked = 0;
         let mut out = Vec::new();
-        for g in a.store.list()?.into_iter().filter(|g| g.live(now)) {
+        for g in a.store.list()?.into_iter().filter(|g| g.live(now) && visible(&who, g)) {
             // Whether its proposal is narrower: for tokens used lately, a bounded number of them.
             let used_lately = g.last_used_at.is_some_and(|t| t >= since);
             let narrower = if used_lately && checked < CHECKUP_TIGHTEN {

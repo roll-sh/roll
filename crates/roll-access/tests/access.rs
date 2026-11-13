@@ -791,6 +791,8 @@ async fn a_users_token_acts_as_them() {
     assert_eq!(d.as_user("usr_bob", Method::DELETE, &format!("/v1/access/tokens/{id}"), None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(d.as_user("usr_bob", Method::GET, &format!("/v1/access/tokens/{id}/tighten"), None).await.0, StatusCode::NOT_FOUND, "nor read what it did");
     assert_eq!(d.as_user("usr_bob", Method::GET, &format!("/v1/access/tokens/{id}/networks"), None).await.0, StatusCode::NOT_FOUND, "nor where from");
+    let (_, bobs) = d.as_user("usr_bob", Method::GET, "/v1/access/checkup", None).await;
+    assert!(bobs.as_array().unwrap().iter().all(|e| e["grant"]["id"] != json!(id)), "nor its checkup: {bobs}");
     assert_eq!(d.as_user("usr_bob", Method::POST, &format!("/v1/access/tokens/{id}/tighten"), Some(json!({ "from": [] }))).await.0, StatusCode::NOT_FOUND, "nor tighten it");
 
     // Her token's `ask` is hers to decide (bob can't); approved, it runs once.
