@@ -3,6 +3,7 @@
 // job's own OIDC token (no stored token) or a roll token. No dependencies: Node's own fetch.
 "use strict";
 
+const childProcess = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 
@@ -40,6 +41,71 @@ async function oidcToken(fetchFn, env, audience) {
   return value;
 }
 
+/**
+ * A line's candidates, as roll code's scan and `roll secrets scan` take them: runs of
+ * `[A-Za-z0-9_\-+/=.:@~]`, the whole trimmed line, and the right-hand side of `KEY=VALUE` or
+ * `key: value` (unquoted). The server never matches anything under 8 characters.
+ */
+function candidatesOf(line) {
+  const out = new Set();
+  const add = (s) => {
+    const n = [...s].length;
+    if (n >= 8 && n <= 4096) out.add(s);
+  };
+  for (const run of line.split(/[^A-Za-z0-9_\-+/=.:@~]/)) add(run);
+  const trimmed = line.trim();
+  add(trimmed);
+  const i = trimmed.search(/[=:]/);
+  if (i >= 0) {
+    const rhs = trimmed.slice(i + 1).trim().replace(/[,;]+$/, "").trim();
+    const q = rhs.match(/^(["'`])(.*)\1$/s);
+    add(q ? q[2] : rhs);
+  }
+  return out;
+}
+
+/** The lines `git diff base...HEAD` adds: `{file, line, text}`. */
+function addedLines(cwd, base) {
+  const diff = childProcess.execFileSync("git", ["diff", "--unified=0", "--no-color", "--no-ext-diff", `${base}...HEAD`], { cwd, maxBuffer: 256 << 20, encoding: "utf8" });
+  const out = [];
+  let file = null;
+  let line = 0;
+  for (const l of diff.split("\n")) {
+    if (l.startsWith("+++ ")) file = l === "+++ /dev/null" ? null : l.slice(4).replace(/^b\//, "");
+    else if (l.startsWith("@@")) line = Number((l.match(/\+(\d+)/) || [0, 0])[1]);
+    else if (l.startsWith("+") && file) out.push({ file, line: line++, text: l.slice(1) });
+  }
+  return out;
+}
+
+/**
+ * `scan`: fails when a line this change adds holds one of the project's stored values, naming the
+ * key, environment, file and line (never the value). Only fingerprints cross: `POST …/leaks`
+ * answers which candidates are values the token may reveal.
+ */
+async function scan(fetchFn, api, token, project, env, out) {
+  const cwd = env.GITHUB_WORKSPACE || process.cwd();
+  const base = (env.INPUT_BASE || "").trim() || (env.GITHUB_BASE_REF ? `origin/${env.GITHUB_BASE_REF}` : "HEAD~1");
+  const where = new Map(); // candidate → first {file, line}
+  for (const a of addedLines(cwd, base)) {
+    for (const c of candidatesOf(a.text)) if (!where.has(c)) where.set(c, a);
+  }
+  const all = [...where.keys()];
+  const found = [];
+  for (let i = 0; i < all.length; i += 20000) {
+    const chunk = all.slice(i, i + 20000);
+    const matches = await call(fetchFn, api, "POST", `/v1/secrets/projects/${encodeURIComponent(project)}/leaks`, token, { candidates: chunk });
+    for (const m of matches) found.push({ ...m, at: where.get(chunk[m.index]) });
+  }
+  for (const f of found) {
+    out.write(`::error file=${f.at.file},line=${f.at.line}::${f.key} (${f.environment}${f.path === "/" ? "" : `:${f.path}`}) from roll secrets is in this change: remove it and rotate it\n`);
+  }
+  if (env.GITHUB_OUTPUT) fs.appendFileSync(env.GITHUB_OUTPUT, `leaks=${found.length}\n`);
+  out.write(`roll secrets: ${all.length} candidates from ${base}...HEAD, ${found.length} stored value${found.length === 1 ? "" : "s"}\n`);
+  if (found.length) throw new Error(`${found.length} of the project's stored values ${found.length === 1 ? "is" : "are"} in this change`);
+  return [];
+}
+
 /** A heredoc delimiter that isn't in `value`, for GITHUB_ENV and GITHUB_OUTPUT. */
 function delimiter(value) {
   for (;;) {
@@ -56,7 +122,8 @@ async function run(env, out, fetchFn = fetch) {
   const input = (name) => (env[`INPUT_${name.replace(/ /g, "_").toUpperCase()}`] || "").trim();
   const api = input("api-url").replace(/\/+$/, "");
   const environment = input("environment");
-  if (!api || !environment) throw new Error("api-url and environment are required");
+  const scanning = input("scan") === "true";
+  if (!api || (!environment && !scanning)) throw new Error("api-url, and environment unless scanning, are required");
   let token = input("token");
   let project = input("project");
   if (token) {
@@ -73,6 +140,7 @@ async function run(env, out, fetchFn = fetch) {
   }
   if (!project) project = (await call(fetchFn, api, "GET", "/v1/secrets/whoami", token)).project;
   if (!project) throw new Error("which project? pass project");
+  if (scanning) return scan(fetchFn, api, token, project, env, out);
   const path = input("path") || "/";
   const v = await call(fetchFn, api, "GET", `/v1/secrets/projects/${encodeURIComponent(project)}/environments/${encodeURIComponent(environment)}/values?path=${encodeURIComponent(path)}`, token);
   if (v.problems && v.problems.length) {
@@ -104,7 +172,7 @@ async function run(env, out, fetchFn = fetch) {
   return keys;
 }
 
-module.exports = { run };
+module.exports = { run, candidatesOf };
 
 if (require.main === module) {
   run(process.env, process.stdout).catch((e) => {

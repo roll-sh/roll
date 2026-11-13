@@ -110,6 +110,11 @@ steps:
   (a PEM key) arrives whole and can't add variables of its own. A key that doesn't resolve fails
   the step, naming it.
 - No dependencies: Node's own `fetch`, nothing to bundle or audit.
+- **`scan: true`** guards a repository on GitHub the way roll code guards the ones it hosts: the
+  lines a pull request adds (`git diff base...HEAD`; check out with `fetch-depth: 0`) are cut into
+  candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
+  values the token may reveal), and each stored value found fails the check with an annotation on
+  its file and line naming the key and environment, never the value.
 
 ## Where it runs
 

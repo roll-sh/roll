@@ -65,3 +65,28 @@ test("a job logs in with its OIDC token, masks every value and exports them", as
   const bad = { ...env, ACTIONS_ID_TOKEN_REQUEST_URL: "https://github.oidc/token", INPUT_IDENTITY: "idn_other" };
   await assert.rejects(run(bad, out, fetchFn), /no identity takes this token/);
 });
+
+test("scan fails a change that adds a stored value, naming where and never the value", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "roll-scan-"));
+  const git = (...args) => require("node:child_process").execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: repo });
+  git("init", "-q");
+  fs.writeFileSync(path.join(repo, "app.js"), "console.log('hi');\n");
+  git("add", "."), git("commit", "-qm", "base");
+  fs.writeFileSync(path.join(repo, ".env"), "# keys\nSTRIPE_KEY=\"sk_live_value123\"\n");
+  git("add", "."), git("commit", "-qm", "oops");
+  const asked = [];
+  const fetchFn = async (url, init = {}) => {
+    const u = new URL(url);
+    if (u.pathname !== "/v1/secrets/projects/prj_a/leaks" || init.headers.authorization !== "Bearer rlt_ci") return new Response("{}", { status: 404 });
+    const { candidates } = JSON.parse(init.body);
+    asked.push(...candidates);
+    const i = candidates.indexOf("sk_live_value123");
+    return new Response(JSON.stringify(i < 0 ? [] : [{ index: i, key: "STRIPE_KEY", environment: "production", path: "/" }]));
+  };
+  let printed = "";
+  const env = { "INPUT_API-URL": "https://roll.test", INPUT_TOKEN: "rlt_ci", INPUT_PROJECT: "prj_a", INPUT_SCAN: "true", INPUT_BASE: "HEAD~1", GITHUB_WORKSPACE: repo };
+  await assert.rejects(run(env, { write: (s) => (printed += s) }, fetchFn), /1 of the project's stored values is in this change/);
+  assert.match(printed, /::error file=\.env,line=2::STRIPE_KEY \(production\) from roll secrets is in this change/);
+  assert.ok(!printed.replace(/::add-mask::.*\n/g, "").includes("sk_live_value123"), "the value is never printed");
+  assert.ok(!asked.includes("console.log('hi');"), "only added lines are asked about");
+});
