@@ -229,6 +229,10 @@ pub struct EnvLive {
     capped: AtomicBool,
     /// Its volume is being restored: nothing starts until it's done.
     held: AtomicBool,
+    /// A scaling worker's instances for its backlog ([`crate::model::Scale`]); 0: its floor.
+    wanted: AtomicU32,
+    /// Since when it has wanted fewer than run (a scale-in waits `scale_down_after`).
+    fewer_since: Mutex<Option<Instant>>,
     /// A gradual rollout's new deployment and the percent of requests it takes.
     canary: Mutex<Option<(Arc<Template>, u8)>>,
     /// Requests routed so far (the canary's share is taken by turns).
@@ -276,6 +280,8 @@ impl EnvLive {
             closed: AtomicBool::new(false),
             capped: AtomicBool::new(false),
             held: AtomicBool::new(false),
+            wanted: AtomicU32::new(0),
+            fewer_since: Mutex::new(None),
             canary: Mutex::new(None),
             routed: AtomicU64::new(0),
             served: Mutex::new(HashMap::new()),
@@ -975,6 +981,11 @@ impl EnvLive {
         self.capped.store(on, Ordering::SeqCst);
     }
 
+    /// A scaling worker's instances for its backlog now.
+    pub fn set_wanted(&self, n: u32) {
+        self.wanted.store(n, Ordering::SeqCst);
+    }
+
     /// Hold it asleep (a restore of its volume) until the guard drops: what runs stops, and no
     /// request, floor, rollout or cron run starts an instance meanwhile (they wait for the wake
     /// lock the guard keeps, or see `held`).
@@ -1262,6 +1273,11 @@ impl EnvLive {
 
     async fn keep_workers(self: &Arc<Self>, tpl: &Arc<Template>) {
         let run = &tpl.run;
+        // A worker that follows its work runs what its backlog wants; else its floor.
+        let target = match &run.scale {
+            Some(_) => self.wanted.load(Ordering::SeqCst).clamp(run.min_instances, run.max_instances.max(run.min_instances)),
+            None => run.min_instances,
+        };
         let insts = self.instances();
         let mut up = 0;
         for i in &insts {
@@ -1277,7 +1293,7 @@ impl EnvLive {
             }
         }
         for i in insts.iter().filter(|i| i.phase() == Phase::Crashed) {
-            if up >= run.min_instances {
+            if up >= target {
                 break;
             }
             // Back off: 1 s doubling to 60 s since it last ran.
@@ -1294,7 +1310,7 @@ impl EnvLive {
                 i.crashes.fetch_add(1, Ordering::SeqCst);
             }
         }
-        while up < run.min_instances {
+        while up < target {
             let Ok(inst) = self.make(tpl).await else { break };
             self.insts.lock().push(inst.clone());
             let deadline = Instant::now() + self.cfg.wake_timeout;
@@ -1302,6 +1318,34 @@ impl EnvLive {
                 break;
             }
             up += 1;
+            self.log.stream(Stream::System).line(format!("scaled out: {up} instances for the backlog"));
+        }
+        // Fewer wanted for `scale_down_after`: one goes (the newest), its work given the drain
+        // to finish; the rest follow on later ticks.
+        let fewer = up > target;
+        let scale_in = {
+            let mut s = self.fewer_since.lock();
+            match (fewer, *s) {
+                (false, _) => {
+                    *s = None;
+                    false
+                }
+                (true, None) => {
+                    *s = Some(Instant::now());
+                    false
+                }
+                (true, Some(t)) => t.elapsed() >= self.cfg.scale_down_after,
+            }
+        };
+        if scale_in
+            && let Some(i) = self.instances().into_iter().filter(|i| matches!(i.phase(), Phase::Running(_))).max_by_key(|i| i.started_at())
+        {
+            *i.phase.lock() = Phase::Stopping;
+            let _ = self.runtime.stop(&i.name, self.cfg.drain).await;
+            self.runtime.remove(&i.name).await;
+            self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
+            *self.fewer_since.lock() = None;
+            self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
         }
     }
 

@@ -127,7 +127,15 @@ impl apps_control::integrations::Resources for FakeResources {
             _ => anyhow::bail!("no {} {ref}", kind.as_str()),
         }
     }
+
+    async fn backlog(&self, stream: &str, _group: &str) -> anyhow::Result<u64> {
+        anyhow::ensure!(stream == "str_lag", "no stream {stream}");
+        Ok(BACKLOG.load(Ordering::SeqCst))
+    }
 }
+
+/// The fake stream's consumer group lag (a scaling worker's test sets it).
+static BACKLOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct World {
     apps: Arc<Apps>,
@@ -1520,5 +1528,30 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     assert_eq!(st, StatusCode::OK);
     assert!(js.contains("https://roll.test/dashboard/projects/") && js.contains("previews?preview=abc"), "the note goes to the preview in roll");
     assert!(!get("/", "application/json").await.1.contains("feedback.js"), "an API call isn't a page");
+}
+
+/// A worker that follows its work: its instances follow a stream group's lag within its bounds,
+/// scaling in one at a time once fewer are wanted; only a worker can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_follows_its_streams_backlog() {
+    let w = world_with(|c| c.live.scale_down_after = Duration::ZERO).await;
+    let ws = w.apps.deps.workspace.clone().unwrap();
+    ws.place(roll_workspace::Scope::All, &w.project, roll_workspace::Kind::Stream, "str_lag", 0.0, 0.0).unwrap();
+    let run = json!({"type": "worker", "min_instances": 1, "max_instances": 4, "scale": {"stream": "str_lag", "group": "billing", "per_instance": 10}});
+    let (svc, d) = image_service(&w, "billing", run).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let live = w.apps.live(&id, "production");
+    let up = |w: &World| w.fake.instances(&id).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+    BACKLOG.store(35, Ordering::SeqCst);
+    w.apps.scale_workers().await;
+    live.tick().await;
+    assert_eq!(up(&w), 4, "35 behind at 10 each: 4 (the ceiling)");
+    BACKLOG.store(0, Ordering::SeqCst);
+    w.apps.scale_workers().await;
+    live.tick().await;
+    live.tick().await;
+    assert_eq!(up(&w), 3, "caught up: one goes at a time");
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"type": "web", "scale": {"stream": "str_lag", "group": "g"}}}))).await.0, StatusCode::BAD_REQUEST, "a web service scales on its requests");
 }
 

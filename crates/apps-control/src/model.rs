@@ -378,6 +378,32 @@ pub struct Run {
     /// proxy and its health checks talk HTTP/2 to it (Cloud Run's `--use-http2`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub h2c: bool,
+    /// A worker's instances follow its work: a stream consumer group's lag (docs/apps/README.md,
+    /// "Workers that follow their work"). Between `min_instances` and `max_instances`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<Scale>,
+}
+
+/// What a worker scales on: `group`'s lag on `stream` (a roll stream in the service's project),
+/// one instance per `per_instance` messages behind.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scale {
+    pub stream: String,
+    pub group: String,
+    #[serde(default = "Scale::default_per_instance")]
+    pub per_instance: u64,
+}
+
+impl Scale {
+    fn default_per_instance() -> u64 {
+        1000
+    }
+
+    /// Instances for a backlog of `lag`, within `min`–`max`.
+    pub fn instances(&self, lag: u64, min: u32, max: u32) -> u32 {
+        (lag.div_ceil(self.per_instance.max(1)).min(u32::MAX as u64) as u32).clamp(min, max.max(min))
+    }
 }
 
 /// The run settings an environment may set for itself (Railway's per-environment settings):
@@ -448,6 +474,7 @@ impl Default for Run {
             alerts: Alerts::default(),
             rollout: Rollout::default(),
             h2c: false,
+            scale: None,
         }
     }
 }
@@ -469,6 +496,15 @@ impl Run {
         }
         if !(1..=100).contains(&r.error_pct) {
             return bad("rollout.error_pct is 1–100");
+        }
+        if let Some(sc) = &self.scale {
+            if self.kind != RunType::Worker {
+                return bad("scale is for a worker (a web service scales on its requests)");
+            }
+            let id_ok = |s: &str| !s.is_empty() && s.len() <= 200 && s.bytes().all(|b| b.is_ascii_graphic());
+            if !id_ok(&sc.stream) || !id_ok(&sc.group) || !(1..=1_000_000_000).contains(&sc.per_instance) {
+                return bad("scale is { stream, group, per_instance (1–1e9) }");
+            }
         }
         if !(0.25..=8.0).contains(&self.cpu) || !self.cpu.is_finite() {
             return bad("cpu is 0.25–8 vCPU");
