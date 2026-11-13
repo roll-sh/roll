@@ -298,14 +298,14 @@ pub fn normalize_watch(cluster: &Cluster, id: &str, w: &Map, previous: Option<&V
     Ok(out)
 }
 
-/// An input as it is printed (`http` requests redacted).
-pub fn redacted_input(input: &Value) -> Value {
+/// An input with `f` applied to each of its `http` request templates.
+fn map_input(input: &Value, f: &dyn Fn(&Value) -> Value) -> Value {
     let Some((ty, body)) = input.as_object().and_then(|m| m.iter().next()) else { return input.clone() };
     match ty.as_str() {
         "http" => {
             let mut b = body.clone();
             if let Value::Obj(m) = &mut b
-                && let Some(r) = m.get("request").map(http::redact)
+                && let Some(r) = m.get("request").map(f)
             {
                 m.insert("request".into(), r);
             }
@@ -318,7 +318,7 @@ pub fn redacted_input(input: &Value) -> Value {
                 .into_iter()
                 .flatten()
                 .map(|s| match s.as_object().and_then(|m| m.iter().next()) {
-                    Some((n, i)) => obj! { n.clone() => redacted_input(i) },
+                    Some((n, i)) => obj! { n.clone() => map_input(i, f) },
                     None => s.clone(),
                 })
                 .collect();
@@ -328,17 +328,17 @@ pub fn redacted_input(input: &Value) -> Value {
     }
 }
 
-/// A stored watch as `GET _watcher/watch` prints it (secrets redacted).
-pub fn redacted_watch(w: &Value) -> Value {
+/// A watch with `f` applied to each HTTP request template (its `http` inputs and webhooks).
+fn map_requests(w: &Value, f: &dyn Fn(&Value) -> Value) -> Value {
     let mut w = w.clone();
     if let Value::Obj(m) = &mut w {
-        if let Some(i) = m.get("input").map(redacted_input) {
+        if let Some(i) = m.get("input").map(|i| map_input(i, f)) {
             m.insert("input".into(), i);
         }
         if let Some(Value::Obj(actions)) = m.get_mut("actions") {
             for a in actions.values_mut() {
                 if let Value::Obj(am) = a
-                    && let Some(wh) = am.get("webhook").map(http::redact)
+                    && let Some(wh) = am.get("webhook").map(f)
                 {
                     am.insert("webhook".into(), wh);
                 }
@@ -346,6 +346,24 @@ pub fn redacted_watch(w: &Value) -> Value {
         }
     }
     w
+}
+
+/// An input as it is printed (`http` requests redacted).
+pub fn redacted_input(input: &Value) -> Value {
+    map_input(input, &http::redact)
+}
+
+/// A stored watch as `GET _watcher/watch` prints it (secrets redacted).
+pub fn redacted_watch(w: &Value) -> Value {
+    map_requests(w, &http::redact)
+}
+
+/// A normalized watch as the cluster stores it (secrets sealed, [`crate::seal`]).
+pub fn sealed_watch(cluster: &Cluster, w: &Map) -> Map {
+    match map_requests(&Value::Obj(w.clone()), &|r| http::seal(cluster, r)) {
+        Value::Obj(m) => m,
+        _ => w.clone(),
+    }
 }
 
 /// Whether parsing the watch warns that `ignore_throttled` is deprecated (a search request

@@ -103,6 +103,8 @@ pub struct ClusterConfig {
     /// shared nodes, where they would reveal other tenants' activity and the host's layout: the
     /// node then reports fixed synthetic figures.
     pub host_metrics: bool,
+    /// Seals the secrets the cluster stores ([`crate::seal`]); `None`: stored as given.
+    pub sealer: Option<std::sync::Arc<crate::seal::Sealer>>,
 }
 
 impl ClusterConfig {
@@ -115,6 +117,7 @@ impl ClusterConfig {
             node_settings: Vec::new(),
             test_features: false,
             host_metrics: false,
+            sealer: None,
         }
     }
 

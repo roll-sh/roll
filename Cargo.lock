@@ -7568,6 +7568,7 @@ dependencies = [
 name = "search-es"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -7578,6 +7579,7 @@ dependencies = [
  "chrono-tz",
  "flate2",
  "foldhash 0.2.0",
+ "hkdf",
  "indexmap",
  "itoa",
  "libc",

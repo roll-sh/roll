@@ -113,6 +113,29 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
     Ok(out)
 }
 
+/// Kinds of sealed values ([`crate::seal`]).
+const PASSWORD: &str = "watch password";
+const AUTH_HEADER: &str = "watch authorization header";
+
+/// A normalized template as the cluster stores it: its password and `Authorization` headers
+/// sealed ([`crate::seal`]).
+pub fn seal(cluster: &Cluster, stored: &Value) -> Value {
+    let mut v = stored.clone();
+    if let Some(Value::Obj(a)) = v.as_object_mut().and_then(|m| m.get_mut("auth")).and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic"))
+        && let Some(p) = a.get("password").map(Value::to_es_string)
+    {
+        a.insert("password".into(), crate::seal::seal(cluster, PASSWORD, &p).into());
+    }
+    if let Some(Value::Obj(h)) = v.as_object_mut().and_then(|m| m.get_mut("headers")) {
+        for (k, val) in h.iter_mut() {
+            if k.eq_ignore_ascii_case("authorization") && let Value::Str(s) = val {
+                *val = Value::from(crate::seal::seal(cluster, AUTH_HEADER, s));
+            }
+        }
+    }
+    v
+}
+
 /// A stored template as it is printed: the password and any `Authorization` header redacted.
 pub fn redact(stored: &Value) -> Value {
     let mut v = stored.clone();
@@ -323,10 +346,11 @@ pub async fn send(cluster: &Cluster, req: &Request) -> EsResult<Response> {
     let method = reqwest::Method::from_bytes(req.method.to_ascii_uppercase().as_bytes()).map_err(|_| EsError::illegal_argument(format!("unsupported http method [{}]", req.method)))?;
     let mut rb = client.request(method, parsed).header("Accept-Charset", "UTF-8");
     for (k, v) in &req.headers {
-        rb = rb.header(k.as_str(), v.as_str());
+        let v = if k.eq_ignore_ascii_case("authorization") { crate::seal::open(cluster, AUTH_HEADER, v)? } else { v.clone() };
+        rb = rb.header(k.as_str(), v);
     }
     if let Some((u, p)) = &req.auth {
-        rb = rb.basic_auth(u, Some(p));
+        rb = rb.basic_auth(u, Some(crate::seal::open(cluster, PASSWORD, p)?));
     }
     if let Some(body) = &req.body {
         if !req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {

@@ -160,6 +160,17 @@ cluster, `Authorization: Bearer <cluster>_<secret>`, or the TLS SNI/`Host` label
 domain (`<cluster>.search.<domain>`). Secrets are compared in constant time. Each cluster has
 request-rate and in-flight byte budgets so one tenant can't starve the node.
 
+Secrets a cluster stores for later use are sealed in its state (`search-es` `seal.rs`): a
+watch's HTTP passwords and `Authorization` headers, connector secrets and Fleet secrets.
+AES-256-GCM under a key derived from the deployment's `ROLL_SECRET_KEY` (rolld; search-dev
+reads the same variable), a fresh nonce per value and the value's kind as associated data. They
+travel sealed through cluster states, snapshots and branches, and are opened only to send a
+request or to answer that secret's own read API; a node with another key refuses to open them
+without naming either. With no key they are stored as given, as Elasticsearch does without
+`xpack.watcher.encrypt_sensitive_data`. ES|QL data sources still refuse S3 secrets, as
+Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
+are kept as hashes, never sealed.
+
 ## On the fleet (roll cloud)
 
 Search runs on the same rolld fleet as every other product (docs/cloud/README.md): no image,

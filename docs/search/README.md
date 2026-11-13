@@ -226,12 +226,10 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys;
    OpenSearch-flavor clusters have no API keys (a 400), so secrets' search link there wants a
    link user like apps'. The fleet test with every product on.
-2. **Watch secrets at rest**: watcher keeps a watch's passwords (http input and webhook basic
-   auth) as given in the cluster's stored state, as Elasticsearch does without
-   `xpack.watcher.encrypt_sensitive_data`. Seal them under the deployment's key (`ROLL_SECRET_KEY`,
-   as owners' provider keys are), open them only to send a request, and keep `_watcher/watch`'s
-   redacted output. Also: watches stored before the watcher engine have no next fire time until
-   re-stored or re-activated; give them one on load.
+2. **Older watches** stored before the watcher engine have no next fire time until re-stored or
+   re-activated: give them one on load. (Stored secrets are sealed now: watch passwords and
+   `Authorization` headers, connector and Fleet secrets, under `ROLL_SECRET_KEY`;
+   docs/search/architecture.md, "Multi-tenancy and authentication".)
 3. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
    both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is;
    `auto_date_histogram` is now counted from the points tree too, 27.8 → 3.0 ms in an A/B): a full

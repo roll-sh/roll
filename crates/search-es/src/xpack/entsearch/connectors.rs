@@ -18,6 +18,8 @@ use crate::xpack::{store, unknown_field};
 pub const CONNECTORS: &str = "connector";
 pub const SYNC_JOBS: &str = "connector.sync_job";
 pub const SECRETS: &str = "connector_secret";
+/// What a connector secret's value is sealed as ([`crate::seal`]).
+const SECRET_KIND: &str = "connector secret";
 
 const CONNECTOR_STATUSES: [&str; 5] = ["created", "needs_configuration", "configured", "connected", "error"];
 
@@ -1296,9 +1298,9 @@ pub async fn secret_post(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let id = crate::meta::names::time_based_id();
     let out = id.clone();
-    let v = v.clone();
+    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, v.clone());
     let now = ctx.now_ms;
-    ctx.cluster.update(move |st| store::put(st, SECRETS, &id, obj! { "value" => v }, now).map(|_| ())).await?;
+    ctx.cluster.update(move |st| store::put(st, SECRETS, &id, entry, now).map(|_| ())).await?;
     Reply::ok(obj! { "id" => out })
 }
 
@@ -1308,15 +1310,16 @@ pub async fn secret_put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let Some(v) = body.get("value").filter(|v| !v.is_null()).cloned() else {
         return Err(EsError::action_request_validation(&["[value] of the connector secret cannot be [null] or [\"\"]".into()]));
     };
+    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, v);
     let now = ctx.now_ms;
-    let created = ctx.cluster.update(move |st| store::put(st, SECRETS, &id, obj! { "value" => v }, now)).await?;
+    let created = ctx.cluster.update(move |st| store::put(st, SECRETS, &id, entry, now)).await?;
     Ok(Reply::Body(if created { 201 } else { 200 }, obj! { "result" => if created { "created" } else { "updated" } }))
 }
 
 pub fn secret_get(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     match ctx.state().metadata.xpack.get(SECRETS, id) {
-        Some(s) => Reply::ok(obj! { "id" => id, "value" => s.get("value").cloned().unwrap_or(Value::Null) }),
+        Some(s) => Reply::ok(obj! { "id" => id, "value" => crate::seal::open_value(ctx.cluster, SECRET_KIND, s)? }),
         None => Err(EsError::resource_not_found(format!("No secret with id [{id}]"))),
     }
 }

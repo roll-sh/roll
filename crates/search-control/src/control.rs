@@ -109,6 +109,9 @@ pub struct SearchConfig {
     pub catalog_connections: usize,
     pub defaults: Defaults,
     pub pricing: Pricing,
+    /// Seals the secrets clusters store (watch passwords, connector and Fleet secrets) under
+    /// the deployment's key (rolld: `ROLL_SECRET_KEY`); `None`: stored as given.
+    pub sealer: Option<Arc<search_es::seal::Sealer>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +155,7 @@ impl SearchConfig {
                 destructive_requires_name: true,
             },
             pricing: Pricing::default(),
+            sealer: None,
         }
     }
 }
@@ -400,6 +404,7 @@ impl Control {
                 idle_unload: Some(cfg.idle_unload),
                 test_features: cfg.test_features,
                 memory_budget: cfg.memory_budget,
+                sealer: cfg.sealer.clone(),
                 ..NodeConfig::default()
             },
             hooks.clone(),

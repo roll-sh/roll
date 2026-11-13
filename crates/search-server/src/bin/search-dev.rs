@@ -158,6 +158,8 @@ async fn run() -> anyhow::Result<()> {
         test_features: args.test_features || args.yaml_test_cluster,
         // One tenant: the host's numbers are its own.
         host_metrics: true,
+        // As rolld does: stored secrets sealed under ROLL_SECRET_KEY when it's set.
+        sealer: std::env::var("ROLL_SECRET_KEY").ok().and_then(|k| search_es::seal::Sealer::from_secret(&k)),
         ..NodeConfig::default()
     };
     let stores: Arc<dyn search_server::StoreProvider> = match &args.data_dir {
