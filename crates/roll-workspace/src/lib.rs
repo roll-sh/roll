@@ -71,11 +71,12 @@ pub enum Kind {
     Stream,
     Bucket,
     Nosql,
+    Search,
     Repo,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [Kind::Postgres, Kind::Redis, Kind::Stream, Kind::Bucket, Kind::Nosql, Kind::Repo];
+    pub const ALL: [Kind; 7] = [Kind::Postgres, Kind::Redis, Kind::Stream, Kind::Bucket, Kind::Nosql, Kind::Search, Kind::Repo];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -84,6 +85,7 @@ impl Kind {
             Kind::Stream => "stream",
             Kind::Bucket => "bucket",
             Kind::Nosql => "nosql",
+            Kind::Search => "search",
             Kind::Repo => "repo",
         }
     }

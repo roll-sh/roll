@@ -1,0 +1,2303 @@
+{
+  "description" : "OpenSearch 3.9.0 k-NN plugin node APIs: _plugins/_knn/stats (filters, node selection, errors), warmup and clear_cache (validation, shard counts) and the graph-cache and request counters a sequence of k-NN searches leaves (captured on a fresh node)",
+  "dialect" : "opensearch",
+  "steps" : [
+    {
+      "req" : "PUT /esm-k1",
+      "body" : {
+        "settings" : {
+          "index.knn" : true,
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "knn_vector",
+              "dimension" : 2
+            },
+            "w" : {
+              "type" : "knn_vector",
+              "dimension" : 2,
+              "method" : {
+                "name" : "hnsw",
+                "engine" : "lucene"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-k1"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-plain",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-plain"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-rep",
+      "body" : {
+        "settings" : {
+          "index.knn" : true,
+          "number_of_shards" : 3
+        },
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "knn_vector",
+              "dimension" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rep"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-closed",
+      "body" : {
+        "settings" : {
+          "index.knn" : true
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-closed"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-closed/_close",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "indices" : {
+          "esm-closed" : {
+            "closed" : true
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"v\":[1,2],\"w\":[3,4]}\n{\"index\":{\"_id\":\"2\"}}\n{\"v\":[2,2]}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 142,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-rep/_bulk?refresh=true",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"v\":[1,2]}\n{\"index\":{\"_id\":\"2\"}}\n{\"v\":[2,2]}\n{\"index\":{\"_id\":\"3\"}}\n{\"v\":[2,3]}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 22,
+        "errors" : false,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-rep",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-rep",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-rep",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats",
+      "mask" : [
+        "took",
+        "graph_stats",
+        "total_load_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "circuit_breaker_triggered" : false,
+        "model_index_status" : null,
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "remote_vector_index_build_stats" : {
+              "repository_stats" : {
+                "read_success_count" : 0,
+                "read_failure_count" : 0,
+                "successful_read_time_in_millis" : 0,
+                "write_success_count" : 0,
+                "write_failure_count" : 0,
+                "successful_write_time_in_millis" : 0
+              },
+              "client_stats" : {
+                "status_request_failure_count" : 0,
+                "index_build_terminal_exception" : 0,
+                "status_request_success_count" : 0,
+                "index_build_success_count" : 0,
+                "index_build_failure_count" : 0,
+                "build_request_failure_count" : 0,
+                "index_build_merge_abort_exception" : 0,
+                "build_request_success_count" : 0,
+                "waiting_time_in_ms" : 0
+              },
+              "build_stats" : {
+                "remote_index_build_flush_time_in_millis" : 0,
+                "remote_index_build_current_merge_operations" : 0,
+                "remote_index_build_current_flush_operations" : 0,
+                "remote_index_build_current_merge_size" : 0,
+                "remote_index_build_current_flush_size" : 0,
+                "remote_index_build_merge_time_in_millis" : 0
+              }
+            },
+            "max_distance_query_with_filter_requests" : 0,
+            "graph_memory_usage_percentage" : 0.0,
+            "graph_query_requests" : 0,
+            "graph_memory_usage" : 0,
+            "cache_capacity_reached" : false,
+            "load_success_count" : 0,
+            "training_memory_usage" : 0,
+            "indices_in_cache" : {},
+            "script_query_errors" : 0,
+            "hit_count" : 0,
+            "knn_query_requests" : 0,
+            "total_load_time" : 0,
+            "miss_count" : 0,
+            "min_score_query_requests" : 0,
+            "knn_query_with_filter_requests" : 0,
+            "training_memory_usage_percentage" : 0.0,
+            "max_distance_query_requests" : 0,
+            "lucene_initialized" : true,
+            "graph_index_requests" : 0,
+            "faiss_initialized" : true,
+            "load_exception_count" : 0,
+            "training_errors" : 0,
+            "min_score_query_with_filter_requests" : 0,
+            "eviction_count" : 0,
+            "nmslib_initialized" : false,
+            "script_compilations" : 0,
+            "script_query_requests" : 0,
+            "graph_stats" : {
+              "merge" : {
+                "current" : 0,
+                "total" : 0,
+                "total_time_in_millis" : 0,
+                "current_docs" : 0,
+                "total_docs" : 0,
+                "total_size_in_bytes" : 0,
+                "current_size_in_bytes" : 0
+              },
+              "refresh" : {
+                "total" : 3,
+                "total_time_in_millis" : 40
+              }
+            },
+            "graph_query_errors" : 0,
+            "indexing_from_model_degraded" : false,
+            "graph_index_errors" : 0,
+            "training_requests" : 0,
+            "script_compilation_errors" : 0
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/_all",
+      "mask" : [
+        "took",
+        "graph_stats",
+        "total_load_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "circuit_breaker_triggered" : false,
+        "model_index_status" : null,
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "remote_vector_index_build_stats" : {
+              "repository_stats" : {
+                "read_success_count" : 0,
+                "read_failure_count" : 0,
+                "successful_read_time_in_millis" : 0,
+                "write_success_count" : 0,
+                "write_failure_count" : 0,
+                "successful_write_time_in_millis" : 0
+              },
+              "client_stats" : {
+                "status_request_failure_count" : 0,
+                "index_build_terminal_exception" : 0,
+                "status_request_success_count" : 0,
+                "index_build_success_count" : 0,
+                "index_build_failure_count" : 0,
+                "build_request_failure_count" : 0,
+                "index_build_merge_abort_exception" : 0,
+                "build_request_success_count" : 0,
+                "waiting_time_in_ms" : 0
+              },
+              "build_stats" : {
+                "remote_index_build_flush_time_in_millis" : 0,
+                "remote_index_build_current_merge_operations" : 0,
+                "remote_index_build_current_flush_operations" : 0,
+                "remote_index_build_current_merge_size" : 0,
+                "remote_index_build_current_flush_size" : 0,
+                "remote_index_build_merge_time_in_millis" : 0
+              }
+            },
+            "max_distance_query_with_filter_requests" : 0,
+            "graph_memory_usage_percentage" : 0.0,
+            "graph_query_requests" : 0,
+            "graph_memory_usage" : 0,
+            "cache_capacity_reached" : false,
+            "load_success_count" : 0,
+            "training_memory_usage" : 0,
+            "indices_in_cache" : {},
+            "script_query_errors" : 0,
+            "hit_count" : 0,
+            "knn_query_requests" : 0,
+            "total_load_time" : 0,
+            "miss_count" : 0,
+            "min_score_query_requests" : 0,
+            "knn_query_with_filter_requests" : 0,
+            "training_memory_usage_percentage" : 0.0,
+            "max_distance_query_requests" : 0,
+            "lucene_initialized" : true,
+            "graph_index_requests" : 0,
+            "faiss_initialized" : true,
+            "load_exception_count" : 0,
+            "training_errors" : 0,
+            "min_score_query_with_filter_requests" : 0,
+            "eviction_count" : 0,
+            "nmslib_initialized" : false,
+            "script_compilations" : 0,
+            "script_query_requests" : 0,
+            "graph_stats" : {
+              "merge" : {
+                "current" : 0,
+                "total" : 0,
+                "total_time_in_millis" : 0,
+                "current_docs" : 0,
+                "total_docs" : 0,
+                "total_size_in_bytes" : 0,
+                "current_size_in_bytes" : 0
+              },
+              "refresh" : {
+                "total" : 3,
+                "total_time_in_millis" : 40
+              }
+            },
+            "graph_query_errors" : 0,
+            "indexing_from_model_degraded" : false,
+            "graph_index_errors" : 0,
+            "training_requests" : 0,
+            "script_compilation_errors" : 0
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/hit_count",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "hit_count" : 0
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/hit_count,bogus,b2",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_plugins/_knn/stats/hit_count,bogus,b2] contains unrecognized stats: [b2], [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_plugins/_knn/stats/hit_count,bogus,b2] contains unrecognized stats: [b2], [bogus]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/hit_count,hit_cont",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_plugins/_knn/stats/hit_count,hit_cont] contains unrecognized stat: [hit_cont] -> did you mean [hit_count]?"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_plugins/_knn/stats/hit_count,hit_cont] contains unrecognized stat: [hit_cont] -> did you mean [hit_count]?"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/_all,hit_count",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Request /_plugins/_knn/stats/_all,hit_count contains _all and individual stats"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Request /_plugins/_knn/stats/_all,hit_count contains _all and individual stats"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/model_index_status,cluster_name",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_plugins/_knn/stats/model_index_status,cluster_name] contains unrecognized stat: [cluster_name]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_plugins/_knn/stats/model_index_status,cluster_name] contains unrecognized stat: [cluster_name]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/hit_count?foo=1",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_plugins/_knn/stats/hit_count] contains unrecognized parameter: [foo]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_plugins/_knn/stats/hit_count] contains unrecognized parameter: [foo]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/hit_count?timeout=1s",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "hit_count" : 0
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/hit_count?timeout=bogus",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "failed to parse [bogus]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "failed to parse [bogus]",
+          "caused_by" : {
+            "type" : "number_format_exception",
+            "reason" : "For input string: \"bogu\""
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/nonode/stats/hit_count",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 0,
+          "successful" : 0,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {}
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/_local/stats/hit_count,miss_count",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "miss_count" : 0,
+            "hit_count" : 0
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/_all/stats",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "circuit_breaker_triggered" : false,
+        "model_index_status" : null,
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "remote_vector_index_build_stats" : {
+              "repository_stats" : {
+                "read_success_count" : 0,
+                "read_failure_count" : 0,
+                "successful_read_time_in_millis" : 0,
+                "write_success_count" : 0,
+                "write_failure_count" : 0,
+                "successful_write_time_in_millis" : 0
+              },
+              "client_stats" : {
+                "status_request_failure_count" : 0,
+                "index_build_terminal_exception" : 0,
+                "status_request_success_count" : 0,
+                "index_build_success_count" : 0,
+                "index_build_failure_count" : 0,
+                "build_request_failure_count" : 0,
+                "index_build_merge_abort_exception" : 0,
+                "build_request_success_count" : 0,
+                "waiting_time_in_ms" : 0
+              },
+              "build_stats" : {
+                "remote_index_build_flush_time_in_millis" : 0,
+                "remote_index_build_current_merge_operations" : 0,
+                "remote_index_build_current_flush_operations" : 0,
+                "remote_index_build_current_merge_size" : 0,
+                "remote_index_build_current_flush_size" : 0,
+                "remote_index_build_merge_time_in_millis" : 0
+              }
+            },
+            "max_distance_query_with_filter_requests" : 0,
+            "graph_memory_usage_percentage" : 0.0,
+            "graph_query_requests" : 0,
+            "graph_memory_usage" : 0,
+            "cache_capacity_reached" : false,
+            "load_success_count" : 0,
+            "training_memory_usage" : 0,
+            "indices_in_cache" : {},
+            "script_query_errors" : 0,
+            "hit_count" : 0,
+            "knn_query_requests" : 0,
+            "total_load_time" : 0,
+            "miss_count" : 0,
+            "min_score_query_requests" : 0,
+            "knn_query_with_filter_requests" : 0,
+            "training_memory_usage_percentage" : 0.0,
+            "max_distance_query_requests" : 0,
+            "lucene_initialized" : true,
+            "graph_index_requests" : 0,
+            "faiss_initialized" : true,
+            "load_exception_count" : 0,
+            "training_errors" : 0,
+            "min_score_query_with_filter_requests" : 0,
+            "eviction_count" : 0,
+            "nmslib_initialized" : false,
+            "script_compilations" : 0,
+            "script_query_requests" : 0,
+            "graph_stats" : {
+              "merge" : {
+                "current" : 0,
+                "total" : 0,
+                "total_time_in_millis" : 0,
+                "current_docs" : 0,
+                "total_docs" : 0,
+                "total_size_in_bytes" : 0,
+                "current_size_in_bytes" : 0
+              },
+              "refresh" : {
+                "total" : 3,
+                "total_time_in_millis" : 40
+              }
+            },
+            "graph_query_errors" : 0,
+            "indexing_from_model_degraded" : false,
+            "graph_index_errors" : 0,
+            "training_requests" : 0,
+            "script_compilation_errors" : 0
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/circuit_breaker_triggered,model_index_status",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "circuit_breaker_triggered" : false,
+        "model_index_status" : null,
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {}
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/indices_in_cache,graph_memory_usage,cache_capacity_reached,graph_memory_usage_percentage",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "indices_in_cache" : {},
+            "graph_memory_usage_percentage" : 0.0,
+            "graph_memory_usage" : 0,
+            "cache_capacity_reached" : false
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/stats",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 405,
+      "response" : {
+        "error" : "Incorrect HTTP method for uri [/_plugins/_knn/stats] and method [POST], allowed: [GET]",
+        "status" : 405
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8",
+        "allow" : "GET"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/esm-plain",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "k_n_n_invalid_indices_exception",
+              "reason" : "Warm up request rejected. One or more indices have 'index.knn' set to false."
+            }
+          ],
+          "type" : "k_n_n_invalid_indices_exception",
+          "reason" : "Warm up request rejected. One or more indices have 'index.knn' set to false."
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/nomatch*",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 0,
+          "successful" : 0,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/esm-closed",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_closed_exception",
+              "reason" : "closed",
+              "index" : "esm-closed",
+              "index_uuid" : "BnB2kfEHSiGRj2SGCrMXgw"
+            }
+          ],
+          "type" : "index_closed_exception",
+          "reason" : "closed",
+          "index" : "esm-closed",
+          "index_uuid" : "BnB2kfEHSiGRj2SGCrMXgw"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/nope",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [nope]",
+              "index" : "nope",
+              "resource.id" : "nope",
+              "resource.type" : "index_or_alias",
+              "index_uuid" : "_na_"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [nope]",
+          "index" : "nope",
+          "resource.id" : "nope",
+          "resource.type" : "index_or_alias",
+          "index_uuid" : "_na_"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/esm-k1,esm-plain",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "k_n_n_invalid_indices_exception",
+              "reason" : "Warm up request rejected. One or more indices have 'index.knn' set to false."
+            }
+          ],
+          "type" : "k_n_n_invalid_indices_exception",
+          "reason" : "Warm up request rejected. One or more indices have 'index.knn' set to false."
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/clear_cache/esm-plain",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "k_n_n_invalid_indices_exception",
+              "reason" : "ClearCache request rejected. One or more indices have 'index.knn' set to false."
+            }
+          ],
+          "type" : "k_n_n_invalid_indices_exception",
+          "reason" : "ClearCache request rejected. One or more indices have 'index.knn' set to false."
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/clear_cache/nomatch*",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 0,
+          "successful" : 0,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/clear_cache/esm-closed",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_closed_exception",
+              "reason" : "closed",
+              "index" : "esm-closed",
+              "index_uuid" : "BnB2kfEHSiGRj2SGCrMXgw"
+            }
+          ],
+          "type" : "index_closed_exception",
+          "reason" : "closed",
+          "index" : "esm-closed",
+          "index_uuid" : "BnB2kfEHSiGRj2SGCrMXgw"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/clear_cache/nope",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 404,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "index_not_found_exception",
+              "reason" : "no such index [nope]",
+              "index" : "nope",
+              "resource.id" : "nope",
+              "resource.type" : "index_or_alias",
+              "index_uuid" : "_na_"
+            }
+          ],
+          "type" : "index_not_found_exception",
+          "reason" : "no such index [nope]",
+          "index" : "nope",
+          "resource.id" : "nope",
+          "resource.type" : "index_or_alias",
+          "index_uuid" : "_na_"
+        },
+        "status" : 404
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/clear_cache/esm-k1",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 405,
+      "response" : {
+        "error" : "Incorrect HTTP method for uri [/_plugins/_knn/clear_cache/esm-k1] and method [GET], allowed: [POST]",
+        "status" : 405
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8",
+        "allow" : "POST"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/warmup/esm-k1",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 405,
+      "response" : {
+        "error" : "Incorrect HTTP method for uri [/_plugins/_knn/warmup/esm-k1] and method [POST], allowed: [GET]",
+        "status" : 405
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8",
+        "allow" : "GET"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/esm-k1?ignore_unavailable=true&foo=2",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_plugins/_knn/warmup/esm-k1] contains unrecognized parameters: [foo], [ignore_unavailable]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_plugins/_knn/warmup/esm-k1] contains unrecognized parameters: [foo], [ignore_unavailable]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/esm-k1?expand_wildcards=all",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "request [/_plugins/_knn/warmup/esm-k1] contains unrecognized parameter: [expand_wildcards]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "request [/_plugins/_knn/warmup/esm-k1] contains unrecognized parameter: [expand_wildcards]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : "no handler found for uri [/_plugins/_knn/warmup] and method [GET]"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/clear_cache",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : "no handler found for uri [/_plugins/_knn/clear_cache] and method [POST]"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/esm-rep",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 6,
+          "successful" : 3,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/indices_in_cache,hit_count,miss_count,load_success_count,graph_query_requests",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "miss_count" : 2,
+            "indices_in_cache" : {
+              "esm-rep" : {
+                "graph_memory_usage_percentage" : 0.0,
+                "graph_memory_usage" : 0,
+                "graph_count" : 2
+              }
+            },
+            "graph_query_requests" : 0,
+            "hit_count" : 0,
+            "load_success_count" : 2
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/clear_cache/esm-rep,esm-k1",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 7,
+          "successful" : 4,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/indices_in_cache",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "indices_in_cache" : {}
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/warmup/esm-k1",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/indices_in_cache,hit_count,miss_count,load_success_count",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "miss_count" : 3,
+            "indices_in_cache" : {
+              "esm-k1" : {
+                "graph_memory_usage_percentage" : 0.0,
+                "graph_memory_usage" : 0,
+                "graph_count" : 1
+              }
+            },
+            "hit_count" : 0,
+            "load_success_count" : 3
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /_plugins/_knn/clear_cache/esm-k1",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "v" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 37,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/indices_in_cache,graph_query_requests,knn_query_requests,hit_count,miss_count",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "miss_count" : 4,
+            "indices_in_cache" : {
+              "esm-k1" : {
+                "graph_memory_usage_percentage" : 0.0,
+                "graph_memory_usage" : 0,
+                "graph_count" : 1
+              }
+            },
+            "graph_query_requests" : 1,
+            "hit_count" : 0,
+            "knn_query_requests" : 1
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "v" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 5,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "w" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 24,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 0.071428575,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.071428575,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "v" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2,
+              "filter" : {
+                "match_all" : {}
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 21,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "v" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "min_score" : 0.1
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "v" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "max_distance" : 5
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "v" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "max_distance" : 5,
+              "filter" : {
+                "match_all" : {}
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 10,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "knn" : {
+            "v" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "min_score" : 0.1,
+              "filter" : {
+                "match_all" : {}
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "script_score" : {
+            "query" : {
+              "match_all" : {}
+            },
+            "script" : {
+              "source" : "knn_score",
+              "lang" : "knn",
+              "params" : {
+                "field" : "v",
+                "query_value" : [
+                  1,
+                  1
+                ],
+                "space_type" : "l2"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 20,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "query" : {
+          "script_score" : {
+            "query" : {
+              "match_all" : {}
+            },
+            "script" : {
+              "source" : "knn_score",
+              "lang" : "knn",
+              "params" : {
+                "field" : "v",
+                "query_value" : [
+                  1,
+                  1
+                ],
+                "space_type" : "l2"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : 0.5,
+          "hits" : [
+            {
+              "_index" : "esm-k1",
+              "_id" : "1",
+              "_score" : 0.5,
+              "_source" : {
+                "v" : [
+                  1.0,
+                  2.0
+                ],
+                "w" : [
+                  3.0,
+                  4.0
+                ]
+              }
+            },
+            {
+              "_index" : "esm-k1",
+              "_id" : "2",
+              "_score" : 0.33333334,
+              "_source" : {
+                "v" : [
+                  2.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-k1/_search",
+      "body" : {
+        "size" : 0,
+        "query" : {
+          "knn" : {
+            "v" : {
+              "vector" : [
+                1,
+                1
+              ],
+              "k" : 2
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 10,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : []
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats",
+      "mask" : [
+        "took",
+        "graph_stats",
+        "total_load_time"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "circuit_breaker_triggered" : false,
+        "model_index_status" : null,
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "remote_vector_index_build_stats" : {
+              "repository_stats" : {
+                "read_success_count" : 0,
+                "read_failure_count" : 0,
+                "successful_read_time_in_millis" : 0,
+                "write_success_count" : 0,
+                "write_failure_count" : 0,
+                "successful_write_time_in_millis" : 0
+              },
+              "client_stats" : {
+                "status_request_failure_count" : 0,
+                "index_build_terminal_exception" : 0,
+                "status_request_success_count" : 0,
+                "index_build_success_count" : 0,
+                "index_build_failure_count" : 0,
+                "build_request_failure_count" : 0,
+                "index_build_merge_abort_exception" : 0,
+                "build_request_success_count" : 0,
+                "waiting_time_in_ms" : 0
+              },
+              "build_stats" : {
+                "remote_index_build_flush_time_in_millis" : 0,
+                "remote_index_build_current_merge_operations" : 0,
+                "remote_index_build_current_flush_operations" : 0,
+                "remote_index_build_current_merge_size" : 0,
+                "remote_index_build_current_flush_size" : 0,
+                "remote_index_build_merge_time_in_millis" : 0
+              }
+            },
+            "max_distance_query_with_filter_requests" : 1,
+            "graph_memory_usage_percentage" : 0.0,
+            "graph_query_requests" : 5,
+            "graph_memory_usage" : 0,
+            "cache_capacity_reached" : false,
+            "load_success_count" : 4,
+            "training_memory_usage" : 0,
+            "indices_in_cache" : {
+              "esm-k1" : {
+                "graph_memory_usage_percentage" : 0.0,
+                "graph_memory_usage" : 0,
+                "graph_count" : 1
+              }
+            },
+            "script_query_errors" : 0,
+            "hit_count" : 4,
+            "knn_query_requests" : 5,
+            "total_load_time" : 5183880,
+            "miss_count" : 4,
+            "min_score_query_requests" : 2,
+            "knn_query_with_filter_requests" : 1,
+            "training_memory_usage_percentage" : 0.0,
+            "max_distance_query_requests" : 2,
+            "lucene_initialized" : true,
+            "graph_index_requests" : 0,
+            "faiss_initialized" : true,
+            "load_exception_count" : 0,
+            "training_errors" : 0,
+            "min_score_query_with_filter_requests" : 1,
+            "eviction_count" : 0,
+            "nmslib_initialized" : false,
+            "script_compilations" : 1,
+            "script_query_requests" : 2,
+            "graph_stats" : {
+              "merge" : {
+                "current" : 0,
+                "total" : 0,
+                "total_time_in_millis" : 0,
+                "current_docs" : 0,
+                "total_docs" : 0,
+                "total_size_in_bytes" : 0,
+                "current_size_in_bytes" : 0
+              },
+              "refresh" : {
+                "total" : 3,
+                "total_time_in_millis" : 40
+              }
+            },
+            "graph_query_errors" : 0,
+            "indexing_from_model_degraded" : false,
+            "graph_index_errors" : 0,
+            "training_requests" : 0,
+            "script_compilation_errors" : 0
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /esm-k1",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_knn/stats/indices_in_cache",
+      "mask" : [
+        "took",
+        "graph_stats"
+      ],
+      "status" : 200,
+      "response" : {
+        "_nodes" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "cluster_name" : "docker-cluster",
+        "nodes" : {
+          "oGxQA16kS6mP_v1xgHiLLQ" : {
+            "indices_in_cache" : {}
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

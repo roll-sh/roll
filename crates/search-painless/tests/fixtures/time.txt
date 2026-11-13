@@ -1,0 +1,337 @@
+return ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('Z'))
+----
+return ZonedDateTime.of(2020, 1, 1, 10, 15, 30, 123000000, ZoneId.of('Europe/Paris'))
+----
+return ZonedDateTime.of(2020, 6, 1, 10, 15, 30, 0, ZoneId.of('America/New_York'))
+----
+return ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('UTC'))
+----
+return ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('GMT+2'))
+----
+return ZonedDateTime.of(2020, 1, 1, 0, 0, 0, 0, ZoneId.of('+05:30'))
+----
+return ZoneId.of('Foo/Bar')
+----
+return ZoneId.of('!!')
+----
+return ZoneOffset.of('+25:00')
+----
+return ZonedDateTime.of(2021, 3, 28, 2, 30, 0, 0, ZoneId.of('Europe/Paris'))
+----
+return ZonedDateTime.of(2021, 10, 31, 2, 30, 0, 0, ZoneId.of('Europe/Paris'))
+----
+return ZonedDateTime.of(2021, 10, 31, 2, 30, 0, 0, ZoneId.of('Europe/Paris')).withLaterOffsetAtOverlap()
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 3, 27, 2, 30, 0, 0, ZoneId.of('Europe/Paris')); return [z.plusDays(1), z.plusHours(24), z.plus(Duration.ofDays(1))]
+----
+return Instant.ofEpochMilli(1577836800123L)
+----
+return Instant.ofEpochSecond(0, 1)
+----
+return Instant.ofEpochSecond(-1, 999999999)
+----
+return Instant.parse('2020-01-01T10:15:30.5Z')
+----
+return Instant.parse('2020-01-01T10:15:30+01:00')
+----
+return Instant.parse('2020-01-01')
+----
+return Instant.ofEpochMilli(1577836800123L).toEpochMilli()
+----
+return Instant.EPOCH.plus(1, ChronoUnit.DAYS)
+----
+return Instant.EPOCH.plus(1, ChronoUnit.MONTHS)
+----
+return Instant.EPOCH.atZone(ZoneId.of('Asia/Tokyo'))
+----
+return Instant.EPOCH.truncatedTo(ChronoUnit.HOURS)
+----
+return LocalDate.of(2020, 2, 30)
+----
+return LocalDate.of(2021, 2, 29)
+----
+return LocalDate.of(2020, 13, 1)
+----
+return LocalDate.of(2020, 1, 31).plusMonths(1)
+----
+return LocalDate.of(2020, 2, 29).plusYears(1)
+----
+return LocalDate.of(2020, 1, 1).getDayOfWeek()
+----
+return [LocalDate.of(2020, 1, 1).getDayOfYear(), LocalDate.of(2020, 12, 31).getDayOfYear(), LocalDate.of(2020,1,1).lengthOfMonth(), LocalDate.of(2020,2,1).lengthOfMonth(), LocalDate.of(2020,1,1).isLeapYear()]
+----
+return LocalDate.parse('2020-02-29')
+----
+return LocalDate.parse('2021-02-29')
+----
+return LocalDate.parse('20200101')
+----
+return LocalDate.parse('2020-01-01x')
+----
+return LocalDate.of(10000, 1, 1)
+----
+return LocalDate.of(-5, 1, 1)
+----
+return LocalDate.of(2020, 1, 1).until(LocalDate.of(2021, 3, 15))
+----
+return LocalDate.of(2020, 1, 31).until(LocalDate.of(2020, 3, 1))
+----
+return ChronoUnit.DAYS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2021, 1, 1))
+----
+return ChronoUnit.MONTHS.between(LocalDate.of(2020, 1, 31), LocalDate.of(2020, 2, 29))
+----
+return ChronoUnit.HOURS.between(LocalDate.of(2020, 1, 1), LocalDate.of(2020, 1, 2))
+----
+return ChronoUnit.HOURS.between(ZonedDateTime.parse('2020-01-01T00:00:00Z'), ZonedDateTime.parse('2020-01-02T05:30:00+01:00'))
+----
+return LocalDate.of(2020, 1, 15).with(TemporalAdjusters.lastDayOfMonth())
+----
+return LocalDate.of(2020, 1, 15).with(TemporalAdjusters.next(DayOfWeek.MONDAY))
+----
+return LocalDate.of(2020, 1, 15).with(TemporalAdjusters.firstInMonth(DayOfWeek.FRIDAY))
+----
+return LocalDate.of(2020, 1, 15).with(TemporalAdjusters.lastInMonth(DayOfWeek.FRIDAY))
+----
+return LocalDate.of(2020, 1, 15).with(ChronoField.DAY_OF_WEEK, 7)
+----
+return LocalDate.of(2020, 1, 15).with(ChronoField.MONTH_OF_YEAR, 13)
+----
+return LocalDate.of(2020, 1, 15).get(ChronoField.HOUR_OF_DAY)
+----
+return LocalDate.of(2020, 1, 15).getLong(ChronoField.EPOCH_DAY)
+----
+return LocalDate.of(2020, 1, 15).get(ChronoField.EPOCH_DAY)
+----
+return LocalTime.of(10, 15)
+----
+return LocalTime.of(10, 15, 30, 1000)
+----
+return LocalTime.of(25, 0)
+----
+return LocalTime.of(23, 59).plusMinutes(2)
+----
+return LocalTime.parse('10:15:30.123456789')
+----
+return LocalTime.NOON.minusHours(13)
+----
+return LocalDateTime.of(2020, 1, 1, 10, 15, 30)
+----
+return LocalDateTime.of(2020, 1, 1, 10, 15)
+----
+return LocalDateTime.parse('2020-01-01T10:15:30.000')
+----
+return LocalDateTime.parse('2020-01-01 10:15:30')
+----
+return LocalDateTime.of(2020, 1, 1, 23, 0).plusHours(2)
+----
+return LocalDateTime.of(2020, 1, 1, 0, 0).truncatedTo(ChronoUnit.DAYS)
+----
+return LocalDateTime.of(2020, 1, 1, 10, 15, 30, 999).truncatedTo(ChronoUnit.SECONDS)
+----
+return ZonedDateTime.parse('2020-01-01T10:15:30+01:00[Europe/Paris]')
+----
+return ZonedDateTime.parse('2020-01-01T10:15:30Z')
+----
+return ZonedDateTime.parse('2020-01-01T10:15:30')
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return [z.getYear(), z.getMonthValue(), z.getMonth(), z.getDayOfMonth(), z.getHour(), z.getMinute(), z.getSecond(), z.getNano(), z.getDayOfWeek(), z.getDayOfYear(), z.getZone(), z.getOffset()]
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30.123Z'); return [z.getHourOfDay(), z.getMillisOfDay(), z.getMillisOfSecond(), z.getMinuteOfDay(), z.getMonthOfYear(), z.getSecondOfDay(), z.getWeekOfWeekyear(), z.getWeekyear(), z.getYearOfCentury(), z.getYearOfEra(), z.getCenturyOfEra(), z.getEra(), z.getDayOfWeekEnum()]
+----
+ZonedDateTime z = ZonedDateTime.parse('2021-01-01T00:00:00Z'); return [z.getWeekOfWeekyear(), z.getWeekyear()]
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-12-31T00:00:00Z'); return [z.getWeekOfWeekyear(), z.getWeekyear()]
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return [z.toInstant(), z.toEpochSecond(), z.toInstant().toEpochMilli(), z.toLocalDate(), z.toLocalTime(), z.toLocalDateTime(), z.toOffsetDateTime()]
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return z.withZoneSameInstant(ZoneId.of('America/Los_Angeles'))
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return z.withZoneSameLocal(ZoneId.of('America/Los_Angeles'))
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-31T10:15:30Z'); return [z.plusMonths(1), z.minusDays(31), z.plusWeeks(2), z.withDayOfMonth(15), z.withHour(0), z.with(ChronoField.YEAR, 1999)]
+----
+ZonedDateTime a = ZonedDateTime.parse('2020-01-01T10:15:30Z'); ZonedDateTime b = ZonedDateTime.parse('2020-01-01T11:15:30+01:00'); return [a.isEqual(b), a.equals(b), a.compareTo(b) < 0, a.isBefore(b), a.isAfter(b)]
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return [z.toEpochMilli(), z.getMillis()]
+----
+return Duration.ofSeconds(3661)
+----
+return Duration.ofMillis(-1500)
+----
+return Duration.ofDays(2).plusHours(3).plusMinutes(4)
+----
+return Duration.between(Instant.EPOCH, Instant.ofEpochSecond(90061))
+----
+return Duration.between(LocalDate.of(2020,1,1), LocalDate.of(2020,1,2))
+----
+return Duration.parse('PT1H30M')
+----
+return Duration.parse('P2DT3H4M')
+----
+return Duration.parse('xyz')
+----
+return [Duration.ofMinutes(90).toHours(), Duration.ofMinutes(90).toMinutes(), Duration.ofMinutes(90).toMillis(), Duration.ofMinutes(90).getSeconds(), Duration.ofMillis(1500).getNano()]
+----
+return Duration.ofSeconds(10).compareTo(Duration.ofSeconds(5))
+----
+return Duration.ofSeconds(-90).abs()
+----
+return Duration.ZERO
+----
+return Period.of(1, 2, 3)
+----
+return Period.ofWeeks(2)
+----
+return Period.parse('P1Y2M3D')
+----
+return Period.between(LocalDate.of(2020, 1, 31), LocalDate.of(2020, 3, 1))
+----
+return Period.of(1, 14, 3).normalized()
+----
+return LocalDate.of(2020, 1, 31).plus(Period.ofMonths(1))
+----
+return LocalDateTime.of(2020, 1, 1, 0, 0).plus(Duration.ofHours(25))
+----
+return Instant.EPOCH.plus(Period.ofDays(1))
+----
+return Instant.EPOCH.plus(Period.ofMonths(1))
+----
+return DayOfWeek.MONDAY.plus(8)
+----
+return [DayOfWeek.SUNDAY.getValue(), Month.MARCH.getValue(), Month.FEBRUARY.length(true), Month.of(12), DayOfWeek.of(3)]
+----
+return Month.of(13)
+----
+return [Month.JANUARY.getDisplayName(TextStyle.FULL, Locale.ROOT), Month.JANUARY.getDisplayName(TextStyle.SHORT, Locale.ROOT), DayOfWeek.MONDAY.getDisplayName(TextStyle.SHORT, Locale.ROOT)]
+----
+return [ChronoUnit.DAYS, ChronoField.DAY_OF_MONTH, ChronoUnit.HALF_DAYS, ChronoField.AMPM_OF_DAY]
+----
+return Year.of(2020).isLeap()
+----
+return YearMonth.of(2020, 2).atEndOfMonth()
+----
+return YearMonth.of(2020, 2)
+----
+return MonthDay.of(2, 29)
+----
+return OffsetDateTime.of(2020, 1, 1, 10, 0, 0, 0, ZoneOffset.ofHours(2))
+----
+return OffsetDateTime.parse('2020-01-01T10:15:30+01:00').toInstant()
+----
+return ZoneOffset.ofHoursMinutes(5, 30)
+----
+return ZoneOffset.UTC
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss'); return f.format(ZonedDateTime.parse('2020-01-02T03:04:05Z'))
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('dd/MM/yy EEE EEEE MMM MMMM a h:mm'); return f.format(LocalDateTime.of(2020, 1, 2, 15, 4))
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd\'T\'HH:mm:ss.SSSXXX'); return f.format(ZonedDateTime.parse('2020-01-02T03:04:05.006+05:30'))
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd\'T\'HH:mm:ssZ'); return f.format(ZonedDateTime.parse('2020-01-02T03:04:05Z'))
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd\'T\'HH:mm:ssxxx VV z'); return f.format(ZonedDateTime.parse('2020-01-02T03:04:05+01:00[Europe/Paris]'))
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd'); return LocalDate.parse('2020-02-30', f)
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd'); return LocalDate.parse('2020-13-01', f)
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-01-01', f)
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('uuuu-MM-dd').withResolverStyle(ResolverStyle.STRICT); return LocalDate.parse('2020-02-30', f)
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy HH:mm'); return LocalDateTime.parse('15.03.2020 14:30', f)
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy HH:mm'); return LocalDateTime.parse('15.03.2020', f)
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('dd.MM.yyyy'); return LocalDateTime.parse('15.03.2020', f)
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('MMM d, yyyy'); return LocalDate.parse('Mar 5, 2020', f)
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss VV'); return ZonedDateTime.parse('2020-01-02 03:04:05 Europe/Paris', f)
+----
+return DateTimeFormatter.ISO_LOCAL_DATE.format(LocalDate.of(2020, 1, 2))
+----
+return DateTimeFormatter.ISO_INSTANT.format(ZonedDateTime.parse('2020-01-02T03:04:05.100+01:00'))
+----
+return DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(ZonedDateTime.parse('2020-01-02T03:04:05+01:00[Europe/Paris]'))
+----
+return DateTimeFormatter.ISO_ZONED_DATE_TIME.format(ZonedDateTime.parse('2020-01-02T03:04:05+01:00[Europe/Paris]'))
+----
+return DateTimeFormatter.BASIC_ISO_DATE.format(LocalDate.of(2020, 1, 2))
+----
+return DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.parse('2020-01-02T03:04:05Z'))
+----
+return DateTimeFormatter.ISO_WEEK_DATE.format(LocalDate.of(2021, 1, 1))
+----
+return DateTimeFormatter.ISO_LOCAL_DATE.format(LocalTime.NOON)
+----
+return DateTimeFormatter.ofPattern('yyyy-MM-dd').format(LocalTime.NOON)
+----
+return DateTimeFormatter.ofPattern('qqqq')
+----
+return DateTimeFormatter.ofPattern('yyyy-MM-dd')
+----
+return DateTimeFormatter.ISO_LOCAL_DATE
+----
+return DateTimeFormatter.ofPattern('{')
+----
+return DateTimeFormatter.ofPattern('ddd')
+----
+return DateTimeFormatter.ofPattern('w W Y e c F Q').format(LocalDate.of(2020, 1, 5))
+----
+return DateTimeFormatter.ofPattern('G GGGG u D DDD').format(LocalDate.of(2020, 2, 5))
+----
+return DateTimeFormatter.ISO_LOCAL_DATE.parse('2020-01-02')
+----
+return LocalDate.from(DateTimeFormatter.ISO_LOCAL_DATE.parse('2020-01-02'))
+----
+return LocalDate.from(ZonedDateTime.parse('2020-01-02T03:04:05Z'))
+----
+return LocalDate.from(LocalTime.NOON)
+----
+return ZonedDateTime.from(LocalDate.of(2020, 1, 1))
+----
+return new Date(0L)
+----
+return new Date(1577836800000L).getTime()
+----
+return Date.from(Instant.EPOCH)
+----
+return Clock.fixed(Instant.EPOCH, ZoneId.of('UTC')).instant()
+----
+return ZonedDateTime.parse('2020-01-01T10:15:30Z').format(DateTimeFormatter.ofPattern('EEEE, MMMM d, yyyy h:mm a'))
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return z.until(ZonedDateTime.parse('2020-03-01T10:15:29Z'), ChronoUnit.MONTHS)
+----
+ZonedDateTime z = ZonedDateTime.parse('2020-01-01T10:15:30Z'); return z.until(ZonedDateTime.parse('2020-01-02T10:15:29Z'), ChronoUnit.DAYS)
+----
+return LocalDate.of(2020, 1, 1).atStartOfDay(ZoneId.of('America/Sao_Paulo'))
+----
+return ZoneId.of('America/Sao_Paulo').getId()
+----
+return ZoneId.of('UTC').normalized()
+----
+return ZoneId.of('Europe/Paris') instanceof ZoneOffset
+----
+return Instant.MAX
+----
+return Instant.MIN
+----
+return LocalDate.MAX
+----
+return LocalDate.MIN.minusDays(1)
+----
+return Instant.ofEpochSecond(Long.MAX_VALUE)
+----
+return Duration.ofSeconds(Long.MAX_VALUE).plusSeconds(1)
+----
+return ChronoUnit.valueOf('DAYS')
+----
+return ChronoField.valueOf('NOPE')
+----
+return ValueRange.of(1, 10)
+----
+return ChronoField.DAY_OF_MONTH.range()
+----
+return LocalDate.of(2020, 2, 1).range(ChronoField.DAY_OF_MONTH)

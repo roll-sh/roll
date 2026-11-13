@@ -1,0 +1,6733 @@
+{
+  "description" : "Elasticsearch 9.5.5 (es-query round 6): query_string bare-term grouping (MultiTerm) and range shortcuts, fuzzy on numbers, term range and ids rewrite descriptions, top_hits/top_metrics numeric_type and unsigned_long sorts, aggregation filters parsed with the request, parse error wrapping of _count and _validate, span field checks, composite parent factories, match_only_text constant scores, intervals and phrase prefix highlighting, terminate_after shortcuts, suggest-only checks, by-query body order.",
+  "steps" : [
+    {
+      "req" : "PUT /esm-qs",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "a" : {
+              "type" : "text",
+              "fields" : {
+                "keyword" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "k" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "long"
+            },
+            "m" : {
+              "type" : "match_only_text"
+            },
+            "u" : {
+              "type" : "unsigned_long"
+            },
+            "d" : {
+              "type" : "double"
+            },
+            "dn" : {
+              "type" : "date_nanos"
+            },
+            "dt" : {
+              "type" : "date"
+            },
+            "sf" : {
+              "type" : "scaled_float",
+              "scaling_factor" : 10
+            },
+            "t" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-qs"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_bulk?refresh=true",
+      "mask" : [
+        "took"
+      ],
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"a\":\"foo bar\",\"k\":\"foo bar\",\"n\":5,\"m\":\"cat dog\",\"u\":2,\"d\":2.7,\"dn\":\"2024-01-01T00:00:00.123456789Z\",\"dt\":\"2024-01-01T00:00:00.123Z\",\"sf\":3.14,\"t\":\"cats over green running fast\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"a\":\"baz\",\"k\":\"baz\",\"n\":7,\"m\":\"engine index blue cats\",\"u\":18446744073709551000,\"d\":-1.5,\"dn\":\"2023-01-01T00:00:00.000000001Z\",\"dt\":\"2023-01-01T00:00:00Z\",\"sf\":-2.25}\n{\"index\":{\"_id\":\"3\"}}\n{\"k\":\"x\"}\n{\"index\":{\"_id\":\"4\"}}\n{\"u\":9223372036854775808,\"n\":122}\n",
+      "headers" : {
+        "content-type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 0,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-qs",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-qs",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-qs",
+              "_id" : "3",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 2,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-qs",
+              "_id" : "4",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 1,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 3,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:foo a:bar) | a.keyword:foo bar | k:foo bar)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo bar baz^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:foo a:bar) | a.keyword:foo bar | k:foo bar) ((a:baz | a.keyword:baz | k:baz))^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "a:x foo bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:x ((a:foo a:bar) | a.keyword:foo bar | k:foo bar)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo bar AND baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:foo | a.keyword:foo | k:foo) +(a:bar | a.keyword:bar | k:bar) +(a:baz | a.keyword:baz | k:baz)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo >=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:foo a:5) | a.keyword:foo >=5 | k:foo >=5)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : ">=5 foo"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:5 a:foo) | a.keyword:>=5 foo | k:>=5 foo)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo bar*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:foo | a.keyword:foo | k:foo) (a:bar* | a.keyword:bar* | k:bar*)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo bar *"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:foo | a.keyword:foo | k:foo) (a:bar | a.keyword:bar | k:bar) (ConstantScore(FieldExistsQuery [field=a]) | ConstantScore(FieldExistsQuery [field=a.keyword]) | ConstantScore(FieldExistsQuery [field=k]))"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo bar k:x"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:foo a:bar) | a.keyword:foo bar | k:foo bar) k:x"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "+foo bar baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+(a:foo | a.keyword:foo | k:foo) ((a:bar a:baz) | a.keyword:bar baz | k:bar baz)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo\\ bar qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:foo a:bar a:qux) | a.keyword:foo bar qux | k:foo bar qux)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "(foo bar) qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:foo a:bar) | a.keyword:foo bar | k:foo bar) (a:qux | a.keyword:qux | k:qux)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo   bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:foo a:bar) | a.keyword:foo bar | k:foo bar)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo bar~"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:foo | a.keyword:foo | k:foo) (a:bar~1 | a.keyword:bar~1 | k:bar~1)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo bar -baz qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:foo a:bar) | a.keyword:foo bar | k:foo bar) -(a:baz | a.keyword:baz | k:baz) (a:qux | a.keyword:qux | k:qux)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "a:(foo bar)"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo \"x y\" bar baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:foo | a.keyword:foo | k:foo) (a:\"x y\" | a.keyword:x y | k:x y) ((a:bar a:baz) | a.keyword:bar baz | k:bar baz)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : ">=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:5 | a.keyword:>=5 | k:>=5)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "n:>=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "IndexOrDocValuesQuery(indexQuery=n:[5 TO 9223372036854775807], dvQuery=n:[5 TO 9223372036854775807])"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "k:(>=5 foo)"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:[5 foo TO *]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : ">=5^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:5 | a.keyword:>=5 | k:>=5))^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "a.keyword",
+              "k"
+            ],
+            "query" : "foo >=5^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:foo | a.keyword:foo | k:foo) ((a:5 | a.keyword:>=5 | k:>=5))^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo bar baz^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo bar (k:baz)^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "a:x foo bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:x k:foo bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo bar AND baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo +k:bar +k:baz"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo >=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo >=5"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : ">=5 foo"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:[5 foo TO *]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo bar*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo k:bar*"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo bar *"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo k:bar ConstantScore(FieldExistsQuery [field=k])"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo bar k:x"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo bar k:x"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "+foo bar baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+k:foo k:bar baz"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo\\ bar qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo bar qux"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "(foo bar) qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo bar k:qux"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo   bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo bar~"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo k:bar~1"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo bar -baz qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo bar -k:baz k:qux"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "a:(foo bar)"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo \"x y\" bar baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo k:x y k:bar baz"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : ">=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:[5 TO *]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "n:>=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "IndexOrDocValuesQuery(indexQuery=n:[5 TO 9223372036854775807], dvQuery=n:[5 TO 9223372036854775807])"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "k:(>=5 foo)"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:[5 foo TO *]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : ">=5^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(k:[5 TO *])^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "k",
+            "query" : "foo >=5^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:foo (k:[5 TO *])^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((+a:foo +a:bar) | k:foo bar)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo bar baz^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+((+a:foo +a:bar) | k:foo bar) +((a:baz | k:baz))^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "a:x foo bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+a:x +((+a:foo +a:bar) | k:foo bar)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo bar AND baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+(a:foo | k:foo) +(a:bar | k:bar) +(a:baz | k:baz)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo >=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((+a:foo +a:5) | k:foo >=5)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : ">=5 foo"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((+a:5 +a:foo) | k:>=5 foo)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo bar*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+(a:foo | k:foo) +(a:bar* | k:bar*)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo bar *"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+(a:foo | k:foo) +(a:bar | k:bar) +(ConstantScore(FieldExistsQuery [field=a]) | ConstantScore(FieldExistsQuery [field=k]))"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo bar k:x"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+((+a:foo +a:bar) | k:foo bar) +k:x"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "+foo bar baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+(a:foo | k:foo) +((+a:bar +a:baz) | k:bar baz)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo\\ bar qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((+a:foo +a:bar +a:qux) | k:foo bar qux)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "(foo bar) qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+((+a:foo +a:bar) | k:foo bar) +(a:qux | k:qux)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo   bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((+a:foo +a:bar) | k:foo bar)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo bar~"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+(a:foo | k:foo) +(a:bar~1 | k:bar~1)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo bar -baz qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+((+a:foo +a:bar) | k:foo bar) -(a:baz | k:baz) +(a:qux | k:qux)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "a:(foo bar)"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+a:foo +a:bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo \"x y\" bar baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+(a:foo | k:foo) +(a:\"x y\" | k:x y) +((+a:bar +a:baz) | k:bar baz)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : ">=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:5 | k:>=5)"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "n:>=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "IndexOrDocValuesQuery(indexQuery=n:[5 TO 9223372036854775807], dvQuery=n:[5 TO 9223372036854775807])"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "k:(>=5 foo)"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:[5 foo TO *]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : ">=5^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "((a:5 | k:>=5))^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "fields" : [
+              "a",
+              "k"
+            ],
+            "default_operator" : "and",
+            "query" : "foo >=5^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+(a:foo | k:foo) +((a:5 | k:>=5))^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo bar baz^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar (a:baz)^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "a:x foo bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:x a:foo a:bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo bar AND baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo +a:bar +a:baz"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo >=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:5"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : ">=5 foo"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:[5 foo TO *]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo bar*"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar*"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo bar *"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar ConstantScore(FieldExistsQuery [field=a])"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo bar k:x"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar k:x"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "+foo bar baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "+a:foo a:bar a:baz"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo\\ bar qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar a:qux"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "(foo bar) qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:foo a:bar) a:qux"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo   bar"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo bar~"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar~1"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo bar -baz qux"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar -a:baz a:qux"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "a:(foo bar)"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:bar"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo \"x y\" bar baz"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo a:\"x y\" a:bar a:baz"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : ">=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:[5 TO *]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "n:>=5"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "IndexOrDocValuesQuery(indexQuery=n:[5 TO 9223372036854775807], dvQuery=n:[5 TO 9223372036854775807])"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "k:(>=5 foo)"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "k:[5 foo TO *]"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : ">=5^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "(a:[5 TO *])^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "default_field" : "a",
+            "query" : "foo >=5^2"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "a:foo (a:[5 TO *])^2.0"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "query" : "foo bar",
+            "default_field" : "n"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : false,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : false,
+            "error" : "[esm-qs/_nExy3_NRdSwdXtkP8mECg] org.elasticsearch.index.query.QueryShardException: failed to create query: For input string: \"foo bar\"; java.lang.NumberFormatException: For input string: \"foo bar\""
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "fuzzy" : {
+            "n" : {
+              "value" : "5"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Can only use fuzzy queries on keyword and text fields - not on [n] which is of type [long]",
+              "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+              "index" : "esm-qs"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-qs",
+              "node" : "GTFtKRkMSi-lm0r0R4ztbA",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Can only use fuzzy queries on keyword and text fields - not on [n] which is of type [long]",
+                "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+                "index" : "esm-qs",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Can only use fuzzy queries on keyword and text fields - not on [n] which is of type [long]"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "match" : {
+            "n" : {
+              "query" : "6",
+              "fuzziness" : 1
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Can only use fuzzy queries on keyword and text fields - not on [n] which is of type [long]",
+              "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+              "index" : "esm-qs"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-qs",
+              "node" : "GTFtKRkMSi-lm0r0R4ztbA",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Can only use fuzzy queries on keyword and text fields - not on [n] which is of type [long]",
+                "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+                "index" : "esm-qs",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Can only use fuzzy queries on keyword and text fields - not on [n] which is of type [long]"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_explain/1",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "range" : {
+            "k" : {
+              "gte" : "a"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "esm-qs",
+        "_id" : "1",
+        "matched" : true,
+        "explanation" : {
+          "value" : 1.0,
+          "description" : "k:[a TO *]",
+          "details" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_explain/1",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "function_score" : {
+            "query" : {
+              "ids" : { }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "esm-qs",
+        "_id" : "1",
+        "matched" : false,
+        "explanation" : {
+          "value" : 0.0,
+          "description" : "The \"ids\" query was rewritten to a \"match_none\" query.",
+          "details" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "ids" : { }
+              },
+              {
+                "match_all" : { }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "valid" : true,
+        "explanations" : [
+          {
+            "index" : "esm-qs",
+            "valid" : true,
+            "explanation" : "MatchNoDocsQuery(\"The \"ids\" query was rewritten to a \"match_none\" query.\") *:*"
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_explain/99",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "combined_fields" : {
+            "query" : "x"
+          }
+        }
+      },
+      "status" : 404,
+      "response" : {
+        "_index" : "esm-qs",
+        "_id" : "99",
+        "matched" : false
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "u" : { }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "u" : { }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "u" : { }
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775808
+              ]
+            },
+            {
+              "sort" : [
+                18446744073709551000
+              ]
+            },
+            {
+              "sort" : [
+                18446744073709551615
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    -9223372036854775806
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "4",
+                  "_score" : null,
+                  "sort" : [
+                    0
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    9223372036854775192
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  "2"
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  "9223372036854775808"
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  "18446744073709551000"
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  "18446744073709551615"
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "u" : "desc"
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "u" : "desc"
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "u" : "desc"
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                18446744073709551000
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775808
+              ]
+            },
+            {
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "sort" : [
+                0
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    9223372036854775192
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "4",
+                  "_score" : null,
+                  "sort" : [
+                    0
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    -9223372036854775806
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  "18446744073709551000"
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  "9223372036854775808"
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  "2"
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  "0"
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "u" : {
+              "numeric_type" : "double"
+            }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "u" : {
+                    "numeric_type" : "double"
+                  }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "u" : {
+                  "numeric_type" : "double"
+                }
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                2.0
+              ]
+            },
+            {
+              "sort" : [
+                9.223372036854776E18
+              ]
+            },
+            {
+              "sort" : [
+                1.8446744073709552E19
+              ]
+            },
+            {
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    2.0
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "4",
+                  "_score" : null,
+                  "sort" : [
+                    9.223372036854776E18
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    1.8446744073709552E19
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  "2.0"
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  "9.223372036854776E18"
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  "1.8446744073709552E19"
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  "Infinity"
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "u" : {
+              "missing" : "_first"
+            }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "u" : {
+                    "missing" : "_first"
+                  }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "u" : {
+                  "missing" : "_first"
+                }
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775808
+              ]
+            },
+            {
+              "sort" : [
+                18446744073709551000
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "3",
+                  "_score" : null,
+                  "sort" : [
+                    -9223372036854775808
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    -9223372036854775806
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "4",
+                  "_score" : null,
+                  "sort" : [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  "0"
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              },
+              {
+                "sort" : [
+                  "2"
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  "9223372036854775808"
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  "18446744073709551000"
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "d" : {
+              "numeric_type" : "long"
+            }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "d" : {
+                    "numeric_type" : "long"
+                  }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "d" : {
+                  "numeric_type" : "long"
+                }
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                -1
+              ]
+            },
+            {
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    -1
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    2
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "3",
+                  "_score" : null,
+                  "sort" : [
+                    9223372036854775807
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  -1
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  2
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  9223372036854775807
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  9223372036854775807
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "n" : {
+              "numeric_type" : "double"
+            }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "n" : {
+                    "numeric_type" : "double"
+                  }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "n" : {
+                  "numeric_type" : "double"
+                }
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                5.0
+              ]
+            },
+            {
+              "sort" : [
+                7.0
+              ]
+            },
+            {
+              "sort" : [
+                122.0
+              ]
+            },
+            {
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    5.0
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    7.0
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "4",
+                  "_score" : null,
+                  "sort" : [
+                    122.0
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  5.0
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  7.0
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  122.0
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  "Infinity"
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "dn" : { }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "dn" : { }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "dn" : { }
+              },
+              "size" : 4
+            }
+          }
+        },
+        "query" : {
+          "exists" : {
+            "field" : "dn"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                1672531200000000001
+              ]
+            },
+            {
+              "sort" : [
+                1704067200123456789
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 2,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    1672531200000000001
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    1704067200123456789
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  "+53002373-11-04T00:00:00.001Z"
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  "+54001709-11-26T10:17:36.789Z"
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "dn" : {
+              "numeric_type" : "date"
+            }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "dn" : {
+                    "numeric_type" : "date"
+                  }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "dn" : {
+                  "numeric_type" : "date"
+                }
+              },
+              "size" : 4
+            }
+          }
+        },
+        "query" : {
+          "exists" : {
+            "field" : "dn"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                1672531200000
+              ]
+            },
+            {
+              "sort" : [
+                1704067200123
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 2,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    1672531200000
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    1704067200123
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  "2023-01-01T00:00:00.000Z"
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  "2024-01-01T00:00:00.123Z"
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "dt" : {
+              "numeric_type" : "date_nanos"
+            }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "dt" : {
+                    "numeric_type" : "date_nanos"
+                  }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "dt" : {
+                  "numeric_type" : "date_nanos"
+                }
+              },
+              "size" : 4
+            }
+          }
+        },
+        "query" : {
+          "exists" : {
+            "field" : "dt"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                1672531200000000000
+              ]
+            },
+            {
+              "sort" : [
+                1704067200123000000
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 2,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    1672531200000000000
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    1704067200123000000
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  "+53002373-11-04T00:00:00.000Z"
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  "+54001709-11-26T10:10:00.000Z"
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "sf" : {
+              "numeric_type" : "long"
+            }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "sf" : {
+                    "numeric_type" : "long"
+                  }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "sf" : {
+                  "numeric_type" : "long"
+                }
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                -2
+              ]
+            },
+            {
+              "sort" : [
+                3
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    -2
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    3
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "3",
+                  "_score" : null,
+                  "sort" : [
+                    9223372036854775807
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  -2
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  3
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  9223372036854775807
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  9223372036854775807
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "sf" : { }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "sf" : { }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "sf" : { }
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                -2.2
+              ]
+            },
+            {
+              "sort" : [
+                3.1
+              ]
+            },
+            {
+              "sort" : [
+                "Infinity"
+              ]
+            },
+            {
+              "sort" : [
+                "Infinity"
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    -2.2
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    3.1
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "3",
+                  "_score" : null,
+                  "sort" : [
+                    "Infinity"
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  -2.2
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  3.1
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  "Infinity"
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  "Infinity"
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations,hits.hits.sort",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          {
+            "d" : {
+              "numeric_type" : "date"
+            }
+          }
+        ],
+        "aggs" : {
+          "t" : {
+            "top_hits" : {
+              "sort" : [
+                {
+                  "d" : {
+                    "numeric_type" : "date"
+                  }
+                }
+              ],
+              "_source" : false
+            }
+          },
+          "m" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "n"
+              },
+              "sort" : {
+                "d" : {
+                  "numeric_type" : "date"
+                }
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "sort" : [
+                -1
+              ]
+            },
+            {
+              "sort" : [
+                2
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775807
+              ]
+            },
+            {
+              "sort" : [
+                9223372036854775807
+              ]
+            }
+          ]
+        },
+        "aggregations" : {
+          "t" : {
+            "hits" : {
+              "total" : {
+                "value" : 4,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "2",
+                  "_score" : null,
+                  "sort" : [
+                    -1
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "1",
+                  "_score" : null,
+                  "sort" : [
+                    2
+                  ]
+                },
+                {
+                  "_index" : "esm-qs",
+                  "_id" : "3",
+                  "_score" : null,
+                  "sort" : [
+                    9223372036854775807
+                  ]
+                }
+              ]
+            }
+          },
+          "m" : {
+            "top" : [
+              {
+                "sort" : [
+                  -1
+                ],
+                "metrics" : {
+                  "n" : 7
+                }
+              },
+              {
+                "sort" : [
+                  2
+                ],
+                "metrics" : {
+                  "n" : 5
+                }
+              },
+              {
+                "sort" : [
+                  9223372036854775807
+                ],
+                "metrics" : {
+                  "n" : 122
+                }
+              },
+              {
+                "sort" : [
+                  9223372036854775807
+                ],
+                "metrics" : {
+                  "n" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=aggregations",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "t" : {
+            "top_metrics" : {
+              "metrics" : {
+                "field" : "u"
+              },
+              "sort" : {
+                "u" : "desc"
+              },
+              "size" : 4
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "aggregations" : {
+          "t" : {
+            "top" : [
+              {
+                "sort" : [
+                  "18446744073709551000"
+                ],
+                "metrics" : {
+                  "u" : "18446744073709551000"
+                }
+              },
+              {
+                "sort" : [
+                  "9223372036854775808"
+                ],
+                "metrics" : {
+                  "u" : "9223372036854775808"
+                }
+              },
+              {
+                "sort" : [
+                  "2"
+                ],
+                "metrics" : {
+                  "u" : "2"
+                }
+              },
+              {
+                "sort" : [
+                  "0"
+                ],
+                "metrics" : {
+                  "u" : null
+                }
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "m" : {
+            "adjacency_matrix" : {
+              "filters" : {
+                "a" : {
+                  "bool" : {
+                    "must" : [
+                      { }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:77] [bool] failed to parse field [must]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:77] [adjacency_matrix] failed to parse field [filters]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:77] [filters] failed to parse field [a]",
+            "caused_by" : {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:77] [bool] failed to parse field [must]",
+              "caused_by" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "query malformed, empty clause found at [1:77]"
+              }
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "aggs" : {
+          "m" : {
+            "adjacency_matrix" : {
+              "filters" : {
+                "c" : {
+                  "dis_max" : { }
+                }
+              }
+            }
+          }
+        },
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "dis_max" : {
+                  "queries" : [
+                    {
+                      "match_all" : { }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "[dis_max] requires 'queries' field with at least one clause",
+              "line" : 1,
+              "col" : 62
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:62] [adjacency_matrix] failed to parse field [filters]",
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:62] [filters] failed to parse field [c]",
+            "caused_by" : {
+              "type" : "parsing_exception",
+              "reason" : "[dis_max] requires 'queries' field with at least one clause",
+              "line" : 1,
+              "col" : 62
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "m" : {
+            "filters" : {
+              "filters" : {
+                "a" : {
+                  "bool" : {
+                    "must" : [
+                      { }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:68] [bool] failed to parse field [must]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:68] [bool] failed to parse field [must]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "query malformed, empty clause found at [1:68]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "m" : {
+            "filters" : {
+              "filters" : [
+                {
+                  "bool" : {
+                    "filter" : { }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:65] [bool] failed to parse field [filter]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:65] [bool] failed to parse field [filter]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "query malformed, empty clause found at [1:65]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "m" : {
+            "filter" : {
+              "bool" : {
+                "must" : [
+                  { }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:51] [bool] failed to parse field [must]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:51] [bool] failed to parse field [must]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "query malformed, empty clause found at [1:51]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_count",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : { }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse",
+              "line" : 1,
+              "col" : 11
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "Failed to parse",
+          "line" : 1,
+          "col" : 11,
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "query malformed, empty clause found at [1:11]"
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_count",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "must" : [
+              { }
+            ]
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "Failed to parse",
+              "line" : 1,
+              "col" : 28
+            }
+          ],
+          "type" : "parsing_exception",
+          "reason" : "Failed to parse",
+          "line" : 1,
+          "col" : 28,
+          "caused_by" : {
+            "type" : "x_content_parse_exception",
+            "reason" : "[1:28] [bool] failed to parse field [must]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "query malformed, empty clause found at [1:28]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_validate/query?explain=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "must_not" : [
+              { }
+            ]
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "valid" : false,
+        "error" : "org.elasticsearch.common.ParsingException: Failed to parse; org.elasticsearch.xcontent.XContentParseException: [1:32] [bool] failed to parse field [must_not]"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "span_near" : {
+            "clauses" : [
+              {
+                "span_not" : {
+                  "exclude" : {
+                    "span_term" : {
+                      "a" : "of"
+                    }
+                  },
+                  "include" : {
+                    "span_term" : {
+                      "t" : "cats"
+                    }
+                  }
+                }
+              },
+              {
+                "span_term" : {
+                  "t" : "over"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Clauses must have same field.",
+              "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+              "index" : "esm-qs"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-qs",
+              "node" : "GTFtKRkMSi-lm0r0R4ztbA",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Clauses must have same field.",
+                "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+                "index" : "esm-qs",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Clauses must have same field."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "span_or" : {
+            "clauses" : [
+              {
+                "span_term" : {
+                  "a" : "foo"
+                }
+              },
+              {
+                "span_term" : {
+                  "t" : "cats"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: Clauses must have same field.",
+              "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+              "index" : "esm-qs"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-qs",
+              "node" : "GTFtKRkMSi-lm0r0R4ztbA",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: Clauses must have same field.",
+                "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+                "index" : "esm-qs",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "Clauses must have same field."
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "span_containing" : {
+            "big" : {
+              "span_term" : {
+                "a" : "foo"
+              }
+            },
+            "little" : {
+              "span_term" : {
+                "t" : "cats"
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to create query: big and little not same field",
+              "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+              "index" : "esm-qs"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-qs",
+              "node" : "GTFtKRkMSi-lm0r0R4ztbA",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to create query: big and little not same field",
+                "index_uuid" : "_nExy3_NRdSwdXtkP8mECg",
+                "index" : "esm-qs",
+                "caused_by" : {
+                  "type" : "illegal_argument_exception",
+                  "reason" : "big and little not same field"
+                }
+              }
+            }
+          ]
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "p" : {
+            "diversified_sampler" : {
+              "field" : "k"
+            },
+            "aggs" : {
+              "c" : {
+                "composite" : {
+                  "sources" : [
+                    {
+                      "k" : {
+                        "terms" : {
+                          "field" : "k"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-qs",
+              "node" : "GTFtKRkMSi-lm0r0R4ztbA",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "[composite] aggregation cannot be used with a parent aggregation of type: [DiversifiedAggregatorFactory]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "p" : {
+            "ip_range" : {
+              "field" : "k",
+              "ranges" : [
+                {
+                  "to" : "10.0.0.1"
+                }
+              ]
+            },
+            "aggs" : {
+              "c" : {
+                "composite" : {
+                  "sources" : [
+                    {
+                      "k" : {
+                        "terms" : {
+                          "field" : "k"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Field [k] of type [keyword] is not supported for aggregation [ip_range]"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "esm-qs",
+              "node" : "GTFtKRkMSi-lm0r0R4ztbA",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Field [k] of type [keyword] is not supported for aggregation [ip_range]"
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Field [k] of type [keyword] is not supported for aggregation [ip_range]",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Field [k] of type [keyword] is not supported for aggregation [ip_range]"
+            }
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits._id,hits.hits._score",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "match" : {
+            "m" : {
+              "query" : "cat",
+              "fuzziness" : 1
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_id" : "2",
+              "_score" : 1.0
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits._id,hits.hits._score",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "fuzzy" : {
+            "m" : "cat"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_id" : "2",
+              "_score" : 1.0
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits._id,hits.hits._score",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "query_string" : {
+            "query" : "cat~1",
+            "default_field" : "m"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_id" : "2",
+              "_score" : 1.0
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits._id,hits.hits._score",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "match_phrase_prefix" : {
+            "m" : "cat"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "_id" : "1",
+              "_score" : 1.0
+            },
+            {
+              "_id" : "2",
+              "_score" : 1.0
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "intervals" : {
+                  "t" : {
+                    "match" : {
+                      "query" : "green"
+                    }
+                  }
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "plain"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats over <em>green</em> running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "intervals" : {
+                  "t" : {
+                    "match" : {
+                      "query" : "green"
+                    }
+                  }
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "unified"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats over <em>green</em> running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "intervals" : {
+                  "t" : {
+                    "any_of" : {
+                      "intervals" : [
+                        {
+                          "wildcard" : {
+                            "pattern" : "gr*"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "plain"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats over green running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "intervals" : {
+                  "t" : {
+                    "any_of" : {
+                      "intervals" : [
+                        {
+                          "wildcard" : {
+                            "pattern" : "gr*"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "unified"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats over <em>green</em> running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "intervals" : {
+                  "t" : {
+                    "prefix" : {
+                      "prefix" : "gr"
+                    }
+                  }
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "plain"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats over green running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "intervals" : {
+                  "t" : {
+                    "prefix" : {
+                      "prefix" : "gr"
+                    }
+                  }
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "unified"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats over <em>green</em> running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "match_phrase_prefix" : {
+                  "t" : "over gr"
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "plain"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats <em>over</em> <em>green</em> running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "match_phrase_prefix" : {
+                  "t" : "over gr"
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "unified"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats <em>over green</em> running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "match_phrase_prefix" : {
+                  "t" : "cats ru"
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "plain"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats over green running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.hits.highlight",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "match_phrase_prefix" : {
+                  "t" : "cats ru"
+                }
+              },
+              {
+                "match" : {
+                  "t" : "fast"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "t" : {
+              "type" : "unified"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "hits" : [
+            {
+              "highlight" : {
+                "t" : [
+                  "cats over green running <em>fast</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search?filter_path=hits.total,aggregations",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "size" : 0,
+        "terminate_after" : 3,
+        "aggs" : {
+          "mn" : {
+            "min" : {
+              "field" : "n"
+            }
+          },
+          "vc" : {
+            "value_count" : {
+              "field" : "n"
+            }
+          },
+          "r" : {
+            "range" : {
+              "field" : "n",
+              "ranges" : [
+                {
+                  "to" : 200
+                }
+              ]
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "hits" : {
+          "total" : {
+            "value" : 4,
+            "relation" : "eq"
+          }
+        },
+        "aggregations" : {
+          "mn" : {
+            "value" : 5.0
+          },
+          "vc" : {
+            "value" : 2
+          },
+          "r" : {
+            "buckets" : [
+              {
+                "key" : "*-200.0",
+                "to" : 200.0,
+                "doc_count" : 2
+              }
+            ]
+          }
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_search",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "suggest" : { },
+        "sort" : [
+          {
+            "_script" : {
+              "script" : {
+                "source" : "1"
+              },
+              "type" : "number"
+            }
+          }
+        ],
+        "rescore" : {
+          "query" : {
+            "rescore_query" : {
+              "match_all" : { }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 1,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 0,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_delete_by_query?refresh=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "must" : [
+              { }
+            ],
+            "should" : [
+              {
+                "multi_match" : { }
+              }
+            ]
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "parsing_exception",
+              "reason" : "No text specified for multi_match query",
+              "line" : 1,
+              "col" : 45
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:45] [bool] failed to parse field [should]",
+          "caused_by" : {
+            "type" : "parsing_exception",
+            "reason" : "No text specified for multi_match query",
+            "line" : 1,
+            "col" : 45
+          }
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-qs/_update_by_query?refresh=true",
+      "mask" : [
+        "took"
+      ],
+      "body" : {
+        "query" : {
+          "dis_max" : {
+            "queries" : [
+              { },
+              {
+                "wildcard" : {
+                  "k" : {
+                    "value" : "*-1*"
+                  }
+                }
+              }
+            ],
+            "tie_breaker" : 0.3
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "query malformed, empty clause found at [1:52]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "query malformed, empty clause found at [1:52]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-qs",
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

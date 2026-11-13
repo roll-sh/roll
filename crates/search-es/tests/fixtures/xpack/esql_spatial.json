@@ -1,0 +1,935 @@
+{
+  "description" : "ES|QL spatial types (geo_point, cartesian point, geo_shape, shape from WKT, GeoJSON, arrays, objects and strings), TO_GEOPOINT/TO_CARTESIANPOINT/TO_GEOSHAPE/TO_CARTESIANSHAPE, ST_X/ST_Y quantization, ST_GEOMETRYTYPE/ST_DIMENSION/ST_ISEMPTY, sort and MIN errors, date filters on custom formats, constant_keyword filters, nested and object/flattened columns (original_types, suggested_cast), KEEP patterns without matches, deduplicated multi-valued group keys",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-geo?filter_path=errors,acknowledged,error",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "properties" : {
+            "location" : {
+              "type" : "geo_point"
+            },
+            "pt" : {
+              "type" : "point"
+            },
+            "shape" : {
+              "type" : "geo_shape"
+            },
+            "cshape" : {
+              "type" : "shape"
+            },
+            "id" : {
+              "type" : "integer"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-geo/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\": {\"_id\": \"1\"}}\n{\"id\": 1, \"location\": \"POINT(1 -1)\", \"pt\": \"POINT(4321 -1234)\", \"shape\": \"POINT(0 0)\", \"cshape\": \"POLYGON((-1 -1, 1 -1, 1 1, -1 1, -1 -1))\"}\n{\"index\": {\"_id\": \"2\"}}\n{\"id\": 2, \"location\": {\"lat\": 41.12, \"lon\": -71.34}, \"pt\": [1.5, 2.5], \"shape\": {\"type\": \"Polygon\", \"coordinates\": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}, \"cshape\": \"LINESTRING(0 0, 1 1, 2 0)\"}\n{\"index\": {\"_id\": \"3\"}}\n{\"id\": 3, \"location\": \"41.5,-71.5\", \"pt\": {\"x\": 3, \"y\": 4}, \"shape\": [\"POINT(0 0)\", \"LINESTRING(0 0, 1 1)\"]}\n{\"index\": {\"_id\": \"4\"}}\n{\"id\": 4, \"location\": {\"type\": \"Point\", \"coordinates\": [4.0053486386, 50.4697386503]}}\n{\"index\": {\"_id\": \"5\"}}\n{\"id\": 5, \"location\": [[1, 2], [3, 4]]}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-mix1?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "d" : {
+              "type" : "date",
+              "format" : "dd-MM-yyyy"
+            },
+            "kind" : {
+              "type" : "constant_keyword",
+              "value" : "wow"
+            },
+            "n" : {
+              "type" : "nested",
+              "properties" : {
+                "x" : {
+                  "type" : "keyword"
+                }
+              }
+            },
+            "o" : {
+              "properties" : {
+                "a" : {
+                  "type" : "keyword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "PUT /compat-xpack-mix2?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "d" : {
+              "type" : "date"
+            },
+            "kind" : {
+              "type" : "constant_keyword",
+              "value" : "abc"
+            },
+            "o" : {
+              "type" : "flattened"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\": {\"_index\": \"compat-xpack-mix1\", \"_id\": \"1\"}}\n{\"d\": \"01-02-1999\", \"n\": [{\"x\": \"a\"}], \"o\": {\"a\": \"q\"}}\n{\"index\": {\"_index\": \"compat-xpack-mix1\", \"_id\": \"2\"}}\n{\"d\": \"01-02-2005\"}\n{\"index\": {\"_index\": \"compat-xpack-mix2\", \"_id\": \"3\"}}\n{\"d\": \"1995-03-04\", \"o\": {\"a\": \"z\"}}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-geo | SORT id"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "cshape",
+            "type" : "cartesian_shape"
+          },
+          {
+            "name" : "id",
+            "type" : "integer"
+          },
+          {
+            "name" : "location",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "pt",
+            "type" : "cartesian_point"
+          },
+          {
+            "name" : "shape",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((-1.0 -1.0, 1.0 -1.0, 1.0 1.0, -1.0 1.0, -1.0 -1.0))",
+            1,
+            "POINT (1.0 -1.0)",
+            "POINT (4321.0 -1234.0)",
+            "POINT (0.0 0.0)"
+          ],
+          [
+            "LINESTRING (0.0 0.0, 1.0 1.0, 2.0 0.0)",
+            2,
+            "POINT (-71.34 41.12)",
+            "POINT (1.5 2.5)",
+            "POLYGON ((0.0 0.0, 1.0 0.0, 1.0 1.0, 0.0 0.0))"
+          ],
+          [
+            null,
+            3,
+            "POINT (-71.5 41.5)",
+            "POINT (3.0 4.0)",
+            [
+              "POINT (0.0 0.0)",
+              "LINESTRING (0.0 0.0, 1.0 1.0)"
+            ]
+          ],
+          [
+            null,
+            4,
+            "POINT (4.0053486386 50.4697386503)",
+            null,
+            null
+          ],
+          [
+            null,
+            5,
+            [
+              "POINT (1.0 2.0)",
+              "POINT (3.0 4.0)"
+            ],
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-geo | SORT id | EVAL x = ST_X(location), y = ST_Y(location), px = ST_X(pt), py = ST_Y(pt) | KEEP id, x, y, px, py"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "id",
+            "type" : "integer"
+          },
+          {
+            "name" : "x",
+            "type" : "double"
+          },
+          {
+            "name" : "y",
+            "type" : "double"
+          },
+          {
+            "name" : "px",
+            "type" : "double"
+          },
+          {
+            "name" : "py",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            0.9999999403953552,
+            -1.000000024214387,
+            4321.0,
+            -1234.0
+          ],
+          [
+            2,
+            -71.34000004269183,
+            41.1199999647215,
+            1.5,
+            2.5
+          ],
+          [
+            3,
+            -71.50000001303852,
+            41.49999999906868,
+            3.0,
+            4.0
+          ],
+          [
+            4,
+            4.005348589271307,
+            50.46973861288279,
+            null,
+            null
+          ],
+          [
+            5,
+            [
+              0.9999999403953552,
+              2.999999988824129
+            ],
+            [
+              1.9999999646097422,
+              3.999999971129
+            ],
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-geo | SORT id | EVAL t = ST_GEOMETRYTYPE(shape), d = ST_DIMENSION(shape), e = ST_ISEMPTY(shape), ct = ST_GEOMETRYTYPE(cshape), lt = ST_GEOMETRYTYPE(location) | KEEP id, t, d, e, ct, lt"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "id",
+            "type" : "integer"
+          },
+          {
+            "name" : "t",
+            "type" : "keyword"
+          },
+          {
+            "name" : "d",
+            "type" : "integer"
+          },
+          {
+            "name" : "e",
+            "type" : "boolean"
+          },
+          {
+            "name" : "ct",
+            "type" : "keyword"
+          },
+          {
+            "name" : "lt",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "ST_Point",
+            0,
+            false,
+            "ST_Polygon",
+            "ST_Point"
+          ],
+          [
+            2,
+            "ST_Polygon",
+            2,
+            false,
+            "ST_LineString",
+            "ST_Point"
+          ],
+          [
+            3,
+            "ST_GeometryCollection",
+            1,
+            false,
+            null,
+            "ST_Point"
+          ],
+          [
+            4,
+            null,
+            null,
+            null,
+            null,
+            "ST_Point"
+          ],
+          [
+            5,
+            null,
+            null,
+            null,
+            null,
+            "ST_Point"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-geo | STATS v = VALUES(location), c = COUNT(shape)"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "v",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            [
+              "POINT (1.0 -1.0)",
+              "POINT (-71.34 41.12)",
+              "POINT (-71.5 41.5)",
+              "POINT (4.0053486386 50.4697386503)",
+              "POINT (1.0 2.0)",
+              "POINT (3.0 4.0)"
+            ],
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-geo | SORT location"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:30: cannot sort on geo_point"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:30: cannot sort on geo_point"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-geo | LIMIT 10 | SORT shape"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:41: cannot sort on geo_shape"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:41: cannot sort on geo_shape"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-geo | WHERE id == 1 | EVAL s = TO_STRING(location), g = TO_GEOSHAPE(location), c = TO_CARTESIANSHAPE(pt) | KEEP s, g, c"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "keyword"
+          },
+          {
+            "name" : "g",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "c",
+            "type" : "cartesian_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 -1.0)",
+            "POINT (1.0 -1.0)",
+            "POINT (4321.0 -1234.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT(1 2)\"), b = TO_CARTESIANPOINT(\"POINT(1.5 -2e3)\"), c = TO_GEOSHAPE(\"POLYGON((0 0, 1 0, 1 1, 0 0))\"), d = TO_CARTESIANSHAPE(\"LINESTRING(0 0, 1 1)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "b",
+            "type" : "cartesian_point"
+          },
+          {
+            "name" : "c",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "d",
+            "type" : "cartesian_shape"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)",
+            "POINT (1.5 -2000.0)",
+            "POLYGON ((0.0 0.0, 1.0 0.0, 1.0 1.0, 0.0 0.0))",
+            "LINESTRING (0.0 0.0, 1.0 1.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"bad\"), b = TO_GEOPOINT(\"POINT(200 100)\"), c = TO_GEOSHAPE(\"MULTIPOINT((1 2), (3 4))\"), d = TO_GEOPOINT(\"POINT EMPTY\"), e = TO_GEOPOINT(\"POINT(1 2 3)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "b",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "c",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "d",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "e",
+            "type" : "geo_point"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            null,
+            null,
+            null,
+            "POINT (1.0 2.0 3.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOSHAPE(\"MULTIPOLYGON(((0 0, 1 0, 1 1, 0 0)), ((5 5, 6 5, 6 6, 5 5)))\"), b = TO_GEOSHAPE(\"MULTILINESTRING((0 0, 1 1), (2 2, 3 3))\"), c = TO_GEOSHAPE(\"POLYGON((0 0, 10 0, 10 10, 0 0), (1 1, 2 1, 2 2, 1 1))\"), d = TO_GEOSHAPE(\"MULTIPOINT(1 2, 3 4)\"), e = TO_GEOSHAPE(\"CIRCLE(1 2 3)\"), f = TO_GEOSHAPE(\"GEOMETRYCOLLECTION(POINT(1 2), LINESTRING(0 0, 1 1))\"), g = TO_GEOSHAPE(\"BBOX(0, 1, 1, 0)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "b",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "c",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "d",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "e",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "f",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "g",
+            "type" : "geo_shape"
+          }
+        ],
+        "values" : [
+          [
+            "MULTIPOLYGON (((0.0 0.0, 1.0 0.0, 1.0 1.0, 0.0 0.0)),((5.0 5.0, 6.0 5.0, 6.0 6.0, 5.0 5.0)))",
+            "MULTILINESTRING ((0.0 0.0, 1.0 1.0),(2.0 2.0, 3.0 3.0))",
+            "POLYGON ((0.0 0.0, 10.0 0.0, 10.0 10.0, 0.0 0.0), (1.0 1.0, 2.0 1.0, 2.0 2.0, 1.0 1.0))",
+            "MULTIPOINT (1.0 2.0, 3.0 4.0)",
+            "CIRCLE (1.0 2.0 3.0)",
+            "GEOMETRYCOLLECTION (POINT (1.0 2.0),LINESTRING (0.0 0.0, 1.0 1.0))",
+            "BBOX (0.0, 1.0, 1.0, 0.0)"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ST_X(TO_GEOPOINT(\"POINT(-180 -90)\")), b = ST_Y(TO_GEOPOINT(\"POINT(180 90)\")), c = ST_X(TO_CARTESIANPOINT(\"POINT(0.1 0.2)\")), d = ST_GEOMETRYTYPE(TO_GEOSHAPE(\"MULTIPOINT(1 2, 3 4)\")), e = ST_DIMENSION(TO_GEOSHAPE(\"GEOMETRYCOLLECTION(POINT(1 2), POLYGON((0 0, 1 0, 1 1, 0 0)))\")), g = ST_GEOMETRYTYPE(TO_GEOSHAPE(\"BBOX(0, 1, 1, 0)\"))"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          },
+          {
+            "name" : "b",
+            "type" : "double"
+          },
+          {
+            "name" : "c",
+            "type" : "double"
+          },
+          {
+            "name" : "d",
+            "type" : "keyword"
+          },
+          {
+            "name" : "e",
+            "type" : "integer"
+          },
+          {
+            "name" : "g",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            -180.0,
+            89.99999995809048,
+            0.10000000149011612,
+            "ST_MultiPoint",
+            2,
+            "ST_Polygon"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ST_X(TO_GEOPOINT([\"POINT(1 2)\",\"POINT(2 2)\"]))"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            [
+              0.9999999403953552,
+              1.9999999646097422
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = ST_X(TO_GEOSHAPE(\"POINT(1 2)\"))"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:9: argument of [ST_X(TO_GEOSHAPE(\"POINT(1 2)\"))] must be [geo_point or cartesian_point], found value [TO_GEOSHAPE(\"POINT(1 2)\")] type [geo_shape]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:9: argument of [ST_X(TO_GEOSHAPE(\"POINT(1 2)\"))] must be [geo_point or cartesian_point], found value [TO_GEOSHAPE(\"POINT(1 2)\")] type [geo_shape]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(1)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:9: argument of [TO_GEOPOINT(1)] must be [geo_point or string], found value [1] type [integer]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:9: argument of [TO_GEOPOINT(1)] must be [geo_point or string], found value [1] type [integer]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT(1 2)\") | EVAL b = a == TO_GEOPOINT(\"POINT(1 2)\")"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "a",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "b",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (1.0 2.0)",
+            true
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = TO_GEOPOINT(\"POINT(1 2)\") | STATS m = MIN(a)"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:47: argument of [MIN(a)] must be [boolean, date, ip, string, version, aggregate_metric_double, exponential_histogram, tdigest or numeric except counter types], found value [a] type [geo_point]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:47: argument of [MIN(a)] must be [boolean, date, ip, string, version, aggregate_metric_double, exponential_histogram, tdigest or numeric except counter types], found value [a] type [geo_point]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-mix* | WHERE d > \"1990\" AND d < \"2000\" | KEEP d | SORT d"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "date"
+          }
+        ],
+        "values" : [
+          [
+            "1995-03-04T00:00:00.000Z"
+          ],
+          [
+            "1999-02-01T00:00:00.000Z"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-mix* | WHERE kind >= \"b\" | KEEP kind"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "kind",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "wow"
+          ],
+          [
+            "wow"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-mix* | SORT d"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "date"
+          },
+          {
+            "name" : "kind",
+            "type" : "keyword"
+          },
+          {
+            "name" : "o",
+            "type" : "unsupported",
+            "original_types" : [
+              "flattened",
+              "object"
+            ],
+            "suggested_cast" : "keyword"
+          },
+          {
+            "name" : "o.a",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "1995-03-04T00:00:00.000Z",
+            "abc",
+            null,
+            null
+          ],
+          [
+            "1999-02-01T00:00:00.000Z",
+            "wow",
+            null,
+            "q"
+          ],
+          [
+            "2005-02-01T00:00:00.000Z",
+            "wow",
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM compat-xpack-mix1 | KEEP n*, o*"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:31: No matches found for pattern [n*]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:31: No matches found for pattern [n*]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [\"x\",\"x\",\"y\"], b = [1, 1] | STATS c = COUNT(*) BY a, b"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "a",
+            "type" : "keyword"
+          },
+          {
+            "name" : "b",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "x",
+            1
+          ],
+          [
+            1,
+            "y",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW a = [\"x\",\"x\",\"y\"] | STATS c = COUNT(*) BY a"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "c",
+            "type" : "long"
+          },
+          {
+            "name" : "a",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            1,
+            "x"
+          ],
+          [
+            1,
+            "y"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-geo?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-mix1?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-mix2?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+# Tests of Elasticsearch 9.5.5's `downsample` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+downsample:downsample/100_downsample_histograms/Downsample exponential histogram with aggregate
+downsample:downsample/100_downsample_histograms/Downsample exponential histogram with last value
+downsample:downsample/100_downsample_histograms/Downsample histogram with aggregate
+downsample:downsample/100_downsample_histograms/Downsample histogram with last value
+downsample:downsample/100_downsample_histograms/Downsample tdigest with aggregate
+downsample:downsample/100_downsample_histograms/Downsample tdigest with last value
+downsample:downsample/10_basic/Downsample a downsampled index
+downsample:downsample/10_basic/Downsample a downsampled index with wrong intervals
+downsample:downsample/10_basic/Downsample a downsampled index with wrong sampling methods
+downsample:downsample/10_basic/Downsample date timestamp field using strict_date_optional_time_nanos format
+downsample:downsample/10_basic/Downsample date_nanos timestamp field using custom format
+downsample:downsample/10_basic/Downsample empty and missing labels
+downsample:downsample/10_basic/Downsample failure
+downsample:downsample/10_basic/Downsample histogram as label
+downsample:downsample/10_basic/Downsample index
+downsample:downsample/10_basic/Downsample index sample last values
+downsample:downsample/10_basic/Downsample index with empty dimension
+downsample:downsample/10_basic/Downsample index with empty dimension on routing path
+downsample:downsample/10_basic/Downsample index with multi-value dimensions
+downsample:downsample/10_basic/Downsample label with ignore_above
+downsample:downsample/10_basic/Downsample no metric index
+downsample:downsample/10_basic/Downsample no metric no label index
+downsample:downsample/10_basic/Downsample non-existing index
+downsample:downsample/10_basic/Downsample not time_series index
+downsample:downsample/10_basic/Downsample object field
+downsample:downsample/10_basic/Downsample to existing index
+downsample:downsample/10_basic/Downsample using coarse grained timestamp
+downsample:downsample/10_basic/Downsample using multiple indices
+downsample:downsample/110_downsample_temporality/Downsample cumulative histogram with consecutive resets in same bucket
+downsample:downsample/110_downsample_temporality/Downsample cumulative temporality exponential histogram
+downsample:downsample/110_downsample_temporality/Downsample cumulative temporality exponential histogram across buckets
+downsample:downsample/110_downsample_temporality/Downsample delta temporality counter
+downsample:downsample/110_downsample_temporality/Downsample delta temporality exponential histogram
+downsample:downsample/110_downsample_temporality/Downsample mixed temporality counters
+downsample:downsample/110_downsample_temporality/Downsample mixed temporality exponential histograms
+downsample:downsample/120_downsample_multiple_segments/Downsample aggregate method with multiple segments
+downsample:downsample/20_unsupported_aggs/Cardinality aggregation on aggregate_metric_double field
+downsample:downsample/20_unsupported_aggs/Histogram aggregation on aggregate_metric_double field
+downsample:downsample/20_unsupported_aggs/Percentiles aggregation on aggregate_metric_double field
+downsample:downsample/20_unsupported_aggs/Range aggregation on aggregate_metric_double field
+downsample:downsample/20_unsupported_aggs/Top-metrics aggregation on aggregate_metric_double field
+downsample:downsample/30_date_histogram/Date histogram aggregation on time series index and rollup indices
+downsample:downsample/30_date_histogram/timezone support - 15m
+downsample:downsample/30_date_histogram/timezone support - 1d
+downsample:downsample/30_date_histogram/timezone support - 1h
+downsample:downsample/40_runtime_fields/Runtime field accessing dimension fields in downsample target index
+downsample:downsample/40_runtime_fields/Runtime field accessing label fields in downsample target index
+downsample:downsample/40_runtime_fields/Runtime fields accessing metric fields in downsample target index
+downsample:downsample/50_auto_date_histogram/Auto date histogram aggregation 10 buckets
+downsample:downsample/50_auto_date_histogram/Auto date histogram aggregation 2 buckets
+downsample:downsample/50_auto_date_histogram/Auto date histogram aggregation 200 buckets
+downsample:downsample/60_settings/Downsample datastream with tier preference
+downsample:downsample/60_settings/Downsample index with pipeline
+downsample:downsample/70_flattened_field_type/A flattened label field
+downsample:downsample/70_flattened_field_type/A flattened label field with mixed content
+downsample:downsample/70_flattened_field_type/A flattened label field with no doc values
+downsample:downsample/80_downsample_aggregate/downsample aggregate field
+downsample:downsample/90_multi_fields/Downsample index with multi-fields
+downsample:downsample/90_multi_fields/Downsampling index fails with metrics as multi-fields

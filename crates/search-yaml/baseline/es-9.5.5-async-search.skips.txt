@@ -1,0 +1,6 @@
+# Environment skips of the `async-search` extended suite: tests that fail on a private single-node
+# Elasticsearch 9.5.5 in Docker for a reason outside the server under test (scripts/search-yaml-suites.sh
+# es-extended-baseline). Format: `<glob over test ids>  # reason`; roll skips them too.
+
+async-search:async-search/10_deprecation/Deprecation when retrieved from store  # needs the x-pack-test-deprecated-query module of Elasticsearch's test build
+async-search:async-search/10_deprecation/Deprecation when retrieved from task  # needs the x-pack-test-deprecated-query module of Elasticsearch's test build

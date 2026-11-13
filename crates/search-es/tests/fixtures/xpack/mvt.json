@@ -1,0 +1,408 @@
+{
+  "description" : "search_mvt request validation (tile encoding is covered by xpack::mvt unit tests with Elasticsearch-captured pixels)",
+  "steps" : [
+    {
+      "req" : "PUT /compat-xpack-mvt",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "location" : {
+              "type" : "geo_point"
+            },
+            "value" : {
+              "type" : "long"
+            },
+            "name" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "compat-xpack-mvt"
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-mvt/_bulk?refresh=true&filter_path=errors",
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"location\":\"POINT(34.25 -21.76)\",\"value\":1,\"name\":\"a\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/location/1/2/0",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Zoom/X/Y combination is not valid: 1/2/0"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Zoom/X/Y combination is not valid: 1/2/0"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/location/30/0/0",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid geotile_grid precision of 30. Must be between 0 and 29."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid geotile_grid precision of 30. Must be between 0 and 29."
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/location/a/0/0",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "number_format_exception",
+              "reason" : "For input string: \"a\""
+            }
+          ],
+          "type" : "number_format_exception",
+          "reason" : "For input string: \"a\""
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/location/0/0/0?grid_type=foo",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid grid type [foo]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid grid type [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/location/0/0/0?grid_agg=foo",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid agg type [foo]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid agg type [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/location/0/0/0?grid_precision=9",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[gridPrecision] parameter cannot be bigger than 8, found [9]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[gridPrecision] parameter cannot be bigger than 8, found [9]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/location/0/0/0?extent=-1",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[extent] parameter cannot be negative, found [-1]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[extent] parameter cannot be negative, found [-1]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/location/0/0/0?size=-1",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "[size] parameter cannot be negative, found [-1]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "[size] parameter cannot be negative, found [-1]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/name/0/0/0",
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "Field [name] is of unsupported type [keyword] for [geo_shape] query",
+              "index_uuid" : "OWtbpk_QQ8Kym-v9DbCtdA",
+              "index" : "compat-xpack-mvt"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "compat-xpack-mvt",
+              "node" : "L2UrqlqkTZiki1UJqdOEYw",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "Field [name] is of unsupported type [keyword] for [geo_shape] query",
+                "index_uuid" : "OWtbpk_QQ8Kym-v9DbCtdA",
+                "index" : "compat-xpack-mvt"
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /compat-xpack-mvt/_mvt/nope/0/0/0",
+      "mask" : [
+        "node"
+      ],
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "query_shard_exception",
+              "reason" : "failed to find type for field [nope]",
+              "index_uuid" : "OWtbpk_QQ8Kym-v9DbCtdA",
+              "index" : "compat-xpack-mvt"
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "compat-xpack-mvt",
+              "node" : "L2UrqlqkTZiki1UJqdOEYw",
+              "reason" : {
+                "type" : "query_shard_exception",
+                "reason" : "failed to find type for field [nope]",
+                "index_uuid" : "OWtbpk_QQ8Kym-v9DbCtdA",
+                "index" : "compat-xpack-mvt"
+              }
+            }
+          ]
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-mvt/_mvt/location/0/0/0",
+      "body" : {
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:2] [vector-tile] unknown field [foo]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:2] [vector-tile] unknown field [foo]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-mvt/_mvt/location/0/0/0",
+      "body" : {
+        "aggs" : {
+          "t" : {
+            "terms" : {
+              "field" : "name"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:40] [vector-tile] failed to parse field [aggs]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:40] [vector-tile] failed to parse field [aggs]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Unsupported aggregation of type [terms].Only metric aggregations are supported."
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-mvt/_mvt/location/0/0/0",
+      "body" : {
+        "aggs" : {
+          "_mvt_x" : {
+            "avg" : {
+              "field" : "value"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid aggregation name [_mvt_x]. Aggregation names cannot start with prefix '_mvt_'"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid aggregation name [_mvt_x]. Aggregation names cannot start with prefix '_mvt_'"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-mvt/_mvt/location/0/0/0",
+      "body" : {
+        "aggs" : {
+          "m" : {
+            "max_bucket" : {
+              "buckets_path" : "x"
+            }
+          }
+        }
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:49] [vector-tile] failed to parse field [aggs]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:49] [vector-tile] failed to parse field [aggs]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Unsupported pipeline aggregation of type [max_bucket]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-mvt/_mvt/location/0/0/0",
+      "body" : {
+        "buffer" : -1
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:11] [vector-tile] failed to parse field [buffer]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:11] [vector-tile] failed to parse field [buffer]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "[buffer] parameter cannot be negative, found [-1]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /compat-xpack-mvt/_mvt/location/0/0/0",
+      "body" : {
+        "grid_type" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "x_content_parse_exception",
+              "reason" : "[1:14] [vector-tile] failed to parse field [grid_type]"
+            }
+          ],
+          "type" : "x_content_parse_exception",
+          "reason" : "[1:14] [vector-tile] failed to parse field [grid_type]",
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Invalid grid type [x]"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /compat-xpack-mvt",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

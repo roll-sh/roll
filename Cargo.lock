@@ -3106,6 +3106,8 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -4207,6 +4209,15 @@ checksum = "f48c6352cc1185740af256ccc396af598d2366bfd90a34f5afe48744bf06a5b5"
 dependencies = [
  "fearless_simd",
  "fearless_simd_macros",
+]
+
+[[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -5385,11 +5396,14 @@ name = "pg-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
+ "chrono",
  "futures",
  "object_store",
  "pg-proxy",
  "postgres-protocol",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -6381,6 +6395,9 @@ dependencies = [
  "s3-control",
  "s3-server",
  "s3-store",
+ "search-control",
+ "search-server",
+ "search-store",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6580,11 +6597,15 @@ dependencies = [
  "roll-edge",
  "roll-secrets",
  "roll-workspace",
+ "rusqlite",
  "s3-api",
  "s3-control",
  "s3-proto",
  "s3-server",
  "s3-store",
+ "search-control",
+ "search-server",
+ "search-store",
  "serde_json",
  "sha2 0.10.9",
  "stream-broker",
@@ -7201,6 +7222,228 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "search-aggs"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "foldhash 0.2.0",
+ "hashbrown 0.16.1",
+ "rand 0.8.8",
+ "search-codec",
+ "search-index",
+ "serde_json",
+ "smallvec",
+]
+
+[[package]]
+name = "search-analysis"
+version = "0.1.0"
+dependencies = [
+ "foldhash 0.2.0",
+ "regex",
+ "regex-syntax",
+ "serde_json",
+ "smallvec",
+ "unicode-normalization",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "search-codec"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32c",
+ "memmap2",
+ "rand 0.8.8",
+ "regex-syntax",
+ "serde_json",
+ "thiserror",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "search-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "code-sql",
+ "futures",
+ "futures-util",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "parking_lot",
+ "reqwest",
+ "roll-cluster",
+ "rusqlite",
+ "search-es",
+ "search-index",
+ "search-server",
+ "search-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower-http 0.7.1",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "search-es"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "flate2",
+ "foldhash 0.2.0",
+ "indexmap",
+ "itoa",
+ "libc",
+ "memchr",
+ "parking_lot",
+ "pbkdf2",
+ "rand 0.8.8",
+ "regex",
+ "regex-syntax",
+ "reqwest",
+ "ryu",
+ "search-aggs",
+ "search-analysis",
+ "search-codec",
+ "search-index",
+ "search-painless",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
+name = "search-index"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "foldhash 0.2.0",
+ "hashbrown 0.16.1",
+ "libm",
+ "parking_lot",
+ "rand 0.8.8",
+ "search-analysis",
+ "search-codec",
+ "serde_json",
+ "smallvec",
+ "thiserror",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "search-painless"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "indexmap",
+ "libm",
+ "regex-syntax",
+ "ryu",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "search-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "flate2",
+ "futures",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "libc",
+ "libmimalloc-sys",
+ "mimalloc",
+ "parking_lot",
+ "rcgen",
+ "reqwest",
+ "search-codec",
+ "search-es",
+ "search-index",
+ "search-store",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.6",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "search-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crc32c",
+ "futures",
+ "getrandom 0.4.3",
+ "hashbrown 0.16.1",
+ "memmap2",
+ "parking_lot",
+ "pg-storage",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "search-yaml"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "indexmap",
+ "libc",
+ "rcgen",
+ "regex",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.6",
 ]
 
 [[package]]

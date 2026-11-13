@@ -1,0 +1,54 @@
+{
+  "ism.change_policy": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/im-plugin/ism/api/",
+      "description": "Changes the policy of managed indices."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ism/change_policy/{index}",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_ism/change_policy/{index}",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "index": {
+              "type": "list",
+              "description": "index"
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_ism/change_policy",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/_opendistro/_ism/change_policy",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The request",
+      "required": false
+    }
+  }
+}

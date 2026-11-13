@@ -1,0 +1,37 @@
+# Tests of Elasticsearch 9.5.5's `kql` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (plain).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+kql:kql/10_kql_basic_query/KQL boolean expressions withing field queries
+kql:kql/10_kql_basic_query/KQL boolean queries
+kql:kql/10_kql_basic_query/KQL match all queries
+kql:kql/10_kql_basic_query/KQL match multiple terms queries (no field specified)
+kql:kql/10_kql_basic_query/KQL match multiple terms queries (no matches)
+kql:kql/10_kql_basic_query/KQL match number queries (no field specified)
+kql:kql/10_kql_basic_query/KQL match phrase queries (no field specified)
+kql:kql/10_kql_basic_query/KQL match term queries (no field specified)
+kql:kql/20_kql_match_query/KQL match term queries (constant_keyword field)
+kql:kql/20_kql_match_query/KQL match term queries (date field)
+kql:kql/20_kql_match_query/KQL match term queries (double field)
+kql:kql/20_kql_match_query/KQL match term queries (integer field)
+kql:kql/20_kql_match_query/KQL match term queries (keyword field)
+kql:kql/20_kql_match_query/KQL match term queries (search by id)
+kql:kql/20_kql_match_query/KQL match term queries (text field)
+kql:kql/30_kql_range_query/KQL match term queries (date field)
+kql:kql/30_kql_range_query/KQL match term queries (double field)
+kql:kql/30_kql_range_query/KQL match term queries (integer field)
+kql:kql/30_kql_range_query/KQL match term queries (keyword field)
+kql:kql/30_kql_range_query/KQL match term queries (text field)
+kql:kql/40_kql_exist_query/KQL exists queries (existing field)
+kql:kql/40_kql_exist_query/KQL exists queries (non-existing field)
+kql:kql/40_kql_exist_query/KQL exists queries - Existing field
+kql:kql/50_kql_nested_fields_query/Inline syntax
+kql:kql/50_kql_nested_fields_query/Nested field syntax
+kql:kql/50_kql_nested_fields_query/Several level of nesting field syntax
+kql:kql/60_kql_prefix_query/KQL prefix query (constant_keyword field)
+kql:kql/60_kql_prefix_query/KQL prefix query (keyword field)
+kql:kql/60_kql_prefix_query/KQL prefix query (no field specified)
+kql:kql/60_kql_prefix_query/KQL prefix query (text field)
+kql:kql/70_kql_wildcard_query/KQL wildcard query (constant_keyword field)
+kql:kql/70_kql_wildcard_query/KQL wildcard query (keyword field)
+kql:kql/70_kql_wildcard_query/KQL wildcard query (no field specified)
+kql:kql/70_kql_wildcard_query/KQL wildcard query (text field)

@@ -1,0 +1,9716 @@
+[
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>fox</em>",
+"<em>quick</em>",
+"<em>quick</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"The <b>quick</b> brown <b>fox</b> jumps over the lazy dog.",
+"A <b>quick</b> movement of the enemy will jeopardize six gunboats.",
+"Second value with <b>quick</b> <b>fox</b>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over",
+"A <em>quick</em> movement of the enemy will",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em>",
+" dog. A <em>quick</em>",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em>",
+" <em>quick</em> movement of the enemy",
+"Second value with <em>quick</em>",
+" <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>fox</em>",
+"<em>quick</em>",
+"<em>quick</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"The <em>quick</em> brown",
+"<em>fox</em> jumps",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" with <em>quick</em> <em>fox</em>",
+"The <em>quick</em>",
+" brown <em>fox</em> jumps",
+". A <em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick brown fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"The <b>quick brown fox</b> jumps over the lazy dog."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"The <em>quick</em> <em>brown</em> <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"The <em>quick</em> <em>brown</em> <em>fox</em> jumps"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick</em> <em>brown</em> <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"The <em>quick</em> <em>brown</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"The <em>quick</em> <em>brown</em> <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick brown fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"The <em>quick brown fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" <em>brown</em> <em>fox</em> jumps",
+"The <em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"All <em>questions</em> asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps",
+"A <em>quick</em> movement of the"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six gunboats. All <em>questions</em> asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"All <em>questions</em> asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>",
+"<em>questions</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"All <em>questions</em> asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"The <b>quick</b> brown fox jumps over the lazy dog.",
+"A <b>quick</b> movement of the enemy will jeopardize six gunboats.",
+"All <b>questions</b> asked by five watched experts amaze the judge.",
+"Second value with <b>quick</b> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over",
+"A <em>quick</em> movement of the enemy will",
+"All <em>questions</em> asked by five watched",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six",
+" gunboats. All <em>questions</em> asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"The <em>quick</em> brown fox",
+" dog. A <em>quick</em>",
+" gunboats. All <em>questions</em>",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six gunboats. All <em>questions</em> asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"The <em>quick</em> brown fox",
+" <em>quick</em> movement of the enemy",
+" gunboats. All <em>questions</em> asked",
+"Second value with <em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six",
+" gunboats. All <em>questions</em> asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>",
+"<em>questions</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"The <em>quick</em> brown",
+"A <em>quick</em> movement",
+"All <em>questions</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"The <em>quick</em>",
+". A <em>quick</em>",
+". All <em>questions</em>",
+" with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"The quick"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"The quick"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog.",
+"Second value with <em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps",
+"Second value with <em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with <em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog.",
+"Second value with <em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Second value with <em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick brown fox</em>",
+"<em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over the lazy dog.",
+"Second value with <em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"The <b>quick brown fox</b> jumps over the lazy dog.",
+"Second value with <b>quick fox</b>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"The <em>quick brown fox</em> jumps over",
+"Second value with <em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em>",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em>",
+"Second value with <em>quick</em>",
+" <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"The <em>quick</em> brown <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six",
+"Second value with <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick brown fox</em>",
+"<em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"The <em>quick brown fox</em>",
+"value with <em>quick fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" with <em>quick</em> <em>fox</em>",
+"The <em>quick</em>",
+" brown <em>fox</em> jumps"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps",
+"A <em>quick</em> movement of the"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog.",
+"A <em>quick</em> movement of the enemy will jeopardize six gunboats.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"The <b>quick</b> brown fox jumps over the lazy dog.",
+"A <b>quick</b> movement of the enemy will jeopardize six gunboats.",
+"Second value with <b>quick</b> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over",
+"A <em>quick</em> movement of the enemy will",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"The <em>quick</em> brown fox",
+" dog. A <em>quick</em>",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"The <em>quick</em> brown fox",
+" <em>quick</em> movement of the enemy",
+"Second value with <em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"The <em>quick</em> brown fox jumps over the lazy dog. A <em>quick</em> movement of the enemy will jeopardize six",
+"Second value with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"The <em>quick</em> brown",
+"A <em>quick</em> movement",
+"value with <em>quick</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"The <em>quick</em>",
+". A <em>quick</em>",
+" with <em>quick</em> fox"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {},
+"fragments": [
+"The quick brown <em>fox</em> jumps over the lazy dog.",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"The quick brown <em>fox</em> jumps",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"The quick brown <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"The quick brown <em>fox</em> jumps over the lazy dog.",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>fox</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"The quick brown <em>fox</em> jumps over the lazy dog.",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"The quick brown <b>fox</b> jumps over the lazy dog.",
+"Second value with quick <b>fox</b>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"The quick brown <em>fox</em> jumps over",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"The quick brown <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"The quick brown <em>fox</em>",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"The quick brown <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"The quick brown <em>fox</em>",
+" <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"The quick brown <em>fox</em> jumps over the lazy dog. A quick movement of the enemy will jeopardize six",
+"Second value with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>fox</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"quick brown <em>fox</em>",
+"with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" brown <em>fox</em> jumps",
+" with quick <em>fox</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {},
+"fragments": [
+"The quick <em>brown</em> fox jumps over the lazy <em>dog</em>."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps",
+"over the lazy <em>dog</em>."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps over the lazy <em>dog</em>. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps over the lazy <em>dog</em>."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps over the lazy <em>dog</em>."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>brown</em>",
+"<em>dog</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps over the lazy <em>dog</em>."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"The quick <b>brown</b> fox jumps over the lazy <b>dog</b>."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps over",
+"the lazy <em>dog</em>."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps over the lazy <em>dog</em>. A quick movement of the enemy will jeopardize six"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"The quick <em>brown</em> fox",
+" <em>dog</em>. A quick"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps over the lazy <em>dog</em>. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge."
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"The quick <em>brown</em> fox",
+" jumps over the lazy <em>dog</em>. A"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"The quick <em>brown</em> fox jumps over the lazy <em>dog</em>. A quick movement of the enemy will jeopardize six"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>brown</em>",
+"<em>dog</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"The quick <em>brown</em>",
+"the lazy <em>dog</em>"
+]
+},
+{
+"values": [
+"The quick brown fox jumps over the lazy dog. A quick movement of the enemy will jeopardize six gunboats. All questions asked by five watched experts amaze the judge.",
+"Second value with quick fox"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" <em>brown</em> fox jumps",
+" over the lazy <em>dog</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"alpha <em>quick</em> beta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"alpha <b>quick</b> beta",
+"gamma <b>quick</b> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"alpha <em>quick</em>",
+"gamma <em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"alpha <em>quick</em> beta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"alpha <b>quick</b> beta",
+"gamma <b>quick</b> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"alpha <em>quick</em>",
+"gamma <em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"alpha <em>quick</em> beta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"alpha <b>quick</b> beta",
+"gamma <b>quick</b> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"alpha <em>quick</em>",
+"gamma <em>quick</em>"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"alpha <em>quick</em> beta",
+"gamma <em>quick</em> delta"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"alpha quick"
+]
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"alpha quick beta",
+"gamma quick delta",
+"no match here"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"'<em>fox</em>' / slash.",
+"the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>fox</em>",
+"<em>quick</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"Brown &lt;b&gt;<em>quick</em>&lt;&#x2F;b&gt; &amp; &#x27;<em>fox</em>&#x27; &#x2F; slash. Another sentence without it. Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"Brown <b><b>quick</b></b> & '<b>fox</b>' / slash. Another sentence without it. Then <b>quick</b> again, with the <b>fox</b>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash",
+"Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"Brown <b><em>quick</em></b",
+"> & '<em>fox</em>' / slash",
+" without it. Then <em>quick</em>",
+" again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"Brown <b><em>quick</em></b",
+"> & '<em>fox</em>' / slash. Another",
+" <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then <em>quick</em> again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>fox</em>",
+"<em>quick</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"Brown <b><em>quick</em>",
+"</b> & '<em>fox</em>",
+"Then <em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" <em>quick</em> again, with the <em>fox</em>!",
+"Brown <b><em>quick</em>",
+"</b> & '<em>fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"Brown <b>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"Brown <b"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"Brown <b><em>quick</em></b> &",
+"Then <em>quick</em> again, with"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"Brown &lt;b&gt;<em>quick</em>&lt;&#x2F;b&gt; &amp; &#x27;fox&#x27; &#x2F; slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"Brown <b><b>quick</b></b> & 'fox' / slash. Another sentence without it. Then <b>quick</b> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash",
+"Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"Brown <b><em>quick</em></b",
+" without it. Then <em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"Brown <b><em>quick</em></b",
+" <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"Brown <b><em>quick</em>",
+"Then <em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"Brown <b><em>quick</em>",
+" <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"Brown <b>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"Brown <b"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {},
+"fragments": [
+"Brown <b><em>quick</b> & 'fox</em>' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"Brown <b><em>quick</b> & 'fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b><em>quick</b> & 'fox</em>' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"Brown <b><em>quick</b> & 'fox</em>' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Brown <b><em>quick</b> & 'fox</em>' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</b> & 'fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"Brown &lt;b&gt;<em>quick&lt;&#x2F;b&gt; &amp; &#x27;fox</em>&#x27; &#x2F; slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"Brown <b><b>quick</b> & 'fox</b>' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"Brown <b><em>quick</b> & 'fox</em>' / slash"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"Brown <b><em>quick</em></b",
+"> & '<em>fox</em>' / slash"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"Brown <b><em>quick</em></b",
+"> & '<em>fox</em>' / slash. Another"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</b> & 'fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"<b><em>quick</b> & 'fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"Brown <b><em>quick</em>",
+"</b> & '<em>fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"Brown <b><em>quick</em></b> &",
+"Then <em>quick</em> again, with"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"Brown &lt;b&gt;<em>quick</em>&lt;&#x2F;b&gt; &amp; &#x27;fox&#x27; &#x2F; slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"Brown <b><b>quick</b></b> & 'fox' / slash. Another sentence without it. Then <b>quick</b> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash",
+"Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"Brown <b><em>quick</em></b",
+" without it. Then <em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"Brown <b><em>quick</em></b",
+" <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"Brown <b><em>quick</em></b> & 'fox' / slash. Another sentence without it. Then <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"Brown <b><em>quick</em>",
+"Then <em>quick</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"Brown <b><em>quick</em>",
+" <em>quick</em> again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>",
+"quick again, with the <em>fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>fox</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"Brown &lt;b&gt;quick&lt;&#x2F;b&gt; &amp; &#x27;<em>fox</em>&#x27; &#x2F; slash. Another sentence without it. Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"Brown <b>quick</b> & '<b>fox</b>' / slash. Another sentence without it. Then quick again, with the <b>fox</b>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>' / slash",
+"Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"> & '<em>fox</em>' / slash",
+" again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"> & '<em>fox</em>' / slash. Another",
+" quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"Brown <b>quick</b> & '<em>fox</em>' / slash. Another sentence without it. Then quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>fox</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"quick</b> & '<em>fox</em>",
+"with the <em>fox</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"</b> & '<em>fox</em>",
+" quick again, with the <em>fox</em>!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {},
+"fragments": [
+"<em>Brown</em> <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b> &"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>Brown</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"<em>Brown</em> &lt;b&gt;quick&lt;&#x2F;b&gt; &amp; &#x27;fox&#x27; &#x2F; slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"<b>Brown</b> <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b> & 'fox' / slash"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"<em>Brown</em> <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>Brown</em>"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"<em>Brown</em> <b>quick"
+]
+},
+{
+"values": [
+"Brown <b>quick</b> & 'fox' / slash. Another sentence without it. Then quick again, with the fox!"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+"<em>Brown</em> <b>quick"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"ten eleven twelve <em>quick</em>",
+"<em>fox</em> twenty-one twenty-two"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <b>quick</b> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <b>quick</b> <b>fox</b> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"eight nine ten eleven twelve <em>quick</em>",
+"seventeen eighteen nineteen twenty <em>quick</em>",
+"<em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen",
+" sixteen seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+" twelve <em>quick</em> thirteen",
+" <em>quick</em> <em>fox</em> twenty-one"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+" eleven twelve <em>quick</em>",
+" nineteen twenty <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen",
+" sixteen seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>",
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"eleven twelve <em>quick</em>",
+"nineteen twenty <em>quick</em>",
+"<em>fox</em> twenty-one"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"quick",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" twenty <em>quick</em> <em>fox</em>",
+" twelve <em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"one two three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"one two"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"brown",
+"fox"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"ten eleven twelve <em>quick</em>",
+"eighteen nineteen twenty <em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <b>quick</b> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <b>quick</b> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"eight nine ten eleven twelve <em>quick</em>",
+"seventeen eighteen nineteen twenty <em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen",
+" sixteen seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+" twelve <em>quick</em> thirteen",
+" <em>quick</em> fox twenty-one"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+" eleven twelve <em>quick</em>",
+" nineteen twenty <em>quick</em> fox"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen",
+" sixteen seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"eleven twelve <em>quick</em>",
+"nineteen twenty <em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"prefix": "qu"
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" twelve <em>quick</em>",
+" twenty <em>quick</em> fox"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"one two three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"one two"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"zzz"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {},
+"fragments": [
+"nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"nineteen twenty <em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <b>quick fox</b>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"seventeen eighteen nineteen twenty <em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+" sixteen seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+" <em>quick</em> <em>fox</em> twenty-one"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+" nineteen twenty <em>quick</em> <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+" sixteen seventeen eighteen nineteen twenty <em>quick</em> <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"twenty <em>quick fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"phrase": [
+"quick",
+"fox"
+],
+"slop": 2
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" twenty <em>quick</em> <em>fox</em> twenty"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"ten eleven twelve <em>quick</em>",
+"eighteen nineteen twenty <em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <b>quick</b> thirteen fourteen fifteen sixteen",
+"seventeen eighteen nineteen twenty <b>quick</b> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"eight nine ten eleven twelve <em>quick</em>",
+"seventeen eighteen nineteen twenty <em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen",
+" sixteen seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+" twelve <em>quick</em> thirteen",
+" <em>quick</em> fox twenty-one"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+" eleven twelve <em>quick</em>",
+" nineteen twenty <em>quick</em> fox"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve <em>quick</em> thirteen fourteen fifteen",
+" sixteen seventeen eighteen nineteen twenty <em>quick</em> fox twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>quick</em>",
+"<em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"eleven twelve <em>quick</em>",
+"nineteen twenty <em>quick</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"fuzzy": [
+"quack",
+1
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" twelve <em>quick</em>",
+" twenty <em>quick</em> fox"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {},
+"fragments": [
+"ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": [
+"nineteen twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": [
+"ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": [
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": [
+"ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": [
+"ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick <b>fox</b>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": [
+"eighteen nineteen twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain"
+},
+"fragments": [
+" sixteen seventeen eighteen nineteen twenty quick <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": [
+" quick <em>fox</em> twenty-one"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": [
+" nineteen twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+" sixteen seventeen eighteen nineteen twenty quick <em>fox</em> twenty-one twenty-two twenty-three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": [
+"<em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": [
+"twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"wildcard": "f*x"
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": [
+" twenty quick <em>fox</em>"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 20,
+"number_of_fragments": 2
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"no_match_size": 8
+},
+"fragments": [
+"one two three"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"order": "score",
+"number_of_fragments": 1
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"boundary_scanner": "word"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"encoder": "html"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"pre_tags": [
+"<b>"
+],
+"post_tags": [
+"</b>"
+]
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 30
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain"
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"fragment_size": 20
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"number_of_fragments": 0
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"fragmenter": "simple",
+"fragment_size": 25
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"no_match_size": 12
+},
+"fragments": [
+"one two"
+]
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"boundary_scanner": "word",
+"fragment_size": 15
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"fragment_size": 10,
+"number_of_fragments": 3
+},
+"fragments": []
+},
+{
+"values": [
+"one two three four five six seven eight nine ten eleven twelve quick thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty quick fox twenty-one twenty-two twenty-three"
+],
+"q": {
+"terms": [
+"brown",
+"dog"
+]
+},
+"opts": {
+"type": "plain",
+"order": "score",
+"fragment_size": 15
+},
+"fragments": []
+}
+]

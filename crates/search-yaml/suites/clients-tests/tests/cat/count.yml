@@ -1,0 +1,29 @@
+---
+requires:
+  serverless: true
+  stack: true
+---
+setup:
+  - do:
+      index:
+        index: 'test_cat_count'
+        body:  { "foo": "bar" }
+---
+teardown:
+  - do:
+      indices.delete:
+        index: 'test_cat_count'
+---
+"cat.count":
+
+  - do:
+      cat.count:
+        format: text
+  - match:
+      $body: "/\n/"
+
+  - do:
+      cat.count:
+        format: json
+  - match:
+      0.count: /[0-9]+/

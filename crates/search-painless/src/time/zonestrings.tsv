@@ -1,0 +1,634 @@
+# DateFormatSymbols.getZoneStrings() for en_US from Elasticsearch 9.5.5's JDK, in its order: id, long and
+# short standard, long and short daylight, long and short generic names (| separated).
+America/Los_Angeles|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+America/Denver|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Phoenix|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Chicago|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/New_York|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Indianapolis|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+Pacific/Honolulu|Hawaii-Aleutian Standard Time|HST|Honolulu Daylight Time|HST|Honolulu Time|HST
+America/Anchorage|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+America/Halifax|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Sitka|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+America/St_Johns|Newfoundland Standard Time|NST|Newfoundland Daylight Time|NDT|Newfoundland Time|NT
+Europe/Paris|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT
+Asia/Jerusalem|Israel Standard Time|IST|Israel Daylight Time|IDT|Israel Time|IT
+Asia/Tokyo|Japan Standard Time|JST|Japan Daylight Time|JDT|Japan Time|JT
+Europe/Bucharest|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Asia/Shanghai|China Standard Time|CST|China Daylight Time|CDT|China Time|CT
+UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC
+GB|Greenwich Mean Time|GMT|British Summer Time|BST|London Time|GMT
+NZ|New Zealand Standard Time|NZST|New Zealand Daylight Time|NZDT|New Zealand Time|NZT
+ACT|Australian Central Standard Time|ACST|Australian Central Daylight Time|ACDT|Australian Central Time|ACT
+AET|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+AGT|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+ART|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+AST|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+BET|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+BST|Bangladesh Standard Time|GMT+06:00|Bangladesh Summer Time|GMT+07:00|Bangladesh Time|GMT+06:00
+CAT|Central Africa Time|CAT|GMT+02:00|CAT|GMT+02:00|CAT
+CET|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+CNT|Newfoundland Standard Time|NST|Newfoundland Daylight Time|NDT|Newfoundland Time|NT
+CST|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+CTT|China Standard Time|CST|China Daylight Time|CDT|China Time|CT
+EAT|East Africa Time|EAT|GMT+03:00|EAT|GMT+03:00|EAT
+ECT|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+EET|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+EST|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+HST|Hawaii-Aleutian Standard Time|HST|Honolulu Daylight Time|HST|Honolulu Time|HST
+IET|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+IST|India Standard Time|IST|GMT+06:30|IST|GMT+05:30|IST
+JST|Japan Standard Time|JST|Japan Daylight Time|JDT|Japan Time|JT
+MET|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+MIT|Samoa Standard Time|GMT+13:00|Samoa Daylight Time|GMT+14:00|Samoa Time|GMT+13:00
+MST|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+NET|Armenia Standard Time|GMT+04:00|Armenia Summer Time|GMT+05:00|Armenia Time|GMT+04:00
+NST|New Zealand Standard Time|NZST|New Zealand Daylight Time|NZDT|New Zealand Time|NZT
+PLT|Pakistan Standard Time|PKT|Pakistan Summer Time|PKST|Pakistan Time|PKT
+PNT|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+PRC|China Standard Time|CST|China Daylight Time|CDT|China Time|CT
+PRT|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+PST|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+ROK|Korean Standard Time|KST|Korean Daylight Time|KDT|Korean Time|KT
+SST|Solomon Islands Time|GMT+11:00|GMT+11:00|GMT+11:00|GMT+11:00|GMT+11:00
+UCT|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC
+VST|Indochina Time|GMT+07:00|GMT+07:00|GMT+07:00|GMT+07:00|GMT+07:00
+WET|Western European Standard Time|WET|Western European Summer Time|WEST|Western European Time|WET
+Cuba|Cuba Standard Time|CST|Cuba Daylight Time|CDT|Cuba Time|CT
+Eire|Greenwich Mean Time|GMT|Irish Standard Time|IST|Dublin Time|GMT
+GMT0|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT
+Iran|Iran Standard Time|GMT+03:30|Iran Daylight Time|GMT+04:30|Iran Time|GMT+03:30
+W-SU|Moscow Standard Time|MSK|Moscow Summer Time|MSK|Moscow Time|MSK
+Zulu|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC
+Egypt|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Japan|Japan Standard Time|JST|Japan Daylight Time|JDT|Japan Time|JT
+Libya|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Israel|Israel Standard Time|IST|Israel Daylight Time|IDT|Israel Time|IT
+Navajo|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+Poland|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Turkey|Türkiye Standard Time|GMT+03:00|Türkiye Summer Time|GMT+04:00|Türkiye Time|GMT+03:00
+CST6CDT|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+EST5EDT|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+Etc/GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT
+Etc/UCT|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC
+Etc/UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC
+GB-Eire|Greenwich Mean Time|GMT|British Summer Time|BST|London Time|GMT
+Iceland|Greenwich Mean Time|GMT|Reykjavik Daylight Time|GMT|Reykjavik Time|GMT
+Jamaica|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+MST7MDT|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+NZ-CHAT|Chatham Standard Time|GMT+12:45|Chatham Daylight Time|GMT+13:45|Chatham Time|GMT+12:45
+PST8PDT|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+Etc/GMT0|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT
+Etc/Zulu|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC
+Hongkong|Hong Kong Standard Time|HKT|Hong Kong Summer Time|HKST|Hong Kong Time|HKT
+Portugal|Western European Standard Time|WET|Western European Summer Time|WEST|Western European Time|WET
+US/Samoa|American Samoa Standard Time|SST|American Samoa Daylight Time|SST|American Samoa Time|SST
+Asia/Aden|Arabian Standard Time|GMT+03:00|Arabian Daylight Time|GMT+03:00|Arabian Time|GMT+03:00
+Asia/Baku|Azerbaijan Standard Time|GMT+04:00|Azerbaijan Summer Time|GMT+05:00|Azerbaijan Time|GMT+04:00
+Asia/Dili|Timor-Leste Time|GMT+09:00|Dili Daylight Time|GMT+09:00|Dili Time|GMT+09:00
+Asia/Gaza|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Asia/Hovd|Khovd Standard Time|GMT+07:00|Khovd Summer Time|GMT+08:00|Khovd Time|GMT+07:00
+Asia/Omsk|Omsk Standard Time|GMT+06:00|Omsk Summer Time|GMT+07:00|Omsk Time|GMT+06:00
+Asia/Oral|Kazakhstan Time|GMT+05:00|Oral Daylight Time|GMT+06:00|Oral Time|GMT+05:00
+Etc/GMT+0|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT
+Etc/GMT-0|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT
+Greenwich|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT
+Kwajalein|Marshall Islands Time|GMT+12:00|Kwajalein Atoll Daylight Time|GMT+12:00|Kwajalein Atoll Time|GMT+12:00
+Singapore|Singapore Standard Time|GMT+08:00|Singapore Daylight Time|GMT+08:20|Singapore Time|GMT+08:00
+US/Alaska|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+US/Hawaii|Hawaii-Aleutian Standard Time|HST|Honolulu Daylight Time|HST|Honolulu Time|HST
+Universal|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC
+Asia/Aqtau|Kazakhstan Time|GMT+05:00|Aktau Daylight Time|GMT+06:00|Aktau Time|GMT+05:00
+Asia/Chita|Yakutsk Standard Time|GMT+09:00|Yakutsk Summer Time|GMT+10:00|Yakutsk Time|GMT+09:00
+Asia/Dacca|Bangladesh Standard Time|GMT+06:00|Bangladesh Summer Time|GMT+07:00|Bangladesh Time|GMT+06:00
+Asia/Dhaka|Bangladesh Standard Time|GMT+06:00|Bangladesh Summer Time|GMT+07:00|Bangladesh Time|GMT+06:00
+Asia/Dubai|Gulf Standard Time|GMT+04:00|Dubai Daylight Time|GMT+04:00|Dubai Time|GMT+04:00
+Asia/Kabul|Afghanistan Time|GMT+04:30|Kabul Daylight Time|GMT+04:30|Kabul Time|GMT+04:30
+Asia/Macao|China Standard Time|CST|China Daylight Time|CDT|China Time|CT
+Asia/Macau|China Standard Time|CST|China Daylight Time|CDT|China Time|CT
+Asia/Qatar|Arabian Standard Time|GMT+03:00|Arabian Daylight Time|GMT+03:00|Arabian Time|GMT+03:00
+Asia/Seoul|Korean Standard Time|KST|Korean Daylight Time|KDT|Korean Time|KT
+Asia/Tomsk|Krasnoyarsk Standard Time|GMT+07:00|Krasnoyarsk Summer Time|GMT+08:00|Krasnoyarsk Time|GMT+07:00
+US/Arizona|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+US/Central|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+US/Eastern|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+US/Pacific|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+Africa/Juba|Central Africa Time|CAT|Juba Daylight Time|CAT|Juba Time|CAT
+Africa/Lome|Greenwich Mean Time|GMT|Lomé Daylight Time|GMT|Lomé Time|GMT
+Asia/Almaty|Kazakhstan Time|GMT+05:00|Almaty Daylight Time|GMT+06:00|Almaty Time|GMT+05:00
+Asia/Anadyr|Kamchatka Standard Time|GMT+12:00|Kamchatka Summer Time|GMT+13:00|Kamchatka Time|GMT+12:00
+Asia/Aqtobe|Kazakhstan Time|GMT+05:00|Aqtobe Daylight Time|GMT+06:00|Aqtobe Time|GMT+05:00
+Asia/Atyrau|Kazakhstan Time|GMT+05:00|Atyrau Daylight Time|GMT+06:00|Atyrau Time|GMT+05:00
+Asia/Beirut|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Asia/Brunei|Brunei Time|GMT+08:00|Brunei Daylight Time|GMT+08:20|Brunei Time|GMT+08:00
+Asia/Harbin|China Standard Time|CST|China Daylight Time|CDT|China Time|CT
+Asia/Hebron|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Asia/Kuwait|Arabian Standard Time|GMT+03:00|Arabian Daylight Time|GMT+03:00|Arabian Time|GMT+03:00
+Asia/Manila|Philippine Standard Time|PST|Philippine Summer Time|PDT|Philippine Time|PT
+Asia/Muscat|Gulf Standard Time|GMT+04:00|Muscat Daylight Time|GMT+04:00|Muscat Time|GMT+04:00
+Asia/Riyadh|Arabian Standard Time|GMT+03:00|Arabian Daylight Time|GMT+03:00|Arabian Time|GMT+03:00
+Asia/Saigon|Indochina Time|GMT+07:00|Ho Chi Minh City Daylight Time|GMT+07:00|Ho Chi Minh City Time|GMT+07:00
+Asia/Taipei|Taiwan Standard Time|CST|Taiwan Daylight Time|CDT|Taiwan Time|CT
+Asia/Tehran|Iran Standard Time|GMT+03:30|Iran Daylight Time|GMT+04:30|Iran Time|GMT+03:30
+Asia/Thimbu|Bhutan Time|GMT+06:00|Thimphu Daylight Time|GMT+06:00|Thimphu Time|GMT+06:00
+Asia/Yangon|Cocos Islands Time|GMT+06:30|Yangon Daylight Time|GMT+06:30|Yangon Time|GMT+06:30
+Brazil/Acre|Acre Standard Time|GMT-05:00|Acre Summer Time|GMT-04:00|Acre Time|GMT-05:00
+Brazil/East|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+Brazil/West|Amazon Standard Time|GMT-04:00|Amazon Summer Time|GMT-03:00|Amazon Time|GMT-04:00
+Europe/Kiev|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Kyiv|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Oslo|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Riga|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Rome|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Indian/Mahe|Seychelles Time|GMT+04:00|Mahé Daylight Time|GMT+04:00|Mahé Time|GMT+04:00
+Pacific/Yap|Papua New Guinea Time|GMT+10:00|Chuuk Daylight Time|GMT+10:00|Chuuk Time|GMT+10:00
+US/Aleutian|Hawaii-Aleutian Standard Time|HAST|Hawaii-Aleutian Daylight Time|HADT|Hawaii-Aleutian Time|HAT
+US/Michigan|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+US/Mountain|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+Africa/Accra|Greenwich Mean Time|GMT|Accra Daylight Time|GMT|Accra Time|GMT
+Africa/Cairo|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Africa/Ceuta|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Africa/Dakar|Greenwich Mean Time|GMT|Dakar Daylight Time|GMT|Dakar Time|GMT
+Africa/Lagos|West Africa Time|WAT|Lagos Daylight Time|WAT|Lagos Time|WAT
+Africa/Tunis|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+America/Adak|Hawaii-Aleutian Standard Time|HAST|Hawaii-Aleutian Daylight Time|HADT|Hawaii-Aleutian Time|HAT
+America/Atka|Hawaii-Aleutian Standard Time|HAST|Hawaii-Aleutian Daylight Time|HADT|Hawaii-Aleutian Time|HAT
+America/Lima|Peru Standard Time|GMT-05:00|Peru Summer Time|GMT-04:00|Peru Time|GMT-05:00
+America/Nome|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+America/Nuuk|Greenland Standard Time|GMT-02:00|Greenland Summer Time|GMT-01:00|Greenland Time|GMT-02:00
+Asia/Baghdad|Arabian Standard Time|GMT+03:00|Arabian Daylight Time|GMT+04:00|Arabian Time|GMT+03:00
+Asia/Bahrain|Arabian Standard Time|GMT+03:00|Arabian Daylight Time|GMT+03:00|Arabian Time|GMT+03:00
+Asia/Bangkok|Indochina Time|GMT+07:00|Bangkok Daylight Time|GMT+07:00|Bangkok Time|GMT+07:00
+Asia/Barnaul|Krasnoyarsk Standard Time|GMT+07:00|Krasnoyarsk Summer Time|GMT+08:00|Krasnoyarsk Time|GMT+07:00
+Asia/Bishkek|Kyrgyzstan Time|GMT+06:00|Bishkek Daylight Time|GMT+07:00|Bishkek Time|GMT+06:00
+Asia/Colombo|India Standard Time|IST|Colombo Daylight Time|IST|Colombo Time|IST
+Asia/Irkutsk|Irkutsk Standard Time|GMT+08:00|Irkutsk Summer Time|GMT+09:00|Irkutsk Time|GMT+08:00
+Asia/Jakarta|Western Indonesia Time|WIB|Jakarta Daylight Time|WIB|Jakarta Time|WIB
+Asia/Karachi|Pakistan Standard Time|PKT|Pakistan Summer Time|PKST|Pakistan Time|PKT
+Asia/Kolkata|India Standard Time|IST|Kolkata Daylight Time|IST|Kolkata Time|IST
+Asia/Kuching|Brunei Time|GMT+08:00|Kuching Daylight Time|GMT+08:20|Kuching Time|GMT+08:00
+Asia/Magadan|Magadan Standard Time|GMT+11:00|Magadan Summer Time|GMT+12:00|Magadan Time|GMT+11:00
+Asia/Nicosia|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Asia/Rangoon|Myanmar Time|GMT+06:30|Yangon Daylight Time|GMT+06:30|Yangon Time|GMT+06:30
+Asia/Tbilisi|Georgia Standard Time|GMT+04:00|Georgia Summer Time|GMT+05:00|Georgia Time|GMT+04:00
+Asia/Thimphu|Bhutan Time|GMT+06:00|Thimphu Daylight Time|GMT+06:00|Thimphu Time|GMT+06:00
+Asia/Yakutsk|Yakutsk Standard Time|GMT+09:00|Yakutsk Summer Time|GMT+10:00|Yakutsk Time|GMT+09:00
+Asia/Yerevan|Armenia Standard Time|GMT+04:00|Armenia Summer Time|GMT+05:00|Armenia Time|GMT+04:00
+Canada/Yukon|Yukon Time|MST|Whitehorse Daylight Time|MST|Whitehorse Time|MST
+Europe/Kirov|Moscow Standard Time|MSK|Moscow Summer Time|MSK|Moscow Time|MSK
+Europe/Malta|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Minsk|Moscow Standard Time|MSK|Moscow Summer Time|MSK|Moscow Time|MSK
+Europe/Sofia|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Vaduz|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Indian/Cocos|Cocos Islands Time|GMT+06:30|Cocos Islands Daylight Time|GMT+06:30|Cocos Islands Time|GMT+06:30
+Pacific/Apia|Samoa Standard Time|GMT+13:00|Samoa Daylight Time|GMT+14:00|Samoa Time|GMT+13:00
+Pacific/Fiji|Fiji Standard Time|GMT+12:00|Fiji Summer Time|GMT+13:00|Fiji Time|GMT+12:00
+Pacific/Guam|Chamorro Standard Time|ChST|Guam Daylight Time|ChST|Guam Time|ChST
+Pacific/Niue|Niue Time|GMT-11:00|Niue Daylight Time|GMT-11:00|Niue Time|GMT-11:00
+Pacific/Truk|Chuuk Time|GMT+10:00|Chuuk Daylight Time|GMT+10:00|Chuuk Time|GMT+10:00
+Pacific/Wake|Wake Island Time|GMT+12:00|Wake Island Daylight Time|GMT+12:00|Wake Island Time|GMT+12:00
+SystemV/AST4|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+SystemV/CST6|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+SystemV/EST5|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+SystemV/MST7|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+SystemV/PST8|Pitcairn Time|GMT-08:00|Pitcairn Time|GMT-08:00|Pitcairn Time|GMT-08:00
+SystemV/YST9|Gambier Time|GMT-09:00|Gambier Time|GMT-09:00|Gambier Time|GMT-09:00
+Africa/Asmara|East Africa Time|EAT|Asmara Daylight Time|EAT|Asmara Time|EAT
+Africa/Asmera|East Africa Time|EAT|Asmara Daylight Time|EAT|Asmara Time|EAT
+Africa/Bamako|Greenwich Mean Time|GMT|Bamako Daylight Time|GMT|Bamako Time|GMT
+Africa/Bangui|West Africa Time|WAT|Bangui Daylight Time|WAT|Bangui Time|WAT
+Africa/Banjul|Greenwich Mean Time|GMT|Banjul Daylight Time|GMT|Banjul Time|GMT
+Africa/Bissau|Greenwich Mean Time|GMT|Bissau Daylight Time|GMT|Bissau Time|GMT
+Africa/Douala|West Africa Time|WAT|Douala Daylight Time|WAT|Douala Time|WAT
+Africa/Harare|Central Africa Time|CAT|Harare Daylight Time|CAT|Harare Time|CAT
+Africa/Kigali|Central Africa Time|CAT|Kigali Daylight Time|CAT|Kigali Time|CAT
+Africa/Luanda|West Africa Time|WAT|Luanda Daylight Time|WAT|Luanda Time|WAT
+Africa/Lusaka|Central Africa Time|CAT|Lusaka Daylight Time|CAT|Lusaka Time|CAT
+Africa/Malabo|West Africa Time|WAT|Malabo Daylight Time|WAT|Malabo Time|WAT
+Africa/Maputo|Central Africa Time|CAT|Maputo Daylight Time|CAT|Maputo Time|CAT
+Africa/Maseru|South Africa Standard Time|SAST|Maseru Daylight Time|SAST|Maseru Time|SAST
+Africa/Niamey|West Africa Time|WAT|Niamey Daylight Time|WAT|Niamey Time|WAT
+America/Aruba|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Bahia|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+America/Belem|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+America/Boise|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Jujuy|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Thule|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+Asia/Ashgabat|Turkmenistan Standard Time|GMT+05:00|Turkmenistan Summer Time|GMT+06:00|Turkmenistan Time|GMT+05:00
+Asia/Calcutta|India Standard Time|IST|Kolkata Daylight Time|IST|Kolkata Time|IST
+Asia/Dushanbe|Tajikistan Time|GMT+05:00|Dushanbe Daylight Time|GMT+06:00|Dushanbe Time|GMT+05:00
+Asia/Istanbul|Türkiye Standard Time|GMT+03:00|Türkiye Summer Time|GMT+04:00|Türkiye Time|GMT+03:00
+Asia/Jayapura|Eastern Indonesia Time|WIT|Jayapura Daylight Time|WIT|Jayapura Time|WIT
+Asia/Katmandu|Nepal Time|GMT+05:45|Kathmandu Daylight Time|GMT+05:45|Kathmandu Time|GMT+05:45
+Asia/Khandyga|Yakutsk Standard Time|GMT+09:00|Yakutsk Summer Time|GMT+10:00|Yakutsk Time|GMT+09:00
+Asia/Makassar|Central Indonesia Time|WITA|Makassar Daylight Time|WITA|Makassar Time|WITA
+Asia/Qostanay|Kazakhstan Time|GMT+05:00|Kostanay Daylight Time|GMT+06:00|Kostanay Time|GMT+05:00
+Asia/Sakhalin|Magadan Standard Time|GMT+11:00|Magadan Summer Time|GMT+12:00|Magadan Time|GMT+11:00
+Asia/Tashkent|Uzbekistan Standard Time|GMT+05:00|Uzbekistan Summer Time|GMT+06:00|Uzbekistan Time|GMT+05:00
+Asia/Tel_Aviv|Israel Standard Time|IST|Israel Daylight Time|IDT|Israel Time|IT
+Asia/Ust-Nera|Vladivostok Standard Time|GMT+10:00|Vladivostok Summer Time|GMT+11:00|Vladivostok Time|GMT+10:00
+Australia/ACT|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/LHI|Lord Howe Standard Time|GMT+10:30|Lord Howe Daylight Time|GMT+11:00|Lord Howe Time|GMT+10:30
+Australia/NSW|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Etc/Greenwich|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT|Greenwich Mean Time|GMT
+Etc/Universal|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC|Coordinated Universal Time|UTC
+Europe/Athens|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Berlin|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Dublin|Greenwich Mean Time|GMT|Irish Standard Time|IST|Dublin Time|GMT
+Europe/Jersey|Greenwich Mean Time|GMT|British Summer Time|BST|Jersey Time|GMT
+Europe/Lisbon|Western European Standard Time|WET|Western European Summer Time|WEST|Western European Time|WET
+Europe/London|Greenwich Mean Time|GMT|British Summer Time|BST|London Time|GMT
+Europe/Madrid|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Monaco|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Moscow|Moscow Standard Time|MSK|Moscow Summer Time|MSK|Moscow Time|MSK
+Europe/Prague|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Samara|Samara Standard Time|GMT+04:00|Samara Summer Time|GMT+05:00|Samara Time|GMT+04:00
+Europe/Skopje|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Tirane|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Vienna|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Warsaw|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Zagreb|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Zurich|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Indian/Chagos|Indian Ocean Time|GMT+06:00|Chagos Archipelago Daylight Time|GMT+06:00|Chagos Archipelago Time|GMT+06:00
+Indian/Comoro|East Africa Time|EAT|Comoros Daylight Time|EAT|Comoros Time|EAT
+Pacific/Chuuk|Papua New Guinea Time|GMT+10:00|Chuuk Daylight Time|GMT+10:00|Chuuk Time|GMT+10:00
+Pacific/Efate|Vanuatu Standard Time|GMT+11:00|Vanuatu Summer Time|GMT+12:00|Vanuatu Time|GMT+11:00
+Pacific/Nauru|Nauru Time|GMT+12:00|Nauru Daylight Time|GMT+12:00|Nauru Time|GMT+12:00
+Pacific/Palau|Palau Time|GMT+09:00|Palau Daylight Time|GMT+09:00|Palau Time|GMT+09:00
+Pacific/Samoa|American Samoa Standard Time|SST|American Samoa Daylight Time|SST|American Samoa Time|SST
+SystemV/HST10|Hawaii-Aleutian Standard Time|HST|Hawaii-Aleutian Standard Time|HST|Hawaii-Aleutian Standard Time|HST
+Africa/Abidjan|Greenwich Mean Time|GMT|Abidjan Daylight Time|GMT|Abidjan Time|GMT
+Africa/Algiers|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Africa/Conakry|Greenwich Mean Time|GMT|Conakry Daylight Time|GMT|Conakry Time|GMT
+Africa/Kampala|East Africa Time|EAT|Kampala Daylight Time|EAT|Kampala Time|EAT
+Africa/Mbabane|South Africa Standard Time|SAST|Mbabane Daylight Time|SAST|Mbabane Time|SAST
+Africa/Nairobi|East Africa Time|EAT|Nairobi Daylight Time|EAT|Nairobi Time|EAT
+Africa/Tripoli|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+America/Belize|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Bogota|Colombia Standard Time|GMT-05:00|Colombia Summer Time|GMT-04:00|Colombia Time|GMT-05:00
+America/Cancun|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Cayman|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Cuiaba|Amazon Standard Time|GMT-04:00|Amazon Summer Time|GMT-03:00|Amazon Time|GMT-04:00
+America/Dawson|Yukon Time|MST|Dawson Daylight Time|MST|Dawson Time|MST
+America/Guyana|Guyana Time|GMT-04:00|Guyana Daylight Time|GMT-04:00|Guyana Time|GMT-04:00
+America/Havana|Cuba Standard Time|CST|Cuba Daylight Time|CDT|Cuba Time|CT
+America/Inuvik|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Juneau|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+America/La_Paz|Bolivia Time|GMT-04:00|La Paz Daylight Time|GMT-03:00|La Paz Time|GMT-04:00
+America/Maceio|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+America/Manaus|Amazon Standard Time|GMT-04:00|Amazon Summer Time|GMT-03:00|Amazon Time|GMT-04:00
+America/Merida|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Nassau|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Panama|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Recife|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+America/Regina|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Virgin|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+Asia/Ashkhabad|Turkmenistan Standard Time|GMT+05:00|Turkmenistan Summer Time|GMT+06:00|Turkmenistan Time|GMT+05:00
+Asia/Chongqing|China Standard Time|CST|China Daylight Time|CDT|China Time|CT
+Asia/Chungking|China Standard Time|CST|China Daylight Time|CDT|China Time|CT
+Asia/Famagusta|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Asia/Hong_Kong|Hong Kong Standard Time|HKT|Hong Kong Summer Time|HKST|Hong Kong Time|HKT
+Asia/Kamchatka|Kamchatka Standard Time|GMT+12:00|Kamchatka Summer Time|GMT+13:00|Kamchatka Time|GMT+12:00
+Asia/Kathmandu|Nepal Time|GMT+05:45|Kathmandu Daylight Time|GMT+05:45|Kathmandu Time|GMT+05:45
+Asia/Pontianak|Western Indonesia Time|WIB|Pontianak Daylight Time|WIB|Pontianak Time|WIB
+Asia/Pyongyang|Korean Standard Time|KST|Korean Daylight Time|KDT|Korean Time|KT
+Asia/Qyzylorda|Kazakhstan Time|GMT+05:00|Kyzylorda Daylight Time|GMT+06:00|Kyzylorda Time|GMT+05:00
+Asia/Samarkand|Uzbekistan Standard Time|GMT+05:00|Uzbekistan Summer Time|GMT+06:00|Uzbekistan Time|GMT+05:00
+Asia/Singapore|Singapore Standard Time|GMT+08:00|Singapore Daylight Time|GMT+08:20|Singapore Time|GMT+08:00
+Asia/Vientiane|Indochina Time|GMT+07:00|Vientiane Daylight Time|GMT+07:00|Vientiane Time|GMT+07:00
+Atlantic/Faroe|Western European Standard Time|WET|Western European Summer Time|WEST|Western European Time|WET
+Australia/West|Australian Western Standard Time|AWST|Australian Western Daylight Time|AWDT|Australian Western Time|AWT
+Canada/Central|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+Canada/Eastern|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+Canada/Pacific|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+Europe/Andorra|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Belfast|Greenwich Mean Time|GMT|British Summer Time|BST|London Time|GMT
+Europe/Nicosia|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Saratov|Samara Standard Time|GMT+04:00|Samara Summer Time|GMT+05:00|Samara Time|GMT+04:00
+Europe/Tallinn|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Vatican|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Vilnius|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Indian/Mayotte|East Africa Time|EAT|Mayotte Daylight Time|EAT|Mayotte Time|EAT
+Indian/Reunion|Réunion Time|GMT+04:00|Réunion Daylight Time|GMT+04:00|Réunion Time|GMT+04:00
+Mexico/BajaSur|Mexican Pacific Standard Time|MST|Mexican Pacific Daylight Time|MDT|Mexican Pacific Time|MT
+Mexico/General|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+Pacific/Easter|Easter Island Standard Time|GMT-06:00|Easter Island Summer Time|GMT-05:00|Easter Island Time|GMT-06:00
+Pacific/Kanton|Phoenix Islands Time|GMT+13:00|Canton Island Daylight Time|GMT+13:00|Canton Island Time|GMT+13:00
+Pacific/Kosrae|Kosrae Time|GMT+11:00|Kosrae Daylight Time|GMT+11:00|Kosrae Time|GMT+11:00
+Pacific/Majuro|Marshall Islands Time|GMT+12:00|Majuro Daylight Time|GMT+12:00|Majuro Time|GMT+12:00
+Pacific/Midway|American Samoa Standard Time|SST|American Samoa Daylight Time|SST|American Samoa Time|SST
+Pacific/Noumea|New Caledonia Standard Time|GMT+11:00|New Caledonia Summer Time|GMT+12:00|New Caledonia Time|GMT+11:00
+Pacific/Ponape|Solomon Islands Time|GMT+11:00|Pohnpei Daylight Time|GMT+11:00|Pohnpei Time|GMT+11:00
+Pacific/Saipan|Chamorro Standard Time|ChST|Saipan Daylight Time|ChST|Saipan Time|ChST
+Pacific/Tahiti|Tahiti Time|GMT-10:00|Tahiti Daylight Time|GMT-10:00|Tahiti Time|GMT-10:00
+Pacific/Tarawa|Marshall Islands Time|GMT+12:00|Tarawa Daylight Time|GMT+12:00|Tarawa Time|GMT+12:00
+Pacific/Wallis|Gilbert Islands Time|GMT+12:00|Wallis & Futuna Daylight Time|GMT+12:00|Wallis & Futuna Time|GMT+12:00
+Africa/Blantyre|Central Africa Time|CAT|Blantyre Daylight Time|CAT|Blantyre Time|CAT
+Africa/Djibouti|East Africa Time|EAT|Djibouti Daylight Time|EAT|Djibouti Time|EAT
+Africa/Freetown|Greenwich Mean Time|GMT|Freetown Daylight Time|GMT|Freetown Time|GMT
+Africa/Gaborone|Central Africa Time|CAT|Gaborone Daylight Time|CAT|Gaborone Time|CAT
+Africa/Khartoum|Central Africa Time|CAT|Khartoum Daylight Time|CAT|Khartoum Time|CAT
+Africa/Kinshasa|West Africa Time|WAT|Kinshasa Daylight Time|WAT|Kinshasa Time|WAT
+Africa/Monrovia|Greenwich Mean Time|GMT|Monrovia Daylight Time|GMT|Monrovia Time|GMT
+Africa/Ndjamena|West Africa Time|WAT|N’Djamena Daylight Time|WAT|N’Djamena Time|WAT
+Africa/Sao_Tome|Greenwich Mean Time|GMT|São Tomé Daylight Time|GMT|São Tomé Time|GMT
+Africa/Timbuktu|Greenwich Mean Time|GMT|Bamako Daylight Time|GMT|Bamako Time|GMT
+Africa/Windhoek|Central Africa Time|CAT|Windhoek Daylight Time|CAT|Windhoek Time|CAT
+America/Antigua|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Caracas|Venezuela Time|GMT-04:00|Caracas Daylight Time|GMT-04:00|Caracas Time|GMT-04:00
+America/Cayenne|French Guiana Time|GMT-03:00|Cayenne Daylight Time|GMT-03:00|Cayenne Time|GMT-03:00
+America/Cordoba|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Creston|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Curacao|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Detroit|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Godthab|Greenland Standard Time|GMT-02:00|Greenland Summer Time|GMT-01:00|Greenland Time|GMT-02:00
+America/Grenada|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Iqaluit|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Jamaica|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Knox_IN|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Managua|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Marigot|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Mendoza|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Moncton|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Nipigon|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Noronha|Fernando de Noronha Standard Time|GMT-02:00|Fernando de Noronha Summer Time|GMT-01:00|Fernando de Noronha Time|GMT-02:00
+America/Ojinaga|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Tijuana|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+America/Toronto|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Tortola|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Yakutat|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+Asia/Choibalsan|Ulaanbaatar Standard Time|GMT+08:00|Ulaanbaatar Summer Time|GMT+09:00|Ulaanbaatar Time|GMT+08:00
+Asia/Phnom_Penh|Indochina Time|GMT+07:00|Phnom Penh Daylight Time|GMT+07:00|Phnom Penh Time|GMT+07:00
+Asia/Ulan_Bator|Ulaanbaatar Standard Time|GMT+08:00|Ulaanbaatar Summer Time|GMT+09:00|Ulaanbaatar Time|GMT+08:00
+Atlantic/Azores|Azores Standard Time|GMT-01:00|Azores Summer Time|GMT|Azores Time|GMT-01:00
+Atlantic/Canary|Western European Standard Time|WET|Western European Summer Time|WEST|Western European Time|WET
+Atlantic/Faeroe|Western European Standard Time|WET|Western European Summer Time|WEST|Western European Time|WET
+Australia/Eucla|Australian Central Western Standard Time|GMT+08:45|Australian Central Western Daylight Time|GMT+09:45|Australian Central Western Time|GMT+08:45
+Australia/North|Australian Central Standard Time|ACST|Australian Central Daylight Time|ACDT|Australian Central Time|ACT
+Australia/Perth|Australian Western Standard Time|AWST|Australian Western Daylight Time|AWDT|Australian Western Time|AWT
+Australia/South|Australian Central Standard Time|ACST|Australian Central Daylight Time|ACDT|Australian Central Time|ACT
+Canada/Atlantic|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+Canada/Mountain|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+Europe/Belgrade|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Brussels|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Budapest|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Busingen|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Chisinau|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Guernsey|Greenwich Mean Time|GMT|British Summer Time|BST|Guernsey Time|GMT
+Europe/Helsinki|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Istanbul|Türkiye Standard Time|GMT+03:00|Türkiye Summer Time|GMT+04:00|Türkiye Time|GMT+03:00
+Europe/Sarajevo|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Tiraspol|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Uzhgorod|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Indian/Maldives|French Southern & Antarctic Time|GMT+05:00|Maldives Daylight Time|GMT+05:00|Maldives Time|GMT+05:00
+Pacific/Chatham|Chatham Standard Time|GMT+12:45|Chatham Daylight Time|GMT+13:45|Chatham Time|GMT+12:45
+Pacific/Fakaofo|Tokelau Time|GMT+13:00|Fakaofo Daylight Time|GMT+13:00|Fakaofo Time|GMT+13:00
+Pacific/Gambier|Gambier Time|GMT-09:00|Gambier Daylight Time|GMT-09:00|Gambier Time|GMT-09:00
+Pacific/Norfolk|Norfolk Island Standard Time|GMT+11:00|Norfolk Island Daylight Time|GMT+12:00|Norfolk Island Time|GMT+11:00
+Pacific/Pohnpei|Solomon Islands Time|GMT+11:00|Pohnpei Daylight Time|GMT+11:00|Pohnpei Time|GMT+11:00
+SystemV/AST4ADT|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+SystemV/CST6CDT|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+SystemV/EST5EDT|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+SystemV/MST7MDT|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+SystemV/PST8PDT|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+SystemV/YST9YDT|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+Africa/Bujumbura|Central Africa Time|CAT|Bujumbura Daylight Time|CAT|Bujumbura Time|CAT
+Africa/Mogadishu|East Africa Time|EAT|Mogadishu Daylight Time|EAT|Mogadishu Time|EAT
+America/Anguilla|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Asuncion|Paraguay Standard Time|GMT-03:00|Paraguay Summer Time|GMT-02:00|Paraguay Time|GMT-03:00
+America/Atikokan|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Barbados|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Dominica|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Edmonton|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Eirunepe|Acre Standard Time|GMT-05:00|Acre Summer Time|GMT-04:00|Acre Time|GMT-05:00
+America/Ensenada|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+America/Mazatlan|Mexican Pacific Standard Time|MST|Mexican Pacific Daylight Time|MDT|Mexican Pacific Time|MT
+America/Miquelon|St. Pierre & Miquelon Standard Time|GMT-03:00|St. Pierre & Miquelon Daylight Time|GMT-02:00|St. Pierre & Miquelon Time|GMT-03:00
+America/Montreal|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Resolute|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Santarem|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+America/Santiago|Chile Standard Time|GMT-04:00|Chile Summer Time|GMT-03:00|Chile Time|GMT-04:00
+America/Shiprock|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/St_Kitts|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/St_Lucia|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Winnipeg|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+Antarctica/Casey|Australian Western Standard Time|AWST|Australian Western Daylight Time|AWDT|Australian Western Time|AWT
+Antarctica/Davis|Davis Time|GMT+07:00|Davis Daylight Time|GMT+07:00|Davis Time|GMT+07:00
+Antarctica/Syowa|Syowa Time|GMT+03:00|Showa Station Daylight Time|GMT+03:00|Showa Station Time|GMT+03:00
+Antarctica/Troll|Greenwich Mean Time|GMT|Troll Station Daylight Time|GMT|Troll Station Time|GMT
+Asia/Ho_Chi_Minh|Indochina Time|GMT+07:00|Ho Chi Minh City Daylight Time|GMT+07:00|Ho Chi Minh City Time|GMT+07:00
+Asia/Krasnoyarsk|Krasnoyarsk Standard Time|GMT+07:00|Krasnoyarsk Summer Time|GMT+08:00|Krasnoyarsk Time|GMT+07:00
+Asia/Novosibirsk|Krasnoyarsk Standard Time|GMT+07:00|Krasnoyarsk Summer Time|GMT+08:00|Krasnoyarsk Time|GMT+07:00
+Asia/Ulaanbaatar|Ulaanbaatar Standard Time|GMT+08:00|Ulaanbaatar Summer Time|GMT+09:00|Ulaanbaatar Time|GMT+08:00
+Asia/Vladivostok|Vladivostok Standard Time|GMT+10:00|Vladivostok Summer Time|GMT+11:00|Vladivostok Time|GMT+10:00
+Atlantic/Bermuda|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+Atlantic/Madeira|Western European Standard Time|WET|Western European Summer Time|WEST|Western European Time|WET
+Atlantic/Stanley|Falkland Islands Standard Time|GMT-03:00|Falkland Islands Summer Time|GMT-02:00|Falkland Islands Time|GMT-03:00
+Australia/Currie|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/Darwin|Australian Central Standard Time|ACST|Australian Central Daylight Time|ACDT|Australian Central Time|ACT
+Australia/Hobart|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/Sydney|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Brazil/DeNoronha|Fernando de Noronha Standard Time|GMT-02:00|Fernando de Noronha Summer Time|GMT-01:00|Fernando de Noronha Time|GMT-02:00
+Europe/Amsterdam|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Astrakhan|Samara Standard Time|GMT+04:00|Samara Summer Time|GMT+05:00|Samara Time|GMT+04:00
+Europe/Gibraltar|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Ljubljana|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Mariehamn|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Europe/Podgorica|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Stockholm|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Ulyanovsk|Samara Standard Time|GMT+04:00|Samara Summer Time|GMT+05:00|Samara Time|GMT+04:00
+Europe/Volgograd|Moscow Standard Time|MSK|Moscow Summer Time|MSK|Moscow Time|MSK
+Indian/Christmas|Christmas Island Time|GMT+07:00|Christmas Island Daylight Time|GMT+07:00|Christmas Island Time|GMT+07:00
+Indian/Kerguelen|French Southern & Antarctic Time|GMT+05:00|Kerguelen Islands Daylight Time|GMT+05:00|Kerguelen Islands Time|GMT+05:00
+Indian/Mauritius|Mauritius Standard Time|GMT+04:00|Mauritius Summer Time|GMT+05:00|Mauritius Time|GMT+04:00
+Mexico/BajaNorte|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+Pacific/Auckland|New Zealand Standard Time|NZST|New Zealand Daylight Time|NZDT|New Zealand Time|NZT
+Pacific/Funafuti|Tuvalu Time|GMT+12:00|Funafuti Daylight Time|GMT+12:00|Funafuti Time|GMT+12:00
+Pacific/Johnston|Hawaii-Aleutian Standard Time|HST|Honolulu Daylight Time|HST|Honolulu Time|HST
+Pacific/Pitcairn|Pitcairn Time|GMT-08:00|Pitcairn Islands Daylight Time|GMT-08:00|Pitcairn Islands Time|GMT-08:00
+Africa/Libreville|West Africa Time|WAT|Libreville Daylight Time|WAT|Libreville Time|WAT
+Africa/Lubumbashi|Central Africa Time|CAT|Lubumbashi Daylight Time|CAT|Lubumbashi Time|CAT
+Africa/Nouakchott|Greenwich Mean Time|GMT|Nouakchott Daylight Time|GMT|Nouakchott Time|GMT
+Africa/Porto-Novo|West Africa Time|WAT|Porto-Novo Daylight Time|WAT|Porto-Novo Time|WAT
+America/Araguaina|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+America/Boa_Vista|Amazon Standard Time|GMT-04:00|Amazon Summer Time|GMT-03:00|Amazon Time|GMT-04:00
+America/Catamarca|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Chihuahua|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Fortaleza|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+America/Glace_Bay|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Goose_Bay|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Guatemala|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Guayaquil|Ecuador Time|GMT-05:00|Guayaquil Daylight Time|GMT-04:00|Guayaquil Time|GMT-05:00
+America/Matamoros|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Menominee|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Monterrey|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Sao_Paulo|Brasilia Standard Time|GMT-03:00|Brasilia Summer Time|GMT-02:00|Brasilia Time|GMT-03:00
+America/St_Thomas|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Vancouver|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+Antarctica/Mawson|Mawson Time|GMT+05:00|Mawson Station Daylight Time|GMT+05:00|Mawson Station Time|GMT+05:00
+Antarctica/Vostok|Vostok Time|GMT+05:00|Vostok Station Daylight Time|GMT+05:00|Vostok Station Time|GMT+05:00
+Asia/Kuala_Lumpur|Malaysia Time|GMT+08:00|Kuala Lumpur Daylight Time|GMT+08:20|Kuala Lumpur Time|GMT+08:00
+Asia/Novokuznetsk|Krasnoyarsk Standard Time|GMT+07:00|Krasnoyarsk Summer Time|GMT+08:00|Krasnoyarsk Time|GMT+07:00
+Chile/Continental|Chile Standard Time|GMT-04:00|Chile Summer Time|GMT-03:00|Chile Time|GMT-04:00
+Europe/Bratislava|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Copenhagen|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Luxembourg|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/San_Marino|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Europe/Simferopol|Moscow Standard Time|MSK|Moscow Summer Time|MSK|Moscow Time|MSK
+Europe/Zaporozhye|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Pacific/Enderbury|Phoenix Islands Time|GMT+13:00|Canton Island Daylight Time|GMT+13:00|Canton Island Time|GMT+13:00
+Pacific/Galapagos|Galapagos Time|GMT-06:00|Galápagos Islands Daylight Time|GMT-05:00|Galápagos Islands Time|GMT-06:00
+Pacific/Kwajalein|Marshall Islands Time|GMT+12:00|Kwajalein Atoll Daylight Time|GMT+12:00|Kwajalein Atoll Time|GMT+12:00
+Pacific/Marquesas|Marquesas Time|GMT-09:30|Marquesas Islands Daylight Time|GMT-09:30|Marquesas Islands Time|GMT-09:30
+Pacific/Pago_Pago|American Samoa Standard Time|SST|American Samoa Daylight Time|SST|American Samoa Time|SST
+Pacific/Rarotonga|Cook Islands Standard Time|GMT-10:00|Cook Islands Summer Time|GMT-09:30|Cook Islands Time|GMT-10:00
+Pacific/Tongatapu|Tonga Standard Time|GMT+13:00|Tonga Summer Time|GMT+14:00|Tonga Time|GMT+13:00
+US/Indiana-Starke|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+Africa/Addis_Ababa|East Africa Time|EAT|Addis Ababa Daylight Time|EAT|Addis Ababa Time|EAT
+Africa/Brazzaville|West Africa Time|WAT|Brazzaville Daylight Time|WAT|Brazzaville Time|WAT
+Africa/Ouagadougou|Greenwich Mean Time|GMT|Ouagadougou Daylight Time|GMT|Ouagadougou Time|GMT
+America/Costa_Rica|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Grand_Turk|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Guadeloupe|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Hermosillo|Mexican Pacific Standard Time|MST|Mexican Pacific Daylight Time|MDT|Mexican Pacific Time|MT
+America/Kralendijk|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Louisville|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Martinique|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Metlakatla|Alaska Standard Time|AKST|Alaska Daylight Time|AKDT|Alaska Time|AKT
+America/Montevideo|Uruguay Standard Time|GMT-03:00|Uruguay Summer Time|GMT-02:00|Uruguay Time|GMT-03:00
+America/Montserrat|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Paramaribo|Suriname Time|GMT-03:00|Paramaribo Daylight Time|GMT-03:00|Paramaribo Time|GMT-03:00
+America/Porto_Acre|Acre Standard Time|GMT-05:00|Acre Summer Time|GMT-04:00|Acre Time|GMT-05:00
+America/Rio_Branco|Acre Standard Time|GMT-05:00|Acre Summer Time|GMT-04:00|Acre Time|GMT-05:00
+America/St_Vincent|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Whitehorse|Yukon Time|MST|Whitehorse Daylight Time|MST|Whitehorse Time|MST
+Antarctica/McMurdo|New Zealand Standard Time|NZST|New Zealand Daylight Time|NZDT|New Zealand Time|NZT
+Antarctica/Rothera|Rothera Time|GMT-03:00|Rothera Station Daylight Time|GMT-03:00|Rothera Station Time|GMT-03:00
+Asia/Srednekolymsk|Magadan Standard Time|GMT+11:00|Magadan Summer Time|GMT+12:00|Magadan Time|GMT+11:00
+Asia/Ujung_Pandang|Central Indonesia Time|WITA|Makassar Daylight Time|WITA|Makassar Time|WITA
+Asia/Yekaterinburg|Yekaterinburg Standard Time|GMT+05:00|Yekaterinburg Summer Time|GMT+06:00|Yekaterinburg Time|GMT+05:00
+Atlantic/Jan_Mayen|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Atlantic/Reykjavik|Greenwich Mean Time|GMT|Reykjavik Daylight Time|GMT|Reykjavik Time|GMT
+Atlantic/St_Helena|Greenwich Mean Time|GMT|St. Helena Daylight Time|GMT|St. Helena Time|GMT
+Australia/Adelaide|Australian Central Standard Time|ACST|Australian Central Daylight Time|ACDT|Australian Central Time|ACT
+Australia/Brisbane|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/Canberra|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/Lindeman|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/Tasmania|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/Victoria|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Chile/EasterIsland|Easter Island Standard Time|GMT-06:00|Easter Island Summer Time|GMT-05:00|Easter Island Time|GMT-06:00
+Europe/Isle_of_Man|Greenwich Mean Time|GMT|British Summer Time|BST|Isle of Man Time|GMT
+Europe/Kaliningrad|Eastern European Standard Time|EET|Eastern European Summer Time|EEST|Eastern European Time|EET
+Pacific/Kiritimati|Line Islands Time|GMT+14:00|Kiritimati Daylight Time|GMT+14:00|Kiritimati Time|GMT+14:00
+Africa/Johannesburg|South Africa Standard Time|SAST|Johannesburg Daylight Time|SAST|Johannesburg Time|SAST
+America/El_Salvador|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Fort_Nelson|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Mexico_City|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Pangnirtung|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Porto_Velho|Amazon Standard Time|GMT-04:00|Amazon Summer Time|GMT-03:00|Amazon Time|GMT-04:00
+America/Puerto_Rico|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Rainy_River|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Tegucigalpa|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Thunder_Bay|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Yellowknife|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+Arctic/Longyearbyen|Central European Standard Time|CET|Central European Summer Time|CEST|Central European Time|CET
+Atlantic/Cape_Verde|Cape Verde Standard Time|GMT-01:00|Cape Verde Summer Time|GMT|Cape Verde Time|GMT-01:00
+Australia/Lord_Howe|Lord Howe Standard Time|GMT+10:30|Lord Howe Daylight Time|GMT+11:00|Lord Howe Time|GMT+10:30
+Australia/Melbourne|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Canada/Newfoundland|Newfoundland Standard Time|NST|Newfoundland Daylight Time|NDT|Newfoundland Time|NT
+Canada/Saskatchewan|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+Indian/Antananarivo|East Africa Time|EAT|Antananarivo Daylight Time|EAT|Antananarivo Time|EAT
+Pacific/Guadalcanal|Solomon Islands Time|GMT+11:00|Guadalcanal Daylight Time|GMT+11:00|Guadalcanal Time|GMT+11:00
+Africa/Dar_es_Salaam|East Africa Time|EAT|Dar es Salaam Daylight Time|EAT|Dar es Salaam Time|EAT
+America/Blanc-Sablon|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Buenos_Aires|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Campo_Grande|Amazon Standard Time|GMT-04:00|Amazon Summer Time|GMT-03:00|Amazon Time|GMT-04:00
+America/Danmarkshavn|Greenwich Mean Time|GMT|Danmarkshavn Daylight Time|GMT|Danmarkshavn Time|GMT
+America/Dawson_Creek|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Indiana/Knox|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Rankin_Inlet|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Santa_Isabel|Pacific Standard Time|PST|Pacific Daylight Time|PDT|Pacific Time|PT
+America/Scoresbysund|Greenland Standard Time|GMT-02:00|Greenland Summer Time|GMT-01:00|Greenland Time|GMT-02:00
+Antarctica/Macquarie|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/Queensland|Australian Eastern Standard Time|AEST|Australian Eastern Daylight Time|AEDT|Australian Eastern Time|AET
+Australia/Yancowinna|Australian Central Standard Time|ACST|Australian Central Daylight Time|ACDT|Australian Central Time|ACT
+Pacific/Port_Moresby|Dumont d’Urville Time|GMT+10:00|Port Moresby Daylight Time|GMT+10:00|Port Moresby Time|GMT+10:00
+America/Cambridge_Bay|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Ciudad_Juarez|Mountain Standard Time|MST|Mountain Daylight Time|MDT|Mountain Time|MT
+America/Coral_Harbour|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Indiana/Vevay|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Lower_Princes|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Port_of_Spain|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Santo_Domingo|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/St_Barthelemy|Atlantic Standard Time|AST|Atlantic Daylight Time|ADT|Atlantic Time|AT
+America/Swift_Current|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+Antarctica/South_Pole|New Zealand Standard Time|NZST|New Zealand Daylight Time|NZDT|New Zealand Time|NZT
+Australia/Broken_Hill|Australian Central Standard Time|ACST|Australian Central Daylight Time|ACDT|Australian Central Time|ACT
+America/Bahia_Banderas|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Port-au-Prince|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+Atlantic/South_Georgia|South Georgia Time|GMT-02:00|South Georgia Daylight Time|GMT-02:00|South Georgia Time|GMT-02:00
+America/Argentina/Jujuy|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Argentina/Salta|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Indiana/Marengo|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Indiana/Winamac|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Argentina/Cordoba|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Argentina/Mendoza|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Argentina/Tucuman|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Argentina/Ushuaia|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Indiana/Tell_City|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Indiana/Vincennes|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+Antarctica/DumontDUrville|Dumont d’Urville Time|GMT+10:00|Dumont d’Urville Station Daylight Time|GMT+10:00|Dumont d’Urville Station Time|GMT+10:00
+America/Argentina/La_Rioja|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Argentina/San_Juan|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Argentina/San_Luis|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Indiana/Petersburg|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Argentina/Catamarca|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Kentucky/Louisville|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Kentucky/Monticello|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/North_Dakota/Beulah|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/North_Dakota/Center|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+America/Indiana/Indianapolis|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+America/Argentina/Buenos_Aires|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Argentina/Rio_Gallegos|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/North_Dakota/New_Salem|Central Standard Time|CST|Central Daylight Time|CDT|Central Time|CT
+Africa/Casablanca|Casablanca Standard Time|GMT|Casablanca Daylight Time|GMT+01:00|Casablanca Time|GMT
+Etc/GMT+1|GMT-01:00|GMT-01:00|GMT-01:00|GMT-01:00|GMT-01:00|GMT-01:00
+Etc/GMT+2|GMT-02:00|GMT-02:00|GMT-02:00|GMT-02:00|GMT-02:00|GMT-02:00
+Etc/GMT+3|GMT-03:00|GMT-03:00|GMT-03:00|GMT-03:00|GMT-03:00|GMT-03:00
+Etc/GMT+4|GMT-04:00|GMT-04:00|GMT-04:00|GMT-04:00|GMT-04:00|GMT-04:00
+Etc/GMT+5|GMT-05:00|GMT-05:00|GMT-05:00|GMT-05:00|GMT-05:00|GMT-05:00
+Etc/GMT+6|GMT-06:00|GMT-06:00|GMT-06:00|GMT-06:00|GMT-06:00|GMT-06:00
+Etc/GMT+7|GMT-07:00|GMT-07:00|GMT-07:00|GMT-07:00|GMT-07:00|GMT-07:00
+Etc/GMT+8|GMT-08:00|GMT-08:00|GMT-08:00|GMT-08:00|GMT-08:00|GMT-08:00
+Etc/GMT+9|GMT-09:00|GMT-09:00|GMT-09:00|GMT-09:00|GMT-09:00|GMT-09:00
+Etc/GMT-1|GMT+01:00|GMT+01:00|GMT+01:00|GMT+01:00|GMT+01:00|GMT+01:00
+Etc/GMT-2|GMT+02:00|GMT+02:00|GMT+02:00|GMT+02:00|GMT+02:00|GMT+02:00
+Etc/GMT-3|GMT+03:00|GMT+03:00|GMT+03:00|GMT+03:00|GMT+03:00|GMT+03:00
+Etc/GMT-4|GMT+04:00|GMT+04:00|GMT+04:00|GMT+04:00|GMT+04:00|GMT+04:00
+Etc/GMT-5|GMT+05:00|GMT+05:00|GMT+05:00|GMT+05:00|GMT+05:00|GMT+05:00
+Etc/GMT-6|GMT+06:00|GMT+06:00|GMT+06:00|GMT+06:00|GMT+06:00|GMT+06:00
+Etc/GMT-7|GMT+07:00|GMT+07:00|GMT+07:00|GMT+07:00|GMT+07:00|GMT+07:00
+Etc/GMT-8|GMT+08:00|GMT+08:00|GMT+08:00|GMT+08:00|GMT+08:00|GMT+08:00
+Etc/GMT-9|GMT+09:00|GMT+09:00|GMT+09:00|GMT+09:00|GMT+09:00|GMT+09:00
+Asia/Amman|Amman Standard Time|GMT+03:00|Amman Daylight Time|GMT+04:00|Amman Time|GMT+03:00
+Etc/GMT+10|GMT-10:00|GMT-10:00|GMT-10:00|GMT-10:00|GMT-10:00|GMT-10:00
+Etc/GMT+11|GMT-11:00|GMT-11:00|GMT-11:00|GMT-11:00|GMT-11:00|GMT-11:00
+Etc/GMT+12|GMT-12:00|GMT-12:00|GMT-12:00|GMT-12:00|GMT-12:00|GMT-12:00
+Etc/GMT-10|GMT+10:00|GMT+10:00|GMT+10:00|GMT+10:00|GMT+10:00|GMT+10:00
+Etc/GMT-11|GMT+11:00|GMT+11:00|GMT+11:00|GMT+11:00|GMT+11:00|GMT+11:00
+Etc/GMT-12|GMT+12:00|GMT+12:00|GMT+12:00|GMT+12:00|GMT+12:00|GMT+12:00
+Etc/GMT-13|GMT+13:00|GMT+13:00|GMT+13:00|GMT+13:00|GMT+13:00|GMT+13:00
+Etc/GMT-14|GMT+14:00|GMT+14:00|GMT+14:00|GMT+14:00|GMT+14:00|GMT+14:00
+Asia/Damascus|Damascus Standard Time|GMT+03:00|Damascus Daylight Time|GMT+04:00|Damascus Time|GMT+03:00
+Africa/El_Aaiun|El Aaiún Standard Time|GMT|El Aaiún Daylight Time|GMT+01:00|El Aaiún Time|GMT
+America/Coyhaique|Coyhaique Standard Time|GMT-03:00|Coyhaique Daylight Time|GMT-02:00|Coyhaique Time|GMT-03:00
+Antarctica/Palmer|Palmer Land Standard Time|GMT-03:00|Palmer Land Daylight Time|GMT-02:00|Palmer Land Time|GMT-03:00
+America/Punta_Arenas|Punta Arenas Standard Time|GMT-03:00|Punta Arenas Daylight Time|GMT-02:00|Punta Arenas Time|GMT-03:00
+Pacific/Bougainville|Bougainville Standard Time|GMT+11:00|Bougainville Daylight Time|GMT+11:00|Bougainville Time|GMT+11:00
+Asia/Kashgar|Ürümqi Standard Time|GMT+06:00|Ürümqi Daylight Time|GMT+06:00|Ürümqi Time|GMT+06:00
+America/Fort_Wayne|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+US/East-Indiana|Eastern Standard Time|EST|Eastern Daylight Time|EDT|Eastern Time|ET
+Asia/Urumqi|Ürümqi Standard Time|GMT+06:00|Ürümqi Daylight Time|GMT+06:00|Ürümqi Time|GMT+06:00
+America/Argentina/ComodRivadavia|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00
+America/Rosario|Argentina Standard Time|GMT-03:00|Argentina Summer Time|GMT-02:00|Argentina Time|GMT-03:00

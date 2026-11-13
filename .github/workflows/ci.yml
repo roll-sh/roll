@@ -38,6 +38,9 @@ jobs:
           # Secrets: values bound to their row, references, .env, token scopes.
           - name: secrets
             packages: -p roll-secrets
+          # roll search's segment format (doc values, points, postings, live docs) and analysis.
+          - name: search
+            packages: -p search-codec -p search-analysis
     name: rust (${{ matrix.name }})
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only

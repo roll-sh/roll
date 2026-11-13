@@ -1,0 +1,1764 @@
+List l=[1,2,3]; List s=l.subList(0,2); l.set(0,9); return s
+----
+List l=[1,2,3,4]; List s=l.subList(1,3); s.set(0, 'x'); l[3] = 'y'; return [l, s, s.size(), s.indexOf('x')]
+----
+List l=[1,2,3]; List s=l.subList(0,2); l.add(5); return s.size()
+----
+Map m = ['a':1, 'b':2]; Set k = m.keySet(); m.put('c', 3); return [k, k.size(), m.values(), m.entrySet()]
+----
+Map m = ['a':1, 'b':2]; for (def e : m.entrySet()) { e.setValue(e.getValue() * 10) } return m
+----
+Map m = ['a':1, 'b':2]; m.keySet().remove('a'); m.values().remove(2); return m
+----
+Map m = new HashMap(); m.computeIfAbsent('x', k -> []).add(1); m.computeIfAbsent('x', k -> []).add(2); return m
+----
+Map m = ['a':1]; m.merge('a', 5, (x, y) -> x + y); m.merge('b', 5, (x, y) -> x + y); return m
+----
+Map m = ['a':1, 'b':null]; return [m.getOrDefault('b', 7), m.getOrDefault('c', 7), m.containsKey('b'), m.get('b')]
+----
+String s = 'Hello, World'; return [s.toUpperCase(), s.substring(7), s.indexOf('o'), s.lastIndexOf('o'), s.replace('l', 'L'), s.charAt(4), s.chars().count(), s.isEmpty(), s.split(',\\s*')]
+----
+String s = '  a b  '; return [s.trim(), s.strip(), s.stripLeading(), s.stripTrailing(), s.isBlank(), s.length()]
+----
+return 'a,b,,c,'.splitOnToken(',')
+----
+return 'a,b,,c,'.splitOnToken(',', 2)
+----
+return 'a,b,,c,'.split(',')
+----
+return String.format('%05d|%-6s|%.3f|%x|%,d|%e', 42, 'ab', Math.PI, 255, 1234567, 12345.678)
+----
+return String.format('%s %S %b %c %%', null, 'abc', null, 65)
+----
+return String.join('-', ['a', 'b', 'c'])
+----
+return 'abc'.repeat(3) + 'x'.compareTo('y') + 'B'.compareToIgnoreCase('a')
+----
+StringBuilder sb = new StringBuilder(); for (int i = 0; i < 5; i++) { sb.append(i).append(',') } sb.setLength(sb.length() - 1); return sb.reverse().toString()
+----
+StringBuilder sb = new StringBuilder('hello'); sb.insert(0, 'X').deleteCharAt(1).replace(0, 1, 'YY'); return [sb, sb.indexOf('l'), sb.charAt(2)]
+----
+char c = 'a'; c += 1; int i = c + 1; return [c, i, (char) i, Character.isLetter(c), Character.toUpperCase(c), Character.getNumericValue('7')]
+----
+int x = Integer.MAX_VALUE; x++; long y = Long.MIN_VALUE; y--; return [x, y, Integer.MAX_VALUE + 1L, (byte) 200, (short) 70000, (int) 3.99, (int) -3.99, (long) 1e20, (int) Double.NaN]
+----
+return [7 / 2, -7 / 2, 7 % -3, -7 % 3, 7.0 / 2, 1 / 0.0, -1 / 0.0, 0.0 / 0.0, 5 >> 1, -5 >> 1, -5 >>> 28, 1 << 33, 1L << 33]
+----
+return [Math.round(2.5), Math.round(-2.5), Math.round(2.4f), Math.floor(-1.1), Math.ceil(-1.1), Math.abs(Integer.MIN_VALUE), Math.floorDiv(-7, 2), Math.floorMod(-7, 2), Math.hypot(3, 4), Math.cbrt(27), Math.signum(-2.0)]
+----
+return [Math.max(1, 2L), Math.min(1.5f, 2), Math.pow(2, 10), Math.sqrt(-1), Math.log10(1000), Math.log(Math.E), Math.exp(0), Math.toDegrees(Math.PI), Math.atan2(1, 1)]
+----
+return [Integer.parseInt('-42'), Long.parseLong('9007199254740993'), Double.parseDouble('1e-3'), Float.parseFloat('3.4028236e38'), Integer.valueOf(127) == Integer.valueOf(127), Integer.toHexString(-1), Integer.toBinaryString(10), Long.toString(255, 16)]
+----
+return Integer.parseInt('abc')
+----
+return Integer.parseInt('')
+----
+return Double.parseDouble('x1')
+----
+return Integer.parseInt(null)
+----
+return [Integer.compare(3, 5), Long.signum(-9L), Integer.bitCount(255), Integer.reverse(1), Long.numberOfTrailingZeros(8), Integer.highestOneBit(100), Double.compare(0.0, -0.0), Double.isNaN(0.0/0.0), Double.MIN_VALUE, Float.MAX_VALUE]
+----
+def x = 5; def y = 2.5; def z = '3'; return [x + y, x * y, x / 2, z + x, x + z, x == 5L, x === 5, y > x]
+----
+def a = [1, 2]; def b = ['k': 'v']; return [a instanceof List, b instanceof Map, a instanceof Collection, 'x' instanceof CharSequence, 5 instanceof Number, null instanceof Object]
+----
+def m = null; return [m?.foo, m?.size(), m ?: 'default', m?.a?.b]
+----
+Map m = ['a': ['b': 1]]; return [m.a.b, m['a']['b'], m.a?.c, m?.x?.y]
+----
+def list = [3, 1, 2]; list.sort((a, b) -> b - a); return list
+----
+List l = ['banana', 'Apple', 'cherry']; l.sort(Comparator.comparing(s -> s.toLowerCase())); return l
+----
+List l = ['bb', 'a', 'ccc', 'dd']; l.sort(Comparator.comparing(String::length).thenComparing(Comparator.reverseOrder())); return l
+----
+List l = [5, 3, 8]; Collections.sort(l); Collections.reverse(l); return [l, Collections.max(l), Collections.min(l), Collections.frequency(l, 3)]
+----
+List l = [1, 2, 3, 4, 5, 6]; return l.stream().filter(x -> x % 2 == 0).map(x -> x * x).collect(Collectors.toList())
+----
+List l = ['a', 'bb', 'cc', 'ddd']; return l.stream().collect(Collectors.groupingBy(s -> s.length(), Collectors.counting()))
+----
+List l = ['a', 'bb', 'cc', 'ddd']; return l.stream().collect(Collectors.groupingBy(String::length, TreeMap::new, Collectors.toList()))
+----
+List l = [1, 2, 3]; return [l.stream().mapToInt(x -> x).sum(), l.stream().mapToDouble(x -> x).average().getAsDouble(), l.stream().reduce(0, (a, b) -> a + b), l.stream().anyMatch(x -> x > 2)]
+----
+return [1, 2, 3, 4].stream().map(Object::toString).collect(Collectors.joining(', ', '[', ']'))
+----
+return IntStream.range(0, 5).mapToObj(i -> 'x' + i).collect(Collectors.toList())
+----
+return ['b', 'a', 'c', 'a'].stream().distinct().sorted().collect(Collectors.toList())
+----
+return [[1, 2], [3], []].stream().flatMap(l -> l.stream()).collect(Collectors.toList())
+----
+return [1, 2, 3, 4, 5].stream().skip(1).limit(3).collect(Collectors.toSet())
+----
+Optional o = [1, 2, 3].stream().filter(x -> x > 5).findFirst(); return [o.isPresent(), o.orElse(-1), o.map(x -> x * 2).orElse(0)]
+----
+return Optional.ofNullable(null).orElseGet(() -> 'gen')
+----
+return Optional.empty().get()
+----
+return Optional.of(null)
+----
+int[] a = new int[] {5, 2, 9}; Arrays.sort(a); return [a.length, a[0], Arrays.toString(a), Arrays.stream(a).sum()]
+----
+int[][] g = new int[3][4]; g[1][2] = 7; return [g.length, g[0].length, g[1][2], Arrays.deepToString(g)]
+----
+String[] s = new String[2]; return [s[0], s.length]
+----
+int[] a = new int[2]; return a[2]
+----
+int[] a = new int[-1]; return a
+----
+List l = [1]; return l[3]
+----
+List l = [1]; return l.get(-1)
+----
+Map m = [:]; return m.get('a').length()
+----
+String s = null; return s.length()
+----
+def x = 'abc'; return x.foo()
+----
+def x = 'abc'; return (int) x
+----
+Object o = 'abc'; return (Integer) o
+----
+return (List) ['a': 1]
+----
+int i = 1; long l = i; double d = l; float f = (float) d; return [i, l, d, f]
+----
+def l = 1L; int i = l; return i
+----
+long l = 1; int i = (int) l; Integer boxed = i; Long lb = l; return [i, boxed, lb, boxed.equals(1), lb.equals(1), lb.equals(1L)]
+----
+Integer a = 1000; Integer b = 1000; return [a == b, a.equals(b), a === b]
+----
+return [10 == 10.0, 'a' == 'a', 1 == 1L, (Object) 1 == (Object) 1L]
+----
+int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } return fib(20)
+----
+def apply(def f, def x) { return f.apply(x) } return apply(x -> x * 3, 7)
+----
+int count = 0; for (int i = 0; i < 10; i++) { if (i == 3) continue; if (i == 7) break; count += i } return count
+----
+int i = 0; do { i += 3 } while (i < 10); return i
+----
+int i = 0; while (true) { if (++i > 5) break; } return i
+----
+int s = 0; for (int i = 0, j = 10; i < j; i++, j--) { s += j - i } return s
+----
+try { throw new IllegalArgumentException('bad') } catch (IllegalArgumentException e) { return 'caught ' + e.getMessage() }
+----
+try { return 1 / 0 } catch (ArithmeticException e) { return e.getMessage() }
+----
+try { List l = []; l.get(0) } catch (IndexOutOfBoundsException e) { return e.getMessage() }
+----
+try { Object o = 'x'; Integer i = (Integer) o } catch (ClassCastException e) { return e.getMessage() }
+----
+try { def x = null; x.foo() } catch (NullPointerException e) { return e.getMessage() }
+----
+throw new IllegalStateException('custom state')
+----
+throw new RuntimeException()
+----
+return Pattern.compile('(\\d+)-(\\d+)').matcher('10-20').matches()
+----
+Matcher m = /(\w+)@(\w+)\.com/.matcher('joe@example.com'); if (m.matches()) { return [m.group(1), m.group(2), m.groupCount()] } return null
+----
+Matcher m = /\d+/.matcher('a1b22c333'); List out = []; while (m.find()) { out.add(m.group()) } return out
+----
+return ['abc' ==~ /a.c/, 'xabcx' ==~ /a.c/, 'xabcx' =~ /a.c/, /A/i.matcher('a').matches()]
+----
+return /[aeiou]/.matcher('hello world').replaceAll('*')
+----
+return 'hello world'.replaceAll(/o/, m -> m.group().toUpperCase())
+----
+return /,/.split('a,b,c')
+----
+Matcher m = /(?<year>\d{4})-(?<month>\d{2})/.matcher('2023-07'); m.find(); return [m.group('year'), m.namedGroup('month'), m.start(), m.end()]
+----
+ZonedDateTime z = ZonedDateTime.parse('2021-03-04T05:06:07Z'); return [z.getYear(), z.getMonthValue(), z.getDayOfMonth(), z.getHour(), z.getDayOfWeek(), z.getDayOfYear(), z.plusDays(30), z.minusHours(10)]
+----
+ZonedDateTime z = ZonedDateTime.of(2021, 1, 31, 10, 0, 0, 0, ZoneId.of('Europe/Paris')); return [z.plusMonths(1), z.withZoneSameInstant(ZoneId.of('UTC')), z.toInstant().toEpochMilli(), z.toLocalDate(), z.getOffset()]
+----
+ZonedDateTime a = ZonedDateTime.parse('2021-01-01T00:00:00Z'); ZonedDateTime b = ZonedDateTime.parse('2021-03-15T12:30:00Z'); return [ChronoUnit.DAYS.between(a, b), ChronoUnit.HOURS.between(a, b), Duration.between(a, b), Period.between(a.toLocalDate(), b.toLocalDate()), a.isBefore(b)]
+----
+Instant i = Instant.ofEpochMilli(1600000000123L); return [i, i.getEpochSecond(), i.getNano(), i.plusSeconds(60), i.truncatedTo(ChronoUnit.HOURS), ZonedDateTime.ofInstant(i, ZoneId.of('America/New_York'))]
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('yyyy/MM/dd HH:mm:ss'); return [f.format(ZonedDateTime.parse('2021-03-04T05:06:07Z')), LocalDateTime.parse('2021/03/04 05:06:07', f)]
+----
+DateTimeFormatter f = DateTimeFormatter.ofPattern('EEEE, MMMM d, yyyy', Locale.ENGLISH); return f.format(LocalDate.of(2024, 2, 29))
+----
+return [DateTimeFormatter.ISO_LOCAL_DATE.format(LocalDate.of(2020, 5, 6)), DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochSecond(0)), DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(ZonedDateTime.parse('2021-03-04T05:06:07+02:00'))]
+----
+return LocalDate.parse('2021-02-30')
+----
+return ZonedDateTime.parse('not a date')
+----
+return [LocalDate.of(2020, 2, 29).plusYears(1), LocalDate.of(2021, 1, 31).plusMonths(1), LocalDate.of(2021, 12, 31).getDayOfWeek().getValue(), LocalDate.of(2021, 1, 1).lengthOfMonth(), LocalDate.of(2020, 1, 1).isLeapYear()]
+----
+ZonedDateTime z = ZonedDateTime.parse('2021-03-04T05:06:07.123456789Z'); return [z.truncatedTo(ChronoUnit.DAYS), z.withNano(0), z.with(TemporalAdjusters.firstDayOfMonth()), z.with(TemporalAdjusters.next(DayOfWeek.MONDAY)), z.getNano()]
+----
+return [Duration.ofMinutes(90), Duration.ofSeconds(3661).toHours(), Duration.parse('PT1H30M').toMinutes(), Duration.ofMillis(1500).getSeconds(), Duration.ofDays(1).plusHours(2)]
+----
+return [ZoneId.of('Europe/Berlin').getRules().getOffset(Instant.parse('2021-07-01T00:00:00Z')), ZoneOffset.ofHours(-5), ZoneOffset.of('+05:30').getTotalSeconds()]
+----
+return ZoneId.of('Mars/Base')
+----
+return [Objects.equals(null, null), Objects.hash(1, 'a'), Objects.isNull(null), Objects.requireNonNullElse(null, 'd'), Objects.toString(null, 'n')]
+----
+return Objects.requireNonNull(null, 'must not be null')
+----
+Set s = new HashSet(); s.add(3); s.add(1); s.add(3); Set t = new TreeSet(['c', 'a', 'b']); return [s, s.size(), t, s.contains(1), t.first()]
+----
+Set a = new HashSet([1, 2, 3]); Set b = new HashSet([2, 3, 4]); a.retainAll(b); return a
+----
+List l = new ArrayList(); l.addAll([1, 2, 3]); l.removeIf(x -> x == 2); l.add(0, 9); l.remove((Object) 3); return l
+----
+List l = [1, 2, 3]; l.remove(0); return l
+----
+List l = [1, 2, 3]; Iterator it = l.iterator(); while (it.hasNext()) { if (it.next() == 2) it.remove() } return l
+----
+List l = [1, 2, 3]; for (def x : l) { if (x == 2) l.remove(x) } return l
+----
+List l = [1, 2, 3]; for (def x : l) { if (x == 1) l.add(4) } return l
+----
+List l = [3, 1, 2]; return [l.contains(2), l.indexOf(5), l.isEmpty(), l.toString(), l.equals([3, 1, 2]), l.hashCode()]
+----
+List l = Collections.unmodifiableList([1, 2]); l.add(3); return l
+----
+List l = List.of(1, 2); l.add(3); return l
+----
+Map m = Map.of('a', 1); m.put('b', 2); return m
+----
+return [List.of(1, 2, 3), Map.of('k', 'v'), Set.of(1), Arrays.asList(1, 2), Collections.emptyList(), Collections.singletonMap('a', 1)]
+----
+return List.of(1, null)
+----
+Map m = new LinkedHashMap(); m.c = 3; m.a = 1; m.b = 2; return [m, m.keySet().iterator().next()]
+----
+Map m = new TreeMap(['b': 2, 'a': 1, 'c': 3]); return [m, m.firstKey(), m.headMap('b'), m.tailMap('b'), m.subMap('a', 'c'), m.descendingMap()]
+----
+Map counts = [:]; for (String w : 'the quick the lazy the end'.split(' ')) { counts[w] = counts.getOrDefault(w, 0) + 1 } return counts
+----
+def total = 0; for (def e : ['a': 1, 'b': 2].entrySet()) { total += e.value } return total
+----
+Map m = ['x': 1]; m.each = 5; return m
+----
+def m = ['x': [1, 2, 3]]; m.x.add(4); m['y'] = m.x.size(); return m
+----
+return [1, 2, 3].stream().map(x -> x + 0.5).max(Double::compare).get()
+----
+List people = [['name':'a','age':30], ['name':'b','age':20]]; people.sort((p1, p2) -> p1.age - p2.age); return people.stream().map(p -> p.name).collect(Collectors.toList())
+----
+return [Base64.getEncoder().encodeToString('hello'.getBytes()), new String(Base64.getDecoder().decode('aGVsbG8='))]
+----
+return ['héllo'.getBytes('UTF-8').length, 'abc'.getBytes().length, new String('abc'.getBytes(), 'UTF-8')]
+----
+return UUID.nameUUIDFromBytes('abc'.getBytes()).toString()
+----
+return [Boolean.parseBoolean('TRUE'), Boolean.parseBoolean('yes'), Boolean.valueOf(true) && false, true ^ true, !false]
+----
+boolean b = 1 < 2 && 'a' != null || false; return b ? 'yes' : 'no'
+----
+int x = 5; x += 3.7; return x
+----
+int x = 5; x /= 2; x *= 3; x -= 1; x %= 4; x <<= 3; x |= 1; x &= 13; x ^= 6; x >>= 1; return x
+----
+String s = 'a'; s += 1; s += 2.5; s += null; s += 'c'; return s
+----
+def s = 'x'; s *= 2; return s
+----
+long t = 0; for (int i = 0; i < 1000; ++i) { t += i * (long) i } return t
+----
+double d = 0.1 + 0.2; return [d, (float) d, d == 0.3, Math.abs(d - 0.3) < 1e-9, 1.0f / 3, 100.0, 1e7, 1.0e-5, 123456789.0f]
+----
+return [Double.toString(1e21), Double.toString(1e-7), String.valueOf(0.001), Float.toString(1.1f), 1e16, -0.0, Double.valueOf('1.0E10')]
+----
+return [(int) 'a', (char) 98, 'a' + 1, (char) ('a' + 1), 'ab'.charAt(0) == (char) 'a']
+----
+char c = 'ab'
+----
+return ['Smith, John'.indexOf(', '), 'abc'.contains('bc'), 'abc'.startsWith('ab'), 'abc'.endsWith('bc'), 'aBc'.equalsIgnoreCase('ABC'), 'a-b-c'.replace('-', ''), 'abc'.matches('[a-c]+')]
+----
+return 'x'.substring(2)
+----
+return 'abc'.charAt(5)
+----
+String s = 'Line1\nLine2\r\nLine3'; return [s.lines().count(), s.split('\\R').length, s.toLowerCase(Locale.ROOT)]
+----
+return [Math.random() < 1.0, new Random(42).nextInt(100), new Random(42).nextDouble()]
+----
+def nums = [1, 2, 3]; def sq = nums.collect(x -> x * x); return sq
+----
+return [1, 2, 3].findAll(x -> x > 1)
+----
+return [[1, 2, 3].find(x -> x > 1), [1, 2, 3].any(x -> x > 2), [1, 2, 3].every(x -> x > 0), [1, 2, 3].sum(), [1, 2, 3].sum(x -> x * 2)]
+----
+return [3, 1, 2].join('|') + ['a': 1].toString()
+----
+return ['a', 'b', 'c'].groupBy(x -> x == 'a')
+----
+return ['a', 'b'].findResults(x -> x == 'a' ? null : x + '!')
+----
+return [1, 2, 3, 4].split(x -> x % 2 == 0)
+----
+return ['k1': 1, 'k2': 2].collect((k, v) -> k + '=' + v)
+----
+return ['k1': 1, 'k2': 2].findAll((k, v) -> v > 1)
+----
+return ['k1': 1, 'k2': 2].count((k, v) -> v > 0)
+----
+return 'abc'.encodeBase64().decodeBase64()
+----
+int i = 0; while (true) { i++ } return i
+----
+for (;;) {} 
+----
+def x = [1, 2]; x.add(x); return x.size()
+----
+return params.missing.foo
+----
+return params['a.b']
+----
+return doc
+----
+return _score
+----
+int x
+----
+int x = ; return x
+----
+return 1 +
+----
+def x = 1; return x.y.z
+----
+return new ArrayList(5).size()
+----
+return new HashMap(['a': 1]).equals(['a': 1])
+----
+return [1, 2] + [3]
+----
+return 'abc' - 'b'
+----
+return null + 1
+----
+String s = null; return s + 'x'
+----
+return [null, 1].contains(null)
+----
+return ['b': 1, 'a': 2].entrySet().stream().sorted(Map.Entry.comparingByKey()).map(e -> e.getKey()).collect(Collectors.toList())
+----
+return ['b': 1, 'a': 2].entrySet().stream().sorted(Map.Entry.comparingByValue(Comparator.reverseOrder())).map(e -> e.getKey() + e.getValue()).collect(Collectors.joining())
+----
+return [1, 2, 3].stream().collect(Collectors.partitioningBy(x -> x > 1))
+----
+return [1, 2, 3].stream().collect(Collectors.toMap(x -> 'k' + x, x -> x * x))
+----
+return [1, 2, 3].stream().collect(Collectors.summingInt(x -> x)) + [1, 2, 3].stream().collect(Collectors.averagingDouble(x -> x))
+----
+return [1, 2, 3].stream().mapToInt(x -> x).summaryStatistics()
+----
+return IntStream.rangeClosed(1, 5).boxed().sorted(Comparator.reverseOrder()).collect(Collectors.toList())
+----
+return Stream.of('a', 'b').collect(Collectors.toCollection(ArrayDeque::new))
+----
+return Stream.iterate(1, x -> x * 2).limit(10).collect(Collectors.toList())
+----
+return Stream.generate(() -> 'z').limit(3).collect(Collectors.joining())
+----
+return [1, 2, 3].stream().peek(x -> x).count()
+----
+return Arrays.asList(3, 1, 2).stream().sorted().findFirst().get()
+----
+return [5, 3].stream().min(Integer::compare).get()
+----
+return ['x', 'yy'].stream().mapToInt(String::length).max().getAsInt()
+----
+return ['a': 1].entrySet().iterator().next()
+----
+return ['a': [1, 2]].a.stream().mapToLong(x -> x).sum()
+----
+return new BigDecimal('1.10').add(new BigDecimal('2.205')).setScale(2, RoundingMode.HALF_UP)
+----
+return new BigInteger('123456789012345678901234567890').multiply(BigInteger.TWO)
+----
+return [NumberFormat.getInstance(Locale.US).format(1234567.891), new DecimalFormat('#,##0.00').format(1234.5), new DecimalFormat('0.###E0').format(12345)]
+----
+int x = 'a' + 1; return x
+----
+String s = 1;
+----
+int x = 1L;
+----
+float f = 1.0;
+----
+def x = 1; x.
+----
+return foo
+----
+return foo()
+----
+int foo(int a) { return a } return foo('x')
+----
+int foo(int a) { return a } return foo(1, 2)
+----
+void foo() {} return foo()
+----
+return new Foo()
+----
+Foo x = null; return x
+----
+return Math.foo(1)
+----
+return Math.max(1)
+----
+return 'abc'.substring('x')
+----
+List l = []; l.add(1, 2, 3)
+----
+return [1, 2].size
+----
+return [1,2].length
+----
+int[] a = new int[2]; return a.size()
+----
+return 1 = 2
+----
+1 + 1
+----
+return; 
+----
+return 1; return 2
+----
+if (true) { return 1 } else { return 2 } return 3
+----
+break
+----
+continue
+----
+int x = 1; int x = 2;
+----
+def x = 1; def f = y -> x + y; return f(2)
+----
+def f = (int a, int b) -> a + b; return f.apply(1, 2)
+----
+Function f = x -> x + 1; return f.apply(1)
+----
+BiFunction f = (a, b) -> a * b; return f.apply(3, 4)
+----
+Supplier s = () -> 42; return s.get()
+----
+Predicate p = x -> x > 1; return [p.test(2), p.negate().test(2), p.and(x -> x < 5).test(9)]
+----
+return [1, 2, 3].stream().map(x -> { int y = x * 2; return y + 1; }).collect(Collectors.toList())
+----
+def x = 5; return x instanceof String ? 'str' : x instanceof Integer ? 'int' : 'other'
+----
+return (String) 5
+----
+return (int) 'ab'
+----
+return (boolean) 1
+----
+boolean b = 1
+----
+return !5
+----
+return -'a'
+----
+return ~1.5
+----
+return 1.5 << 2
+----
+return 1 & 2.0
+----
+return true + 1
+----
+String s = 'x'; s++; return s
+----
+return 1 ? 2 : 3
+----
+return 1 ?: 2
+----
+return null == 1
+----
+def a = 1; def b = 'x'; return a < b
+----
+def a = [1]; return a > 1
+----
+return 'abc' < 'abd'
+----
+Object o = new ArrayList(); o.add(1); return o
+----
+def o = new ArrayList(); o.add(1); return o
+----
+return new int[] {1, 'a'}
+----
+return new String[] {'a', 'b'}.length
+----
+int[] a = [1, 2]; return a
+----
+List l = new int[2]; return l
+----
+return ['a', 'b'] as List
+----
+for (int i : [1, 2]) { return i }
+----
+for (String s : [1, 2]) { return s }
+----
+for (def x : 5) { return x }
+----
+for (def x : null) { return x }
+----
+def x; return x.y
+----
+return params.a + params.b
+----
+#params: {"a": 1, "b": 2.5, "c": "x", "d": [1, 2], "e": {"f": true}}
+return [params.a + params.b, params.c + params.a, params.d.size(), params.e.f, params.get('c'), params['d'][1], params.containsKey('z')]
+----
+#params: {"n": 9007199254740993, "f": 1.5e300, "neg": -1, "s": "é中"}
+return [params.n, params.f * 10, params.neg, params.s.length(), params.n.getClass().getName(), params.neg.getClass()]
+----
+#params: {"x": 3}
+params.x = 5; return params.x
+----
+#params: {"list": [3, 1, 2]}
+params.list.sort(null); return params.list
+----
+return /a/.matcher(null)
+----
+return 'aaa' ==~ null
+----
+return /(/
+----
+return Pattern.compile('[')
+----
+return /a/z
+----
+return 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!' ==~ /(a+)+b/
+----
+String s = ''; for (int i = 0; i < 100; i++) { s += 'ab' } return s =~ /(ab)*c/
+----
+return """
+----
+return 'unterminated
+----
+return "double \"quoted\" A \t tab"
+----
+return 'single \'q\' \\ back'
+----
+return '\n'.length()
+----
+return 0x1F + 010 + 0b11
+----
+return 1_000
+----
+return 2147483648
+----
+return 2147483648L
+----
+return -2147483648
+----
+return 9223372036854775808L
+----
+return 1e400
+----
+return 1.0f + 1.0d + 1L + 1
+----
+return 0x7FFFFFFF + 1
+----
+return 07
+----
+return 09
+----
+return 1.
+----
+return .5
+----
+return 5.f
+----
+return 1e
+----
+return 'a' 'b'
+----
+return (1 + 2
+----
+return [1, 2
+----
+return [:
+----
+return ['a': ]
+----
+def m = ['a': 1, 'a': 2]; return m
+----
+return {1, 2}
+----
+int[] a = {1, 2}; return a
+----
+return new int[]
+----
+return new int[2][]
+----
+int[][] a = new int[2][]; return a[0]
+----
+return this
+----
+return super.toString()
+----
+class A {}
+----
+import java.util.List; return 1
+----
+switch (1) { case 1: return 1 }
+----
+var x = 1; return x
+----
+final int x = 1; return x
+----
+static int x = 1;
+----
+return x -> x
+----
+def f = String::length; return f('abc')
+----
+def f = String::length; return f.apply('abc')
+----
+return ['a', 'bb'].stream().map(String::length).collect(Collectors.toList())
+----
+return ['a', 'bb'].stream().map(this::foo).collect(Collectors.toList())
+----
+int dbl(int x) { return 2 * x } return [1, 2].stream().map(this::dbl).collect(Collectors.toList())
+----
+return [1, 2].stream().map(Integer::new).collect(Collectors.toList())
+----
+return ['1', '2'].stream().map(Integer::parseInt).collect(Collectors.toList())
+----
+return [1, 2].stream().map(ArrayList::new)
+----
+return [1, 2].stream().toArray(String[]::new)
+----
+return [1, 2].stream().toArray(int[]::new)
+----
+return Arrays.toString([1, 2].stream().toArray())
+----
+int x = 0; def f = () -> x++; return f()
+----
+int x = 0; [1, 2].forEach(y -> x += y); return x
+----
+List acc = []; [1, 2].forEach(y -> acc.add(y * 2)); return acc
+----
+return [1, 2, 3].removeIf(x -> x)
+----
+return ['a', 'b'].stream().filter(x -> x.length()).count()
+----
+Debug.explain([1, 2])
+----
+Debug.explain(null)
+----
+Debug.explain(params)
+----
+Debug.explain('x' + 1)
+----
+return Math.min(1, null)
+----
+Integer x = null; return x + 1
+----
+Integer x = null; int y = x; return y
+----
+def x = null; int y = x; return y
+----
+def x = 'a'; int y = x; return y
+----
+def x = 2.5; int y = x; return y
+----
+def x = 2.5; int y = (int) x; return y
+----
+def x = 2L; long y = x; float z = x; return [y, z]
+----
+def x = 'a'; char c = x; return c
+----
+def x = 'ab'; char c = x; return c
+----
+def x = 'a'; char c = (char) x; return c
+----
+String s = 'a'; char c = (char) s; return c
+----
+char c = (char) 'ab'; return c
+----
+byte b = 127; b++; return b
+----
+short s = 1; s = s + 1; return s
+----
+short s = 1; s += 1; return s
+----
+byte b = 10; b *= 30; return b
+----
+float f = 0.1f; double d = f; return [f, d, f == 0.1, f == 0.1f]
+----
+long l = Long.MAX_VALUE; double d = l; long back = (long) d; return [d, back, back == l]
+----
+String s = null; return s =~ /a/
+----
+String s = null; return s ==~ /a/
+----
+return /a/.split(null)
+----
+return /a/.split(null, 2)
+----
+return /a/.splitAsStream(null)
+----
+return /a/.asPredicate().test(null)
+----
+String s = null; return /a/.matcher('a').reset(s)
+----
+return 'abc'.replaceAll(/b/, null)
+----
+String s = null; return s.replaceAll(/b/, m -> 'x')
+----
+return [
+----
+return ['a':
+----
+return [1,
+----
+return (
+----
+return new int[
+----
+return 1 + 
+----
+if (true
+----
+def x = [1, 2].stream().filter(x -> true); return x
+----
+return [[1, 2].stream().map(x -> x), [1].stream().filter(x -> true), [1].stream().sorted(), [1].stream().distinct(), [1].stream().limit(1), [1].stream().skip(1), [1].stream().peek(x -> x), [1].stream().flatMap(x -> [x].stream()), [1].stream().mapToInt(x -> x), [1].stream().mapToLong(x -> x), [1].stream().mapToDouble(x -> x), [1].stream()].stream().map(x -> x.getClass().getName()).collect(Collectors.toList())
+----
+return [IntStream.range(0, 2).map(x -> x).getClass().getName(), IntStream.range(0, 2).boxed().getClass().getName(), IntStream.range(0, 2).filter(x -> true).getClass().getName(), IntStream.range(0, 2).asLongStream().getClass().getName(), IntStream.range(0, 2).mapToObj(x -> x).getClass().getName(), IntStream.range(0, 2).getClass().getName(), Stream.of(1).getClass().getName(), Stream.empty().getClass().getName()]
+----
+return [1, 2].stream().toArray(Integer[]::new)
+----
+return [1, 'a'].stream().toArray(Integer[]::new)
+----
+return [1, 2].stream().toArray(x -> new String[x])
+----
+return [1, 2].stream().toArray(x -> new Object[1])
+----
+return [1, 2].stream().map(x -> x).toArray(String[]::new)
+----
+return Debug.explain(new HashMap())
+----
+Debug.explain(Collections.emptyList())
+----
+Debug.explain(Collections.unmodifiableList([1]))
+----
+Debug.explain(List.of(1))
+----
+Debug.explain(Map.of())
+----
+Debug.explain(Arrays.asList(1))
+----
+Debug.explain([1].subList(0, 1))
+----
+Debug.explain([1].iterator())
+----
+Debug.explain(['a': 1].keySet())
+----
+Debug.explain(['a': 1].entrySet().iterator().next())
+----
+Debug.explain([1].stream())
+----
+Debug.explain(x -> x)
+----
+Debug.explain(Optional.empty())
+----
+Debug.explain(new int[0])
+----
+Debug.explain(ZonedDateTime.parse('2020-01-01T00:00:00Z'))
+----
+Debug.explain(ZoneId.of('UTC'))
+----
+Debug.explain(ZoneId.of('Europe/Paris'))
+----
+Debug.explain(/a/)
+----
+Debug.explain(/a/.matcher('a'))
+----
+Debug.explain(new TreeMap().descendingMap())
+----
+Debug.explain(Comparator.naturalOrder())
+----
+Debug.explain(new StringBuilder())
+----
+Debug.explain(Collections.singletonList(1))
+----
+Debug.explain(DateTimeFormatter.ISO_DATE)
+----
+Debug.explain(1.5f)
+----
+Debug.explain('c'.charAt(0))
+----
+String s = ''; for (int i = 0; i < 100; i++) { s += 'ab' } return s.replaceAll(/(ab)*c/, m -> 'x')
+----
+String s = ''; for (int i = 0; i < 100; i++) { s += 'ab' } return s.replaceFirst(/(ab)*c/, m -> 'x')
+----
+String s = ''; for (int i = 0; i < 100; i++) { s += 'ab' } return /(ab)*c/.split(s)
+----
+String s = ''; for (int i = 0; i < 100; i++) { s += 'ab' } return /(ab)*c/.asPredicate().test(s)
+----
+String s = ''; for (int i = 0; i < 100; i++) { s += 'ab' } return /(ab)*c/.splitAsStream(s).count()
+----
+String s = null; return s.replaceFirst(/b/, m -> 'x')
+----
+String s = ''; for (int i = 0; i < 100; i++) { s += 'ab' } return s.replaceAll('(ab)*c', 'x')
+----
+String s = ''; for (int i = 0; i < 100; i++) { s += 'ab' } return s.matches('(ab)*c')
+----
+return [1, null, 3].stream().collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().filter(x -> true).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().map(x -> x).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().peek(x -> x).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().distinct().collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().limit(5).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().skip(1).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().sorted().collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().sorted((a, b) -> 0).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().flatMap(x -> [x].stream()).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().map(x -> x).filter(x -> true).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().sorted().map(x -> x).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().filter(x -> true).sorted().collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return [1, null, 3].stream().limit(5).map(x -> x).collect(Collectors.toMap(x -> 'k' + x, x -> x))
+----
+return new HashSet([1, null]).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return [1: 1, null: 2].keySet().stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return [1: 1, 2: null].values().stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return new LinkedList([1, null]).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return new ArrayDeque([1, 2]).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return new TreeSet([1, 2]).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return [1, null].subList(0, 2).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return Collections.unmodifiableList([1, null]).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return Collections.singletonList(null).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return Collections.emptyList().stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return new LinkedHashSet([1, null]).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return [1: 1, 2: null].entrySet().stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+return new ArrayList([1, null]).stream().collect(Collectors.toMap(x -> 'k' + x, x -> null))
+----
+List l = [1, 2, 3]; l.stream().forEach(x -> l.add(4)); return l
+----
+List l = [1, 2, 3]; l.stream().map(x -> x).forEach(x -> l.add(4)); return l
+----
+List l = [1, 2, 3]; l.stream().filter(x -> true).forEach(x -> l.add(4)); return l
+----
+List l = [1, 2, 3]; return l.stream().map(x -> l.add(4)).collect(Collectors.toList())
+----
+List l = [1, 2, 3]; return l.stream().map(x -> l.add(4)).count()
+----
+List l = [1, 2, 3]; return l.stream().peek(x -> l.add(4)).count()
+----
+List l = [1, 2, 3]; return l.stream().filter(x -> l.add(4)).count()
+----
+List l = [1, 2, 3]; return l.stream().anyMatch(x -> l.add(4))
+----
+List l = [1, 2, 3]; return l.stream().anyMatch(x -> { l.add(4); return false })
+----
+List l = [1, 2, 3]; return l.stream().map(x -> { l.set(0, 9); return x }).collect(Collectors.toList())
+----
+List l = [1, 2, 3]; Stream s = l.stream(); l.add(4); return s.count()
+----
+List l = [1, 2, 3]; Stream s = l.stream(); l.add(4); return s.collect(Collectors.toList())
+----
+List l = [1, 2, 3]; return l.stream().reduce(0, (a, b) -> { l.add(1); return a + b })
+----
+List l = [1, 2, 3]; return l.stream().limit(2).map(x -> l.add(4)).collect(Collectors.toList())
+----
+List l = [1, 2, 3]; return l.stream().sorted().map(x -> l.add(4)).collect(Collectors.toList())
+----
+List l = [1, 2, 3]; l.forEach(x -> l.add(4)); return l
+----
+Set s = new HashSet([1, 2]); s.stream().forEach(x -> s.add(x + 10)); return s
+----
+List o = []; long c = [1, 2, 3].stream().peek(x -> o.add(x)).count(); return [c, o]
+----
+return [3, 'a'].stream().sorted().collect(Collectors.toList())
+----
+return [3, 'a', 2].stream().sorted().collect(Collectors.toList())
+----
+return [3, 'a'].stream().map(x -> x).sorted().collect(Collectors.toList())
+----
+return [3, 'a'].stream().filter(x -> true).sorted().collect(Collectors.toList())
+----
+return [3, 'a'].stream().sorted().count()
+----
+return [3, 'a'].stream().sorted().findFirst()
+----
+return [3, 'a'].stream().sorted().toArray()
+----
+return [3, 'a'].stream().sorted().forEach(x -> x)
+----
+return [3, 'a'].stream().max(Comparator.naturalOrder())
+----
+return [3, 'a'].stream().min(Comparator.naturalOrder())
+----
+return ['a', 3].stream().max(Comparator.naturalOrder())
+----
+return [3, 'a'].stream().map(x -> x).max(Comparator.naturalOrder())
+----
+return [3, 'a'].stream().max(Comparator.reverseOrder())
+----
+return [null].stream().findFirst()
+----
+return [null].stream().findAny()
+----
+return [null].stream().map(x -> x).findFirst()
+----
+return [null].stream().filter(x -> true).findFirst()
+----
+return [null].stream().max((a, b) -> 0)
+----
+return [null].stream().min((a, b) -> 0)
+----
+return [null].stream().reduce((a, b) -> a)
+----
+return [null, null].stream().reduce((a, b) -> a)
+----
+return [null].stream().collect(Collectors.toMap(x -> 'k', x -> x))
+----
+return [1].stream().collect(Collectors.groupingBy(x -> null))
+----
+return [1].stream().map(x -> x).collect(Collectors.groupingBy(x -> null))
+----
+return [1].stream().collect(Collectors.groupingBy(x -> null, Collectors.counting()))
+----
+return [1].stream().collect(Collectors.partitioningBy(x -> null))
+----
+return [null].stream().collect(Collectors.toSet())
+----
+return [1, 1].stream().collect(Collectors.toMap(x -> x, x -> x))
+----
+return [1, 1].stream().map(x -> x).collect(Collectors.toMap(x -> x, x -> x))
+----
+return [null].stream().collect(Collectors.joining())
+----
+return [1].stream().collect(Collectors.joining())
+----
+def s = [1,2].stream(); s.count(); return s.filter(x -> true)
+----
+def s = [1,2].stream(); s.count(); return s.map(x -> x)
+----
+def s = [1,2].stream(); s.count(); return s.sorted()
+----
+def s = [1,2].stream(); s.count(); return s.limit(1)
+----
+def s = [1,2].stream(); s.count(); return s.mapToInt(x -> x)
+----
+def s = [1,2].stream(); s.count(); return s.distinct()
+----
+def s = [1,2].stream(); s.filter(x -> true); return s.map(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.sum(); return s.sum()
+----
+def s = [1].stream().mapToInt(x -> x); s.sum(); return s.max()
+----
+def s = [1].stream().mapToInt(x -> x); s.sum(); return s.boxed()
+----
+def s = [1].stream().mapToInt(x -> x); s.sum(); return s.map(x -> x)
+----
+def s = [1].stream().mapToLong(x -> x); s.sum(); return s.sum()
+----
+def s = [1].stream().mapToDouble(x -> x); s.sum(); return s.sum()
+----
+def s = [1].stream().mapToInt(x -> x); s.sum(); return s.count()
+----
+def s = [1].stream().mapToInt(x -> x); s.sum(); return s.toArray()
+----
+def s = [1,2].stream(); s.count(); return s.iterator()
+----
+def s = [1,2].stream(); s.count(); return s.toArray()
+----
+return [null, 1].stream().max(Comparator.naturalOrder())
+----
+return [1, null].stream().max(Comparator.naturalOrder())
+----
+return [null, 1].stream().max(Comparator.reverseOrder())
+----
+return [1, null].stream().max(Comparator.reverseOrder())
+----
+return [null, 1].stream().max(Collections.reverseOrder())
+----
+List l = [1, null]; l.sort(Comparator.naturalOrder()); return l
+----
+List l = [1, 'a']; l.sort(Comparator.naturalOrder()); return l
+----
+List l = [1, 'a']; l.sort(Comparator.reverseOrder()); return l
+----
+List l = [1, 'a']; l.sort(Comparator.naturalOrder().reversed()); return l
+----
+List l = [1, 'a']; Collections.sort(l, Comparator.naturalOrder()); return l
+----
+return Comparator.naturalOrder().compare(1, 'a')
+----
+return Comparator.naturalOrder().compare(null, 1)
+----
+return Comparator.reverseOrder().compare(1, 'a')
+----
+return [1, 'a'].stream().sorted(Comparator.reverseOrder()).collect(Collectors.toList())
+----
+return [Comparator.naturalOrder().toString(), Comparator.reverseOrder().toString(), Collections.reverseOrder().toString()]
+----
+return [['k':1,'v':'a'], ['k':1,'v':'b']].stream().max((x,y) -> x.k - y.k).get().v
+----
+return [['k':1,'v':'a'], ['k':1,'v':'b']].stream().min((x,y) -> x.k - y.k).get().v
+----
+return [['k':1,'v':'a'], ['k':1,'v':'b']].stream().collect(Collectors.maxBy((x,y) -> x.k - y.k)).get().v
+----
+return Collections.max([['k':1,'v':'a'], ['k':1,'v':'b']], (x,y) -> x.k - y.k).v
+----
+return [1, 2].stream().max(null)
+----
+return [1, 2].stream().toArray(x -> new Object[5])
+----
+return [1, 2].stream().map(x -> x).toArray(x -> new Object[1])
+----
+return [1, 2].stream().map(x -> x).toArray(x -> new Object[5])
+----
+return [1, 2].stream().map(x -> x).toArray(int[]::new)
+----
+return [1, 2].stream().filter(x -> true).toArray(x -> new Object[1])
+----
+return [1, 2].stream().filter(x -> true).toArray(x -> new Object[5])
+----
+return [1, 2].stream().filter(x -> true).toArray(int[]::new)
+----
+return [1, 2].stream().peek(x -> x).toArray(String[]::new)
+----
+return [1, 2].stream().peek(x -> x).toArray(x -> new Object[1])
+----
+return [1, 2].stream().peek(x -> x).toArray(x -> new Object[5])
+----
+return [1, 2].stream().peek(x -> x).toArray(int[]::new)
+----
+return [1, 2].stream().sorted((a,b) -> 0).toArray(String[]::new)
+----
+return [1, 2].stream().sorted((a,b) -> 0).toArray(x -> new Object[1])
+----
+return [1, 2].stream().sorted((a,b) -> 0).toArray(x -> new Object[5])
+----
+return [1, 2].stream().sorted((a,b) -> 0).toArray(int[]::new)
+----
+return [1, 2].stream().distinct().toArray(x -> new Object[1])
+----
+return [1, 2].stream().distinct().toArray(x -> new Object[5])
+----
+return [1, 2].stream().distinct().toArray(int[]::new)
+----
+return [1, 2].stream().limit(5).toArray(String[]::new)
+----
+return [1, 2].stream().limit(5).toArray(x -> new Object[1])
+----
+return [1, 2].stream().limit(5).toArray(x -> new Object[5])
+----
+return [1, 2].stream().limit(5).toArray(int[]::new)
+----
+return [1, 2].stream().skip(0).toArray(String[]::new)
+----
+return [1, 2].stream().skip(0).toArray(x -> new Object[1])
+----
+return [1, 2].stream().skip(0).toArray(x -> new Object[5])
+----
+return [1, 2].stream().skip(0).toArray(int[]::new)
+----
+return [1, 2].stream().flatMap(x -> [x].stream()).toArray(x -> new Object[1])
+----
+return [1, 2].stream().flatMap(x -> [x].stream()).toArray(x -> new Object[5])
+----
+return [1, 2].stream().flatMap(x -> [x].stream()).toArray(int[]::new)
+----
+return [1, 2].stream().map(x -> x).map(x -> x).toArray(String[]::new)
+----
+return [1, 2].stream().map(x -> x).map(x -> x).toArray(x -> new Object[1])
+----
+return [1, 2].stream().map(x -> x).map(x -> x).toArray(x -> new Object[5])
+----
+return [1, 2].stream().map(x -> x).map(x -> x).toArray(int[]::new)
+----
+return new HashSet([1, 2]).stream().toArray(String[]::new)
+----
+return new LinkedList([1, 2]).stream().toArray(String[]::new)
+----
+return Collections.singletonList(1).stream().toArray(String[]::new)
+----
+return ['a':1].keySet().stream().toArray(Integer[]::new)
+----
+return [1,2].stream().toArray(x -> null)
+----
+return [1,2].stream().toArray(x -> [1])
+----
+return [].stream().toArray(int[]::new)
+----
+return [].stream().filter(x -> true).toArray(int[]::new)
+----
+def s = [1, 2].stream(); s.skip(0); return s.count()
+----
+def s = [1, 2].stream(); s.count(); return s.skip(0)
+----
+List l = [1, 2, 3]; l.forEach(x -> { if (x == 3) { l.add(4) } }); return l
+----
+List l = [1, 2, 3]; l.forEach(x -> { if (x == 1) { l.add(4) } }); return l
+----
+List l = [1, 2, 3]; List seen = []; l.forEach(x -> { seen.add(x); if (x == 1) { l.remove(2) } }); return seen
+----
+Map m = ['a': 1, 'b': 2]; m.forEach((k, v) -> m.put('z', 1)); return m
+----
+Map m = new HashMap(['a': 1, 'b': 2]); m.forEach((k, v) -> m.put('z', 1)); return m
+----
+Map m = new TreeMap(['a': 1, 'b': 2]); m.forEach((k, v) -> m.put('z', 1)); return m
+----
+Set s = new HashSet([1, 2]); s.forEach(x -> s.add(x + 10)); return s
+----
+List l = new LinkedList([1, 2]); l.forEach(x -> l.add(5)); return l
+----
+Map m = ['a': 1, 'b': 2]; m.keySet().forEach(k -> m.put('z', 1)); return m
+----
+Map m = ['a': 1, 'b': 2]; m.values().forEach(k -> m.put('z', 1)); return m
+----
+Map m = ['a': 1, 'b': 2]; m.entrySet().forEach(k -> m.put('z', 1)); return m
+----
+Map m = ['a': 1, 'b': 2]; for (def k : m.keySet()) { m.put('z', 1) } return m
+----
+List l = [1, 2, 3]; for (def x : l) { if (x == 3) { l.add(4) } } return l
+----
+List l = [1, 2, 3]; for (def x : l) { if (x == 2) { l.remove(0) } } return l
+----
+List l = [1, 2, 3]; Iterator it = l.iterator(); it.next(); l.add(9); return it.next()
+----
+List l = [1, 2, 3]; l.removeIf(x -> { l.add(1); return false })
+----
+List l = [1, 2, 3]; l.replaceAll(x -> { l.add(1); return x })
+----
+List l = [3, 2, 1]; l.sort((a, b) -> { l.add(1); return a - b })
+----
+Map m = ['a': 1]; m.replaceAll((k, v) -> { m.put('q', 2); return v })
+----
+Map m = ['a': 1]; m.computeIfAbsent('b', k -> { m.put('c', 1); return 2 }); return m
+----
+Map m = ['a': 1]; m.compute('b', (k, v) -> { m.put('c', 1); return 2 }); return m
+----
+Map m = ['a': 1]; m.merge('a', 5, (x, y) -> { m.put('c', 1); return 2 }); return m
+----
+List l = [1,2,3]; Stream s = l.stream(); l.add(4); return s.count()
+----
+List l = [1,2,3]; Stream s = l.stream().filter(x -> true); l.add(4); return s.count()
+----
+List l = [1, 2, 3]; l.forEach(x -> { l.add(4) }); return l
+----
+List l = [1, 2, 3]; l.forEach(x -> { if (x == 3) { l.add(4) } else { l.add(5) } }); return l
+----
+List l = [1, 2, 3]; l.forEach(x -> { if (x == 3) { l.add(4) } int y = 1; }); return l
+----
+List l = [1]; l.forEach(x -> { if (x == 3) { l.add(4) } return; }); return l
+----
+[1].stream().forEach(x -> { if (x == 1) { x++ } }); return 1
+----
+Consumer c = x -> { if (x == 1) { x++ } }; return 1
+----
+def l = [1]; l.forEach(x -> { if (x == 1) { x++ } }); return 1
+----
+List l = [1]; l.forEach(x -> { while (x < 1) { x++ } }); return 1
+----
+List l = [1]; l.forEach(x -> { for (int i = 0; i < 1; i++) { x++ } }); return 1
+----
+List l = [1]; l.forEach(x -> { if (x == 1) x++; }); return 1
+----
+List l = [1]; l.forEach(x -> { try { x++ } catch (Exception e) {} }); return 1
+----
+List l = [1]; l.forEach(x -> { if (x == 1) { x++ } x--; }); return 1
+----
+List l = [1]; l.removeIf(x -> { if (x == 1) { return true } }); return l
+----
+Function f = x -> { if (x == 1) { return 1 } }; return f.apply(1)
+----
+Runnable r = () -> { if (true) { int a = 1 } }; return 1
+----
+List l = [1]; l.forEach(x -> { if (x == 1) { } }); return 1
+----
+List l = [1]; l.forEach(x -> { int a = 1; }); return 1
+----
+List l = [1]; l.forEach(x -> {}); return 1
+----
+List l = [1, 2, 3]; l.removeIf(x -> { l.add(1); return x == 2 })
+----
+List l = [1, 2, 3]; l.removeIf(x -> { if (x == 3) { l.add(1) } return x == 1 })
+----
+List l = [1, 2, 3]; List s = l.subList(0, 2); l.replaceAll(x -> x * 2); return s
+----
+List l = [1, 2, 3]; Iterator it = l.iterator(); it.next(); l.replaceAll(x -> x * 2); return it.next()
+----
+List l = [1, 2, 3]; List s = l.subList(0, 2); l.sort(null); return s
+----
+Map m = new LinkedHashMap(); m.a = 1; m.compute('b', (k, v) -> { m.put('c', 1); return 2 }); return m
+----
+Map m = new LinkedHashMap(); m.a = 1; m.replaceAll((k, v) -> { m.put('q', 2); return v })
+----
+Map m = ['a': 1]; m.computeIfPresent('a', (k, v) -> { m.put('c', 1); return 2 }); return m
+----
+Map m = ['a': 1]; m.computeIfAbsent('a', k -> { m.put('c', 1); return 2 }); return m
+----
+Map m = ['a': 1]; m.merge('b', 5, (x, y) -> { m.put('c', 1); return 2 }); return m
+----
+Map m = ['a': 1]; m.computeIfAbsent('b', k -> { m.remove('a'); return 2 }); return m
+----
+Map m = ['a': 1]; m.compute('b', (k, v) -> { m.put('b', 7); return 2 }); return m
+----
+def s = [1,2].stream(); s.count(); return s.peek(x -> x)
+----
+def s = [1,2].stream(); s.count(); return s.skip(1)
+----
+def s = [1,2].stream(); s.count(); return s.flatMap(x -> [x].stream())
+----
+def s = [1,2].stream(); s.count(); return s.mapToLong(x -> x)
+----
+def s = [1,2].stream(); s.count(); return s.mapToDouble(x -> x)
+----
+def s = [1,2].stream(); s.count(); return s.sorted((a, b) -> 0)
+----
+def s = [1,2].stream(); s.count(); return s.flatMapToInt(x -> IntStream.of(x))
+----
+def s = [1,2].stream(); s.count(); return s.flatMapToLong(x -> LongStream.of(x))
+----
+def s = [1,2].stream(); s.count(); return s.flatMapToDouble(x -> DoubleStream.of(x))
+----
+def s = [1,2].stream(); s.count(); return s.unordered()
+----
+def s = [1,2].stream(); s.count(); return s.sequential()
+----
+def s = [1,2].stream(); s.count(); return s.onClose(() -> 1)
+----
+def s = [1,2].stream(); s.count(); return s.toArray(x -> new Object[x])
+----
+def s = [1,2].stream(); s.count(); return s.count()
+----
+def s = [1,2].stream(); s.count(); return s.collect(Collectors.toList())
+----
+def s = [1,2].stream(); s.count(); return s.collect(() -> [], (a, b) -> a.add(b), (a, b) -> a.addAll(b))
+----
+def s = [1,2].stream(); s.count(); return s.reduce(0, (a, b) -> a)
+----
+def s = [1,2].stream(); s.count(); return s.reduce((a, b) -> a)
+----
+def s = [1,2].stream(); s.count(); return s.reduce(0, (a, b) -> a, (a, b) -> a)
+----
+def s = [1,2].stream(); s.count(); return s.max((a, b) -> 0)
+----
+def s = [1,2].stream(); s.count(); return s.min((a, b) -> 0)
+----
+def s = [1,2].stream(); s.count(); return s.anyMatch(x -> true)
+----
+def s = [1,2].stream(); s.count(); return s.allMatch(x -> true)
+----
+def s = [1,2].stream(); s.count(); return s.noneMatch(x -> true)
+----
+def s = [1,2].stream(); s.count(); return s.findFirst()
+----
+def s = [1,2].stream(); s.count(); return s.findAny()
+----
+def s = [1,2].stream(); s.count(); return s.forEach(x -> x)
+----
+def s = [1,2].stream(); s.count(); return s.forEachOrdered(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.filter(x -> true)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.map(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.peek(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.skip(1)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.limit(1)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.sorted()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.distinct()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.boxed()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.mapToObj(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.asLongStream()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.asDoubleStream()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.mapToLong(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.mapToDouble(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.flatMap(x -> null)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.sum()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.max()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.min()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.count()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.average()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.summaryStatistics()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.toArray()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.iterator()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.anyMatch(x -> true)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.allMatch(x -> true)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.noneMatch(x -> true)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.findFirst()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.findAny()
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.forEach(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.forEachOrdered(x -> x)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.reduce(0, (a, b) -> a)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.reduce((a, b) -> a)
+----
+def s = [1].stream().mapToInt(x -> x); s.count(); return s.collect(() -> [], (a, b) -> a.add(b), (a, b) -> a.addAll(b))
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.filter(x -> true)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.map(x -> x)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.peek(x -> x)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.skip(1)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.limit(1)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.sorted()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.distinct()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.boxed()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.mapToObj(x -> x)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.asDoubleStream()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.mapToDouble(x -> x)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.mapToInt(x -> (int) x)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.flatMap(x -> null)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.sum()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.max()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.min()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.count()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.average()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.summaryStatistics()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.toArray()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.iterator()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.anyMatch(x -> true)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.allMatch(x -> true)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.noneMatch(x -> true)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.findFirst()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.findAny()
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.forEach(x -> x)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.forEachOrdered(x -> x)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.reduce(0, (a, b) -> a)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.reduce((a, b) -> a)
+----
+def s = [1].stream().mapToLong(x -> x); s.count(); return s.collect(() -> [], (a, b) -> a.add(b), (a, b) -> a.addAll(b))
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.filter(x -> true)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.map(x -> x)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.peek(x -> x)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.skip(1)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.limit(1)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.sorted()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.distinct()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.boxed()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.mapToObj(x -> x)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.mapToLong(x -> (long) x)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.mapToInt(x -> (int) x)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.flatMap(x -> null)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.sum()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.max()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.min()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.count()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.average()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.summaryStatistics()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.toArray()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.iterator()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.anyMatch(x -> true)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.allMatch(x -> true)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.noneMatch(x -> true)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.findFirst()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.findAny()
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.forEach(x -> x)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.forEachOrdered(x -> x)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.reduce(0, (a, b) -> a)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.reduce((a, b) -> a)
+----
+def s = [1].stream().mapToDouble(x -> x); s.count(); return s.collect(() -> [], (a, b) -> a.add(b), (a, b) -> a.addAll(b))
+----
+def s = [1,2].stream().map(x -> x); s.count(); return s.forEach(x -> x)
+----
+return [:5]
+----
+return [:,]
+----
+return [: 1:2]
+----
+return [1:
+----
+return [1:2,
+----
+return [1:2, 3
+----
+return [:;
+----
+return [DateTimeFormatter.ISO_LOCAL_DATE_TIME.toString(), DateTimeFormatter.ISO_OFFSET_DATE.toString(), DateTimeFormatter.ISO_OFFSET_TIME.toString(), DateTimeFormatter.ISO_OFFSET_DATE_TIME.toString(), DateTimeFormatter.ISO_ZONED_DATE_TIME.toString(), DateTimeFormatter.ISO_DATE_TIME.toString(), DateTimeFormatter.ISO_DATE.toString(), DateTimeFormatter.ISO_TIME.toString(), DateTimeFormatter.ISO_INSTANT.toString(), DateTimeFormatter.ISO_ORDINAL_DATE.toString(), DateTimeFormatter.ISO_WEEK_DATE.toString(), DateTimeFormatter.BASIC_ISO_DATE.toString(), DateTimeFormatter.RFC_1123_DATE_TIME.toString()]
+----
+return ZonedDateTime.parse('2021-01-01T00:00:00+0100')
+----
+return ZonedDateTime.parse('2021-01-01T00:00:00+01')
+----
+return OffsetDateTime.parse('2021-01-01T00:00:00+01:00:30')
+----
+return OffsetDateTime.parse('2021-01-01T00:00:00+010030')
+----
+return ZonedDateTime.parse('2021-01-01T00:00:00+1')
+----
+return DateTimeFormatter.ISO_ZONED_DATE_TIME.format(ZonedDateTime.parse('2021-01-01T00:00:00+01:00'))
+----
+return DateTimeFormatter.ISO_DATE_TIME.format(ZonedDateTime.parse('2021-01-01T00:00:00+01:00'))
+----
+return DateTimeFormatter.ISO_ZONED_DATE_TIME.format(ZonedDateTime.parse('2021-01-01T00:00:00Z[UTC]'))
+----
+return DateTimeFormatter.ISO_DATE.parse('2021-01-01+0130')
+----
+return LocalDate.parse('20210101+0100', DateTimeFormatter.BASIC_ISO_DATE)
+----
+return LocalDate.parse('20210101+01', DateTimeFormatter.BASIC_ISO_DATE)
+----
+return DateTimeFormatter.ISO_OFFSET_TIME.parse('10:00+01')
+----
+return ZonedDateTime.parse('2021-01-01T00:00:00+01:00[Europe/Paris]')
+----
+return ZonedDateTime.parse('2021-01-01T00:00:00+01:00[+01:00]')
+----
+return DateTimeFormatter.RFC_1123_DATE_TIME.parse('Tue, 3 Jun 2008 11:05:30 GMT')
+----
+return DateTimeFormatter.RFC_1123_DATE_TIME.parse('3 Jun 2008 11:05:30 +0200')
+----
+return DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.parse('2008-06-03T11:05:30Z'))
+----
+return Instant.parse('2021-01-01T00:00:00+01:00')
+----
+return Instant.parse('2021-01-01T00:00:00.123456Z')
+----
+return DateTimeFormatter.ISO_INSTANT.parse('2021-01-01T00:00:00+0100')
+----
+return DateTimeFormatter.ofPattern('VV').format(OffsetDateTime.parse('2021-01-01T00:00:00+01:00'))
+----
+return new DateTimeFormatterBuilder().appendZoneOrOffsetId().toFormatter().format(OffsetDateTime.parse('2021-01-01T00:00:00+01:00'))
+----
+return [new DateTimeFormatterBuilder().appendZoneRegionId().toFormatter(), new DateTimeFormatterBuilder().appendZoneOrOffsetId().toFormatter()]
+----
+return OffsetDateTime.parse('2021-01-01T00:00:00+25:00')
+----
+return OffsetDateTime.parse('2021-01-01T00:00:00+01:70')
+----
+return DateTimeFormatter.RFC_1123_DATE_TIME.withLocale(Locale.FRANCE).format(ZonedDateTime.parse('2008-06-03T11:05:30Z'))
+----
+return ZonedDateTime.parse('2021-01-01T00:00:00z')
+----
+return ZonedDateTime.parse('2021-01-01t00:00:00Z')
+----
+return OffsetTime.parse('10:15:30+01:00:30')
+----
+return LocalDate.parse('2021-01-01+01:00', DateTimeFormatter.ISO_DATE)
+----
+return DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochSecond(1))
+----
+return Instant.parse('2021-01-01T00:00:00+0100')
+return OffsetTime.parse('x')
+----
+return OffsetTime.parse('x', DateTimeFormatter.ISO_OFFSET_TIME)
+----
+return DateTimeFormatter.ISO_DATE.parse('x')
+----
+return DateTimeFormatter.ISO_DATE.parse('2021-01-01x')
+----
+return DateTimeFormatter.ISO_DATE.parse('2021-01-01T', ZonedDateTime::from)
+----
+return OffsetDateTime.parse('2021-01-01T00:00:00+0100', DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+----
+return Instant.parse('x')
+----
+return OffsetTime.parse('x')
+----
+return DateTimeFormatter.ISO_DATE_TIME.parse('2021-01-01T00:00:00+01:00', ZonedDateTime::from)
+----
+return DateTimeFormatter.ISO_LOCAL_DATE.parse('2021-01-02', LocalDate::from)
+----
+return DateTimeFormatter.ISO_LOCAL_DATE.parse('2021-01-02', t -> t.get(ChronoField.DAY_OF_MONTH))
+----
+return LocalDate.of(2021, 1, 1).with(t -> t.plus(2, ChronoUnit.DAYS))
+----
+return LocalDate.of(2021, 1, 1).query(TemporalQueries.localDate())
+----
+return LocalDate.of(2021, 1, 1).query(t -> t.get(ChronoField.YEAR))
+----
+TemporalQuery q = LocalDate::from; return q.queryFrom(LocalDateTime.of(2020, 1, 1, 1, 1))
+----
+TemporalAdjuster a = t -> t.plus(1, ChronoUnit.DAYS); return a.adjustInto(LocalDate.of(2020, 1, 1))
+----
+return ZonedDateTime.from(DateTimeFormatter.ISO_INSTANT.parse('2021-01-01T00:00:00Z'))
+----
+return Instant.from(DateTimeFormatter.ISO_INSTANT.parse('2021-01-01T00:00:00Z'))
+----
+return [TemporalQueries.zoneId(), TemporalQueries.precision().toString()]
+----
+return [LocalDate.of(2021,1,1).query(TemporalQueries.precision()), ZonedDateTime.parse('2021-01-01T00:00:00Z').query(TemporalQueries.zone()), OffsetDateTime.parse('2021-01-01T00:00:00+01:00').query(TemporalQueries.zoneId()), LocalTime.of(1,2).query(TemporalQueries.chronology()), LocalDate.of(2021,1,1).query(TemporalQueries.localTime())]
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('b', 2); m.put('c', 3); m.headMap('c').clear(); return m
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('b', 2); m.put('c', 3); SortedMap h = m.headMap('c'); h.put('0', 0); return [m, h]
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('b', 2); m.put('c', 3); m.headMap('b').put('z', 0); return m
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('b', 2); m.put('c', 3); m.tailMap('b').remove('c'); return m
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('b', 2); m.put('c', 3); NavigableMap d = m.descendingMap(); d.put('d', 4); return [m, d, d.firstKey(), d.headMap('b')]
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('b', 2); m.put('c', 3); NavigableMap s = m.subMap('a', true, 'b', true); m.put('aa', 9); return [s, s.size(), s.lastKey(), s.containsKey('c'), s.get('aa')]
+----
+TreeMap m = new TreeMap(); m.put('a', 1); return m.subMap('b', 'a')
+----
+TreeMap m = new TreeMap(); m.put('a', 1); return m.headMap('a').firstKey()
+----
+TreeMap m = new TreeMap(); m.put('a', 1); return m.headMap('a').lastKey()
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('c', 3); return m.subMap('a', 'c').put('d', 1)
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('c', 3); return m.tailMap('b').put('a', 1)
+----
+TreeMap m = new TreeMap(); m.put('a', 1); return m.headMap('a').headMap('b')
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('b', 2); m.put('c', 3); return [m.headMap('c').entrySet(), m.tailMap('a', false).keySet(), m.descendingMap().values(), m.descendingKeySet(), m.navigableKeySet()]
+----
+TreeSet t = new TreeSet(); t.addAll(['a', 'b', 'c', 'd']); SortedSet h = t.headSet('c'); t.add('0'); h.remove('a'); return [t, h, h.first(), t.tailSet('b'), t.subSet('a', 'c'), t.descendingSet()]
+----
+TreeSet t = new TreeSet(); t.addAll(['a', 'b', 'c']); t.headSet('b').clear(); t.descendingSet().add('z'); return t
+----
+TreeSet t = new TreeSet(); t.addAll(['a', 'b']); return t.headSet('b').add('x')
+----
+TreeMap m = new TreeMap(); m.put(1, 'a'); m.put(5, 'b'); m.put(9, 'c'); Map h = m.headMap(6); int n = 0; for (def e : h.entrySet()) { n += e.getKey() } h.entrySet().removeIf(e -> e.getKey() == 1); return [n, m]
+----
+TreeMap m = new TreeMap(); m.put(1, 'a'); m.put(5, 'b'); m.put(9, 'c'); return [m.headMap(6).equals([1:'a', 5:'b']), m.headMap(6).hashCode(), m.tailMap(5, true).firstEntry(), m.tailMap(5, true).pollFirstEntry(), m]
+----
+TreeMap m = new TreeMap(); m.put(1, 'a'); m.put(5, 'b'); return [m.headMap(3) instanceof NavigableMap, m.headMap(3) instanceof TreeMap, m.headMap(3).comparator(), m.descendingMap().comparator() == Collections.reverseOrder()]
+----
+TreeMap m = new TreeMap((a, b) -> b - a); m.put(1, 'a'); m.put(5, 'b'); m.put(3, 'c'); return [m, m.headMap(3), m.tailMap(3), m.descendingMap(), m.descendingMap().headMap(3)]
+----
+TreeMap m = new TreeMap(); m.put('a', 1); m.put('b', 2); def h = m.headMap('b'); m.clear(); return [h, h.size(), h.isEmpty()]
+
+----
+TreeMap m = new TreeMap(); m.put(1, 'a'); m.put(5, 'b'); m.put(9, 'c'); NavigableMap d = m.descendingMap(); return [d.headMap(5), d.tailMap(5), d.subMap(9, 1), d.firstKey(), d.lastEntry(), d.ceilingKey(6), d.floorKey(6), d.descendingMap(), d.navigableKeySet()]
+----
+TreeMap m = new TreeMap(); m.put(1, 'a'); m.put(5, 'b'); m.put(9, 'c'); NavigableSet k = m.navigableKeySet(); k.remove(5); return [m, k, k.first()]
+----
+TreeMap m = new TreeMap(); m.put(1, 'a'); m.put(5, 'b'); return m.navigableKeySet().add(3)
+----
+TreeMap m = new TreeMap(); m.put(1, 'a'); m.put(5, 'b'); m.put(9, 'c'); NavigableMap h = m.headMap(9, false); h.pollLastEntry(); h.put(2, 'x'); return [m, h, h.size(), m.size()]
+----
+TreeMap m = new TreeMap(); m.put(1, 'a'); m.put(5, 'b'); m.put(9, 'c'); def h = m.headMap(6); h.clear(); return [m, h]
+----
+TreeMap m = new TreeMap(); for (int i = 0; i < 10; i++) { m.put(i, i * i) } m.headMap(7).clear(); m.tailMap(9).clear(); return m
+----
+TreeMap m = new TreeMap(); m.put('a', 1); return m.headMap('b').headMap('c')
+----
+TreeMap m = new TreeMap(); m.put('a', 1); return m.headMap('b', false).tailMap('b', false)
+----
+TreeMap m = new TreeMap(); m.put('a', 1); return m.subMap('a', 'c').subMap('b', 'd')
+----
+Enumeration e = Collections.enumeration([1, 2, 3]); List out = []; while (e.hasMoreElements()) { out.add(e.nextElement()) } return out
+----
+return Collections.list(Collections.enumeration([1, 2]))
+----
+Enumeration e = Collections.emptyEnumeration(); return [e.hasMoreElements(), Collections.list(e)]
+----
+return Collections.emptyEnumeration().nextElement()
+----
+Enumeration e = Collections.enumeration([1]); e.nextElement(); return e.nextElement()
+----
+Hashtable h = new Hashtable(); h.put('a', 1); h.put('b', 2); return [Collections.list(h.keys()), Collections.list(h.elements())]
+----
+Dictionary d = new Hashtable(); d.put('a', 1); return [d.get('a'), d.size(), d.isEmpty(), d.remove('a'), d.isEmpty()]
+----
+Vector v = new Vector([1, 2]); Object[] a = new Object[3]; v.copyInto(a); return [Collections.list(v.elements()), Arrays.toString(a)]
+----
+Set s = Collections.newSetFromMap(new LinkedHashMap()); s.add('b'); s.add('a'); return s
+----
+return Collections.newSetFromMap(['a': true])
+----
+try { LocalDate.parse('2021-13-01') } catch (DateTimeParseException e) { return [e.getErrorIndex(), e.getParsedString(), e.getMessage()] }
+----
+try { LocalDate.parse('2021-01-01x') } catch (DateTimeParseException e) { return [e.getErrorIndex(), e.getParsedString()] }
+----
+try { LocalDate.parse('x2021-01-01') } catch (DateTimeParseException e) { return [e.getErrorIndex(), e.getParsedString()] }
+----
+DateTimeParseException e = new DateTimeParseException('bad', 'abc', 2); return [e.getMessage(), e.getErrorIndex(), e.getParsedString()]
+----
+return Collections.list(null)
+Hashtable h = new Hashtable(); for (int i = 0; i < 20; i++) { h.put('k' + i, i) } return [h, new Hashtable(['x': 1, 'y': 2, 'z': 3])]
+----
+Hashtable h = new Hashtable(); h.put(1, 'a'); h.put(12, 'b'); h.put(23, 'c'); h.remove(12); h.put(34, 'd'); return [h, h.keySet(), h.entrySet()]
+----
+Hashtable h = new Hashtable(); for (int i = 0; i < 30; i += 3) { h.put(i, i) } h.remove(9); h.put(100, 1); return h
+----
+return [1].spliterator()
+----
+Spliterator s = [1, 2, 3].spliterator(); List out = []; s.tryAdvance(x -> out.add(x)); return [out, s.estimateSize(), s.getExactSizeIfKnown(), s.characteristics(), s.hasCharacteristics(Spliterator.SIZED)]
+----
+Spliterator s = [1, 2, 3, 4].spliterator(); Spliterator t = s.trySplit(); List a = []; List b = []; s.forEachRemaining(x -> a.add(x)); t.forEachRemaining(x -> b.add(x)); return [a, b]
+----
+return [new HashSet([1]).spliterator().characteristics(), new TreeSet([1]).spliterator().characteristics(), new LinkedList([1]).spliterator().characteristics(), ['a': 1].keySet().spliterator().characteristics(), ['a': 1].values().spliterator().characteristics(), ['a': 1].entrySet().spliterator().characteristics(), new ArrayDeque([1]).spliterator().characteristics()]
+----
+return [1].spliterator().getComparator()
+----
+TreeSet t = new TreeSet(); t.add(1); return t.spliterator().getComparator()
+----
+Iterator it = Spliterators.iterator([1, 2].spliterator()); return [it.next(), it.next(), it.hasNext()]
+----
+Spliterator s = Spliterators.spliteratorUnknownSize([1, 2].iterator(), Spliterator.ORDERED); return [s.estimateSize(), s.getExactSizeIfKnown(), s.characteristics()]
+----
+Spliterator s = Spliterators.spliterator([1, 2], 0); return [s.estimateSize(), s.characteristics()]
+----
+Spliterator s = Spliterators.emptySpliterator(); return [s.estimateSize(), s.tryAdvance(x -> x), s.characteristics()]
+----
+return [Spliterator.ORDERED, Spliterator.DISTINCT, Spliterator.SORTED, Spliterator.SIZED, Spliterator.NONNULL, Spliterator.IMMUTABLE, Spliterator.CONCURRENT, Spliterator.SUBSIZED]
+----
+Spliterator s = [1, 2].stream().spliterator(); return [s.estimateSize(), s.characteristics()]
+----
+List l = [1, 2, 3]; Spliterator s = l.spliterator(); l.add(4); return s.estimateSize()
+----
+List l = [1, 2, 3]; Spliterator s = l.spliterator(); l.add(4); List out = []; s.forEachRemaining(x -> out.add(x)); return out
+----
+TreeSet ts = new TreeSet(); ts.add(1); return [new HashSet([1]).spliterator().characteristics(), ts.spliterator().characteristics(), new LinkedList([1]).spliterator().characteristics(), ['a': 1].keySet().spliterator().characteristics(), ['a': 1].values().spliterator().characteristics(), ['a': 1].entrySet().spliterator().characteristics(), new ArrayDeque([1]).spliterator().characteristics(), new LinkedHashSet([1]).spliterator().characteristics(), [1].subList(0,1).spliterator().characteristics(), new HashSet([1]).spliterator(), new LinkedList([1]).spliterator(), ts.spliterator(), new LinkedHashSet([1]).spliterator(), new ArrayDeque([1]).spliterator(), [1].subList(0,1).spliterator(), ['a': 1].values().spliterator(), ['a': 1].entrySet().spliterator()]
+----
+return Locale.lookupTag([new Locale.LanguageRange('fr-CA')], ['fr', 'fr-CA', 'en'])
+----
+return Locale.filter(Locale.LanguageRange.parse('fr-*,en;q=0.5'), [Locale.FRANCE, Locale.CANADA_FRENCH, Locale.US, Locale.GERMANY])
+----
+return Locale.LanguageRange.parse('en-US;q=1.0,fr;q=0.5,*;q=0.1')
+----
+List r = Locale.LanguageRange.parse('en-US;q=1.0,fr;q=0.5'); return [r[0].getRange(), r[0].getWeight(), r[1].getRange(), r[1].getWeight(), r[0]]
+----
+return [Locale.LanguageRange.MAX_WEIGHT, Locale.LanguageRange.MIN_WEIGHT]
+----
+return new Locale.LanguageRange('EN-us', 0.5)
+----
+return new Locale.LanguageRange('en', 2.0)
+----
+return new Locale.LanguageRange('e_n')
+----
+return Locale.filterTags(Locale.LanguageRange.parse('en-*'), ['en-US', 'en-GB', 'fr-FR', 'en'])
+----
+return Locale.lookup(Locale.LanguageRange.parse('de-CH,fr;q=0.5'), [Locale.GERMAN, Locale.FRENCH, Locale.US])
+----
+return Locale.lookupTag(Locale.LanguageRange.parse('zh-Hant-TW'), ['zh', 'zh-Hant', 'en'])
+----
+return Locale.filter(Locale.LanguageRange.parse('*'), [Locale.US, Locale.FRANCE])
+----
+return Locale.filterTags(Locale.LanguageRange.parse('de-*-DE'), ['de-DE', 'de-Latn-DE', 'de-CH'], Locale.FilteringMode.EXTENDED_FILTERING)
+----
+return Locale.filterTags(Locale.LanguageRange.parse('de-DE'), ['de-DE', 'de-Latn-DE', 'de-CH', 'de-de-x'])
+----
+return [Locale.FilteringMode.values(), Locale.FilteringMode.valueOf('AUTOSELECT_FILTERING')]
+----
+return Locale.LanguageRange.parse('xx;q=x')
+----
+return Locale.LanguageRange.mapEquivalents(Locale.LanguageRange.parse('en'), ['en': ['en-US', 'en-GB']])
+----
+return Locale.lookupTag(Locale.LanguageRange.parse('fr-CA;q=0'), ['fr-CA'])

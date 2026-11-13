@@ -1,0 +1,178 @@
+# Tests of Elasticsearch 9.5.5's `ingest-common` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security config=user-agent/test-regexes.yml:modules/ingest-common/src/yamlRestTest/resources/test-regexes.yml config=ingest-user-agent/test-regexes-legacy.yml:modules/ingest-common/src/yamlRestTest/resources/test-regexes.yml).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+ingest-common:ingest/100_date_index_name_processor/Test date index name processor with defaults
+ingest-common:ingest/10_basic/Ingest common installed
+ingest-common:ingest/110_sort/Test sort Processor
+ingest-common:ingest/120_grok/Test Grok Patterns Retrieval
+ingest-common:ingest/120_grok/Test Grok Pipeline
+ingest-common:ingest/120_grok/Test Grok Pipeline With Custom Pattern
+ingest-common:ingest/120_grok/Test Grok Pipeline With Custom Pattern Sharing Same Name As Another
+ingest-common:ingest/120_grok/Test Grok Pipeline with validate_only
+ingest-common:ingest/120_grok/Test Grok Pipeline with validate_only without subname
+ingest-common:ingest/120_grok/Test simulate with grok debugging enabled
+ingest-common:ingest/120_grok/Test simulate with invalid GROK pattern
+ingest-common:ingest/130_escape_dot/Test escape_dot processor
+ingest-common:ingest/130_escape_dot/Test escape_dot processor with override and wildcard
+ingest-common:ingest/140_json/Test JSON Processor
+ingest-common:ingest/140_json/Test JSON Processor duplicate keys
+ingest-common:ingest/140_json/Test JSON Processor lenient parsing
+ingest-common:ingest/140_json/Test JSON Processor recursive merge strategy
+ingest-common:ingest/150_kv/Test KV Processor
+ingest-common:ingest/150_kv/Test KV Processor with template snippets
+ingest-common:ingest/15_info_ingest/Cluster ingest information
+ingest-common:ingest/15_info_ingest/Test bytes_produced not increased when pipeline fails
+ingest-common:ingest/15_info_ingest/Test drop processor
+ingest-common:ingest/15_info_ingest/Test human readable byte stat fields
+ingest-common:ingest/15_info_ingest/Test that final pipeline has byte stats recorded in first pipeline
+ingest-common:ingest/15_info_ingest/Test that pipeline processor has byte stats recorded in first pipeline
+ingest-common:ingest/15_info_ingest/Test that reroute processor has byte stats recorded in first pipeline
+ingest-common:ingest/160_urldecode/Test KV Processor
+ingest-common:ingest/170_version/Test set document version & version type
+ingest-common:ingest/180_bytes_processor/Test bytes processor
+ingest-common:ingest/190_script_processor/Test adding circular references fails pipeline
+ingest-common:ingest/190_script_processor/Test invoke bytes processor
+ingest-common:ingest/190_script_processor/Test invoke community_id processor
+ingest-common:ingest/190_script_processor/Test invoke json processor, assign to field
+ingest-common:ingest/190_script_processor/Test invoke json processor, assign to root
+ingest-common:ingest/190_script_processor/Test invoke lowercase processor
+ingest-common:ingest/190_script_processor/Test invoke uppercase processor
+ingest-common:ingest/190_script_processor/Test invoke uri_parts processor
+ingest-common:ingest/190_script_processor/Test invoke urlDecode processor
+ingest-common:ingest/190_script_processor/Test metadata
+ingest-common:ingest/190_script_processor/Write Field Nested Document
+ingest-common:ingest/190_script_processor/Write Fields API
+ingest-common:ingest/200_default_pipeline/Test index with default pipeline
+ingest-common:ingest/200_dissect_processor/Test dissect processor match
+ingest-common:ingest/200_dissect_processor/Test dissect processor mismatch
+ingest-common:ingest/200_dissect_processor/Test fail to create dissect processor
+ingest-common:ingest/20_crud/Test Get All Pipelines
+ingest-common:ingest/20_crud/Test basic pipeline crud
+ingest-common:ingest/20_crud/Test basic pipeline with on_failure in processor
+ingest-common:ingest/20_crud/Test invalid config
+ingest-common:ingest/20_crud/Test invalid processor config
+ingest-common:ingest/20_crud/Test processor with description
+ingest-common:ingest/20_crud/Test wildcard pipeline delete
+ingest-common:ingest/210_conditional_processor/Test conditional processor fulfilled condition
+ingest-common:ingest/210_conditional_processor/Test conditional processor unfulfilled condition
+ingest-common:ingest/210_conditional_processor/Test conditional processor with fields API
+ingest-common:ingest/210_conditional_processor/Test conditionals support params and statements
+ingest-common:ingest/210_conditional_processor/Test fields iterator is unmodifiable
+ingest-common:ingest/210_pipeline_processor/Test Pipeline Processor with Circular Pipelines
+ingest-common:ingest/210_pipeline_processor/Test Pipeline Processor with Simple Inner Pipeline
+ingest-common:ingest/210_pipeline_processor/Test Pipeline Processor with templating
+ingest-common:ingest/210_pipeline_processor/Test _ingest.pipeline metadata
+ingest-common:ingest/210_pipeline_processor/Test ignore_missing_pipeline parameter
+ingest-common:ingest/220_drop_processor/Test Drop Processor
+ingest-common:ingest/220_drop_processor/Test Drop Processor On Failure
+ingest-common:ingest/220_drop_processor/Test Drop Processor with Upsert (_bulk)
+ingest-common:ingest/220_drop_processor/Test Drop Processor with Upsert (_update)
+ingest-common:ingest/230_change_target_index/Test Change Target Index with Default Pipeline
+ingest-common:ingest/230_change_target_index/Test Change Target Index with Explicit Pipeline
+ingest-common:ingest/240_final_pipeline/Test final pipeline when target index is changed
+ingest-common:ingest/240_final_pipeline/Test index with final pipeline
+ingest-common:ingest/250_csv/Test CSV Processor defaults
+ingest-common:ingest/250_csv/Test CSV Processor quote and separator
+ingest-common:ingest/250_csv/Test CSV Processor trim
+ingest-common:ingest/250_csv/Test CSV Processor trim log
+ingest-common:ingest/260_seq_no/Test set _if_seq_no & _if_primary_term
+ingest-common:ingest/270_set_processor/Test set processor with a templated value
+ingest-common:ingest/270_set_processor/Test set processor with copy_from
+ingest-common:ingest/270_set_processor/Test set processor with ignore_empty_value and a literal empty value
+ingest-common:ingest/270_set_processor/Test set processor with index change and require_alias
+ingest-common:ingest/270_set_processor/Test set processor with more interesting mustache
+ingest-common:ingest/270_set_processor/Test set processor with mustache edge cases
+ingest-common:ingest/270_set_processor/Test set processor with reflection attempts
+ingest-common:ingest/280_rename/Test Rename Processor
+ingest-common:ingest/280_rename/Test Rename Processor with override
+ingest-common:ingest/280_rename/Test Rename Processor with template snippets and ignore_missing
+ingest-common:ingest/290_versioned_update/Test pipeline versioned updates
+ingest-common:ingest/30_date_processor/Test date processor
+ingest-common:ingest/30_date_processor/Test date processor timezone calculations
+ingest-common:ingest/30_date_processor/Test date processor with no timezone configured
+ingest-common:ingest/30_date_processor/Test week based date parsing
+ingest-common:ingest/30_date_processor/Test week based date parsing with locale
+ingest-common:ingest/310_reroute_processor/Test data stream with lazy rollover obtains pipeline from template
+ingest-common:ingest/310_reroute_processor/Test pipeline run after reroute
+ingest-common:ingest/310_reroute_processor/Test remove then add reroute processor with and without lazy rollover
+ingest-common:ingest/310_reroute_processor/Test two stage routing
+ingest-common:ingest/320_uri_parts_processor/Test URI parts Processor
+ingest-common:ingest/330_terminate_processor/Test pipeline including conditional terminate pipeline
+ingest-common:ingest/330_terminate_processor/Test pipeline with terminate invoked from an outer pipeline
+ingest-common:ingest/340_flexible_access_pattern/Test dotted field name exists
+ingest-common:ingest/340_flexible_access_pattern/Test dotted field name retrieval
+ingest-common:ingest/340_flexible_access_pattern/Test dotted field name writes
+ingest-common:ingest/340_flexible_access_pattern/Test dotted field removal
+ingest-common:ingest/350_append_copy_from/Array into a present array
+ingest-common:ingest/350_append_copy_from/Array into an absent value
+ingest-common:ingest/350_append_copy_from/It is not permitted to have both copy_from and value
+ingest-common:ingest/350_append_copy_from/Simple value into a present array
+ingest-common:ingest/350_append_copy_from/Simple value into a present simple value
+ingest-common:ingest/350_append_copy_from/Simple value into an absent value
+ingest-common:ingest/350_recover_failure_document_processor/Test recover_failure_document processor error handling - missing document field
+ingest-common:ingest/350_recover_failure_document_processor/Test recover_failure_document processor error handling - missing source field
+ingest-common:ingest/350_recover_failure_document_processor/Test recover_failure_document processor with data stream failure store
+ingest-common:ingest/360_append_allow_duplicates/allow_duplicates (false) removes duplicates with a missing array and copy_from
+ingest-common:ingest/360_append_allow_duplicates/allow_duplicates (false) removes duplicates with a missing array and templating
+ingest-common:ingest/360_append_allow_duplicates/allow_duplicates (false) removes duplicates with a present array and copy_from
+ingest-common:ingest/360_append_allow_duplicates/allow_duplicates (false) removes duplicates with a present array and templating
+ingest-common:ingest/360_append_allow_duplicates/allow_duplicates (false) removes duplicates with an empty array and copy_from
+ingest-common:ingest/360_append_allow_duplicates/allow_duplicates (false) removes duplicates with an empty array and templating
+ingest-common:ingest/370_append_ignore_empty_values/A missing copy_from value is ignored
+ingest-common:ingest/370_append_ignore_empty_values/A non-null value is copied
+ingest-common:ingest/370_append_ignore_empty_values/A null copy_from value is ignored
+ingest-common:ingest/370_append_ignore_empty_values/An empty array copy_from value is ignored
+ingest-common:ingest/370_append_ignore_empty_values/An empty string copy_from value is ignored
+ingest-common:ingest/370_append_ignore_empty_values/Empty strings and nulls are ignored in an array
+ingest-common:ingest/380_append_edge_cases/an absent value isn't added in the absence of change
+ingest-common:ingest/380_append_edge_cases/if a value doesn't change because of ignoring duplicates or empty values, it doesn't become a list
+ingest-common:ingest/380_append_edge_cases/scalar values will become a list if necessary
+ingest-common:ingest/390_registered_domain_processor/Registered Domain Processor: Complex FQDN
+ingest-common:ingest/390_registered_domain_processor/Registered Domain Processor: Field missing with ignore_missing false causes error
+ingest-common:ingest/390_registered_domain_processor/Registered Domain Processor: Field missing with ignore_missing true
+ingest-common:ingest/390_registered_domain_processor/Registered Domain Processor: Invalid input
+ingest-common:ingest/390_registered_domain_processor/Registered Domain Processor: Unmatchable FQDN
+ingest-common:ingest/390_registered_domain_processor/Registered Domain Processor: Valid Domain Only (no subdomain)
+ingest-common:ingest/390_registered_domain_processor/Registered Domain Processor: Valid FQDN
+ingest-common:ingest/390_registered_domain_processor/Registered Domain Processor: Valid TLD Only
+ingest-common:ingest/400_useragent_processor/Test user agent processor with defaults
+ingest-common:ingest/400_useragent_processor/Test user agent processor with parameters
+ingest-common:ingest/40_mutate/Test metadata
+ingest-common:ingest/40_mutate/Test mutate processors
+ingest-common:ingest/410_useragent_custom_regex/Test user agent processor with custom regex file
+ingest-common:ingest/420_useragent_custom_regex_legacy/Test user agent processor with custom regex file in legacy ingest-user-agent directory
+ingest-common:ingest/50_on_failure/Test Pipeline With Nested Processor On Failures
+ingest-common:ingest/50_on_failure/Test Pipeline With On Failure Block
+ingest-common:ingest/50_on_failure/Test pipeline with empty on_failure in a processor
+ingest-common:ingest/50_on_failure/Test pipeline with empty on_failure in pipeline
+ingest-common:ingest/50_on_failure/Test pipeline with ignore_failure in a processor
+ingest-common:ingest/60_fail/Test Fail Processor
+ingest-common:ingest/60_fail/Test Fail Processor with Upsert (_update)
+ingest-common:ingest/60_fail/Test Fail Processor with Upsert (bulk)
+ingest-common:ingest/60_fail/Test fail with on_failure
+ingest-common:ingest/70_bulk/Test bulk request with _none request pipeline and default pipeline
+ingest-common:ingest/70_bulk/Test bulk request with default pipeline
+ingest-common:ingest/70_bulk/Test bulk request with list_executed_pipelines
+ingest-common:ingest/70_bulk/Test bulk request without default pipeline
+ingest-common:ingest/70_bulk/Update with pipeline
+ingest-common:ingest/80_foreach/Test foreach Processor
+ingest-common:ingest/90_simulate/Test simulate with exception thrown
+ingest-common:ingest/90_simulate/Test simulate with invalid processor config
+ingest-common:ingest/90_simulate/Test simulate with no provided pipeline or pipeline_id
+ingest-common:ingest/90_simulate/Test simulate with pipeline with conditional and skipped and dropped
+ingest-common:ingest/90_simulate/Test simulate with provided invalid pipeline definition
+ingest-common:ingest/90_simulate/Test simulate with provided pipeline definition
+ingest-common:ingest/90_simulate/Test simulate with provided pipeline definition with on_failure block
+ingest-common:ingest/90_simulate/Test simulate with provided pipeline that does not exist
+ingest-common:ingest/90_simulate/Test simulate with stored ingest pipeline
+ingest-common:ingest/90_simulate/Test simulate with verbose flag
+ingest-common:ingest/90_simulate/Test simulate without id
+ingest-common:ingest/90_simulate/Test verbose simulate with Pipeline Processor and ignore_missing_pipeline
+ingest-common:ingest/90_simulate/Test verbose simulate with Pipeline Processor with Circular Pipelines
+ingest-common:ingest/90_simulate/Test verbose simulate with Pipeline Processor with Multiple Pipelines
+ingest-common:ingest/90_simulate/Test verbose simulate with error in pipeline
+ingest-common:ingest/90_simulate/Test verbose simulate with exception thrown
+ingest-common:ingest/90_simulate/Test verbose simulate with ignore_failure and no exception thrown
+ingest-common:ingest/90_simulate/Test verbose simulate with ignore_failure and thrown exception
+ingest-common:ingest/90_simulate/Test verbose simulate with on_failure
+ingest-common:ingest/90_simulate/Test verbose simulate with true conditional and on failure

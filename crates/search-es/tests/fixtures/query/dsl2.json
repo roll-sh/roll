@@ -1,0 +1,755 @@
+{
+ "source": "Elasticsearch 9.5.5 (_search on an index; printed form from an alias filter in _search_shards)",
+ "cases": [
+  {
+   "query": "{\"bool\":{\"must\":null}}",
+   "expect": {
+    "bool": {
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"must\":[{\"match_all\":{}}],\"should\":{\"term\":{\"kw\":\"x\"}},\"mustNot\":{\"term\":{\"kw\":\"y\"}}}}",
+   "expect": {
+    "bool": {
+     "must": [
+      {
+       "match_all": {
+        "boost": 1.0
+       }
+      }
+     ],
+     "must_not": [
+      {
+       "term": {
+        "kw": {
+         "value": "y"
+        }
+       }
+      }
+     ],
+     "should": [
+      {
+       "term": {
+        "kw": {
+         "value": "x"
+        }
+       }
+      }
+     ],
+     "boost": 1.0
+    }
+   },
+   "warnings": [
+    "[bool][1:84] Deprecated field [mustNot] used, expected [must_not] instead"
+   ]
+  },
+  {
+   "query": "{\"bool\":{\"must\":{\"match_all\":{\"boost\":-2}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:48] [bool] failed to parse field [must]",
+    "caused_by": {
+     "type": "parsing_exception",
+     "reason": "[1:48] [match_all] failed to parse field [boost]",
+     "line": 1,
+     "col": 48,
+     "caused_by": {
+      "type": "x_content_parse_exception",
+      "reason": "[1:48] [match_all] failed to parse field [boost]",
+      "caused_by": {
+       "type": "illegal_argument_exception",
+       "reason": "negative [boost] are not allowed in [{\n  \"match_all\" : {\n    \"boost\" : 1.0\n  }\n}], use a value between 0 and 1 to deboost"
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"boost\":-1,\"must\":{\"match_all\":{}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:27] [bool] failed to parse field [boost]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "negative [boost] are not allowed in [{\n  \"bool\" : {\n    \"boost\" : 1.0\n  }\n}], use a value between 0 and 1 to deboost"
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"must\":{\"match_all\":{}},\"boost\":-1}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:51] [bool] failed to parse field [boost]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "negative [boost] are not allowed in [{\n  \"bool\" : {\n    \"must\" : [\n      {\n        \"match_all\" : {\n          \"boost\" : 1.0\n        }\n      }\n    ],\n    \"boost\" : 1.0\n  }\n}], use a value between 0 and 1 to deboost"
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"minimum_should_match\":null}}",
+   "expect": {
+    "bool": {
+     "boost": 1.0
+    }
+   }
+  },
+  {
+   "query": "{\"bool\":{\"minimum_should_match\":[1]}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:42] [bool] minimum_should_match doesn't support values of type: START_ARRAY"
+   }
+  },
+  {
+   "query": "{\"bool\":{\"adjust_pure_negative\":\"x\"}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:42] [bool] failed to parse field [adjust_pure_negative]",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Failed to parse value [x] as only [true] or [false] are allowed."
+    }
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"query\":{\"match_all\":{}},\"functions\":[{\"filter\":{\"term\":{\"kw\":\"x\"}},\"weight\":2},{\"random_score\":{},\"weight\":1},{\"script_score\":{\"script\":\"_score*2\"}},{\"field_value_factor\":{\"field\":\"num\",\"factor\":1.2,\"modifier\":\"sqrt\",\"missing\":1}},{\"gauss\":{\"date\":{\"origin\":\"now\",\"scale\":\"10d\",\"offset\":\"1d\",\"decay\":0.5}},\"multi_value_mode\":\"avg\"}],\"score_mode\":\"sum\",\"boost_mode\":\"replace\",\"max_boost\":10,\"min_score\":0.5,\"boost\":2,\"_name\":\"fs\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [function_score] query. field [multi_value_mode] is not supported",
+    "line": 1,
+    "col": 355
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"gauss\":{\"geo\":{\"origin\":\"0,0\",\"scale\":\"1km\"}}}}",
+   "expect": {
+    "function_score": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "functions": [
+      {
+       "filter": {
+        "match_all": {
+         "boost": 1.0
+        }
+       },
+       "gauss": {
+        "geo": {
+         "origin": "0,0",
+         "scale": "1km"
+        },
+        "multi_value_mode": "MIN"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"weight\":3}}",
+   "expect": {
+    "function_score": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "functions": [
+      {
+       "filter": {
+        "match_all": {
+         "boost": 1.0
+        }
+       },
+       "weight": 3.0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"random_score\":{\"seed\":10,\"field\":\"_seq_no\"}}}",
+   "expect": {
+    "function_score": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "functions": [
+      {
+       "filter": {
+        "match_all": {
+         "boost": 1.0
+        }
+       },
+       "random_score": {
+        "seed": 10,
+        "field": "_seq_no"
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"random_score\":{\"seed\":\"abc\"}}}",
+   "expect": {
+    "function_score": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "functions": [
+      {
+       "filter": {
+        "match_all": {
+         "boost": 1.0
+        }
+       },
+       "random_score": {
+        "seed": 96354
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"random_score\":{\"seed\":12345678901}}}",
+   "expect": {
+    "function_score": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "functions": [
+      {
+       "filter": {
+        "match_all": {
+         "boost": 1.0
+        }
+       },
+       "random_score": {
+        "seed": -539222985
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"random_score\":{\"seed\":1.5}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "random_score seed must be an int, long or string, not 'VALUE_NUMBER'",
+    "line": 1,
+    "col": 52
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"exp\":{\"num\":{\"origin\":1,\"scale\":2}},\"linear\":{\"num\":{\"origin\":1,\"scale\":2}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [function_score] query. already found function [exp], now encountering [linear]. use [functions] array if you want to define several functions.",
+    "line": 1,
+    "col": 75
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"functions\":[{\"weight\":2}],\"gauss\":{\"num\":{\"origin\":1,\"scale\":2}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [function_score] query. [you can either define [functions] array or a single function, not both. already found [functions] array, now encountering [gauss].]",
+    "line": 1,
+    "col": 64
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"gauss\":{\"num\":{\"origin\":1,\"scale\":2}},\"functions\":[{\"weight\":2}]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [function_score] query. [you can either define [functions] array or a single function, not both. already found [gauss], now encountering [functions].]",
+    "line": 1,
+    "col": 80
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"functions\":[{}]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [function_score] query. an entry in functions list is missing a function.",
+    "line": 1,
+    "col": 43
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"functions\":[1]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [START_OBJECT]. malformed query, expected a [VALUE_NUMBER] while parsing functions but got a [function_score] instead",
+    "line": 1,
+    "col": 42
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"functions\":[{\"foo\":{}}]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "unknown query [function_score] did you mean any of [random_score, script_score]?",
+    "line": 1,
+    "col": 49,
+    "caused_by": {
+     "type": "named_object_not_found_exception",
+     "reason": "[1:49] unknown field [foo]"
+    }
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"functions\":[{\"weight\":-1}]}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "[weight] cannot be negative for a filtering function"
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"score_mode\":\"foo\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No enum constant org.elasticsearch.common.lucene.search.function.FunctionScoreQuery.ScoreMode.FOO"
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"boost_mode\":\"foo\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No enum constant org.elasticsearch.common.lucene.search.function.CombineFunction.FOO"
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [function_score] query. field [foo] is not supported",
+    "line": 1,
+    "col": 35
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"query\":{\"match_all\":{}}}}",
+   "expect": {
+    "function_score": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "functions": []
+    }
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"field_value_factor\":{\"factor\":2}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[field_value_factor] required field 'field' missing",
+    "line": 1,
+    "col": 61
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"field_value_factor\":{\"field\":\"num\",\"modifier\":\"foo\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "No enum constant org.elasticsearch.common.lucene.search.function.FieldValueFactorFunction.Modifier.FOO"
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"gauss\":{\"num\":{\"origin\":1,\"scale\":2}},\"weight\":2}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "failed to parse [function_score] query. already found function [gauss], now encountering [weight]. use [functions] array if you want to define several functions.",
+    "line": 1,
+    "col": 77
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"gauss\":{\"num\":{\"origin\":1,\"scale\":2},\"multi_value_mode\":\"foo\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Illegal sort mode: foo"
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"gauss\":{}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "malformed score function score parameters.",
+    "line": 1,
+    "col": 38
+   }
+  },
+  {
+   "query": "{\"function_score\":{\"script_score\":{}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "script_score requires 'script' field",
+    "line": 1,
+    "col": 45
+   }
+  },
+  {
+   "query": "{\"script_score\":{\"query\":{\"match_all\":{}},\"script\":{\"source\":\"1\"},\"min_score\":1,\"boost\":2,\"_name\":\"s\"}}",
+   "expect": {
+    "script_score": {
+     "query": {
+      "match_all": {
+       "boost": 1.0
+      }
+     },
+     "script": {
+      "source": "1",
+      "lang": "painless"
+     },
+     "min_score": 1.0,
+     "boost": 2.0,
+     "_name": "s"
+    }
+   }
+  },
+  {
+   "query": "{\"script_score\":{\"query\":{\"match_all\":{}},\"script\":\"1\"}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:61] [script_score] script doesn't support values of type: VALUE_STRING"
+   }
+  },
+  {
+   "query": "{\"script_score\":{\"script\":{\"source\":\"1\"}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Required [query]"
+   }
+  },
+  {
+   "query": "{\"script_score\":{\"query\":{\"match_all\":{}}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Required [script]"
+   }
+  },
+  {
+   "query": "{\"script_score\":{\"query\":{\"match_all\":{}},\"script\":{\"source\":\"1\"},\"foo\":1}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "[1:76] [script_score] unknown field [foo]"
+   }
+  },
+  {
+   "query": "{\"query_string\":{\"query\":\"a AND b\"}}",
+   "expect": {
+    "query_string": {
+     "query": "a AND b",
+     "fields": []
+    }
+   }
+  },
+  {
+   "query": "{\"query_string\":{\"query\":\"a\",\"default_field\":\"t\",\"fields\":[\"t\",\"t2^2\"],\"type\":\"phrase\",\"tie_breaker\":0.3,\"default_operator\":\"and\",\"analyzer\":\"standard\",\"quote_analyzer\":\"standard\",\"max_determinized_states\":5,\"allow_leading_wildcard\":false,\"enable_position_increments\":false,\"fuzziness\":1,\"fuzzy_prefix_length\":1,\"fuzzy_max_expansions\":5,\"fuzzy_rewrite\":\"constant_score\",\"phrase_slop\":2,\"analyze_wildcard\":true,\"rewrite\":\"constant_score\",\"minimum_should_match\":\"1\",\"quote_field_suffix\":\".exact\",\"lenient\":true,\"time_zone\":\"+01:00\",\"escape\":true,\"auto_generate_synonyms_phrase_query\":false,\"fuzzy_transpositions\":false,\"boost\":2,\"_name\":\"qs\"}}",
+   "parses": true
+  },
+  {
+   "query": "{\"query_string\":{\"default_field\":\"t\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[query_string] must be provided with a [query]",
+    "line": 1,
+    "col": 46
+   }
+  },
+  {
+   "query": "{\"query_string\":{\"query\":\"a\",\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[query_string] query does not support [foo]",
+    "line": 1,
+    "col": 45
+   }
+  },
+  {
+   "query": "{\"query_string\":{\"query\":\"a\",\"fields\":\"t\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[query_string] query does not support [fields]",
+    "line": 1,
+    "col": 48
+   }
+  },
+  {
+   "query": "{\"query_string\":{\"query\":\"a\",\"time_zone\":\"Foo/Bar\"}}",
+   "error": {
+    "type": "zone_rules_exception",
+    "reason": "Unknown time-zone ID: Foo/Bar"
+   }
+  },
+  {
+   "query": "{\"query_string\":{\"query\":\"a\",\"fields\":[\"t^-1\"]}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "negative [boost] are not allowed in [{\n  \"query_string\" : {\n    \"query\" : \"a\",\n    \"fields\" : [ ]\n  }\n}], use a value between 0 and 1 to deboost"
+   }
+  },
+  {
+   "query": "{\"query_string\":{\"query\":\"a\",\"type\":\"boolean\"}}",
+   "expect": {
+    "query_string": {
+     "query": "a",
+     "fields": []
+    }
+   },
+   "warnings": [
+    "Deprecated field [boolean] used, expected [best_fields] instead"
+   ]
+  },
+  {
+   "query": "{\"query_string\":{\"query\":\"a\",\"fields\":[\"t^2\",\"t^3\"]}}",
+   "expect": {
+    "query_string": {
+     "query": "a",
+     "fields": [
+      "t^3.0"
+     ]
+    }
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"query\":\"a b\"}}",
+   "expect": {
+    "simple_query_string": {
+     "query": "a b"
+    }
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"query\":\"a\",\"fields\":[\"t^2\"],\"default_operator\":\"AND\",\"analyzer\":\"standard\",\"flags\":\"AND|OR\",\"lenient\":false,\"analyze_wildcard\":true,\"minimum_should_match\":\"1\",\"quote_field_suffix\":\".x\",\"auto_generate_synonyms_phrase_query\":false,\"fuzzy_prefix_length\":1,\"fuzzy_max_expansions\":3,\"fuzzy_transpositions\":false,\"type\":\"phrase\",\"boost\":2,\"_name\":\"s\"}}",
+   "expect": {
+    "simple_query_string": {
+     "query": "a",
+     "fields": [
+      "t^2.0"
+     ],
+     "analyzer": "standard",
+     "flags": 5,
+     "default_operator": "and",
+     "lenient": false,
+     "analyze_wildcard": true,
+     "quote_field_suffix": ".x",
+     "minimum_should_match": "1",
+     "auto_generate_synonyms_phrase_query": false,
+     "fuzzy_prefix_length": 1,
+     "fuzzy_max_expansions": 3,
+     "fuzzy_transpositions": false,
+     "type": "phrase",
+     "boost": 2.0,
+     "_name": "s"
+    }
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"query\":\"a\",\"flags\":\"NONE\"}}",
+   "expect": {
+    "simple_query_string": {
+     "query": "a",
+     "flags": 0
+    }
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"query\":\"a\",\"flags\":\"ALL\"}}",
+   "expect": {
+    "simple_query_string": {
+     "query": "a"
+    }
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"query\":\"a\",\"flags\":3}}",
+   "expect": {
+    "simple_query_string": {
+     "query": "a",
+     "flags": 3
+    }
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"query\":\"a\",\"flags\":-5}}",
+   "expect": {
+    "simple_query_string": {
+     "query": "a"
+    }
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"query\":\"a\",\"flags\":\"foo\"}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Unknown simple_query_string flag [foo]"
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"query\":\"a\",\"foo\":1}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[simple_query_string] unsupported field [foo]",
+    "line": 1,
+    "col": 52
+   }
+  },
+  {
+   "query": "{\"simple_query_string\":{\"fields\":[\"t\"]}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "[simple_query_string] query text missing",
+    "line": 1,
+    "col": 48
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"match\":{\"query\":\"a b\",\"max_gaps\":2,\"ordered\":true,\"analyzer\":\"standard\",\"filter\":{\"not_containing\":{\"match\":{\"query\":\"c\"}}}}}}}",
+   "expect": {
+    "intervals": {
+     "t": {
+      "match": {
+       "query": "a b",
+       "max_gaps": 2,
+       "ordered": true,
+       "analyzer": "standard",
+       "filter": {
+        "not_containing": {
+         "match": {
+          "query": "c",
+          "max_gaps": -1,
+          "ordered": false
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"all_of\":{\"intervals\":[{\"match\":{\"query\":\"a\"}},{\"prefix\":{\"prefix\":\"b\"}}],\"ordered\":true,\"max_gaps\":3}}}}",
+   "expect": {
+    "intervals": {
+     "t": {
+      "all_of": {
+       "ordered": true,
+       "max_gaps": 3,
+       "intervals": [
+        {
+         "match": {
+          "query": "a",
+          "max_gaps": -1,
+          "ordered": false
+         }
+        },
+        {
+         "prefix": {
+          "prefix": "b"
+         }
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"any_of\":{\"intervals\":[{\"wildcard\":{\"pattern\":\"a*\"}},{\"fuzzy\":{\"term\":\"abc\"}},{\"regexp\":{\"pattern\":\"a.*\"}},{\"range\":{\"gte\":\"a\",\"lt\":\"c\"}}]}},\"boost\":2,\"_name\":\"i\"}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Expected [END_OBJECT] but got [FIELD_NAME]",
+    "line": 1,
+    "col": 170
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"match\":{\"query\":\"a\",\"filter\":{\"script\":{\"source\":\"interval.start > 1\"}}}}}}",
+   "expect": {
+    "intervals": {
+     "t": {
+      "match": {
+       "query": "a",
+       "max_gaps": -1,
+       "ordered": false,
+       "filter": {
+        "script": {
+         "source": "interval.start > 1",
+         "lang": "painless"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"foo\":{\"query\":\"a\"}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Unknown interval type [foo], expecting one of [match, any_of, all_of, prefix, wildcard, regexp, range]",
+    "line": 1,
+    "col": 29
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"match\":{}}}}",
+   "error": {
+    "type": "illegal_argument_exception",
+    "reason": "Required [query]"
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Missing intervals from interval query definition",
+    "line": 1,
+    "col": 30
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"match\":{\"query\":\"a\"},\"prefix\":{\"prefix\":\"b\"}}}}",
+   "error": {
+    "type": "parsing_exception",
+    "reason": "Only one interval rule can be specified, found [match] and [prefix]",
+    "line": 1,
+    "col": 51
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"range\":{\"gte\":\"a\",\"gt\":\"b\",\"lt\":\"c\"}}}}",
+   "error": {
+    "type": "x_content_parse_exception",
+    "reason": "Failed to build [range] after last required field arrived",
+    "caused_by": {
+     "type": "illegal_argument_exception",
+     "reason": "Either [gte] or [gt], one of them must be provided"
+    }
+   }
+  },
+  {
+   "query": "{\"intervals\":{\"t\":{\"match\":{\"query\":\"a\",\"filter\":{\"foo\":{\"match\":{\"query\":\"c\"}}}}}}}",
+   "parses": true
+  }
+ ]
+}

@@ -1,0 +1,64 @@
+{
+ "properties": {
+  "fv": {
+   "type": "dense_vector",
+   "dims": 4,
+   "index": true,
+   "similarity": "l2_norm"
+  },
+  "fvc": {
+   "type": "dense_vector",
+   "dims": 4,
+   "index": true,
+   "similarity": "cosine"
+  },
+  "fvb": {
+   "type": "dense_vector",
+   "dims": 4,
+   "index": false
+  },
+  "bv": {
+   "type": "dense_vector",
+   "dims": 4,
+   "element_type": "byte",
+   "index": true,
+   "similarity": "l2_norm"
+  },
+  "bvc": {
+   "type": "dense_vector",
+   "dims": 4,
+   "element_type": "byte",
+   "index": true,
+   "similarity": "cosine"
+  },
+  "bvb": {
+   "type": "dense_vector",
+   "dims": 4,
+   "element_type": "byte",
+   "index": false
+  },
+  "bit": {
+   "type": "dense_vector",
+   "dims": 16,
+   "element_type": "bit",
+   "index": true,
+   "similarity": "l2_norm"
+  },
+  "bitb": {
+   "type": "dense_vector",
+   "dims": 16,
+   "element_type": "bit",
+   "index": false
+  },
+  "bf": {
+   "type": "dense_vector",
+   "dims": 4,
+   "element_type": "bfloat16",
+   "index": true,
+   "similarity": "l2_norm"
+  },
+  "l": {
+   "type": "long"
+  }
+ }
+}

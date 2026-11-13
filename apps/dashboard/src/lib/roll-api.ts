@@ -67,7 +67,7 @@ export interface Health {
 }
 
 /** A product rolld can run; `GET /v1/info` lists the ones this node runs (`ROLL_PRODUCTS`). */
-export type Product = "postgres" | "redis" | "streams" | "tasks" | "storage" | "nosql" | "queues" | "code";
+export type Product = "postgres" | "redis" | "streams" | "tasks" | "storage" | "nosql" | "queues" | "code" | "search";
 
 export interface Info {
   version: string;

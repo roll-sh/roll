@@ -69,6 +69,10 @@ s3-store.workspace = true
 # `tests/secrets.rs`: roll secrets in process.
 roll-secrets.workspace = true
 roll-workspace.workspace = true
+# `tests/search.rs` runs the `roll` binary against an in-process search control plane.
+search-control.workspace = true
+search-server.workspace = true
+search-store.workspace = true
 
 [[test]]
 name = "cqlsh_roll"

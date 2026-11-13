@@ -1,10 +1,11 @@
-import { Boxes, Database, GitBranch, Package, Waves, Zap, type LucideIcon } from "lucide-react";
+import { Boxes, Database, GitBranch, Package, TextSearch, Waves, Zap, type LucideIcon } from "lucide-react";
 import type { ResourceKind } from "@/lib/workspace-api";
 
 export const KIND_ICON: Record<ResourceKind, LucideIcon> = {
   postgres: Database,
   redis: Zap,
   nosql: Boxes,
+  search: TextSearch,
   stream: Waves,
   bucket: Package,
   repo: GitBranch,

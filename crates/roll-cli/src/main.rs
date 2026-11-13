@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 mod nosql;
 mod queues;
+mod search;
 mod storage;
 mod redis;
 mod seal;
@@ -73,6 +74,9 @@ enum Cmd {
     /// RabbitMQ-compatible message queues.
     #[command(alias = "q")]
     Queues(queues::Queues),
+    /// Elasticsearch-compatible search.
+    #[command(subcommand, alias = "es")]
+    Search(search::Search),
     /// S3-compatible object storage.
     #[command(subcommand, alias = "s3")]
     Storage(storage::Storage),
@@ -404,6 +408,7 @@ async fn main() -> anyhow::Result<()> {
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
+        Cmd::Search(cmd) => return search::run(&api, cli.json, cmd).await,
         Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
         Cmd::Secrets { at, cmd } => return secrets::run(&secrets_api(&api).await?, cli.json, at, cmd).await,
         Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,

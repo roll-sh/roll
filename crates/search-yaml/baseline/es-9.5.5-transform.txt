@@ -1,0 +1,111 @@
+# Tests of Elasticsearch 9.5.5's `transform` YAML suite that pass on a private single-node
+# Elasticsearch 9.5.5 in Docker configured like the suite's own test cluster (security).
+# Written by scripts/search-yaml-suites.sh es-extended-baseline (crates/search-yaml/suites/extended.txt).
+transform:transform/preview_transforms/Test preview continuous transform with no warnings
+transform:transform/preview_transforms/Test preview continuous transform with warnings
+transform:transform/preview_transforms/Test preview non-existent transform
+transform:transform/preview_transforms/Test preview of unattended transform
+transform:transform/preview_transforms/Test preview returns bad request with invalid agg
+transform:transform/preview_transforms/Test preview transform
+transform:transform/preview_transforms/Test preview transform by id
+transform:transform/preview_transforms/Test preview transform latest
+transform:transform/preview_transforms/Test preview transform latest with search runtime fields
+transform:transform/preview_transforms/Test preview transform latest with unique key field of aggregate_metric_double type
+transform:transform/preview_transforms/Test preview transform pivot with search runtime fields
+transform:transform/preview_transforms/Test preview transform with disabled mapping deduction
+transform:transform/preview_transforms/Test preview transform with invalid config
+transform:transform/preview_transforms/Test preview transform with offset
+transform:transform/preview_transforms/Test preview transform with timeout
+transform:transform/preview_transforms/Test preview with both id and body
+transform:transform/preview_transforms/Test preview with missing pipeline
+transform:transform/preview_transforms/Test preview with non-existing source index
+transform:transform/preview_transforms/Test preview with unsupported agg
+transform:transform/preview_transforms/Test preview without id and body
+transform:transform/preview_transforms_synthetic_source/simple
+transform:transform/transforms_cat_apis/Test cat transform stats hiding headers
+transform:transform/transforms_cat_apis/Test cat transform stats with column selection
+transform:transform/transforms_cat_apis/Test cat transform stats with continuous transform
+transform:transform/transforms_crud/Test PUT continuous transform
+transform:transform/transforms_crud/Test PUT continuous transform without delay set
+transform:transform/transforms_crud/Test alias scenarios
+transform:transform/transforms_crud/Test basic transform crud
+transform:transform/transforms_crud/Test creation failures due to duplicate and conflicting field names
+transform:transform/transforms_crud/Test creation failures of latest function
+transform:transform/transforms_crud/Test creation of latest function
+transform:transform/transforms_crud/Test delete transform when it does not exist
+transform:transform/transforms_crud/Test get all transforms when there are none
+transform:transform/transforms_crud/Test get transform when it does not exist
+transform:transform/transforms_crud/Test invalid destination index name
+transform:transform/transforms_crud/Test invalid transform id
+transform:transform/transforms_crud/Test put config with invalid number of failure retries
+transform:transform/transforms_crud/Test put config with invalid pivot size
+transform:transform/transforms_crud/Test put transform with bad query due to script compilation
+transform:transform/transforms_crud/Test put transform with frequency too high
+transform:transform/transforms_crud/Test put transform with frequency too low
+transform:transform/transforms_crud/Test put transform with invalid source index
+transform:transform/transforms_crud/Test put transform with invalid source index pattern
+transform:transform/transforms_crud/Test put transform with missing pipeline
+transform:transform/transforms_crud/Test put transform with missing pipeline and defer validations
+transform:transform/transforms_crud/Test put valid config with create_time in the body
+transform:transform/transforms_crud/Test put valid config with version in the body
+transform:transform/transforms_crud/Test transform for export
+transform:transform/transforms_crud/Test transform where dest is included in source
+transform:transform/transforms_crud/Test transform where source query is invalid
+transform:transform/transforms_crud/Test transform with invalid page parameter
+transform:transform/transforms_crud/Test transform with query and array of indices in source
+transform:transform/transforms_force_delete/Test force deleting a running transform
+transform:transform/transforms_latest/Test latest preview includes document IDs
+transform:transform/transforms_latest/Test latest preview picks correct document when sort and sync fields are non-monotonic
+transform:transform/transforms_latest/Test latest preview with multi-field unique key
+transform:transform/transforms_reset/Test force reseting a running transform
+transform:transform/transforms_reset/Test reset new transform
+transform:transform/transforms_reset/Test reset running transform
+transform:transform/transforms_reset/Test reset stopped transform
+transform:transform/transforms_reset/Test reset transform when it does not exist
+transform:transform/transforms_start_stop/Test schedule_now all transforms
+transform:transform/transforms_start_stop/Test schedule_now missing transform
+transform:transform/transforms_start_stop/Test schedule_now on a stopped transform
+transform:transform/transforms_start_stop/Test schedule_now on an already started transform
+transform:transform/transforms_start_stop/Test start already started transform
+transform:transform/transforms_start_stop/Test start batch transform with from parameter
+transform:transform/transforms_start_stop/Test start missing transform
+transform:transform/transforms_start_stop/Test start transform
+transform:transform/transforms_start_stop/Test start transform with empty value of from parameter
+transform:transform/transforms_start_stop/Test start transform with invalid value of from parameter
+transform:transform/transforms_start_stop/Test start transform with missing pipeline
+transform:transform/transforms_start_stop/Test start transform with pipeline
+transform:transform/transforms_start_stop/Test start/stop only starts/stops specified transform
+transform:transform/transforms_start_stop/Test start/stop with field alias
+transform:transform/transforms_start_stop/Test start/stop/start continuous transform
+transform:transform/transforms_start_stop/Test start/stop/start transform
+transform:transform/transforms_start_stop/Test stop all
+transform:transform/transforms_start_stop/Test stop already stopped transform
+transform:transform/transforms_start_stop/Test stop missing transform
+transform:transform/transforms_start_stop/Test stop missing transform by expression
+transform:transform/transforms_start_stop/Test stop transform with force and wait_for_checkpoint true 
+transform:transform/transforms_start_stop/Verify start transform creates destination index with appropriate mapping
+transform:transform/transforms_start_stop/Verify start transform creates destination index without mapping deduction
+transform:transform/transforms_start_stop/Verify start transform reuses destination index
+transform:transform/transforms_stats/Test get multiple transform stats
+transform:transform/transforms_stats/Test get multiple transform stats where one does not have a task
+transform:transform/transforms_stats/Test get single transform stats when it does not have a task
+transform:transform/transforms_stats/Test get transform stats
+transform:transform/transforms_stats/Test get transform stats on missing transform
+transform:transform/transforms_stats/Test get transform stats with timeout
+transform:transform/transforms_stats_continuous/Test get continuous transform stats
+transform:transform/transforms_unattended/Test unattended put and start
+transform:transform/transforms_unattended/Test unattended put and start wildcard
+transform:transform/transforms_update/Test alias scenarios
+transform:transform/transforms_update/Test basic transform crud
+transform:transform/transforms_update/Test invalid destination index name
+transform:transform/transforms_update/Test put transform with invalid source index
+transform:transform/transforms_update/Test transform where dest is included in source
+transform:transform/transforms_update/Test update retention policy
+transform:transform/transforms_update/Test update transform metadata
+transform:transform/transforms_update/Test update transform when it is batch
+transform:transform/transforms_update/Test update transform with frequency too high
+transform:transform/transforms_update/Test update transform with frequency too low
+transform:transform/transforms_update/Test update transform with missing pipeline
+transform:transform/transforms_update/Test update transform with missing transform
+transform:transform/transforms_upgrade/Test upgrade transform
+transform:transform/transforms_upgrade/Test upgrade transform dry run
