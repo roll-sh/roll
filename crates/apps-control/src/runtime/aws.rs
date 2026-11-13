@@ -230,7 +230,8 @@ mod tests {
                 ("ROLL_APPS_RUNTIME", "fargate"),
                 ("ROLL_APPS_FARGATE_CLUSTER", "roll-cloud"),
                 ("ROLL_APPS_FARGATE_SUBNETS", "subnet-a, subnet-b"),
-                ("ROLL_APPS_FARGATE_SECURITY_GROUP", "sg-apps"),
+                ("ROLL_APPS_FARGATE_SECURITY_GROUP", "sg-isolated"),
+                ("ROLL_APPS_FARGATE_GUARD_IMAGE", "1.dkr.ecr.us-gov-west-1.amazonaws.com/roll:fetch-v1"),
                 ("ROLL_APPS_FARGATE_EXECUTION_ROLE", "arn:aws:iam::1:role/apps-exec"),
                 ("ROLL_APPS_FARGATE_LOG_GROUP", "/roll-cloud/apps"),
                 ("ROLL_APPS_CODEBUILD_PROJECT", "roll-cloud-apps"),
@@ -241,7 +242,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!((c.subnets.len(), c.public_ip, c.arch.as_str(), c.ecr_repo.as_str(), c.bucket.as_str(), c.prefix.as_str()), (2, false, "ARM64", "apps", "data", "apps/"));
+        assert_eq!((c.subnets.len(), c.public_ip, c.arch.as_str(), c.ecr_repo.as_str(), c.bucket.as_str(), c.prefix.as_str(), c.port), (2, false, "ARM64", "apps", "data", "apps/", 9970));
         assert_eq!(c.object_arn("apps/env/x.env"), "arn:aws-us-gov:s3:::data/apps/env/x.env");
     }
 }
