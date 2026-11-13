@@ -603,8 +603,11 @@ Ranked by what a person notices first. Done so far:
   preview, the pull request comment, the dashboard and the CLI (measured against real Postgres).
 - live logs pushed (server-sent events) to the dashboard's sheet and `roll preview logs -f`.
 - the bypass on roll apps' gate too (`bypass_sha256`, feature/roll-apps 31ddb210d).
-- a budget alert to the project's repos (webhooks, the event stream) at 80% and 100% of
-  `max_usd_month`, once a month each.
+- a budget alert to the project's repos (its own `budget` event: webhooks, the event stream,
+  automations) at 80% and 100% of `max_usd_month`, once a month per budget;
+- a third adversarial review and its fixes (no bypass for forks, rotation restarts nothing the
+  runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
+  logs that say when lines were missed and stop with a hidden tab).
 
 1. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
    first service's page through the bypass, and the comment shows it (Vercel does). Store it in
