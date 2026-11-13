@@ -6696,6 +6696,7 @@ dependencies = [
  "unicode-width",
  "url",
  "urlencoding",
+ "zeroize",
 ]
 
 [[package]]
