@@ -19,6 +19,7 @@
 /v1/apps/services/{id}/environments/{env}/promote
 /v1/apps/services/{id}/environments/{env}/redeploy
 /v1/apps/services/{id}/environments/{env}/restart
+/v1/apps/services/{id}/environments/{env}/rollback
 /v1/apps/services/{id}/environments/{env}/runs
 /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize
 /v1/apps/services/{id}/environments/{env}/sleep
@@ -129,6 +130,7 @@
 /v1/previews/{id}/refresh
 /v1/previews/{id}/screenshot
 /v1/previews/{id}/screenshot.png
+/v1/previews/{id}/shares/{share}
 /v1/previews/{id}/sleep
 /v1/previews/{id}/wake
 /v1/queues/vhosts/{vhost}/bindings
@@ -144,6 +146,8 @@
 /v1/search/clusters/{id}/indices/{index}/docs
 /v1/search/clusters/{id}/indices/{index}/docs/{doc}
 /v1/search/clusters/{id}/indices/{index}/mapping
+/v1/search/clusters/{id}/indices/{index}/refresh
+/v1/search/clusters/{id}/indices/{index}/settings
 /v1/search/clusters/{id}/unload
 /v1/search/clusters/{id}/usage
 /v1/secrets/projects/{project}/audit
