@@ -770,7 +770,9 @@ Ours are done or in `## Next`; theirs (each thread has been told):
   as roll code and apps do. Ours on merge: register an environment resolver for `"apps"` in
   rolld/src/access.rs (`Resolvers::environments`) answering `Some("preview")` for an ephemeral
   environment, so the "previews only" preset reaches `pv-<id>` and not a hand-named one. Also
-  on merge: `api::actor` reads `roll_auth::Grant::on(ext)`'s name before the operator's. mcp's new `roll-net`
+  on merge: `api::actor` reads `roll_auth::Grant::on(ext)`'s name before the operator's. And `put_link` (and
+  create's `links`) checks `Grant::allows(<resource>, reveal)`, as roll-mcp's gate does (836a7b4f2):
+  a link puts the resource's password where the service's code reads it. mcp's new `roll-net`
   is the SSRF guard everyone should share: apps' `net.rs` and `model::private_ip` move onto it
   once #19 is on main (the ranges and `no_proxy` already match).
 - **roll-previews** drives apps over HTTP (`RollApps`): names, limits, tokens, the bypass hash,
@@ -806,8 +808,7 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 
 2. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).
 3. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
     (Vercel's rolling releases, Cloud Run's traffic splits).
-4. Then: per-environment run settings in the dashboard, `roll apps metrics
-    --range`, CLI commands for drains and notifications.
+4. Then: per-environment run settings in the dashboard, (done: `roll apps metrics --range`, `roll apps drains`, `notifications`, `activity`).
 5. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every

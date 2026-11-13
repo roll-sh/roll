@@ -296,6 +296,37 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, default_value_t = 60)]
         minutes: i64,
+        /// The last `1h`, `24h` or `7d` instead of `--minutes`.
+        #[arg(long)]
+        range: Option<String>,
+    },
+    /// Who changed what in the service (settings, variables by name, domains, links), newest
+    /// first.
+    Activity {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// The project's log drains: list them, `--add <https url>` (prints its signing secret
+    /// once), or `--remove <id>`.
+    Drains {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with = "remove")]
+        add: Option<String>,
+        #[arg(long)]
+        remove: Option<String>,
+    },
+    /// The project's notification targets: list them, `--add <url>` (`--kind slack|discord|webhook`,
+    /// a webhook's secret printed once), or `--remove <id>`.
+    Notifications {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with = "remove")]
+        add: Option<String>,
+        #[arg(long, default_value = "webhook")]
+        kind: String,
+        #[arg(long)]
+        remove: Option<String>,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
@@ -1187,7 +1218,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             api.post(&format!("{}/restart", env_path(&svc, &target.env)), json!({})).await?
         }
-        AppsCmd::Metrics { target, minutes } => {
+        AppsCmd::Metrics { target, minutes, range } => {
+            let minutes = match range.as_deref() {
+                None => minutes,
+                Some("1h") => 60,
+                Some("24h" | "1d") => 24 * 60,
+                Some("7d" | "1w") => 7 * 24 * 60,
+                Some(r) => bail!("--range is 1h, 24h or 7d, not {r}"),
+            };
             let svc = service(api, &target).await?;
             let v = api.get(&format!("{}/metrics?minutes={minutes}", env_path(&svc, &target.env))).await?;
             if !json_out {
@@ -1203,6 +1241,78 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Activity { target } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("/v1/apps/services/{}/activity", enc(&s(&svc["id"])))).await?;
+            if !json_out {
+                for e in v.as_array().into_iter().flatten() {
+                    let t = e["at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+                    let who = e["data"]["actor"].as_str().unwrap_or("someone");
+                    let what = s(&e["kind"]).trim_start_matches("audit.").to_string();
+                    let env = e["environment"].as_str().filter(|x| !x.is_empty()).map(|x| format!(" ({x})")).unwrap_or_default();
+                    let mut detail = e["data"].clone();
+                    if let Some(o) = detail.as_object_mut() {
+                        o.remove("actor");
+                    }
+                    println!("{t}  {who:<16} {what}{env}  {detail}");
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Drains { target, add, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/drains", enc(&s(&svc["project"])));
+            if let Some(url) = add {
+                let d = api.post(&path, json!({ "url": url })).await?;
+                if !json_out {
+                    println!("{}  {}  secret {}", s(&d["id"]), s(&d["host"]), s(&d["secret"]));
+                    eprintln!("the secret is shown once: check X-Roll-Signature-256 with it");
+                    return Ok(());
+                }
+                d
+            } else if let Some(id) = remove {
+                api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
+                json!({ "deleted": id })
+            } else {
+                let v = api.get(&path).await?;
+                if !json_out {
+                    for d in v.as_array().into_iter().flatten() {
+                        println!("{}  {}", s(&d["id"]), s(&d["host"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+        }
+        AppsCmd::Notifications { target, add, kind, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/notifications", enc(&s(&svc["project"])));
+            if let Some(url) = add {
+                let t = api.post(&path, json!({ "kind": kind, "url": url })).await?;
+                if !json_out {
+                    println!("{}  {} {}  events {}", s(&t["id"]), s(&t["kind"]), s(&t["host"]), t["events"]);
+                    if let Some(secret) = t["secret"].as_str() {
+                        println!("secret {secret}");
+                        eprintln!("the secret is shown once: check X-Roll-Signature-256 with it");
+                    }
+                    return Ok(());
+                }
+                t
+            } else if let Some(id) = remove {
+                api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
+                json!({ "deleted": id })
+            } else {
+                let v = api.get(&path).await?;
+                if !json_out {
+                    for t in v.as_array().into_iter().flatten() {
+                        println!("{}  {:<8} {}  {}", s(&t["id"]), s(&t["kind"]), s(&t["host"]), t["events"]);
+                    }
+                    return Ok(());
+                }
+                v
+            }
         }
         AppsCmd::Limits { target, alert, hard } => {
             let svc = service(api, &target).await?;
