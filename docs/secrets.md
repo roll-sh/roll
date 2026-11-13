@@ -1322,22 +1322,35 @@ Reviewed again on 2026-11-13:
 - across the apps, previews, MCP and search branches (findings sent to each thread; this branch's
   part is done: untrusted preview environments, `linked` keys, the Access table).
 
-Ranked:
+Ranked (work that can start now):
 
-1. **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
+1. **Weak values** (1Password Watchtower): a key whose name says it's a credential (`PASSWORD`,
+   `SECRET`, `TOKEN`, `API_KEY`…) and whose value is short, of one kind of character, a common
+   password or its own key's name is flagged `weak` when it's written (computed from the plaintext
+   then, kept as a flag), shown to whoever may reveal it, in insights, the list and `roll secrets
+   insights`.
+2. **Values as they were**: `GET …/values?seq=` resolves an environment as it was after a change
+   (reveal, audited), for "what did production have before the incident"; `roll secrets export
+   --at`.
+3. **`roll secrets check .env.example`**: the keys a template names that the environment lacks (and
+   the ones it has that the template doesn't), without reading a value, for CI and onboarding.
+
+Waiting on other pull requests:
+
+- **Swap the stopgap authority for roll-access** when `feature/roll-mcp` (PR #19) lands. It's
    ready on `wip/secrets-on-mcp`, which is merged with both branches and green. Every route this
    router serves has a catalogue row there (imports decided per source, rotators, search), ephemeral
    environments are roll-access's `preview` class (`environment_fn`), and `ask` grants are
    honoured. Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Merge with roll search** (#22), whichever merges second. Checked live on a branch with both
+- **Merge with roll search** (#22), whichever merges second. Checked live on a branch with both
    (2026-11-13): a key linked to a cluster's `api_key` gets the cluster's own API key (200 with it,
    401 without), rotating issues a new one while the old works through the grace period and fails
    once its retired lease is revoked, and a `dynamic` link's key dies with its lease. The merge
    conflicts are additive: CI's matrix (`secrets` and `search` rows), roll-cli's test dependencies,
    rolld's `main.rs` (search's router, then workspace and secrets) and `DbBudget` (both `search`
    and `secrets`, with secrets' extra reserved connection).
-3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+- *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+- **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
