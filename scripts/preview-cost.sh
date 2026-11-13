@@ -6,7 +6,9 @@
 #   1. waits for the preview: a branch of every resource, the service deployed;
 #   2. visits the service (cold start, then warm) and reads what the running container uses;
 #   3. lets it sleep and reads what's left;
-#   4. lands the change and checks that every branch went and every parent stayed.
+#   4. checks a preview's own variable, a docs-only push under ignore_paths (kept build), and
+#      `[skip preview]` in the title;
+#   5. lands the change and checks that every branch went and every parent stayed.
 # Prints the measurements as markdown. Needs Docker (the service container is roll-previews-*).
 #
 #   scripts/preview-cost.sh [--keep]     # --keep: leave the daemon running at the end
@@ -251,6 +253,62 @@ if [ -n "$PG_BRANCH" ]; then
   say "$SCHEMA"
 fi
 
+say "a preview's own variable reaches its running service; roll's names are refused"
+ROLL_CLI="$ROOT/target/debug/roll"
+ROLL_API_URL="http://$API" "$ROLL_CLI" preview env "$PV" FEATURE_FLAG=on >/dev/null
+if ROLL_API_URL="http://$API" "$ROLL_CLI" preview env "$PV" DATABASE_URL=postgres://elsewhere >/dev/null 2>&1; then echo "DATABASE_URL should be refused as a preview variable"; exit 1; fi
+VAR_SEEN=""
+for _ in $(seq 1 120); do
+  VAR_SEEN=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^FEATURE_FLAG=//p')
+  [ "$VAR_SEEN" = on ] && break
+  sleep 0.5
+done
+[ "$VAR_SEEN" = on ] || { echo "the service should see FEATURE_FLAG=on after roll preview env"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
+
+say "with ignore_paths, a docs-only push keeps the services and the preview reports the new head"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"ignore_paths":["docs/"]}' >/dev/null
+bare() { echo "${1#cs_}"; }
+until_head() { # until_head <change head>: the preview is for it
+  for _ in $(seq 1 120); do
+    [ "$(bare "$(api GET "/v1/previews/$PV" | jq_ "d['head']")")" = "$(bare "$1")" ] && return 0
+    sleep 0.5
+  done
+  echo "the preview should follow the change to $1"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1
+}
+BUILD=$(api GET "/v1/previews/$PV" | jq_ "d['head']")
+api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"}}}' >/dev/null
+DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
+until_head "$DOCS_HEAD"
+RUNS=$(api GET "/v1/previews/$PV" | jq_ "d.get('runs') or ''")
+[ "$(bare "$RUNS")" = "$(bare "$BUILD")" ] || { echo "a docs-only push should keep the services on $BUILD, not $RUNS"; exit 1; }
+WAITED2=$(ROLL_API_URL="http://$API" "$ROLL_CLI" preview wait --change "$CHG" --timeout 30) || { echo "roll preview wait should pass for the docs-only head"; exit 1; }
+api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Code","files":{"index.html":{"content":"preview of change 1, third"},"docs/setup.md":{"content":"how to run it"}}}' >/dev/null
+CODE_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
+until_head "$CODE_HEAD"
+for _ in $(seq 1 120); do
+  [ "$(api GET "/v1/previews/$PV" | jq_ "not d.get('runs') and d['state'] in ('ready', 'sleeping')")" = True ] && break
+  sleep 0.5
+done
+PAGE=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/")
+[ "$PAGE" = "preview of change 1, third" ] || { echo "a push that touches code should redeploy: the page says $PAGE"; exit 1; }
+KEPT="kept $(bare "$RUNS" | cut -c1-10) through a docs-only push; redeployed at $(bare "$CODE_HEAD" | cut -c1-10)"
+
+say "[skip preview] in the title removes the preview; without it, a new one comes"
+api PATCH "/v1/code/changes/$CHG" '{"title":"New page [skip preview]"}' >/dev/null
+for _ in $(seq 1 120); do
+  N=$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)")
+  [ "$N" = 0 ] && break
+  sleep 0.5
+done
+[ "$N" = 0 ] || { echo "[skip preview] should remove the preview"; exit 1; }
+api PATCH "/v1/code/changes/$CHG" '{"title":"New page"}' >/dev/null
+for _ in $(seq 1 240); do
+  PV=$(api GET "/v1/previews?project=$PRJ" | jq_ "d[0]['id'] if d and d[0]['state'] in ('ready','sleeping') else ''")
+  [ -n "$PV" ] && break
+  sleep 0.5
+done
+[ -n "$PV" ] || { echo "a new preview should come once the title stops skipping it"; exit 1; }
+
 if [ -n "${STOP_BEFORE_LAND:-}" ]; then
   echo "stopped before landing: project $PRJ, preview $PV (run with --keep to leave the daemon up)"
   exit 0
@@ -284,5 +342,8 @@ cat <<EOF
 | Cost while running (from the preview) | $ACTIVE |
 | Cost while asleep (from the preview) | $SLEEPING |
 | The first service's screenshot (taken in the service container's own network) | $SHOT |
+| A preview's own variable (`roll preview env`) in the running service / `DATABASE_URL` as one | FEATURE_FLAG=$VAR_SEEN / refused |
+| ignore_paths: docs/ | $KEPT |
+| `[skip preview]` in the title, then without it | removed, then a new preview |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 3 / $BRANCHES_LEFT |
 EOF

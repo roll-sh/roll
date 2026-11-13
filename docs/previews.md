@@ -761,6 +761,9 @@ Ranked by what a person notices first. Done so far:
   starts closed instead of covering the page);
 - branch roles in pg-control (`app_role`, `app_connection_uri`, kept across in-place resets) with
   its e2e test, which previews use;
+- a sixth review and its fixes (only `ignore_paths` keeps a build, never past `roll.toml`; hand-made
+  previews outlive the rules; warnings for a keep running out; atomic preview variables; a
+  pending `roll/preview` settled when a preview goes before it was ready);
 - a fifth adversarial review and its fixes (the superuser never runs what a preview's code
   planted: pinned `search_path`, the schema diff as the branch's role, no in-place rewrite after
   preview code ran, triggers restored exactly; screenshots off the reconciler's pass; links bound
@@ -773,11 +776,15 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
+1. **This round live in `scripts/preview-cost.sh`**: the title words, path filters, kept builds and
+   a preview's own variables were measured against fake products only. Live: a docs-only push
+   keeps the services and reports the new head (`runs`), a push to `src/` redeploys, a variable
+   set with `roll preview env` reaches the running service, and `[skip preview]` removes it.
+2. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
    words do now. roll code changes have no labels yet; GitHub's go through the mirror.
-2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
