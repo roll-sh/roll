@@ -780,6 +780,10 @@ async fn insights_show_when_each_key_was_last_read_and_changed() {
 
     // An environment with a limit and somewhere to say so is reminded of its stale keys, once a day.
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "notify_url": "https://hooks.example/T0/B0/x" }))).await;
+    // Production's value pasted into staging, where more people and less vetted code read it.
+    api.set("staging", "USED", "u").await;
+    let i = api.ok(Method::GET, "/environments/production/insights", None).await;
+    assert_eq!((i["keys"][1]["key"].as_str(), i["keys"][1]["exposed_in"].clone(), i["keys"][0]["exposed_in"].clone()), (Some("USED"), json!(["staging"]), json!([])));
     api.db.write(|c| c.execute("UPDATE secrets SET updated_at = updated_at - 8640000000 WHERE key = 'USED'", ())).unwrap();
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || {

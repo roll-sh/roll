@@ -350,6 +350,14 @@ first, names and dates only), for any environment with a notify URL, limit or no
 staleness, it's only flagged: nothing stops working in roll. `roll secrets set KEY=v --expires
 2027-03-31`, `roll secrets expire KEY --on 90d` (or `never`) and the editor's date field set it.
 
+**Protected values set elsewhere** (1Password Watchtower's reuse check). In a protected
+environment, each key's `exposed_in` names the unprotected environments that hold the very same
+value: production's database password pasted into staging, where more people, previews and less
+vetted code can read it. Values are compared by fingerprint (per project; nothing is decrypted),
+plain values only: links and references are expected to match, and the empty value is skipped.
+Only environments the caller may read are named. The environment's list marks the key "also in
+staging", and `roll secrets insights` prints `ALSO IN staging`.
+
 ### Compare and promote
 
 - `GET …/compare?from=development&to=staging&path=/` lists every key in either environment with a
@@ -1223,7 +1231,7 @@ Done and in PR #20:
 - checks, sandboxes and previews, resolving untrusted; preview environments untrusted themselves;
 - leaked secrets don't land, plus scans of a repo's default branch and history;
 - required and typed keys; insights, rotation reminders and expiry dates for values that expire
-  outside roll;
+  outside roll; a protected environment's values that are also set in an unprotected one;
 - one-time sharing, and sharing across projects;
 - syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
   Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
@@ -1257,8 +1265,11 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Read alerts** (Doppler's and 1Password's activity alerts): tell an environment's notify URL
+   when a token or workload identity reads from an address it hasn't used before, or someone
+   reveals unusually many values in an hour (names and counts, never values).
+3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-3. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

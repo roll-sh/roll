@@ -29,6 +29,9 @@ pub struct KeyInsight {
     pub expires_at: Option<i64>,
     /// It expires within `EXPIRING_DAYS`, or already has.
     pub expiring: bool,
+    /// In a protected environment: the unprotected environments holding the very same value
+    /// (those the caller may read), where more people and less vetted code can read it.
+    pub exposed_in: Vec<String>,
 }
 
 /// How far ahead an expiry is flagged and announced.
@@ -48,10 +51,34 @@ impl Secrets {
     pub fn insights(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<Insights> {
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
-        self.project(project)?;
+        let dek = self.project(project)?;
         let now = self.db.now_ms()?;
         let since = now - WINDOW_DAYS * 86_400_000;
-        let max_age_days = self.db.read(|c| envs::by_slug(c, project, slug))?.max_age_days;
+        let env = self.db.read(|c| envs::by_slug(c, project, slug))?;
+        let max_age_days = env.max_age_days;
+        // The same value (fingerprints are per project) set in an unprotected environment: only
+        // plain values (no link, no reference), and never the empty one.
+        let mut exposed: HashMap<String, Vec<String>> = HashMap::new();
+        if env.protected {
+            let rows: Vec<(String, String, String)> = self.db.read(|c| {
+                c.query(
+                    "SELECT o.key, e.slug, s.path FROM secrets o
+                     JOIN secrets s ON s.project_id = o.project_id AND s.fp = o.fp AND s.env_id <> o.env_id
+                     JOIN environments e ON e.id = s.env_id
+                     WHERE o.env_id = ? AND o.path = ? AND o.owner = '' AND o.link IS NULL AND COALESCE(o.refs, '[]') = '[]' AND o.fp <> ?
+                       AND s.owner = '' AND s.link IS NULL AND COALESCE(s.refs, '[]') = '[]' AND e.protected = 0
+                     ORDER BY e.position, e.slug",
+                    params![env.id, path, dek.fingerprint("")],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })?;
+            for (key, other, at) in rows {
+                let list = exposed.entry(key).or_default();
+                if !list.contains(&other) && caller.allows(Action::Read, &Scope::at(project, &other, &at)) {
+                    list.push(other);
+                }
+            }
+        }
         let entries = self.view(project, slug, &path, caller, false, Action::Read)?;
         // Newest first: the first row naming a key is its last read.
         let rows: Vec<(i64, String, String)> = self.db.read(|c| {
@@ -80,6 +107,7 @@ impl Secrets {
                     stale: max_age_days.is_some_and(|d| now - e.row.updated_at > d * 86_400_000),
                     expires_at: e.row.expires_at,
                     expiring: e.row.expires_at.is_some_and(|t| t < now + EXPIRING_DAYS * 86_400_000),
+                    exposed_in: if e.source == crate::read::Source::Own { exposed.get(&e.row.key).cloned().unwrap_or_default() } else { vec![] },
                     last_read_at: read.map(|r| r.0),
                     last_read_by: read.map(|r| r.1.clone()),
                     reads_30d: month.get(&e.row.key).copied().unwrap_or(0),

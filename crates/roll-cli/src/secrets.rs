@@ -1265,7 +1265,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     Some(t) => format!("  expires {}", day(t)),
                     None => String::new(),
                 };
-                println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}{expiry}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
+                let exposed: Vec<String> = k["exposed_in"].as_array().into_iter().flatten().map(s).collect();
+                let exposed = if exposed.is_empty() { String::new() } else { format!("  ALSO IN {}", exposed.join(", ")) };
+                println!("{:<32} changed {:<8} {read} ({}x in 30d){stale}{expiry}{exposed}", s(&k["key"]), ago(k["updated_at"].as_i64().unwrap_or(0)), k["reads_30d"]);
             }
         }
         Secrets::Shares { revoke } => {
