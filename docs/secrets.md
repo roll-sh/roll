@@ -577,7 +577,8 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   project.
 - `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
   the project it's bound to), the directory's project and environment and how many keys it can
-  read there, the keys a `.env.example` names that it lacks, and whether staged files hold any of
+  read there, anything there that needs fixing now (expired, missing or exposed keys, from health),
+  the keys a `.env.example` names that it lacks, and whether staged files hold any of
   the project's values (the scan, names only). It fails when a check does: a first step when
   `roll run` doesn't see what it should.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
@@ -1496,10 +1497,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **The sidebar's health count cached**: one request per project every 30 seconds, not one per
-   navigation (the Health tab still refreshes after every write).
-2. **Health in `roll secrets doctor`**: the directory's environment's serious findings (expired,
-   missing, exposed) as checks of their own.
 
 Waiting on other pull requests:
 

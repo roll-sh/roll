@@ -2036,6 +2036,17 @@ async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
                     keys = Some(names);
                 }
             }
+            // Nothing in this environment needs fixing now.
+            if let Ok(found) = api.get(&format!("/v1/secrets/projects/{}/health", enc(&id))).await {
+                let serious: Vec<String> = found
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|f| f["environment"] == at.env.as_str() && ["expired", "missing", "exposed"].contains(&f["issue"].as_str().unwrap_or_default()))
+                    .map(|f| format!("{} {} ({})", s(&f["issue"]), s(&f["key"]), s(&f["detail"])))
+                    .collect();
+                checks.push(if serious.is_empty() { (true, format!("nothing in {} needs fixing now", at.env)) } else { (false, format!("{} needs fixing: {}", at.env, serious.join("; "))) });
+            }
             // Staged files hold none of the project's values.
             if let Some(files) = staged_files().ok().filter(|f| !f.is_empty()) {
                 let mut cands = std::collections::HashSet::new();
