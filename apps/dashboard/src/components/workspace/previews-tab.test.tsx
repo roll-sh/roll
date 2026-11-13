@@ -2,6 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkStateProvider } from "@/components/mark-state";
+import { codeApi } from "@/lib/code-api";
 import { previewsApi, type Preview, type PreviewSettings } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { ProjectPreviews } from "./previews";
@@ -10,6 +11,11 @@ vi.mock("@/lib/previews-api", async (orig) => {
   const real = await orig<typeof import("@/lib/previews-api")>();
   const fns = Object.fromEntries(Object.keys(real.previewsApi).map((k) => [k, vi.fn()]));
   return { ...real, previewsApi: fns };
+});
+
+vi.mock("@/lib/code-api", async (orig) => {
+  const real = await orig<typeof import("@/lib/code-api")>();
+  return { ...real, codeApi: { ...real.codeApi, submitReview: vi.fn() } };
 });
 
 const api = vi.mocked(previewsApi);
@@ -94,5 +100,29 @@ describe("the Previews tab", () => {
     await u.click(confirm);
     expect(api.remove).toHaveBeenCalledWith("pv_abc");
     expect(await within(list).findByRole("button", { name: "Checkout redesign: Deleting" })).toBeInTheDocument();
+  });
+
+  it("posts a note from the preview page's feedback button on the change, once", async () => {
+    const u = userEvent.setup({ delay: null });
+    vi.mocked(codeApi.submitReview).mockResolvedValue({} as never);
+    const posted = vi.fn();
+    render(
+      <MarkStateProvider>
+        <ProjectPreviews
+          project={project}
+          inventory={new Map()}
+          open="pv_abc"
+          feedback={{ path: "/checkout", selector: "button.pay", viewport: "1280x800", note: "The button is cut off" }}
+          onFeedbackPosted={posted}
+        />
+      </MarkStateProvider>,
+    );
+    await u.click(await screen.findByRole("button", { name: "Post on the change" }));
+    expect(codeApi.submitReview).toHaveBeenCalledWith("chg_1", {
+      verdict: "comment",
+      body: expect.stringContaining("· `button.pay`\n\nThe button is cut off"),
+    });
+    expect(await screen.findByText(/Posted on the change/)).toBeInTheDocument();
+    expect(posted).toHaveBeenCalledOnce();
   });
 });
