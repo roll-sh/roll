@@ -324,6 +324,25 @@ export interface Preview {
   redis: { db_id: string } | null;
   error: string | null;
   created_at: number;
+  /** A preview environment of the change's workspace project (roll previews, docs/previews.md). */
+  environment?: PreviewEnvironment;
+}
+
+/** roll previews' `Preview` as a change shows it (`PreviewEnvironment` in code-control's model.rs). */
+export interface PreviewEnvironment {
+  /** `pv_…`. */
+  id: string;
+  slug: string;
+  state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
+  services: { name: string; url: string; state: string }[];
+  resources: { kind: string; parent: string; ref: string | null }[];
+  sleeping_usd_month: number;
+  active_usd_hour: number;
+  /** The preview on the dashboard (its project's Previews tab). */
+  dashboard_url: string | null;
+  github: { comment: boolean; status: boolean; deployment: boolean };
+  /** The changeset the preview runs. */
+  head?: string;
 }
 
 export interface Change {

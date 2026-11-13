@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 mod nosql;
 mod queues;
+mod preview;
 mod storage;
 mod redis;
 mod secrets;
@@ -98,6 +99,10 @@ enum Cmd {
     /// roll's MCP server: client config, approvals waiting for you, the audit log.
     #[command(subcommand)]
     Mcp(access::Mcp),
+    /// Preview environments: every service and a branch of every data resource of a project,
+    /// per change or pull request.
+    #[command(subcommand, alias = "previews")]
+    Preview(preview::Preview),
 }
 
 #[derive(Subcommand)]
@@ -420,6 +425,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Run(r) => return secrets::run_command(&secrets_api(&api).await?, r).await,
         Cmd::Token(cmd) => return access::token(&api, cli.json, cmd).await,
         Cmd::Mcp(cmd) => return access::mcp(&api, cli.json, cmd).await,
+        Cmd::Preview(cmd) => return preview::run(&api, cli.json, cmd).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

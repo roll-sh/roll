@@ -797,6 +797,7 @@ impl code_control::PreviewBackend for Previews {
             redis: None,
             error: None,
             created_at: 1,
+            environment: None,
         })
     }
     async fn delete(&self, _r: &code_control::model::RepoRow, _c: &code_control::model::Change) -> anyhow::Result<()> {

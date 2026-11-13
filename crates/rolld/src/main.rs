@@ -21,6 +21,7 @@ mod edge;
 mod isolation;
 mod logs;
 mod nosql;
+mod previews;
 mod products;
 mod queues;
 mod storage;
@@ -447,6 +448,24 @@ async fn run() -> anyhow::Result<()> {
     // the copy taken below: every product's router merges above this line, or its links 404.
     let workspace = workspace::open(&args, &home)?;
     router = router.merge(roll_workspace::router(workspace.clone()));
+    // roll previews: an environment per change of a project's repos (needs roll code).
+    let (preview_hosts, previews_store) = match &code {
+        Some(c) => {
+            let on_products = previews::Products {
+                postgres: postgres.is_some(),
+                redis: redis.is_some(),
+                nosql: nosql.is_some(),
+                storage: storage_svc.is_some(),
+                streams: streams.is_some(),
+                queues: queues.is_some(),
+                tasks: tasks.is_some(),
+            };
+            let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products)?;
+            router = router.merge(roll_previews::api::router(p.engine.clone()));
+            (Some(p.runtime), Some(p.engine.store.clone()))
+        }
+        None => (None, None),
+    };
     // Scoped tokens, approvals, audit and OAuth (access.rs): the evaluator joins the gate.
     let access = access::open(
         &args,
@@ -458,6 +477,7 @@ async fn run() -> anyhow::Result<()> {
             nosql: nosql.as_ref().map(|n| n.control.clone()),
             streams: streams.as_ref().map(|s| s.broker.clone()),
             code: code.as_ref().map(|c| &c.code),
+            previews: previews_store,
         },
         workspace.clone(),
     )?;
@@ -501,6 +521,9 @@ async fn run() -> anyhow::Result<()> {
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {
         router = c.router(router);
+    }
+    if let Some(rt) = &preview_hosts {
+        router = router.layer(axum::middleware::from_fn_with_state(rt.clone(), roll_previews::runtime::route));
     }
     // In a cluster, requests from other nodes are verified first.
     if cluster.backend_name() != "memory" {
@@ -644,6 +667,7 @@ async fn start_postgres(args: &Args, home: &std::path::Path, storage: &StorageCo
 struct CodeNode {
     code: std::sync::Arc<code_control::Code>,
     previews: std::sync::Arc<code_preview::Previews>,
+    isolation: std::sync::Arc<dyn code_preview::Isolation>,
     _checks: tokio::task::JoinHandle<()>,
 }
 
@@ -801,10 +825,10 @@ async fn start_code(
         Some(data),
         isolation.clone(),
     );
-    let runner = code_preview::CheckRunner::new(isolation, args.code_runner_concurrency).with_secrets(std::sync::Arc::new(secrets.clone()));
+    let runner = code_preview::CheckRunner::new(isolation.clone(), args.code_runner_concurrency).with_secrets(std::sync::Arc::new(secrets.clone()));
     code.set_secret_env(std::sync::Arc::new(secrets));
     let checks = code_preview::start(&code, std::sync::Arc::new(runner), previews.clone());
-    Ok(CodeNode { code, previews, _checks: checks })
+    Ok(CodeNode { code, previews, isolation, _checks: checks })
 }
 
 

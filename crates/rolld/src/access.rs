@@ -19,6 +19,15 @@ impl<F: Fn(&str) -> Option<String> + Send + Sync + 'static> Resolver for Resolve
     }
 }
 
+/// A resolver that says the environment too.
+struct ResolveWith<F>(F);
+
+impl<F: Fn(&str) -> Option<Resolved> + Send + Sync + 'static> Resolver for ResolveWith<F> {
+    fn resolve(&self, _kind: &str, id: &str) -> Option<Resolved> {
+        (self.0)(id)
+    }
+}
+
 /// The products whose ids the evaluator can't read off a path.
 pub struct Products<'a> {
     pub postgres: Option<Arc<pg_control::Control>>,
@@ -26,6 +35,8 @@ pub struct Products<'a> {
     pub nosql: Option<Arc<nosql_control::Control>>,
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub code: Option<&'a Arc<code_control::Code>>,
+    /// roll previews: which resources are a preview's branches.
+    pub previews: Option<Arc<roll_previews::Store>>,
 }
 
 fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Resolvers {
@@ -53,6 +64,26 @@ fn resolvers(p: Products<'_>, workspace: Arc<roll_workspace::Workspace>) -> Reso
         for kind in ["change", "thread", "work"] {
             let code = code.clone();
             r.by_kind.insert(kind, Arc::new(ResolveFn(move |id: &str| code.repo_of(kind, id))));
+        }
+    }
+    if let Some(store) = p.previews {
+        // A preview's branch is in the `preview` environment, so a "Previews only" token reaches
+        // it and never its parent. Postgres branches are routes of the parent project: not these.
+        for (kind, preview_kind) in [("database", "redis"), ("nosql-database", "nosql"), ("stream", "stream"), ("bucket", "bucket"), ("vhost", "queue"), ("cluster", "search")] {
+            let (inner, store) = (r.by_kind.remove(kind), store.clone());
+            r.by_kind.insert(
+                kind,
+                Arc::new(ResolveWith(move |id: &str| {
+                    let mut got = match &inner {
+                        Some(i) => i.resolve(kind, id)?,
+                        None => Resolved { id: id.to_string(), environment: None },
+                    };
+                    if matches!(store.environment_of(preview_kind, &got.id), Ok(Some(_))) {
+                        got.environment = Some("preview".into());
+                    }
+                    Some(got)
+                })),
+            );
         }
     }
     r
@@ -206,6 +237,42 @@ impl roll_mcp::ToolSet for CodeTools {
 
 #[cfg(test)]
 mod tests {
+    use roll_previews::{Kind, Mode, State, store::New};
+    use std::sync::Arc;
+
+    /// A "Previews only" token's rules name the `preview` environment: a preview's branch is in
+    /// it, the parent it was branched from never is.
+    #[test]
+    fn a_previews_branches_are_in_the_preview_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite = |f: &str| code_sql::Target::Sqlite(dir.path().join(f));
+        let ws = Arc::new(roll_workspace::Workspace::open(&sqlite("ws.db"), Default::default()).unwrap());
+        let store = Arc::new(roll_previews::Store::open(&sqlite("previews.db"), Default::default()).unwrap());
+        let new = New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: None,
+            branch: Some("feat".into()),
+            number: None,
+            title: "t".into(),
+            github_pr: None,
+            head: "cs_1".into(),
+            trusted: true,
+            state: State::Creating,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_resources(&row.id, &[(Kind::Bucket, "assets".into(), Mode::Branch)]).unwrap();
+        store.set_resource(&row.id, Kind::Bucket, "assets", |r| r.r#ref = Some("assets-pv".into())).unwrap();
+        let products = super::Products { postgres: None, redis: None, nosql: None, streams: None, code: None, previews: Some(store) };
+        let r = super::resolvers(products, ws);
+        assert_eq!(r.resolve("bucket", "assets-pv").and_then(|r| r.environment).as_deref(), Some("preview"));
+        assert_eq!(r.resolve("bucket", "assets").and_then(|r| r.environment), None);
+    }
+
     #[test]
     fn code_tools_get_product_names() {
         assert_eq!(super::rename("search_code"), "code_search");

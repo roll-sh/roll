@@ -429,7 +429,7 @@ impl PreviewBackend for FakePreviews {
     async fn create(&self, _repo: &RepoRow, change: &Change, dir: &Path) -> anyhow::Result<Preview> {
         self.dirs.lock().push(dir.join("c.txt").exists());
         self.paths.lock().push(dir.to_path_buf());
-        Ok(Preview { state: PreviewState::Sleeping, url: Some(format!("http://{}.preview.test", change.id)), postgres: None, redis: None, error: None, created_at: 1 })
+        Ok(Preview { state: PreviewState::Sleeping, url: Some(format!("http://{}.preview.test", change.id)), postgres: None, redis: None, error: None, created_at: 1, environment: None })
     }
     async fn delete(&self, _repo: &RepoRow, change: &Change) -> anyhow::Result<()> {
         self.deleted.lock().push(change.id.clone());

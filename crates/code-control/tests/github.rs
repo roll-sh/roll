@@ -119,6 +119,27 @@ async fn comment(State(m): S, Path((o, r, n)): Path<(String, String, u64)>, Json
     Json(json!({ "id": 1, "body": b["body"] }))
 }
 
+async fn list_comments(State(m): S, Path((o, r, n)): Path<(String, String, u64)>) -> Json<Value> {
+    let path = format!("/repos/{o}/{r}/issues/{n}/comments");
+    let made: Vec<Value> = m.calls.lock().iter().filter(|(meth, p, _)| meth == "POST" && *p == path).map(|(_, _, b)| json!({ "id": 1, "body": b["body"], "user": { "login": "roll[bot]", "type": "Bot" } })).collect();
+    Json(json!(made))
+}
+
+async fn edit_comment(State(m): S, Path((o, r, id)): Path<(String, String, u64)>, Json(b): Json<Value>) -> Json<Value> {
+    record(&m, "PATCH", format!("/repos/{o}/{r}/issues/comments/{id}"), b.clone());
+    Json(json!({ "id": id, "body": b["body"] }))
+}
+
+async fn create_deployment(State(m): S, Path((o, r)): Path<(String, String)>, Json(b): Json<Value>) -> Json<Value> {
+    record(&m, "POST", format!("/repos/{o}/{r}/deployments"), b.clone());
+    Json(json!({ "id": 900 + m.next_id.fetch_add(1, Ordering::SeqCst) }))
+}
+
+async fn deployment_status(State(m): S, Path((o, r, id)): Path<(String, String, u64)>, Json(b): Json<Value>) -> Json<Value> {
+    record(&m, "POST", format!("/repos/{o}/{r}/deployments/{id}/statuses"), b.clone());
+    Json(json!({ "id": 1, "state": b["state"] }))
+}
+
 async fn pulls(State(m): S, axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>) -> Json<Value> {
     // `head=owner:branch` narrows it to that branch's pull request, as GitHub does.
     let head = q.get("head").and_then(|h| h.split_once(':')).map(|(_, b)| b.to_string());
@@ -393,7 +414,10 @@ async fn github_mock() -> GitHub {
         .route("/orgs/{org}/teams", get(list_teams))
         .route("/repos/{o}/{r}/issues", get(issues))
         .route("/repos/{o}/{r}/issues/{n}", get(issue).patch(patch_issue))
-        .route("/repos/{o}/{r}/issues/{n}/comments", post(comment))
+        .route("/repos/{o}/{r}/issues/{n}/comments", get(list_comments).post(comment))
+        .route("/repos/{o}/{r}/issues/comments/{id}", axum::routing::patch(edit_comment))
+        .route("/repos/{o}/{r}/deployments", post(create_deployment))
+        .route("/repos/{o}/{r}/deployments/{id}/statuses", post(deployment_status))
         .route("/repos/{o}/{r}/issues/{n}/labels", post(add_labels))
         .route("/repos/{o}/{r}/issues/{n}/labels/{l}", axum::routing::delete(remove_label))
         .route("/repos/{o}/{r}/statuses/{sha}", post(create_status))
@@ -628,6 +652,46 @@ async fn connect_import_webhooks_and_mirror() {
         g.mock.calls.lock().iter().any(|(m, p, b)| m == "PATCH" && p.ends_with("/check-runs/1") && b["conclusion"] == "success")
     })
     .await;
+
+    // A preview environment on a PR's change (roll previews): one comment, edited in place as
+    // the preview changes; a `roll/preview` status on the head; a deployment that goes inactive
+    // when the preview is removed.
+    let env = |state: &str| code_control::model::Preview {
+        state: code_control::model::PreviewState::Running,
+        url: Some("http://web-pr5-shop.preview.test".into()),
+        postgres: None,
+        redis: None,
+        error: None,
+        created_at: 1,
+        environment: Some(code_control::model::PreviewEnvironment {
+            id: "pv_test".into(),
+            slug: "pr5-shop".into(),
+            state: state.into(),
+            services: vec![code_control::model::PreviewServiceLink { name: "web".into(), url: "http://web-pr5-shop.preview.test".into(), state: "sleeping".into() }],
+            resources: Vec::new(),
+            sleeping_usd_month: 0.01,
+            active_usd_hour: 0.002,
+            dashboard_url: None,
+            github: Default::default(),
+            head: None,
+        }),
+    };
+    let preview_calls = |path: &str| g.mock.calls.lock().iter().filter(|(_, p, _)| p.contains(path)).cloned().collect::<Vec<_>>();
+    a.code.report_environment(c5_id, Some(&env("creating"))).unwrap();
+    until("preview comment, status and deployment", || async {
+        !preview_calls("/issues/5/comments").is_empty() && !preview_calls("/deployments/").is_empty()
+    })
+    .await;
+    a.code.report_environment(c5_id, Some(&env("ready"))).unwrap();
+    until("the comment edited, the status green", || async {
+        !preview_calls("/issues/comments/").is_empty()
+            && preview_calls("/statuses/").iter().any(|(_, _, b)| b["context"] == "roll/preview" && b["state"] == "success")
+    })
+    .await;
+    assert_eq!(preview_calls("/issues/5/comments").len(), 1, "one comment, edited in place");
+    assert_eq!(preview_calls("/deployments").iter().filter(|(_, p, _)| p.ends_with("/deployments")).count(), 1, "one deployment per head");
+    a.code.report_environment(c5_id, None).unwrap();
+    until("the deployment inactive", || async { preview_calls("/deployments/").iter().any(|(_, _, b)| b["state"] == "inactive") }).await;
 
     // Landing the PR's change: mirrored to GitHub, the PR commented on and closed.
     let landed = a.ok("POST", &format!("/v1/code/changes/{pr_change}/land"), None).await;

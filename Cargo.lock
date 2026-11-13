@@ -6368,6 +6368,7 @@ dependencies = [
  "clap",
  "code-chat",
  "code-control",
+ "code-preview",
  "code-sql",
  "getrandom 0.4.3",
  "libc",
@@ -6383,6 +6384,7 @@ dependencies = [
  "reqwest",
  "roll-access",
  "roll-auth",
+ "roll-previews",
  "roll-secrets",
  "roll-workspace",
  "rustls-pemfile",
@@ -6503,6 +6505,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-previews"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "code-control",
+ "code-preview",
+ "code-sql",
+ "getrandom 0.4.3",
+ "hyper 1.12.0",
+ "hyper-util",
+ "parking_lot",
+ "roll-cluster",
+ "roll-workspace",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "roll-secrets"
 version = "0.1.0"
 dependencies = [
@@ -6611,6 +6638,7 @@ dependencies = [
  "roll-cluster",
  "roll-edge",
  "roll-mcp",
+ "roll-previews",
  "roll-secrets",
  "roll-workspace",
  "s3-api",

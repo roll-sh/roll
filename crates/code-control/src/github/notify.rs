@@ -5,7 +5,7 @@
 //! that came from GitHub.
 
 use super::{Hub, Link, link_of, mark, set_mark};
-use crate::model::{Change, ChangeState, Check, CheckStatus, RepoRow, WorkItem, WorkState};
+use crate::model::{Change, ChangeState, Check, CheckStatus, Preview, PreviewState, RepoRow, WorkItem, WorkState};
 use crate::{Code, Result};
 use code_github::model::{CheckConclusion, CheckOutput, CheckRunRequest, CheckStatus as GhStatus};
 
@@ -138,4 +138,222 @@ pub(super) async fn check_run(code: &Code, hub: &Hub, c: &Change, check: &Check)
         }
     }
     Ok(())
+}
+
+/// A pull request's preview, brought up to date: one comment edited in place, a commit status
+/// `roll/preview` on the head, and a GitHub deployment to `preview/<slug>`. Reads the change's
+/// preview as it is now, so a retry or a later delivery converges on roll's state.
+pub(super) async fn preview(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
+    let (Some(pr), Some((r, l))) = (c.github_pr, connected(code, &c.repo_id)) else { return Ok(()) };
+    let gh = |e: code_github::Error| crate::Error::Internal(e.into());
+    let rules = c.preview.as_ref().and_then(|p| p.environment.as_ref()).map(|e| e.github).unwrap_or_default();
+    let body = preview_comment(c);
+    // The comment: edited in place once it exists (a removed preview edits it too), and only
+    // when its text changed (a preview waking and sleeping doesn't touch it).
+    let comment_key = format!("pv-comment:{}", c.id);
+    let digest = format!("{:016x}", fnv(body.as_bytes()));
+    let stored = mark(code, &comment_key)?;
+    let (comment, sent) = match stored.as_deref().and_then(|v| v.split_once(':')) {
+        Some((id, d)) => (id.parse::<u64>().ok(), Some(d.to_string())),
+        None => (stored.as_deref().and_then(|v| v.parse::<u64>().ok()), None),
+    };
+    match (comment, &c.preview) {
+        (Some(_), _) if sent.as_deref() == Some(&digest) => {}
+        (Some(id), _) => match hub.client.update_comment(l.installation_id, &l.owner, &l.repo, id, &body).await {
+            Ok(_) => set_mark(code, &comment_key, &format!("{id}:{digest}"))?,
+            // Someone deleted it on GitHub: start a new one if there's still a preview.
+            Err(e) if e.status() == Some(404) && c.preview.is_some() && rules.comment => {
+                let made = hub.client.create_comment(l.installation_id, &l.owner, &l.repo, pr, &body).await.map_err(gh)?;
+                set_mark(code, &comment_key, &format!("{}:{digest}", made.id))?;
+            }
+            Err(e) if e.status() == Some(404) => {}
+            Err(e) => return Err(gh(e)),
+        },
+        (None, Some(_)) if rules.comment => {
+            // A send that made the comment and then failed (a timeout, the mark's write) left
+            // it there: find it by its marker rather than make a second one.
+            let marker = format!("<!-- roll-preview:{} -->", c.id);
+            let existing = hub.client.issue_comments(l.installation_id, &l.owner, &l.repo, pr).await.map_err(gh)?;
+            // Only an app's own comment (anyone can paste the marker; editing theirs would fail).
+            let ours = |x: &&code_github::model::Comment| x.user.as_ref().is_some_and(|u| u.kind.as_deref() == Some("Bot") && u.login.ends_with("[bot]"));
+            let id = match existing.iter().filter(ours).find(|x| x.body.as_deref().is_some_and(|b| b.contains(&marker))) {
+                Some(found) => {
+                    hub.client.update_comment(l.installation_id, &l.owner, &l.repo, found.id, &body).await.map_err(gh)?;
+                    found.id
+                }
+                None => hub.client.create_comment(l.installation_id, &l.owner, &l.repo, pr, &body).await.map_err(gh)?.id,
+            };
+            set_mark(code, &comment_key, &format!("{id}:{digest}"))?;
+        }
+        _ => {}
+    }
+    let head = c.preview.as_ref().and_then(|p| p.environment.as_ref()).and_then(|e| e.head.clone()).unwrap_or_else(|| c.head.clone());
+    let sha = code.store.resolve(&r.id, &head).ok().flatten().and_then(|cs| code.store.git_of(&r.id, &cs).ok().flatten()).map(|(commit, _)| commit.hex());
+    let Some(sha) = sha else { return Ok(()) };
+    let env = c.preview.as_ref().and_then(|p| p.environment.as_ref());
+    let url = c.preview.as_ref().and_then(|p| p.url.clone());
+    let log_url = env.and_then(|e| e.dashboard_url.clone());
+    let (status, deploy, description) = preview_states(c.preview.as_ref());
+    // Statuses go out when they change for this head, not on every wake and sleep.
+    let state_key = format!("pv-state:{}", c.id);
+    let state_now = format!("{sha}:{status:?}:{deploy:?}:{description}");
+    if mark(code, &state_key)?.as_deref() == Some(state_now.as_str()) {
+        return Ok(());
+    }
+    // The commit status, on the head it's about.
+    if rules.status
+        && let Some(status) = status
+    {
+        let target = url.as_deref().or(log_url.as_deref());
+        hub.client.create_status(l.installation_id, &l.owner, &l.repo, &sha, status, "roll/preview", Some(&description), target).await.map_err(gh)?;
+    }
+    // The deployment: one per head, its status following the preview; the last one goes
+    // inactive when the preview is removed.
+    let last_key = format!("pv-deploy:{}", c.id);
+    match env {
+        Some(e) if rules.deployment => {
+            let key = format!("pv-deploy:{}:{sha}", c.id);
+            let id = match mark(code, &key)?.and_then(|v| v.parse::<u64>().ok()) {
+                Some(id) => id,
+                None => {
+                    let id = hub
+                        .client
+                        .create_deployment(l.installation_id, &l.owner, &l.repo, &sha, &format!("preview/{}", e.slug), "roll preview")
+                        .await
+                        .map_err(gh)?;
+                    set_mark(code, &key, &id.to_string())?;
+                    set_mark(code, &last_key, &id.to_string())?;
+                    id
+                }
+            };
+            if let Some(state) = deploy {
+                hub.client
+                    .create_deployment_status(l.installation_id, &l.owner, &l.repo, id, state, url.as_deref(), log_url.as_deref(), &description)
+                    .await
+                    .map_err(gh)?;
+            }
+        }
+        None => {
+            if let Some(id) = mark(code, &last_key)?.and_then(|v| v.parse::<u64>().ok()).filter(|_| c.preview.is_none()) {
+                match hub.client.create_deployment_status(l.installation_id, &l.owner, &l.repo, id, "inactive", None, None, "preview deleted").await {
+                    Ok(_) => {}
+                    Err(e) if e.status() == Some(404) => {}
+                    Err(e) => return Err(gh(e)),
+                }
+                set_mark(code, &last_key, "inactive")?;
+            }
+        }
+        _ => {}
+    }
+    set_mark(code, &state_key, &state_now)
+}
+
+/// FNV-1a: a stable digest of what was last sent (not a security boundary).
+fn fnv(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ *x as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The commit status, the deployment status and their description for a preview.
+fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static str>, String) {
+    let Some(p) = p else { return (None, Some("inactive"), "Preview deleted".into()) };
+    let state = p.environment.as_ref().map(|e| e.state.as_str()).unwrap_or(match p.state {
+        PreviewState::Creating => "creating",
+        PreviewState::Running => "ready",
+        PreviewState::Sleeping => "sleeping",
+        PreviewState::Failed => "failed",
+    });
+    match state {
+        // Asleep or awake it's ready (the first request wakes it): one status for both, so
+        // waking and sleeping send nothing.
+        "ready" | "sleeping" => (Some("success"), Some("success"), "Preview ready: it sleeps when idle and wakes on the first request".into()),
+        "failed" => (Some("failure"), Some("failure"), p.error.as_deref().and_then(|e| e.lines().next()).unwrap_or("Preview failed").chars().take(130).collect()),
+        "awaiting_approval" => (Some("pending"), None, "Waiting for a writer to approve running this fork (approve-run)".into()),
+        "queued" => (Some("pending"), None, "Waiting for a preview slot".into()),
+        "deleting" => (None, Some("inactive"), "Preview deleted".into()),
+        _ => (Some("pending"), Some("in_progress"), "Preview starting".into()),
+    }
+}
+
+/// The pull request comment for a preview.
+fn preview_comment(c: &Change) -> String {
+    let marker = format!("<!-- roll-preview:{} -->", c.id);
+    let Some(p) = &c.preview else { return format!("**roll preview**: deleted.\n\n{marker}") };
+    let mut out = String::new();
+    match &p.environment {
+        Some(e) => {
+            let link = e.dashboard_url.as_ref().map(|u| format!(" · [open in roll]({u})")).unwrap_or_default();
+            // Asleep or awake, it's ready: the comment only changes when something real does.
+            let state = if e.state == "sleeping" { "ready" } else { e.state.as_str() };
+            out.push_str(&format!("**roll preview** · {}{link}\n\n", word(state)));
+            if !e.services.is_empty() {
+                out.push_str("| Service | URL |\n| --- | --- |\n");
+                for s in &e.services {
+                    out.push_str(&format!("| {} | {} |\n", s.name, s.url));
+                }
+                out.push('\n');
+            }
+            if !e.resources.is_empty() {
+                let data: Vec<String> = e
+                    .resources
+                    .iter()
+                    .map(|x| match &x.r#ref {
+                        Some(r) => format!("{} `{}` → `{r}`", x.kind, x.parent),
+                        None => format!("{} `{}` (branching)", x.kind, x.parent),
+                    })
+                    .collect();
+                out.push_str(&format!("Data, branched copy-on-write: {}.\n\n", data.join(", ")));
+            }
+            out.push_str(&format!(
+                "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
+                e.sleeping_usd_month, e.active_usd_hour
+            ));
+        }
+        None => {
+            out.push_str("**roll preview**");
+            if let Some(u) = &p.url {
+                out.push_str(&format!(": {u}"));
+            }
+            out.push('\n');
+        }
+    }
+    if let Some(err) = &p.error {
+        let first: String = err.lines().take(12).collect::<Vec<_>>().join("\n");
+        out.push_str(&format!("\n```\n{first}\n```\n"));
+    }
+    out.push_str(&format!("\n{marker}"));
+    out
+}
+
+fn word(state: &str) -> String {
+    state.replace('_', " ")
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::model::{PreviewEnvironment, PreviewGithub, PreviewResourceLink, PreviewServiceLink};
+
+    #[test]
+    fn a_preview_comment_lists_services_data_and_cost() {
+        let env = PreviewEnvironment {
+            id: "pv_1".into(),
+            slug: "pr7-shop".into(),
+            state: "ready".into(),
+            services: vec![PreviewServiceLink { name: "web".into(), url: "https://web-pr7-shop.preview.roll.site".into(), state: "sleeping".into() }],
+            resources: vec![PreviewResourceLink { kind: "postgres".into(), parent: "prj_a".into(), r#ref: Some("br_b".into()) }],
+            sleeping_usd_month: 0.0123,
+            active_usd_hour: 0.0143,
+            dashboard_url: Some("https://roll.sh/dashboard/projects/prj_x/previews".into()),
+            github: PreviewGithub::default(),
+            head: None,
+        };
+        let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
+        let (status, deploy, _) = preview_states(Some(&p));
+        assert_eq!((status, deploy), (Some("success"), Some("success")));
+        assert_eq!(preview_states(None).1, Some("inactive"));
+        let mut e = p.environment.clone().unwrap();
+        e.state = "awaiting_approval".into();
+        let waiting = Preview { environment: Some(e), ..p.clone() };
+        assert_eq!(preview_states(Some(&waiting)).0, Some("pending"));
+    }
 }

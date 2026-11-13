@@ -58,7 +58,24 @@ pub struct Job {
     pub change: Option<String>,
     /// The longest it may live, however its runner fares (a check's timeout plus preparing).
     pub deadline: Duration,
+    /// A cache kept between runs (package downloads, build outputs), by name: mounted at
+    /// [`CACHE_DIR`] where the isolation can keep one (Docker: a named volume).
+    pub cache: Option<String>,
 }
+
+/// Where a job's cache is mounted, and the package managers' variables that point into it.
+pub const CACHE_DIR: &str = "/roll-cache";
+pub const CACHE_ENV: [(&str, &str); 9] = [
+    ("npm_config_cache", "/roll-cache/npm"),
+    ("npm_config_store_dir", "/roll-cache/pnpm"),
+    ("YARN_CACHE_FOLDER", "/roll-cache/yarn"),
+    ("BUN_INSTALL_CACHE_DIR", "/roll-cache/bun"),
+    ("PIP_CACHE_DIR", "/roll-cache/pip"),
+    ("UV_CACHE_DIR", "/roll-cache/uv"),
+    ("CARGO_HOME", "/roll-cache/cargo"),
+    ("GOMODCACHE", "/roll-cache/go/mod"),
+    ("GOCACHE", "/roll-cache/go/build"),
+];
 
 impl std::fmt::Debug for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -96,4 +113,6 @@ pub trait Isolation: Send + Sync {
     async fn remove_leftovers(&self, kind: Kind);
     /// A data URL (Postgres, Redis) as the job's container reaches it.
     fn reach(&self, url: &str) -> String;
+    /// Drop a job cache ([`Job::cache`]); nothing where caches aren't kept.
+    async fn drop_cache(&self, _name: &str) {}
 }

@@ -414,6 +414,17 @@ impl Store {
         })
     }
 
+    /// Drop what the catalog knows of a branch's history (its base images, WAL position and LSN
+    /// index): a reset branch starts a new one.
+    pub fn forget_history(&self, id: &str) -> anyhow::Result<()> {
+        self.with(|c| {
+            for table in ["wal_positions", "lsn_index", "base_images"] {
+                c.execute(&format!("DELETE FROM {table} WHERE branch_id = ?1"), [id])?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn delete_branch(&self, id: &str) -> anyhow::Result<()> {
         self.with(|c| {
             for table in ["storage_samples", "wal_positions", "lsn_index", "base_images"] {

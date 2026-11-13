@@ -151,6 +151,7 @@ roll-secrets = { path = "crates/roll-secrets" }
 roll-access = { path = "crates/roll-access" }
 roll-net = { path = "crates/roll-net" }
 roll-mcp = { path = "crates/roll-mcp" }
+roll-previews = { path = "crates/roll-previews" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }

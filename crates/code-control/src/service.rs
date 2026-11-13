@@ -1036,6 +1036,15 @@ impl Code {
         Ok(c)
     }
 
+    /// roll previews (docs/previews.md): set the change's preview to its environment's summary,
+    /// or clear it (`None`), and tell the feed, webhooks and GitHub with a `preview` event
+    /// promised in the same write. Nothing happens when it's unchanged, so it's cheap to repeat.
+    pub fn report_environment(&self, change_id: &str, preview: Option<&Preview>) -> Result<()> {
+        let Some((repo, mut promised)) = self.db.set_change_preview_promised(change_id, preview)? else { return Ok(()) };
+        self.emit_kept(&mut promised, &repo, "preview", json!({ "change": change_id, "preview": preview }));
+        Ok(())
+    }
+
     pub async fn delete_preview(&self, r: &RepoRow, c: &Change) -> Result<Change> {
         let backend = self.previews.read().clone();
         if c.preview.is_some()

@@ -7,7 +7,7 @@
 import type { IdentityColor } from "./agents-api";
 import { call } from "./roll-api";
 
-export const RESOURCE_KINDS = ["postgres", "redis", "stream", "bucket", "nosql", "repo"] as const;
+export const RESOURCE_KINDS = ["postgres", "redis", "stream", "bucket", "nosql", "queue", "tasks", "repo"] as const;
 export type ResourceKind = (typeof RESOURCE_KINDS)[number];
 
 export interface PlacedResource {

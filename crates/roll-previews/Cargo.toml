@@ -1,0 +1,30 @@
+[package]
+name = "roll-previews"
+description = "roll previews: a branch of every data resource and every service of a workspace project, per change or pull request (/v1/previews)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+code-control.workspace = true
+code-preview.workspace = true
+code-sql.workspace = true
+getrandom.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+parking_lot.workspace = true
+roll-cluster.workspace = true
+roll-workspace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

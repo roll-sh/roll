@@ -25,7 +25,7 @@ export function Inspector({ open, onClose, children }: { open: boolean; onClose:
   );
 }
 
-function Head({ tile, title, sub, actions, onClose }: { tile: ReactNode; title: string; sub: ReactNode; actions?: ReactNode; onClose: () => void }) {
+export function Head({ tile, title, sub, actions, onClose }: { tile: ReactNode; title: string; sub: ReactNode; actions?: ReactNode; onClose: () => void }) {
   return (
     <div className="flex items-center gap-2.5 px-3 pt-3 pb-2.5">
       {tile}
@@ -41,7 +41,7 @@ function Head({ tile, title, sub, actions, onClose }: { tile: ReactNode; title: 
   );
 }
 
-function Tabs<T extends string>({ tabs, value, onChange }: { tabs: readonly T[]; value: T; onChange: (t: T) => void }) {
+export function Tabs<T extends string>({ tabs, value, onChange }: { tabs: readonly T[]; value: T; onChange: (t: T) => void }) {
   return (
     <div className="flex gap-1 border-b border-line px-2">
       {tabs.map((t) => (
@@ -60,11 +60,11 @@ function Tabs<T extends string>({ tabs, value, onChange }: { tabs: readonly T[];
   );
 }
 
-const Label = ({ children }: { children: ReactNode }) => (
+export const Label = ({ children }: { children: ReactNode }) => (
   <div className="mt-4 mb-1.5 flex justify-between text-[11px] font-medium text-subtle first:mt-0">{children}</div>
 );
 
-function Rows({ rows }: { rows: [string, ReactNode][] }) {
+export function Rows({ rows }: { rows: [string, ReactNode][] }) {
   return (
     <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
       {rows.map(([k, v]) => (
@@ -176,7 +176,7 @@ export function ResourceSheet({
   );
 }
 
-function Stat({ label, value, note }: { label: string; value: string; note: string }) {
+export function Stat({ label, value, note }: { label: string; value: string; note: string }) {
   return (
     <div className="rounded-lg border border-line-2 bg-raised px-2.5 py-2 inset-shadow-highlight">
       <div className="text-[11px] text-subtle">{label}</div>

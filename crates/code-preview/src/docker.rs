@@ -67,14 +67,54 @@ pub async fn remove(name: &str) {
     let _ = docker(&["rm", "-f", name]).await;
 }
 
-/// Remove containers of one kind left over from a previous run of the daemon.
+/// The daemon whose containers these are (`sh.roll.code.home=<its home>`): several daemons
+/// share a host in development, and one must never remove another's containers.
+static HOME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Label every container this process makes with its home, and clean up only those.
+pub fn set_home(home: &Path) {
+    let _ = HOME.set(home.display().to_string());
+}
+
+fn home_label() -> Option<String> {
+    HOME.get().map(|h| format!("{LABEL}.home={h}"))
+}
+
+/// Remove containers of one kind left over from a previous run of the daemon (of this home,
+/// when [`set_home`] was called).
 pub async fn remove_leftovers(kind: &str) {
     let filter = format!("label={LABEL}={kind}");
-    if let Ok(ids) = docker(&["ps", "-aq", "--filter", &filter]).await {
+    let mut args = vec!["ps".to_string(), "-aq".into(), "--filter".into(), filter];
+    if let Some(h) = home_label() {
+        args.extend(["--filter".into(), format!("label={h}")]);
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Ok(ids) = docker(&argv).await {
         for id in ids.split_whitespace() {
             remove(id).await;
         }
     }
+}
+
+/// Make a cache volume (once): world-writable, so an image that runs as another user can use it.
+async fn ensure_cache(name: &str) -> anyhow::Result<()> {
+    if docker(&["volume", "inspect", name]).await.is_ok() {
+        return Ok(());
+    }
+    let mut labels = vec!["volume".to_string(), "create".into(), "--label".into(), format!("{LABEL}=cache")];
+    if let Some(h) = home_label() {
+        labels.extend(["--label".into(), h]);
+    }
+    labels.push(name.to_string());
+    let argv: Vec<&str> = labels.iter().map(String::as_str).collect();
+    docker(&argv).await?;
+    let mount = format!("{name}:/c");
+    let helper = format!("{name}-init");
+    let r = docker(&["run", "--rm", "--name", &helper, "-v", &mount, "alpine:3", "chmod", "1777", "/c"]).await;
+    if r.is_err() {
+        remove(&helper).await;
+    }
+    r.map(|_| ())
 }
 
 pub async fn running(name: &str) -> bool {
@@ -182,15 +222,27 @@ impl Isolation for Docker {
         if let Some(c) = &job.change {
             args.extend(["--label".into(), format!("{LABEL}.change={c}")]);
         }
+        if let Some(h) = home_label() {
+            args.extend(["--label".into(), h]);
+        }
         if let (Kind::Preview, Some(port)) = (job.kind, job.port) {
             args.extend(["--publish".into(), format!("127.0.0.1::{port}")]);
         }
         args.extend(["--workdir".into(), workdir.into(), "--add-host".into(), "host.docker.internal:host-gateway".into()]);
         args.extend(limits(job.memory_mb, job.cpus));
+        let mut env: Vec<(String, String)> = Vec::new();
+        if let Some(cache) = &job.cache {
+            ensure_cache(cache).await?;
+            args.extend(["--volume".into(), format!("{cache}:{}", crate::isolation::CACHE_DIR)]);
+            // The cache's variables, unless the job sets its own.
+            let own = |k: &str| job.env.iter().any(|(j, _)| j == k);
+            env.extend(crate::isolation::CACHE_ENV.iter().filter(|(k, _)| !own(k)).map(|(k, v)| (k.to_string(), v.to_string())));
+        }
+        env.extend(job.env.iter().cloned());
         // Values never go on the command line. Names docker itself reads (DOCKER_HOST, PATH,
         // proxies…) go in a private env file; every other is passed by name, its value in the
         // docker CLI's environment (which keeps multi-line values, as env files can't).
-        let (own, by_name): (Vec<_>, Vec<_>) = job.env.iter().cloned().partition(|(k, _)| docker_reads(k));
+        let (own, by_name): (Vec<_>, Vec<_>) = env.into_iter().partition(|(k, _)| docker_reads(k));
         let file = match own.is_empty() {
             true => None,
             false => Some(private_env_file(&own)?),
@@ -254,6 +306,10 @@ impl Isolation for Docker {
 
     fn reach(&self, url: &str) -> String {
         crate::data::for_container(url)
+    }
+
+    async fn drop_cache(&self, name: &str) {
+        let _ = docker(&["volume", "rm", "-f", name]).await;
     }
 }
 
