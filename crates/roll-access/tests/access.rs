@@ -64,6 +64,7 @@ fn postgres() -> Router {
         .route("/git/{owner}/{repo}/git-receive-pack", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/storage/buckets/{name}", get(|| async { axum::Json(json!({ "name": "logs" })) }))
         .route("/v1/storage/buckets", get(|| async { axum::Json(json!([{ "name": "logs" }, { "name": "media" }])) }))
+        .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
 }
@@ -781,6 +782,17 @@ async fn approvals_can_be_remembered() {
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
     assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
     assert_eq!(ask("pc").await.0, StatusCode::OK);
+
+    // Copying another environment's variables is reading them: it needs reveal there too.
+    let (dev, _) = d.token(json!([{ "product": "apps", "resources": "*", "environments": ["dev", "dev2"], "actions": { "write": "allow", "reveal": "allow" } }]), json!({})).await;
+    let put = |from: Value| {
+        let (d, t) = (&d, dev.clone());
+        async move { d.call(&t, Method::PUT, "/v1/apps/services/svc_a/environments/dev2", Some(json!({ "variables_from": from }))).await }
+    };
+    let (s, e) = put(json!("production")).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("reveal")), "{e}");
+    assert_eq!(put(json!("dev")).await.0, StatusCode::OK);
+    assert_eq!(d.call(&dev, Method::PUT, "/v1/apps/services/svc_a/environments/dev2", Some(json!({}))).await.0, StatusCode::OK);
 
     // Remembered where it was asked: development's values, never production's.
     let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;

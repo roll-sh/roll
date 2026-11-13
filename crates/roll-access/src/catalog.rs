@@ -65,11 +65,14 @@ pub struct Row {
     pub path_query: Option<&'static str>,
     /// Fields of the answer that are credentials: replaced unless the grant may `reveal`.
     pub reveals: &'static [&'static str],
+    /// A body field naming another environment of the same resource whose values the request
+    /// copies (apps' `variables_from`): it also needs `reveal` there.
+    pub copies_from: Option<&'static str>,
 }
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_))
+        matches!(self.act, Act::Body(_)) || self.copies_from.is_some()
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -91,7 +94,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[] }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -127,6 +130,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn copies_from(mut self, field: &'static str) -> Row {
+        self.copies_from = Some(field);
         self
     }
 }
@@ -874,7 +881,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
-    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    // `variables_from` copies another environment's values into this one: reveal there too.
+    row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from("variables_from"),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
