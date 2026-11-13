@@ -1,9 +1,11 @@
 import { ArrowUpRight, ExternalLink } from "lucide-react";
+import { useState } from "react";
 import type { PreviewEnvironment } from "@/lib/code-api";
 import type { PreviewKind } from "@/lib/previews-api";
 import { PREVIEW_KIND_ICON } from "../workspace/preview-sheet";
 import { host, money, STATE_LABEL, StateDot } from "../workspace/previews-common";
-import { a11yWords } from "@/lib/previews-api";
+import { a11yWords, previewsApi } from "@/lib/previews-api";
+import { errorText } from "../workspace/previews-common";
 
 /**
  * A change's preview environment (roll previews): every service's URL, the data branches, what
@@ -71,6 +73,12 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
             : `The page looks the same as at ${env.visual_change.since.replace(/^cs_/, "").slice(0, 10)}.`}
         </p>
       )}
+      {env.base_change && (
+        <p className="text-[12px] text-muted">
+          {env.base_change.percent > 0 ? `Differs ${Math.max(env.base_change.percent, 0.1).toFixed(1)}% from ${env.base_change.branch}.` : `Looks the same as ${env.base_change.branch}.`}
+        </p>
+      )}
+      {env.visual_review && env.visual_review.state !== "unchanged" && <VisualReview previewId={env.id} review={env.visual_review} />}
       {env.expires_at != null && (
         <p className="text-[12px] text-muted">
           It goes {new Date(env.expires_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}; keep it from Previews.
@@ -81,6 +89,41 @@ export function PreviewEnvironmentView({ env, compact = false }: { env: PreviewE
           Open in Previews <ArrowUpRight className="size-3.5" strokeWidth={1.5} />
         </a>
       )}
+    </div>
+  );
+}
+
+/** The change's visual review (`roll/visual`): who accepted it, or the way to. */
+function VisualReview({ previewId, review }: { previewId: string; review: NonNullable<PreviewEnvironment["visual_review"]> }) {
+  const [by, setBy] = useState<string | null>(review.state === "accepted" ? (review.by ?? "someone") : null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (by) return <p className="text-[12px] text-subtle">Its look was accepted by {by} at this push.</p>;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[12px]">
+      <span className="text-soft">
+        A visual change to review{review.required ? " before it lands" : ""}: {Math.max(review.percent, 0.1).toFixed(1)}% unlike {review.branch}.
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          setError(null);
+          try {
+            const p = await previewsApi.acceptVisual(previewId);
+            setBy(p.visual_review?.by ?? "you");
+          } catch (e) {
+            setError(errorText(e));
+          } finally {
+            setBusy(false);
+          }
+        }}
+        className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+      >
+        {busy ? "Accepting…" : "Accept"}
+      </button>
+      {error && <span className="text-[11.5px] text-danger">{error}</span>}
     </div>
   );
 }
