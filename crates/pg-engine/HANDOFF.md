@@ -10096,6 +10096,92 @@ from `perf record` of c1; round 1's figures from agent 220's table):
   5. Memory (lead 5 of the brief) not started: the engine 1,675 MB against PostgreSQL's 1,651
      and pgrust's 1,871 at 2 GB caches.
 
+## Point reads, round 5 (agent 230)
+
+BENCH.md "Point reads, round 5" has the measurements (lane A, two cores, plain dist: prepared point
+selects at 8 clients -6.1% user instructions and -7.5% cycles a read, CPU a read -3.3%; at 32
+clients ops/s +11.4%, CPU -10.2%) and the same-day table of roll (plain dist and PGO), PostgreSQL
+18.6 and pgrust: at 8 clients roll's PGO build 116,944 ops/s against pgrust's 109,653 (1.07x;
+13.7 µs user CPU a read against 16.2) and PostgreSQL's 65,462; at 32 clients level with pgrust
+(0.99x); the plain dist build 0.82x pgrust at 8. What changed, four commits:
+
+- *A point reader's buffers left to the thread's next reader* (`storage/point.rs`): a
+  `PointReader`'s per-source held blocks, its position, seek key and candidate key (`Bufs`) go
+  back to a thread-local spare when it drops (the blocks let go first: they are its view's) and
+  the next reader on the thread takes them, its slots resized to its view. `Held` keeps its block
+  as an `Option` and its buffers across reads (`Held::keep`, `BlockPos::clone_from` copying into
+  the buffers it has: the derived `Clone` allocated a new key each time a block was held). A
+  unique key's probe and its row's fetch made about a dozen allocations for these; each costs
+  about 144 instructions with its free and a cache miss besides (`_mi_page_malloc` ran at CPI 5).
+  A reader made while another is alive on the thread starts with empty buffers, as before.
+- *A unique key's row fetched by one snapshot read of its key*: `Txn::get_one_snap` (the
+  transaction's own write of the key, else the store's newest visible version, through a point
+  reader) and `ScanNode::fetch_stored_one`, which `point_probe` calls instead of
+  `fetch_stored(&[key])`: the same branches (a table with out-of-line values read as stored after
+  `toast_ready`, which `fetch_stored` now shares; `fetch_kept`'s first-call count; anything else
+  through `fetch_stored`), without `get_many_snap_with`'s and `get_versions_with`'s four vectors
+  for one key, and without copying the entry's value into a key before the fetch.
+- *A kept plan's index scan keeps its `Fetcher` across executions* while it has nothing to note
+  (`Fetcher::keeps`: every heap page still all-visible, its watch holding, and not a temporary
+  table's, whose horizon is its transaction's). `park` dropped it, and each execution's
+  `Fetcher::new` took the relation's model lock and cloned the database's, the id table's and the
+  model's `Arc`s, counts every session's scans write. A page that stops being all-visible is seen
+  at the next fetch, as within one execution (`fetch` drops the watch); rescans within a statement
+  already kept it.
+- *The command tag without `format!`* (`query_tag`: the word and an `itoa` count).
+
+Tests: `storage::tests::point_readers_one_after_another` (readers made one after another on a
+thread over two stores whose views have one and four file sources, alternating, and a second
+reader made while one is alive, each answering as a scan does); `tests/wire.rs`
+`point_lookups_go_out_as_decoded_ones` now also looks up rows the open transaction updated and
+inserted and a row with a value stored out of line (the table's rows then fetched as stored),
+each the same as the lookup under a LIMIT.
+
+Not kept (BENCH.md has the pairs; patches in `~/.cache/a230/patches/`): the hot-range bookkeeping
+without `Hot::note_scan`'s mutex (no measurable cost there); c4 (3 of 13 clock reads skipped, one
+reader for the probe and the fetch, the derived value's buffer reused as the row key, the block
+cache's CLOCK bit written only when unset: -3.0% instructions and -2.4% cycles at the median, two
+pairs under 2%). The wait spin needs no change at 8 clients on this lane (probe numbers in BENCH).
+
+**Where a read goes now** (c3 at 8 clients, 25.8 µs user in the profile's run): the probe and the
+row's fetch 5.2 µs (`Block::seek` 1.05 self, the block cache 0.56 at CPI 10); `run_query`
+around the executor about 5 (relation locks with `Txn::lock`'s key vectors 0.74 of allocation,
+which agent 218's lock bookkeeping, landed since, removes); Bind 2.3; the transaction's end 2.4;
+the executor restart 1.4. Across the read: 13 clock reads (about 4% of the instructions), libc's
+memcpy/memcmp (unresolved frames in the profile) 12% of user time, and about 20 allocations left.
+
+**Next**, by size: (1) re-profile on origin's head: agent 218's lock bookkeeping and
+transaction-start settings landed as this round ended (about 1 µs of this profile's allocation a
+read was theirs); (2) the clock: one statement-start reading
+(PostgreSQL's SetCurrentStatementStartTimestamp at Bind and Execute) shared by `start_activity`'s
+query_start, `statement_timestamp()`, an implicit transaction's start (`txn_time`, `now()`),
+`Database::touch` and `begin_in`. It is a behaviour fix as well: in PostgreSQL 18.6
+`statement_timestamp() = query_start` of the backend's own pg_stat_activity row is true, and
+`now() = query_start` in a one-statement transaction; in roll both are false (checked on this
+round's head; `now() = xact_start` is true in both); (3) the block cache's read path without a lock and a reference count per block
+(a per-file slot table read under an epoch guard, the CLOCK bit set only when unset): its lines
+move between cores at every lookup; (4) the probe's three remaining allocations and its second
+view reference (c4's parts, worth having inside a bigger change).
+
+Verification, on `1101220b1` (the four commits and their tests rebased onto origin's
+`7867694b9`): release build; release Clippy 19 warnings, none in a file changed here; release lib
+tests; golden (in-process, wire, shuffled); wire; kept_plans in release and debug; twophase; the
+storage tests (storage_format, storage_read_once, storage_linked_gc, storage_upgrade_batches,
+toast_storage); crash_random seeds 1-30; isolation against a private PostgreSQL 18.6 (a230-pgref,
+max_prepared_transactions 10): 142/143 specs, 1831/1832 permutations (intra-grant-inplace, as
+before), `roll-point-select` and `roll-point-update` matching; the regress files test_setup,
+select, prepare, plancache, portals, privileges, rowsecurity, transactions, btree_index, insert,
+update: 4530/4530 units. The verification train on `1101220b1` (`TRAIN_NO_CHECKOUT=1`): release
+crate tests; Clippy 20 warnings, none in a file changed here; crash_random seeds 1-30 x 4; the
+power stage (power_cut 4 passed; seeds 1-30 x 4 with CRASH_POWER=1, with and without
+CRASH_ASYNC=1); debug crate tests; the full regression suite (51148/51150 units, newly differing
+0); isolation 1647/1648 permutations; pg_dump_tap 14609 passed, 0 failed. Then rebased onto
+origin's `da4c6aa34` (agent 218's stack; a clean rebase, the tree measured in BENCH's last
+pairs), where the release build, lib tests, golden, wire, kept_plans (release and debug),
+twophase, the storage tests, crash_random seeds 1-30, isolation and the regress subset were run
+again: all passed (isolation 142/143 specs, intra-grant-inplace as before; regress subset
+4530/4530 units).
+
 ## Point reads, round 4 (agent 221)
 
 BENCH.md "Point reads, round 4" has the measurements (lane A, two cores: prepared point

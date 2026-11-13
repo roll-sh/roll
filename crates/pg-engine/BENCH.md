@@ -860,6 +860,144 @@ At 256 MB, a block not cached costs its zstd decompression (q06: 25.6% of the cy
 the OS page cache: 12-22% of its cycles in the kernel's copy). PostgreSQL with
 `shared_buffers = 2GB`: 1,204-1,243 MB on the same four.
 
+## Point reads, round 5 (2026-11-13, agent 230)
+
+HANDOFF.md "Point reads, round 5" has what changed. Harness: agent 221's (`~/.cache/a230/bench`),
+lane A: servers on CPUs 6,7,24,25 (two cores), clients on 8,9,26,27, each run holding
+`~/.cache/lane-a.lock`; plain `--profile dist` builds in a container (8 GiB, swap off), 100,000
+accounts, 2 s warmup, 10 s measured; user instructions and cycles per operation from `perf stat
+--per-thread` of the connections' threads. New this round: before each pair the harness waits up
+to an hour (outside the lane lock) for quiet CPUs; the machine stayed busy (load 25-45 all day),
+so pairs whose foreign load went above 1.0 core were flagged and more pairs run. **base** is
+`14abf2d5f` (round 4's docs, the head this round started on).
+
+**Four servers, same day** (`sb6`, 2026-11-13 evening: three rounds, each server started once a
+round after a wait for quiet CPUs, the order rotated; medians; at 8 and 32 clients a run with more
+than 0.3 cores of foreign load on the server CPUs is left out, 1 of 3 for roll plain at 8 clients,
+PostgreSQL at 8, and the PGO build's and PostgreSQL's pgbench at 32). Roll is this round's commits
+on `7867694b9` (`1101220b1`, before their rebase onto agent 218's stack) in two builds: **plain dist** (`cargo build --profile dist`) and **PGO**
+(`tools/dist-pgo.sh`, its default benchmark-class training, same commit); PostgreSQL 18.6 and
+pgrust (`malisper/pgrust:v0.4-beta-amd64`, its published PGO-built binary) as in round 4:
+
+| workload | clients | server | ops/s | CPU µs/op (user+sys) | p50 / p99 ms | ÷PG | ÷pgrust |
+|---|---:|---|---:|---:|---:|---:|---:|
+| prepared point select | 1 | roll, plain dist | 20,151 | 46.9 (21.1+25.8) | 0.042 / 0.120 | 2.11x | 1.63x |
+| | | roll, PGO | 27,840 | 33.1 (13.0+20.1) | 0.029 / 0.077 | 2.92x | 2.25x |
+| | | PostgreSQL | 9,528 | 62.5 (27.9+35.4) | 0.092 / 0.228 | | |
+| | | pgrust | 12,368 | 46.6 (25.2+21.6) | 0.080 / 0.153 | | |
+| prepared point select | 8 | roll, plain dist | 90,110 | 39.3 (21.7+17.6) | 0.080 / 0.201 | 1.38x | 0.82x |
+| | | roll, PGO | 116,944 | 29.8 (13.7+16.1) | 0.056 / 0.156 | 1.79x | 1.07x |
+| | | PostgreSQL | 65,462 | 54.2 (25.0+29.2) | 0.112 / 0.323 | | |
+| | | pgrust | 109,653 | 31.8 (16.2+15.6) | 0.061 / 0.161 | | |
+| prepared point select | 32 | roll, plain dist | 84,128 | 47.1 (26.2+20.4) | 0.225 / 4.777 | 1.29x | 0.76x |
+| | | roll, PGO | 110,061 | 35.9 (17.2+18.4) | 0.222 / 0.829 | 1.69x | 0.99x |
+| | | PostgreSQL | 65,065 | 60.1 (28.4+31.7) | 0.453 / 1.441 | | |
+| | | pgrust | 110,829 | 35.2 (18.4+16.8) | 0.267 / 0.777 | | |
+| pgbench -S prepared | 32 | roll, plain dist | 93,560 | 41.3 (23.8+17.5) | 0.166 / 5.851 | 1.39x | 0.82x |
+| | | roll, PGO | 120,093 | 31.0 (15.7+15.3) | 0.196 / 1.208 | 1.78x | 1.06x |
+| | | PostgreSQL | 67,370 | 56.8 (27.7+29.1) | 0.424 / 1.309 | | |
+| | | pgrust | 113,713 | 32.7 (18.1+14.7) | 0.239 / 0.747 | | |
+
+Roll's user CPU a read at 8 clients: plain 21.7 µs, PGO 13.7, pgrust 16.2. Memory: anon+shmem
+after a run is the same for base and this round's code (32.9 MB at 8 clients); the cgroup's peak
+(about 180 MiB for roll, 250-300 for PostgreSQL, 470-610 for pgrust) is mostly the page cache of
+the fixtures' load and moved by up to 50 MB between runs of one binary. A first try at this table
+(`sb5`, the afternoon) had 1-3.7 cores of foreign load in most runs and isn't used.
+
+**Where a read went at the start** (base, 8 clients, LBR call stacks of user cycles, 26.3 µs user a
+read in that run): the unique key's probe 3.25 µs (`first_raw` 2.56: block seeks 0.87, the cache
+lookups 0.27, the newest-version seek 0.49) and the row's fetch 2.55 (of which `get_many_snap_with`'s
+and `get_versions_with`'s vectors for one key 0.4); `run_query` around the executor 5.2 (privilege
+check and relation locks 1.3, `begin_statement` 0.7, the `ExecCtx` made and dropped 1.0, a
+`format!` for the command tag 0.23); Bind 2.3 (Describe 1.55); the transaction's end 2.4; the
+executor's restart 1.6 (`bind_scan` 0.65, `Fetcher::new` 0.3 with its drop). Per read: 30
+allocations (uprobes on mimalloc's entry points: 29.1 `mi_malloc_aligned`, 30.1 `mi_free`), 1.28
+context switches, no page faults. CPI 2.2 over the whole read: `_mi_page_malloc` alone is 9.1% of
+the cycles at CPI 5.1 (about 280 cycles an allocation, a cache miss each: eight connection threads
+on four hardware threads, each read waking on caches another thread just used), the block cache's
+`block_with` CPI 10 (a shard mutex, the entry's CLOCK bit and the block's `Arc` count, lines every
+session writes). Allocation and freeing take 11% of a read's instructions (about 144 instructions
+an allocate/free pair). 13 clock reads a read take about 4% of its instructions (`clock_gettime`,
+the vDSO and `sub_timespec`).
+
+**Wait spin** (lead 3), a probe binary with the spin's time and slots from the environment, 2 runs
+each at 8 clients: off 79,698 ops/s, 43.7 µs CPU a read (user 25.3, sys 18.5); the default (50 µs,
+one slot on these four CPUs) 78,996, 43.6; two slots 78,730, 44.1; 20 µs and two slots 76,291,
+45.4; four slots 70,927, 52.5. At 8 clients on two cores roll seldom polls, and polling more costs:
+round 4's "message read 14%" is not polling on this lane. Nothing changed.
+
+**The change** (c3: four commits, measured as one; HANDOFF has each) against base, alternating
+pairs of plain dist builds:
+
+| cell | pairs (unflagged) | Δ ops/s | Δ CPU/op | Δ instr/op | Δ cycles/op | instr by pair |
+|---|---:|---:|---:|---:|---:|---|
+| point select, 8 clients | 6 (5) | +1.7% | -3.3% | -6.1% | -7.5% | -5.4% to -8.3% (cycles -5.0% to -11.5%) |
+| point select, 32 clients | 3 (3) | +11.4% | -10.2% | -6.2% | -10.7% | -2.1% to -9.2% |
+| point select, 1 client | 12 (3) | +12.6% | -9.3% | -7.4% | -10.4% | -4.4% to -7.8% (unflagged) |
+| range read (100 rows), 8 clients | 5 (5) | -3.6% | +3.1% | -0.2% | +0.1% | -0.3% to +1.3% |
+| short transactions, 8 clients | 6 (4) | -0.5% | +0.2% | -4.5% | -0.9% | -5.7% to +4.5% |
+
+Agent 218's short-transaction stack (lock bookkeeping without allocations, the catalog and the
+id table by reference, Bind in place) landed while this round ran. The same four commits merged
+onto origin's head with it (`da4c6aa34`, the tree that lands) against that head, 5 alternating
+pairs at 8 clients, no pair above 0.88 foreign cores: ops/s +4.5%, CPU a read -5.2%, instructions
+-5.7% (-0.9% to -7.2% by pair), cycles -6.2% (-4.4% to -9.7%, every pair).
+
+Point select, 8 clients, every pair (against base):
+
+| pair | base ops/s | c3 ops/s | Δ ops/s | base µs/op | c3 µs/op | Δ CPU | base instr | c3 instr | Δ instr | Δ cycles | foreign cores |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 61,166 | 74,467 | +21.7% | 51.2 | 46.2 | -9.7% | 47,194 | 43,259 | -8.3% | -11.5% | 0.73 |
+| 2 | 83,125 | 80,858 | -2.7% | 43.3 | 42.9 | -0.9% | 46,116 | 43,492 | -5.7% | -5.0% | 0.26 |
+| 3 | 83,505 | 85,817 | +2.8% | 42.6 | 40.9 | -4.2% | 45,907 | 43,358 | -5.6% | -7.5% | 0.17 |
+| 4 (flagged) | 70,323 | 27,778 | -60.5% | 46.2 | 58.1 | +25.6% | 45,432 | 42,316 | -6.9% | +3.2% | 2.27 |
+| 5 | 65,112 | 70,093 | +7.6% | 49.1 | 47.4 | -3.5% | 47,163 | 44,634 | -5.4% | -8.7% | 0.60 |
+| 6 | 79,500 | 80,032 | +0.7% | 44.3 | 42.9 | -3.2% | 46,124 | 43,123 | -6.5% | -7.4% | 0.21 |
+
+The day was busy (load 25-45): at 1 client nine of twelve pairs were flagged; c3 used less CPU a
+read in seven of those nine and in all three unflagged ones. At 1 client the connection threads poll
+their sockets between messages (the wait spin), so their user instructions and cycles a read
+include the polls: ops/s and CPU a read are what count there. Range reads were run twice: the first
+5 pairs (4 unflagged) gave -19.8% ops/s at the median, but the slow c3 runs had p99 2.7 ms against
+0.8 and instructions +0.1%; the second set (the table above) has the connection threads' user cycles
+a read the same in every pair (418.7k against 419.3k in pair 1), and c3's user time a read higher
+only where its run saw more foreign load (0.53 / 0.39, 0.32 / 0.14, 0.13 / 0.07 cores); at equal
+load (pairs 4 and 5) c3 is equal or faster. One range run's instructions a read moved by 19% with
+the store's layout after the load (every connection thread alike), not with the binary. Short
+transactions' instructions per transaction swing ±5% between runs of one binary, as round 4 found.
+
+TPC-H SF1 smoke (q02 and q20, the point lookups' paths; base and c3 alternating on a copy of one
+loaded data directory, on lane A; 3 rounds of 3 repetitions, then 4 rounds of 5, user instructions
+and cycles of the server process): instructions -0.2% to +0.04% in every run, result hashes the
+same; cycles -3.9% to +5.3%, but +14% in the two runs where c3's server saw 0.81 and 0.86 foreign
+cores against base's 0.54 and 0.61 (q20 wall 0.357 -> 0.412 and 0.338 -> 0.441 s there; 0.340 ->
+0.332 and 0.329 -> 0.345 at equal load).
+
+Footprint (fresh server each, cgroup anon+shmem 25 s into 100 idle sessions, alternating): base
+37.6 / 37.5 MB, c3 36.4 / 37.6 MB; fresh data directory 3.03 MB each.
+
+DataRows: `pointscan.py` (round 4's: 7 prepared point lookups over fixed-width, text, varchar,
+date, NULL, non-ASCII, out-of-line and added columns, keys present, updated, deleted and missing,
+Execute with and without a row limit, binary / text / two mixed formats): every DataRow,
+PortalSuspended and CommandComplete byte-identical between base, c3 and PostgreSQL 18.6.
+
+c3 at 8 clients, profiled as base was (25.8 µs user in that run): the probe and fetch 5.22 µs (from
+5.8); allocation 2.5 µs self (from 2.9). What allocates now, by size: `Txn::lock` and its lock key
+0.74 µs (agent 218's lock bookkeeping on `wip/a218` takes these), the transaction-start settings
+0.21 (also 218's), the `ExecCtx` 0.24, the executor restart's `bind_scan` and `Kills` 0.23, the
+probe's three (its candidate key, the derived value's copy, the data key's) 0.28.
+
+**Dropped** (patches and numbers in `~/.cache/a230/patches/`):
+
+- c1, the hot-range bookkeeping without the mutex every probe takes (`Hot::note_scan`'s scans of
+  a refused range counted ahead per thread, `Discard::claims` without its lock until a range
+  exists): 3 pairs at 8 clients, instructions -1.3%, +0.6%, +1.1%: that mutex was not a cost.
+- c4 on c3: the planning time read only for pg_stat_statements and auto_explain's start only
+  with auto_explain (3 of the 13 clock reads), one point reader for the probe and its row's fetch
+  (one view `Arc` taken, not two), the derived value's buffer taken as the row key, the block
+  cache's CLOCK bit written only when unset: 5 pairs against c3, instructions -1.7% to -6.2%
+  (median -3.0%), cycles -0.3% to -9.7% (median -2.4%), ops/s +0.5%, CPU -0.8%: two pairs under 2%.
+
 ## Point reads, round 4 (2026-11-12, agent 221)
 
 HANDOFF.md "Point reads, round 4" has what changed. Harness: agent 210's (`~/.cache/a221/bench`),
