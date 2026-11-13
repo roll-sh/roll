@@ -208,6 +208,12 @@ pub enum Mcp {
         /// allow, deny or ask.
         #[arg(long)]
         decision: Option<String>,
+        /// Who touched this resource (or anything under it: a cluster's indices).
+        #[arg(long)]
+        resource: Option<String>,
+        /// read, write, delete, reveal, deploy or admin.
+        #[arg(long)]
+        action: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
@@ -648,10 +654,10 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
                 println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
-        Mcp::Audit { token, product, decision, limit } => {
+        Mcp::Audit { token, product, decision, resource, action, limit } => {
             let mut q = url::form_urlencoded::Serializer::new(String::new());
             q.append_pair("limit", &limit.to_string());
-            for (k, v) in [("grant", token), ("product", product), ("decision", decision)] {
+            for (k, v) in [("grant", token), ("product", product), ("decision", decision), ("resource", resource), ("action", action)] {
                 if let Some(v) = v {
                     q.append_pair(k, &v);
                 }

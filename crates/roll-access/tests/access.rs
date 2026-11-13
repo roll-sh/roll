@@ -920,6 +920,15 @@ async fn a_rule_can_grant_some_indices() {
     assert_eq!(d.call(&logs, Method::POST, "/v1/search/clusters/cl_1/request", Some(json!({}))).await.0, StatusCode::FORBIDDEN);
     // Tightened to what it used: the two expressions it searched, nothing else.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Who touched cl_1: the cluster and what's under it; an index alone; a pattern is literal.
+    let who = |q: &str| {
+        let (d, path) = (&d, format!("/v1/access/audit?{q}"));
+        async move { d.call(OPERATOR, Method::GET, &path, None).await.1.as_array().unwrap().iter().map(|e| e["resource"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>() }
+    };
+    let all = who("resource=cl_1").await;
+    assert!(all.contains(&"cl_1".to_string()) && all.contains(&"cl_1/logs-2025".to_string()), "{all:?}");
+    assert!(who("resource=cl_1/logs-2025&action=read").await.iter().all(|r| r == "cl_1/logs-2025"));
+    assert!(who("resource=cl_%25").await.is_empty(), "a % is a percent sign");
     let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{logs_id}/tighten"), None).await;
     assert_eq!(t["narrower"], true, "{t}");
     assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*,-logs-old" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
