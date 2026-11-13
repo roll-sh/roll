@@ -198,8 +198,13 @@ counts as not allowed here: an answer is never held for a person.
 ### Storage accounts
 
 Storage acts in the account a request names (`X-Roll-Account` or `?account=`), and bucket names
-repeat across accounts. A request naming an account is about storage as a whole: only a rule for
-every storage resource covers it.
+repeat across accounts:
+
+- A bucket in a named account is `<account>/<bucket>`, so a rule
+  `{product: "storage", resources: [{id: "acme/logs"}]}` reaches `logs` in account `acme` only.
+  A plain bucket name (`{id: "logs"}`) means the default account's bucket.
+- Anything else in a named account (its bucket list, keys, roles, IAM) is about storage as a whole:
+  only a rule for every storage resource covers it.
 
 ### Presets
 

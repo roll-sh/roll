@@ -95,12 +95,21 @@ fn invalid_token(access: &Access) -> Response {
 pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap) -> Target {
     let param = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let product = row.product.to_string();
-    // Storage acts in the account a request names; bucket names repeat across accounts, so a
-    // request naming one is about the product as a whole.
-    if row.product == "storage"
-        && (headers.contains_key("x-roll-account") || query.is_some_and(|q| url::form_urlencoded::parse(q.as_bytes()).any(|(k, _)| k == "account")))
-    {
-        return Target::Product { product };
+    // Storage acts in the account a request names. Bucket names repeat across accounts, so a
+    // bucket there is `<account>/<bucket>` (a rule names it so); anything else in another account
+    // (lists, keys, roles) is about the product as a whole.
+    if row.product == "storage" {
+        let from_query = || query.and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.into_owned()));
+        let account = headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).or_else(from_query).filter(|a| !a.is_empty());
+        if let Some(account) = account {
+            return match row.target {
+                Tgt::Param(names, kind) => {
+                    let bucket = names.iter().filter_map(|n| param(n)).collect::<Vec<_>>().join("/");
+                    Target::One(access.resource(row.product, kind, &format!("{account}/{bucket}")))
+                }
+                _ => Target::Product { product },
+            };
+        }
     }
     match row.target {
         Tgt::Param(names, kind) => {
