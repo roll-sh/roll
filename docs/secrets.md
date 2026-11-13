@@ -1461,6 +1461,10 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Terraform Cloud sync**: a workspace's (or variable set's) variables, `sensitive`, `env` or
+   `terraform` category, with a team token held as a roll secret.
+2. **DigitalOcean App Platform sync**: an app's (or one component's) environment variables, set
+   through the app spec, encrypted (`SECRET` type).
 
 Waiting on other pull requests:
 
