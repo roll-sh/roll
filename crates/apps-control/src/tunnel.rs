@@ -25,7 +25,29 @@ impl Drop for TunnelSlot {
     }
 }
 
+/// A web instance a helper on this host can reach from inside its network (roll previews'
+/// screenshots: a browser container joined to it, loading `http://127.0.0.1:<port>/`). Held
+/// awake while this is kept.
+pub struct Reachable {
+    /// Join this container's network (`--network container:<it>`).
+    pub container: String,
+    /// The app's port inside it.
+    pub port: u16,
+    _lease: Lease,
+}
+
 impl Apps {
+    /// An instance of the environment's web service, woken, and how to reach it from inside its
+    /// network. None where the runtime has no container to join (Fargate).
+    pub async fn reachable(self: &Arc<Self>, service: &str, env: &str) -> Result<Option<Reachable>> {
+        let lease = self.tunnel_target(service, env).await?;
+        let Some(container) = self.deps.runtime.network_container(&lease.inst.name).await else { return Ok(None) };
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, _) = self.service_env(&sid, &e).await?;
+        let port = self.live(service, env).template().and_then(|t| t.run.port).or(svc.run.port).unwrap_or(8080);
+        Ok(Some(Reachable { container, port, _lease: lease }))
+    }
+
     pub fn tunnel_slot(&self, service: &str, env: &str) -> Result<TunnelSlot> {
         let count = self.tunnels.lock().entry(crate::env_key(service, env)).or_default().clone();
         let slot = TunnelSlot(count.clone());

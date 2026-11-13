@@ -118,6 +118,13 @@ pub trait Runtime: Send + Sync {
     async fn take_callers(&self, _name: &str) -> bool {
         false
     }
+    /// The container whose network a helper on this host may join to reach the instance from
+    /// inside (`--network container:<it>`: its sandbox, or the instance itself). None where
+    /// there's no such thing (Fargate, the fake).
+    async fn network_container(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     /// Connections to it now from the project's other services (not rolld's): dear, read only
     /// when it's about to sleep.
     async fn private_peers(&self, _name: &str) -> Option<u32> {

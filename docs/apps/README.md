@@ -1296,6 +1296,11 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   `code-preview/src/docker.rs` (#20's change). Previews sends `feedback: true` (its own rule:
   the setting, a change, an access token) once apps' follow-up is in its tree: the held #21
   answers 400 to an unknown field. One copy of `feedback.js` and its tagger after the merge.
+  Screenshots of a roll apps service (previews' `RollApps::screenshot`): `Apps::reachable(service,
+  env)` wakes an instance and holds it while the returned `Reachable { container, port }` lives;
+  previews' browser joins `--network container:<container>` (capabilities dropped, read-only)
+  and loads `http://127.0.0.1:<port>/`, as on its own runtime. None on a runtime with no
+  container to join (Fargate). Checked on Docker in `a_private_caller_wakes_a_sleeping_service`.
   Once #26 and #28 are both on main, rolld calls `apps.set_feedback_notes(…)` with an adapter
   over previews' `Engine::notes_for(env, path)` (`p.engine` in `rolld/src/previews/mod.rs`),
   mapping its `Note` onto apps' (`path, selector, note, by, at`, ms).

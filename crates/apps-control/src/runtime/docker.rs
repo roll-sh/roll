@@ -546,6 +546,13 @@ impl Runtime for Docker {
         k.marks.remove(name);
     }
 
+    async fn network_container(&self, name: &str) -> Option<String> {
+        if self.sandbox(name).await.is_some() {
+            return Some(sandbox_name(name));
+        }
+        self.running(name).await.then(|| name.to_string())
+    }
+
     async fn take_callers(&self, name: &str) -> bool {
         let Some(sb) = self.sandbox(name).await else { return false };
         let Some(now) = sb.accepted() else {

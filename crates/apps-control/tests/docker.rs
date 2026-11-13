@@ -483,6 +483,12 @@ async fn a_private_caller_wakes_a_sleeping_service() {
         public.as_millis()
     );
     let _ = docker(&["rm", "-f", &caller]).await;
+    // From inside its network, as roll previews' screenshots reach it: asleep, woken, held.
+    live.sleep().await;
+    let r = w.apps.reachable(&id, "production").await.unwrap().expect("a container to join");
+    let inside = docker(&["run", "--rm", "--network", &format!("container:{}", r.container), "--cap-drop", "ALL", "--read-only", "busybox:1.37", "wget", "-q", "-O-", &format!("http://127.0.0.1:{}/", r.port)]).await;
+    assert!(inside.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "{inside:?}");
+    drop(r);
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
     let _ = docker(&["network", "rm", &net]).await;
     let left = docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
