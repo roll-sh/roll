@@ -1,6 +1,6 @@
 [package]
 name = "roll-edge"
-description = "roll cloud's edge: PROXY protocol, TLS with SNI certificates, Postgres TLS negotiation, Host routing, ACME DNS-01 certificates, internal splices and drain"
+description = "roll cloud's edge: PROXY protocol, TLS with SNI certificates, Postgres TLS negotiation, Host routing, ACME DNS-01 certificates, custom domain certificates (ACME HTTP-01, Cloudflare for SaaS), internal splices and drain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -37,4 +37,5 @@ x509-parser.workspace = true
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true
+tempfile.workspace = true
 tokio-tungstenite.workspace = true

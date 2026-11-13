@@ -124,7 +124,7 @@ pub fn open_store(args: &crate::Args, home: &Path) -> anyhow::Result<Arc<Store>>
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "previews".into() },
         None => code_sql::Target::Sqlite(home.join("previews.db")),
     };
-    let pg = code_sql::PgOptions { max_connections: args.db_budget()?.workspace, ca: args.code.code_db_ca.clone(), ..Default::default() };
+    let pg = code_sql::PgOptions { max_connections: args.db_budget()?.previews, ca: args.code.code_db_ca.clone(), ..Default::default() };
     Ok(Arc::new(tokio::task::block_in_place(|| Store::open(&target, pg))?))
 }
 

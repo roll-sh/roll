@@ -9,17 +9,22 @@
 //! - [`http`]: the HTTPS listener, routing by Host to routers and reverse proxies.
 //! - [`certs`] and [`acme`]: wildcard certificates over ACME DNS-01 (Cloudflare), sealed in
 //!   object storage, issued by one node at a time and reloaded by all.
+//! - [`domains`]: custom domains' certificates over ACME HTTP-01 on a node alone, for the
+//!   hostnames a [`domains::CustomDomains`] names; [`saas`]: Cloudflare for SaaS custom
+//!   hostnames on the fleet.
 //! - [`splice`]: hand a client connection to the node that owns its tenant.
 //! - [`drain`]: `GET /healthz` and the draining state a stopping node shares.
 
 pub mod acme;
 pub mod certs;
+pub mod domains;
 pub mod drain;
 pub mod hosts;
 pub mod http;
 pub mod listener;
 pub mod pg;
 pub mod proxy_protocol;
+pub mod saas;
 pub mod seal;
 pub mod splice;
 pub mod stream;

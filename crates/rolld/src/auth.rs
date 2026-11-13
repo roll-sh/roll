@@ -46,6 +46,10 @@ pub const RULES: &[Rule] = &[
     // operator's token as its admin.
     Rule { route: "/v1/code", access: Access::Product("roll code: owners, tokens, public repos, signed webhooks, device login") },
     Rule { route: "/git", access: Access::Product("roll code's git smart HTTP: its tokens, public repos") },
+    // roll apps' deploy hooks: the secret is the URL's last segment (`rlk_…`, a hash kept), for CI
+    // and registries' webhooks that send no header; anything but a live hook is a 404, and each
+    // deploy is in the service's activity with the caller's address (docs/apps/README.md).
+    Rule { route: "/v1/apps/hooks", access: Access::Product("roll apps' deploy hooks: the secret in the URL") },
     // Accounts: sign-in is public; the rest checks the session, an admin's, or the operator's
     // token (docs/accounts.md).
     Rule { route: "/v1/accounts", access: Access::Product("accounts: sign-in, then the session decides") },

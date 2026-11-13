@@ -77,7 +77,7 @@ export function Rows({ rows }: { rows: [string, ReactNode][] }) {
   );
 }
 
-function CopyField({ shown, value }: { shown: string; value: string }) {
+export function CopyField({ shown, value }: { shown: string; value: string }) {
   const [done, setDone] = useState(false);
   return (
     <div className="flex items-center gap-2 rounded-lg border border-line-2 bg-raised py-1.5 pr-1.5 pl-2.5 inset-shadow-highlight">
@@ -118,7 +118,7 @@ export function ResourceSheet({
         title={view.name}
         sub={
           <>
-            <i className={`size-1.5 shrink-0 rounded-full ${view.state === "online" ? "bg-ok" : view.state === "missing" ? "bg-danger" : "bg-subtle"}`} />
+            <i className={`size-1.5 shrink-0 rounded-full ${view.state === "online" ? "bg-ok" : view.state === "missing" || view.state === "failed" ? "bg-danger" : view.state === "starting" ? "bg-accent" : "bg-subtle"}`} />
             {view.stateLabel} · {KIND_LABEL[view.kind]}
           </>
         }

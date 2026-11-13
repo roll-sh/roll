@@ -149,10 +149,12 @@ roll-cluster = { path = "crates/roll-cluster" }
 roll-accounts = { path = "crates/roll-accounts" }
 roll-auth = { path = "crates/roll-auth" }
 roll-workspace = { path = "crates/roll-workspace" }
+roll-previews = { path = "crates/roll-previews" }
+apps-build = { path = "crates/apps-build" }
+apps-control = { path = "crates/apps-control" }
 roll-access = { path = "crates/roll-access" }
 roll-net = { path = "crates/roll-net" }
 roll-mcp = { path = "crates/roll-mcp" }
-roll-previews = { path = "crates/roll-previews" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }
@@ -163,6 +165,10 @@ code-preview = { path = "crates/code-preview" }
 roll-fetch = { path = "crates/roll-fetch" }
 aws-sdk-ecs = "1"
 aws-sdk-cloudwatchlogs = "1"
+# roll apps on the fleet: builds in CodeBuild, images in ECR, build variables in Secrets Manager.
+aws-sdk-codebuild = "1"
+aws-sdk-ecr = "1"
+aws-sdk-secretsmanager = "1"
 code-index = { path = "crates/code-index" }
 code-review = { path = "crates/code-review" }
 agent-proto = { path = "crates/agent-proto" }
@@ -174,6 +180,7 @@ curve25519-dalek = "4"
 hkdf = "0.12"
 toml = "1"
 http-body-util = "0.1"
+ignore = "0.4"
 http-body = "1"
 comrak = { version = "0.56", default-features = false }
 ammonia = "4"
