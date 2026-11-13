@@ -872,6 +872,11 @@ async fn a_5xx_rate_past_the_alert_is_an_event_once() {
     let w = world().await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80, "alerts": {"error_pct": 10}})).await;
     let id = svc["id"].as_str().unwrap().to_string();
+    // Well inside a minute: the five written and the five judged are the same five.
+    let into = code_sql::now_ms() % 60_000;
+    if into > 50_000 {
+        tokio::time::sleep(Duration::from_millis((60_000 - into + 100) as u64)).await;
+    }
     let now = code_sql::now_ms() / 60_000;
     let minute = |m: i64, errors: i64| apps_control::store::MinuteRow { minute: m, requests: 100, errors, instances: 1, memory_bytes: 64 << 20, ..Default::default() };
     w.apps.store.put_minutes(&id, "production", &(1..=5).map(|i| minute(now - i, 20)).collect::<Vec<_>>()).unwrap();

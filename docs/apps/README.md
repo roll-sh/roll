@@ -883,6 +883,19 @@ Spend counts the services a project has now (a deleted service's month drops out
 
 ## Measured
 
+- A web instance's network lives in a sandbox made with it (`Docker` with `netns`, the default;
+  `ROLL_APPS_NETNS=0` turns it off): busybox asleep, holding the network namespace, its aliases
+  on the project network and its published port, with no capabilities, 16 MiB, 0.05 vCPU, 8
+  pids and a read-only root. The app joins that namespace (`NetworkMode: container:<sandbox>`), so
+  a wake starts only the app, with no network set up on its path (the same idea as Kubernetes'
+  pause container). Snapshot restore (CRIU) would go further, but this host has no CRIU and
+  Docker's checkpointing is experimental. Measured on real Docker
+  (`a_cold_start_skips_network_setup_with_a_sandbox`: the same image, five alternating pairs):
+  median 151 ms against 238 ms, and in a second run 171 against 375, faster in five of five each
+  time; the standard cold start went from 258 to 175 ms median and Node's from 313 to 199 ms.
+  The sandbox is removed with its instance, and a node taking a service over keeps a known
+  instance's sandbox.
+
 On ai-server (36 cores, Docker 29, overlayfs, load around 25–30 from other work), 2026-11-12.
 `crates/apps-control/tests/docker.rs` (`pnpm test:apps --docker`) prints the first three; the Node
 row is `roll up` of a two-file Node app against a real rolld, timed with curl over Tailscale.
@@ -1096,6 +1109,7 @@ platform branches".
 7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
 8. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-9. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
-    snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
+9. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+   restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
+   Firecracker microVM hosts on the fleet.
 10. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

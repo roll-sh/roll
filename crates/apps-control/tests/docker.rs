@@ -52,6 +52,10 @@ struct World {
 
 /// roll apps on this host's Docker, or None when the Docker tests aren't asked for.
 async fn docker_world() -> Option<World> {
+    docker_world_netns(None).await
+}
+
+async fn docker_world_netns(netns: Option<bool>) -> Option<World> {
     if std::env::var("ROLL_APPS_DOCKER").ok().as_deref() != Some("1") || !apps_control::runtime::docker::available().await {
         eprintln!("skipped: set ROLL_APPS_DOCKER=1 with Docker running");
         return None;
@@ -65,7 +69,10 @@ async fn docker_world() -> Option<World> {
     let mut cfg = AppsConfig::new(dir.path().to_path_buf());
     cfg.live.probe_every = Duration::from_millis(5);
     let deps = Deps {
-        runtime: Arc::new(Docker::new(dir.path().join("scratch"))),
+        runtime: Arc::new(match netns {
+            Some(on) => Docker::new(dir.path().join("scratch")).with_netns(on),
+            None => Docker::new(dir.path().join("scratch")),
+        }),
         builder: Arc::new(DockerBuilder::new(2)),
         sources: None,
         secrets: Arc::new(NoSecrets),
@@ -324,4 +331,77 @@ async fn a_volume_restores_from_its_tar_and_a_broken_one_changes_nothing() {
     rt.write_volume(&vol, Box::new(std::io::Cursor::new(tar))).await.unwrap();
     assert_eq!(sh("ls -A /data && cat /data/a/f"), ".hidden\na\none\n");
     rt.remove_volume(&vol).await;
+}
+
+/// A cold start with the instance's network in a sandbox made with it (the wake starts only the
+/// app, in the sandbox's network namespace) against the instance holding its own: alternating
+/// pairs on the same image, everything removed after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cold_start_skips_network_setup_with_a_sandbox() {
+    let (Some(on), Some(off)) = (docker_world_netns(Some(true)).await, docker_world_netns(Some(false)).await) else { return };
+    let (a, ah) = deploy_container(&on, "sandboxed").await;
+    let (b, bh) = deploy_container(&off, "own").await;
+    let cold = |w: &World, id: String, host: String| {
+        let (apps, public) = (w.apps.clone(), w.public.clone());
+        async move {
+            apps.live(&id, "production").sleep().await;
+            let (st, t) = get(&public, &host).await;
+            assert_eq!(st, StatusCode::OK);
+            t
+        }
+    };
+    let (mut with, mut without, mut faster) = (Vec::new(), Vec::new(), 0);
+    for i in 0..5 {
+        // Alternating which goes first.
+        let (x, y) = if i % 2 == 0 {
+            let x = cold(&on, a.clone(), ah.clone()).await;
+            (x, cold(&off, b.clone(), bh.clone()).await)
+        } else {
+            let y = cold(&off, b.clone(), bh.clone()).await;
+            (cold(&on, a.clone(), ah.clone()).await, y)
+        };
+        faster += usize::from(x < y);
+        with.push(x);
+        without.push(y);
+    }
+    let sandboxes = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={a}"), "--filter", "label=sh.roll.apps.role=network"]).await.unwrap();
+    assert!(!sandboxes.is_empty(), "the sandboxed instance has its network sandbox");
+    eprintln!(
+        "MEASURED cold start, network in a sandbox vs its own: median {} ms vs {} ms (pairs {:?} vs {:?}; sandbox faster in {faster} of 5)",
+        median(with.clone()).as_millis(),
+        median(without.clone()).as_millis(),
+        with.iter().map(|d| d.as_millis()).collect::<Vec<_>>(),
+        without.iter().map(|d| d.as_millis()).collect::<Vec<_>>(),
+    );
+    for (w, id) in [(&on, &a), (&off, &b)] {
+        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+        let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    }
+    let left = apps_control::runtime::docker::docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={a}")]).await.unwrap();
+    assert!(left.is_empty(), "the instance and its sandbox are gone: {left}");
+    on.apps.shutdown().await;
+    off.apps.shutdown().await;
+}
+
+/// A small busybox site run as a container (a start command keeps it from being served as files): its id and host.
+async fn deploy_container(w: &World, name: &str) -> (String, String) {
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "build": {"start": "httpd -f -p $PORT -h /site"}, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let tree = tempfile::tempdir().unwrap();
+    std::fs::write(tree.path().join("index.html"), "<h1>cold</h1>").unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
+    let dep = d["id"].as_str().unwrap().to_string();
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+        if x["status"] == "active" {
+            break;
+        }
+        assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
+    (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
 }
