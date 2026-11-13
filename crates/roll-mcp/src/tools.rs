@@ -474,6 +474,10 @@ static TOOLS: &[Tool] = &[
     ),
     t("search_delete_index", "Delete an index", "Delete an index and its documents.", "search", "DELETE", "/v1/search/clusters/{cluster}/indices/{index}", &[req("cluster", "Cluster"), req("index", "Index")]),
     t("search_put_mapping", "Update a mapping", "Add fields to an index's mapping (Elasticsearch's PUT /<index>/_mapping).", "search", "PUT", "/v1/search/clusters/{cluster}/indices/{index}/mapping", &[req("cluster", "Cluster"), req("index", "Index"), breq("properties", Ty::Obj, "Field mappings")]),
+    t("search_get_mapping", "Get a mapping", "An index's field mappings (Elasticsearch's GET /<index>/_mapping).", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/mapping", &[req("cluster", "Cluster"), req("index", "Index")]),
+    t("search_index_settings", "Index settings", "An index's settings (Elasticsearch's GET /<index>/_settings).", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/settings", &[req("cluster", "Cluster"), req("index", "Index")]),
+    t("search_refresh", "Refresh an index", "Make what was just indexed searchable now (Elasticsearch's POST /<index>/_refresh).", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/refresh", &[req("cluster", "Cluster"), req("index", "Index")]),
+    t("search_analyze", "Analyze text", "The tokens an index's analyzer makes of some text (Elasticsearch's POST /<index>/_analyze): how a field will match.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/analyze", &[req("cluster", "Cluster"), req("index", "Index"), breq("text", Ty::Str, "Text to analyze"), b("analyzer", Ty::Str, "An analyzer by name"), b("field", Ty::Str, "Analyze as this field does")]),
     t("search_add_document", "Add a document", "Index a document under a new id.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/docs", &[req("cluster", "Cluster"), req("index", "Index"), P { name: "document", ty: Ty::Str, at: At::RawJson, required: true, desc: "The document, as JSON text" }]),
     t(
         "search_bulk",
