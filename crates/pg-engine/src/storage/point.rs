@@ -17,12 +17,30 @@ use std::sync::Arc;
 pub type Version = (u64, Option<Bytes>);
 
 /// A block a source read last, and the seek key that found it: every key from that one to
-/// the block's last key is in it, so a seek there needs nothing but the block.
+/// the block's last key is in it, so a seek there needs nothing but the block. (No block:
+/// none held; its buffers are kept for the next.)
+#[derive(Default)]
 pub(super) struct Held {
-    block: Arc<super::sst::Block>,
+    block: Option<Arc<super::sst::Block>>,
     from: Vec<u8>,
     /// Where the last read in it stopped (the next of ascending reads starts there).
     pos: BlockPos,
+}
+
+impl Held {
+    /// The block held, when `key` falls in it.
+    fn holding(&mut self, key: &[u8]) -> Option<(&super::sst::Block, &mut BlockPos)> {
+        let b = self.block.as_deref()?;
+        (self.from.as_slice() <= key && b.last_key().is_some_and(|l| key <= l)).then_some((b, &mut self.pos))
+    }
+
+    /// Hold `block`, which `seek` found at `pos`.
+    fn keep(&mut self, block: Arc<super::sst::Block>, seek: &[u8], pos: &BlockPos) {
+        self.block = Some(block);
+        self.from.clear();
+        self.from.extend_from_slice(seek);
+        self.pos.clone_from(pos);
+    }
 }
 
 /// Single-key reads at one snapshot over the sources as they were when it was made (see the
@@ -33,16 +51,44 @@ pub struct PointReader {
     /// Check the last level's bloom filters too (keys that may not exist; keys an index
     /// named are in it when no newer source has them, so its filters would only cost).
     bloom_last: bool,
+    bufs: Bufs,
+}
+
+/// A reader's buffers: a reader leaves them to its thread's next one (`SPARE`), so a point
+/// read per statement (a unique key's probe and its row's fetch) makes none of them again.
+#[derive(Default)]
+struct Bufs {
     /// Per file source, by its place: the frozen sources, L0's files, then L1.
-    held: Vec<Option<Held>>,
+    held: Vec<Held>,
     pos: BlockPos,
     seek: Vec<u8>,
+    /// `first_raw`'s candidate key.
+    cand: Vec<u8>,
+}
+
+thread_local! {
+    static SPARE: std::cell::RefCell<Bufs> = std::cell::RefCell::new(Bufs::default());
+}
+
+impl Drop for PointReader {
+    fn drop(&mut self) {
+        // (The blocks held are this reader's view's: they go with it.)
+        let mut bufs = std::mem::take(&mut self.bufs);
+        bufs.held.iter_mut().for_each(|h| h.block = None);
+        // (Not as the thread ends: the buffers go then.)
+        let _ = SPARE.try_with(|s| {
+            if let Ok(mut s) = s.try_borrow_mut() {
+                *s = bufs;
+            }
+        });
+    }
 }
 
 impl PointReader {
     pub(super) fn new(view: Arc<View>, ts: u64, bloom_last: bool) -> PointReader {
-        let n = view.imm.len() + view.l0.len() + 1;
-        PointReader { view, ts, bloom_last, held: (0..n).map(|_| None).collect(), pos: BlockPos::default(), seek: Vec::new() }
+        let mut bufs = SPARE.try_with(|s| s.try_borrow_mut().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default()).unwrap_or_default();
+        bufs.held.resize_with(view.imm.len() + view.l0.len() + 1, Held::default);
+        PointReader { view, ts, bloom_last, bufs }
     }
 
     pub fn ts(&self) -> u64 {
@@ -52,9 +98,11 @@ impl PointReader {
     /// Room for a storage key in the buffers every read writes into, made at the first
     /// read (a key grown into them entry by entry reallocated each a few times).
     fn room(&mut self) {
-        if self.seek.capacity() == 0 {
-            self.seek.reserve(KEY_ROOM);
-            self.pos.reserve_key(KEY_ROOM);
+        let b = &mut self.bufs;
+        if b.seek.capacity() == 0 {
+            b.seek.reserve(KEY_ROOM);
+            b.cand.reserve(KEY_ROOM);
+            b.pos.reserve_key(KEY_ROOM);
         }
     }
 
@@ -66,10 +114,11 @@ impl PointReader {
     /// values as stored (out-of-line ones not put back).
     pub fn get_raw(&mut self, key: &[u8]) -> Result<Option<Version>> {
         self.room();
-        self.seek.clear();
-        self.seek.extend_from_slice(key);
-        self.seek.extend_from_slice(&(!self.ts).to_be_bytes());
-        let hit = newest(&self.view, key, &self.seek, self.bloom_last, &mut self.held, &mut self.pos)?;
+        let b = &mut self.bufs;
+        b.seek.clear();
+        b.seek.extend_from_slice(key);
+        b.seek.extend_from_slice(&(!self.ts).to_be_bytes());
+        let hit = newest(&self.view, key, &b.seek, self.bloom_last, &mut b.held, &mut b.pos)?;
         Ok(deleted_by_range(&self.view, key, hit, self.ts))
     }
 
@@ -80,13 +129,12 @@ impl PointReader {
     /// visible version (deleted ones): a scan is cheaper.
     pub fn first_raw(&mut self, start: &[u8], end: &[u8]) -> Result<First> {
         self.room();
-        let mut from = std::mem::take(&mut self.seek);
+        let Bufs { held, pos, seek: from, cand } = &mut self.bufs;
         from.clear();
         from.extend_from_slice(start);
-        let mut cand = Vec::with_capacity(KEY_ROOM);
         let mut tries = 0;
-        let out = loop {
-            if !smallest_key(&self.view, &from, &mut self.held, &mut self.pos, &mut cand)? {
+        Ok(loop {
+            if !smallest_key(&self.view, from, held, pos, cand)? {
                 break First::None;
             }
             if !end.is_empty() && cand.as_slice() >= end {
@@ -96,16 +144,16 @@ impl PointReader {
                 // (A key `start` extends: its versions sort after `start`. No key starts with
                 // it, so none lies between `start` and past its versions.)
                 from.clear();
-                from.extend_from_slice(&cand);
+                from.extend_from_slice(cand);
                 from.extend_from_slice(&[0xFF; 9]);
                 continue;
             }
             from.clear();
-            from.extend_from_slice(&cand);
+            from.extend_from_slice(cand);
             from.extend_from_slice(&(!self.ts).to_be_bytes());
-            let hit = newest(&self.view, &cand, &from, true, &mut self.held, &mut self.pos)?;
-            if let Some((_, Some(v))) = deleted_by_range(&self.view, &cand, hit, self.ts) {
-                break First::Row(cand, v);
+            let hit = newest(&self.view, cand, from, true, held, pos)?;
+            if let Some((_, Some(v))) = deleted_by_range(&self.view, cand, hit, self.ts) {
+                break First::Row(cand.clone(), v);
             }
             tries += 1;
             if tries == FIRST_TRIES {
@@ -114,9 +162,7 @@ impl PointReader {
             // (Past every version of this key: no other user key starts with it.)
             from.truncate(cand.len());
             from.extend_from_slice(&[0xFF; 9]);
-        };
-        self.seek = from;
-        Ok(out)
+        })
     }
 }
 
@@ -139,7 +185,7 @@ const FIRST_TRIES: u32 = 4;
 
 /// The smallest user key at or after `from` that any source of `view` holds a version of,
 /// into `out` (false: none).
-fn smallest_key(view: &View, from: &[u8], held: &mut [Option<Held>], pos: &mut BlockPos, out: &mut Vec<u8>) -> Result<bool> {
+fn smallest_key(view: &View, from: &[u8], held: &mut [Held], pos: &mut BlockPos, out: &mut Vec<u8>) -> Result<bool> {
     let mut found = false;
     let mut take = |k: &[u8]| {
         let k = user_key(k);
@@ -174,15 +220,12 @@ fn smallest_key(view: &View, from: &[u8], held: &mut [Option<Held>], pos: &mut B
 
 /// The first storage key at or after `from` in non-overlapping files in key order, to `f`
 /// (not called: none), through the block `held` keeps when `from` falls in it.
-fn file_first(ssts: &[Arc<SstReader>], mut held: Option<&mut Option<Held>>, from: &[u8], pos: &mut BlockPos, f: &mut dyn FnMut(&[u8])) -> Result<()> {
-    if let Some(Some(h)) = held.as_deref_mut()
-        && h.from.as_slice() <= from
-        && h.block.last_key().is_some_and(|l| from <= l)
-    {
+fn file_first(ssts: &[Arc<SstReader>], mut held: Option<&mut Held>, from: &[u8], pos: &mut BlockPos, f: &mut dyn FnMut(&[u8])) -> Result<()> {
+    if let Some((block, hpos)) = held.as_deref_mut().and_then(|h| h.holding(from)) {
         // (From where the last read in the block stopped.)
-        h.block.seek_on(from, &mut h.pos);
-        if h.pos.index() < h.block.len() {
-            f(h.pos.key());
+        block.seek_on(from, hpos);
+        if hpos.index() < block.len() {
+            f(hpos.key());
         }
         return Ok(());
     }
@@ -199,7 +242,7 @@ fn file_first(ssts: &[Arc<SstReader>], mut held: Option<&mut Option<Held>>, from
             if b == first
                 && let Some(slot) = held
             {
-                *slot = Some(Held { block, from: from.to_vec(), pos: pos.clone() });
+                slot.keep(block, from, pos);
             }
             return Ok(());
         }
@@ -226,7 +269,7 @@ pub(super) fn newest(
     key: &[u8],
     seek: &[u8],
     bloom_last: bool,
-    held: &mut [Option<Held>],
+    held: &mut [Held],
     pos: &mut BlockPos,
 ) -> Result<Option<Version>> {
     if let Some(hit) = mem_get(&view.mem, key, seek) {
@@ -271,7 +314,7 @@ fn mem_get(m: &Memtable, key: &[u8], seek: &[u8]) -> Option<Version> {
 fn file_get(
     ssts: &[Arc<SstReader>],
     bloom: bool,
-    mut held: Option<&mut Option<Held>>,
+    mut held: Option<&mut Held>,
     key: &[u8],
     seek: &[u8],
     pos: &mut BlockPos,
@@ -284,15 +327,12 @@ fn file_get(
         let k = pos.key();
         Some((user_key(k) == key).then(|| (key_ts(k), block.value(pos))))
     };
-    if let Some(Some(h)) = held.as_deref_mut()
-        && h.from.as_slice() <= seek
-        && h.block.last_key().is_some_and(|l| seek <= l)
-    {
+    if let Some((block, hpos)) = held.as_deref_mut().and_then(|h| h.holding(seek)) {
         // (From where the last read in the block stopped.)
-        h.block.seek_on(seek, &mut h.pos);
-        if h.pos.index() < h.block.len() {
-            let k = h.pos.key();
-            return Ok((user_key(k) == key).then(|| (key_ts(k), h.block.value(&h.pos))));
+        block.seek_on(seek, hpos);
+        if hpos.index() < block.len() {
+            let k = hpos.key();
+            return Ok((user_key(k) == key).then(|| (key_ts(k), block.value(hpos))));
         }
     }
     let f = match ssts.len() {
@@ -311,15 +351,7 @@ fn file_get(
         if b == first
             && let Some(slot) = held.as_deref_mut()
         {
-            match slot {
-                Some(h) => {
-                    h.block = block;
-                    h.from.clear();
-                    h.from.extend_from_slice(seek);
-                    h.pos.clone_from(pos);
-                }
-                None => *slot = Some(Held { block, from: seek.to_vec(), pos: pos.clone() }),
-            }
+            slot.keep(block, seek, pos);
         }
         return Ok(hit);
     }

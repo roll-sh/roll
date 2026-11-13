@@ -516,7 +516,7 @@ const F_TS: usize = 1;
 const F_DERIVED: usize = 2;
 
 /// A position in a block: entry `i`, its whole key and value, and where the next one starts.
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct BlockPos {
     i: usize,
     next: u32,
@@ -534,6 +534,23 @@ pub struct BlockPos {
 
 const TOMBSTONE: u32 = u32::MAX;
 const DERIVED: u32 = u32::MAX - 1;
+
+impl Clone for BlockPos {
+    fn clone(&self) -> BlockPos {
+        let mut p = BlockPos::default();
+        p.clone_from(self);
+        p
+    }
+
+    /// (Into this one's key buffers: a point reader keeps the position its block was found
+    /// at, read after read, without an allocation each.)
+    fn clone_from(&mut self, o: &BlockPos) {
+        let BlockPos { i, next, vnext, shared, key, val_off, val_len, dval } = self;
+        (*i, *next, *vnext, *shared, *val_off, *val_len) = (o.i, o.next, o.vnext, o.shared, o.val_off, o.val_len);
+        key.clone_from(&o.key);
+        dval.clone_from(&o.dval);
+    }
+}
 
 impl BlockPos {
     /// Room for `n` bytes in the key buffer (a point read's keys: made once, not grown entry
