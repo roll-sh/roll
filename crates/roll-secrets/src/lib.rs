@@ -387,6 +387,8 @@ impl Secrets {
         db.add_column("secrets", "weak", "TEXT")?;
         // Who supplies a required key (health and the daily notice name them).
         db.add_column("required", "owner", "TEXT")?;
+        // A deleted project kept only until what it issued is revoked (forget_project).
+        db.add_column("projects", "forgotten_at", "INTEGER")?;
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
@@ -459,14 +461,24 @@ impl Secrets {
         Ok(serde_json::json!({ "ok": self.keys.is_ok(), "key": self.key_source, "resealed": resealed, "links": self.links.kinds().map(|p| p.kind().to_string()).collect::<Vec<_>>(), "syncs": self.syncs.kinds().map(|t| t.kind().to_string()).collect::<Vec<_>>() }))
     }
 
-    /// Forget everything about a project (its workspace project was deleted). Active leases are
-    /// revoked first.
+    /// Forget everything about a project (its workspace project was deleted). What it issued is
+    /// revoked first, while the project's key and registries can still reach it. Anything that
+    /// couldn't be revoked stays as a lease the sweeper retries, with what revoking it needs (the
+    /// project's key, its registries), until [`Secrets::sweep_forgotten`] finds nothing left.
     pub fn forget_project(&self, project: &str) -> Result<()> {
         self.revoke_leases_where("project_id = ?", project);
-        let managed = self.managed_where("project_id = ?", project);
-        let done = self.db.write(|c| {
-            for t in ["secrets", "versions", "changes", "requests", "leases", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities", "rotators", "outside_dbs"] {
+        let failed = self.revoke_managed(self.managed_where("project_id = ?", project));
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            for t in ["secrets", "versions", "changes", "requests", "tokens", "audit", "required", "shares", "syncs", "audit_sinks", "notices", "identities"] {
                 c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
+            }
+            c.execute("DELETE FROM leases WHERE project_id = ? AND revoked_at IS NOT NULL", [project])?;
+            for (link, handle) in &failed {
+                c.execute(
+                    "INSERT INTO leases (id, project_id, env_id, key, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES (?, ?, '', '', 'retired', ?, ?, 'roll:forget', ?, ?, NULL)",
+                    code_sql::params![names::new_id("lse", 16), project, json(link), json(handle), now, now],
+                )?;
             }
             let envs = c.query("SELECT id FROM environments WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?;
             for e in &envs {
@@ -477,14 +489,36 @@ impl Secrets {
             // What other projects shared with this one goes with it.
             c.execute("DELETE FROM exports WHERE to_project = ?", [project])?;
             c.execute("DELETE FROM environments WHERE project_id = ?", [project])?;
-            c.execute("DELETE FROM projects WHERE project_id = ?", [project])?;
-            Ok::<_, Error>(())
-        });
-        if done.is_ok() {
-            self.revoke_managed(managed);
-        }
-        done
+            c.execute("UPDATE projects SET forgotten_at = ? WHERE project_id = ?", code_sql::params![now, project])?;
+            forget_if_done(c, project)
+        })
     }
+
+    /// Forgotten projects whose last lease is revoked: their key and registries go.
+    pub(crate) fn sweep_forgotten(&self) -> Result<()> {
+        self.db.write(|c| {
+            for p in c.query("SELECT project_id FROM projects WHERE forgotten_at IS NOT NULL LIMIT 100", (), |r| r.get::<_, String>(0))? {
+                forget_if_done(c, &p)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Registries of the project's own resources (rotators…): a lease's revocation reads them.
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs"];
+
+/// Drop a forgotten project's key and registries once no lease of its waits to be revoked.
+fn forget_if_done(c: &code_sql::Conn<'_>, project: &str) -> Result<()> {
+    let waiting: i64 = c.query_row("SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL", [project], |r| r.get(0))?;
+    if waiting == 0 {
+        c.execute("DELETE FROM leases WHERE project_id = ?", [project])?;
+        for t in REGISTRIES {
+            c.execute(&format!("DELETE FROM {t} WHERE project_id = ?"), [project])?;
+        }
+        c.execute("DELETE FROM projects WHERE project_id = ?", [project])?;
+    }
+    Ok(())
 }
 
 fn json<T: serde::Serialize>(v: &T) -> String {

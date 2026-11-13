@@ -110,6 +110,31 @@ struct Opened {
 struct State {
     next: usize,
     generation: BTreeMap<String, u64>,
+    /// Roles an issue or a retirement is changing right now, until (unix ms): nothing else takes them.
+    #[serde(default)]
+    held: BTreeMap<String, i64>,
+}
+
+/// How long an issue or a retirement holds a role: past its connection's timeout (15 s) and the
+/// write that stores what it issued, after which the stored credential or lease keeps it busy. A
+/// hold outlives a crash between the two by no more than this.
+const HOLD_MS: i64 = 2 * 60_000;
+
+/// The roles nobody may take now: the one a stored credential uses, any an unrevoked lease still
+/// covers (a retired one in its grace), and any held by an issue or retirement in flight.
+fn busy(c: &code_sql::Conn<'_>, id: &str, st: &State, now: i64) -> Result<std::collections::BTreeSet<String>> {
+    let like = (format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%"));
+    let mut out: std::collections::BTreeSet<String> = st.held.iter().filter(|(_, until)| **until > now).map(|(r, _)| r.clone()).collect();
+    let stored: Vec<String> = c.query("SELECT link_state FROM secrets WHERE link_state IS NOT NULL AND link LIKE ? AND link LIKE ?", params![like.0, like.1], |r| r.get(0))?;
+    let leased: Vec<String> = c.query("SELECT handle FROM leases WHERE revoked_at IS NULL AND link LIKE ? AND link LIKE ?", params![like.0, like.1], |r| r.get(0))?;
+    for (text, inner) in stored.iter().map(|t| (t, true)).chain(leased.iter().map(|t| (t, false))) {
+        let v: Json = serde_json::from_str(text).unwrap_or_default();
+        let handle = if inner { &v["handle"] } else { &v };
+        if let Some(role) = handle["role"].as_str() {
+            out.insert(role.to_string());
+        }
+    }
+    Ok(out)
 }
 
 fn state_of(c: &code_sql::Conn<'_>, id: &str) -> Result<State> {
@@ -120,6 +145,18 @@ fn state_of(c: &code_sql::Conn<'_>, id: &str) -> Result<State> {
 fn save(c: &code_sql::Conn<'_>, id: &str, st: &State) -> Result<()> {
     c.execute("UPDATE outside_dbs SET state = ? WHERE id = ?", params![serde_json::to_string(st).expect("state"), id])?;
     Ok(())
+}
+
+/// Where a URL points (`host:port`, or a list for MongoDB), cut the way the drivers cut it. A user
+/// name or password holding `/`, `?` or `#` unencoded is refused (parsers disagree on where it
+/// ends, and the host shown to readers must never be part of a password); the error doesn't echo it.
+fn authority_host(url: &str) -> Result<String> {
+    let rest = url.split_once("://").map_or("", |(_, r)| r);
+    let (userinfo, after) = rest.rsplit_once('@').unwrap_or(("", rest));
+    if userinfo.contains(['/', '?', '#']) {
+        return Err(Error::BadRequest("percent-encode the URL's user name and password (/ is %2F, ? is %3F, # is %23)".into()));
+    }
+    Ok(after.split(['/', '?', '#']).next().unwrap_or_default().to_string())
 }
 
 fn aad(project: &str, id: &str) -> String {
@@ -189,6 +226,7 @@ impl Provider {
             if st.generation.get(role).copied() == Some(generation) {
                 st.next = idx;
                 st.generation.insert(role.to_string(), to);
+                st.held.remove(role);
                 save(c, id, &st)?;
             }
             Ok(())
@@ -227,15 +265,21 @@ impl LinkProvider for Provider {
         if roles.len() != 2 {
             return Err(Error::Link(format!("database {ref} needs two roles to take turns", ref = r#ref)));
         }
-        // Claim the turn first (the database only): two issues never get the same role.
+        // Claim a free role first (the database only): never the one in use, one still in its
+        // grace, or one another issue or retirement is changing.
+        let now = self.db.now_ms()?;
         let (idx, role, generation) = self.db.write(|c| {
             let mut st = state_of(c, r#ref)?;
-            let idx = st.next % 2;
+            let busy = busy(c, r#ref, &st, now)?;
+            let idx = [st.next % 2, (st.next + 1) % 2].into_iter().find(|i| !busy.contains(&roles[*i])).ok_or_else(|| {
+                Error::Conflict("in_use", format!("both of {}'s roles are in use: one serves the current login, the other is still in its grace period (or another rotation is running). Rotate again once the grace ends", roles.join(" and ")))
+            })?;
             let role = roles[idx].clone();
             st.next = (idx + 1) % 2;
             let g = st.generation.entry(role.clone()).or_default();
             *g += 1;
             let generation = *g;
+            st.held.insert(role.clone(), now + HOLD_MS);
             save(c, r#ref, &st)?;
             Ok::<_, Error>((idx, role, generation))
         })?;
@@ -262,7 +306,28 @@ impl LinkProvider for Provider {
             return Ok(());
         }
         let Opened { url, ca, roles, .. } = self.open(r#ref)?;
-        self.outside.set_password(url.expose(), ca.as_deref(), role, &password()).map_err(|why| Error::Link(format!("retiring {role}'s password: {why}")))?;
+        // Hold it while its password changes, so no issue takes it halfway.
+        let now = self.db.now_ms()?;
+        let held = self.db.write(|c| {
+            let mut st = state_of(c, r#ref)?;
+            if st.generation.get(role).copied() != Some(generation) {
+                return Ok::<_, Error>(false);
+            }
+            st.held.insert(role.to_string(), now + HOLD_MS);
+            save(c, r#ref, &st)?;
+            Ok(true)
+        })?;
+        if !held {
+            return Ok(());
+        }
+        if let Err(why) = self.outside.set_password(url.expose(), ca.as_deref(), role, &password()) {
+            self.db.write(|c| {
+                let mut st = state_of(c, r#ref)?;
+                st.held.remove(role);
+                save(c, r#ref, &st)
+            })?;
+            return Err(Error::Link(format!("retiring {role}'s password: {why}")));
+        }
         // Its latest handout is gone (a grace that ended, or an issue whose write failed): it's
         // the role to hand out next, never the other, which may be in use.
         let idx = roles.iter().position(|r| r == role).unwrap_or(0);
@@ -309,7 +374,7 @@ impl Secrets {
         if group.as_ref().is_some_and(|g| n.roles.contains(g)) {
             return Err(Error::BadRequest("the group role isn't one of the two that take turns".into()));
         }
-        let host = names::url_host(&n.url);
+        let host = authority_host(&n.url)?;
         if !["postgres://", "postgresql://", "mysql://", "redis://", "rediss://"].iter().any(|p| n.url.starts_with(p)) || host.is_empty() || n.url.len() > 2048 {
             return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db or rediss://…@host:6379".into()));
         }
