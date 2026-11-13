@@ -39,6 +39,8 @@ type Ctx = {
   resourceName: (l: SecretLink) => string;
   /** The project's required keys (typed ones say what a value must be). */
   required: Required[];
+  /** Expired, missing and exposed findings across the project (`…/health`): the Health tab's count. */
+  serious: number;
   reloadRequired: () => void;
 };
 
@@ -73,6 +75,8 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   const api = useMemo(() => secretsApi(project.id), [project.id]);
   const overview = useLoad(() => api.overview(), [api]);
   const required = useLoad(() => api.required(), [api]);
+  // Again whenever the environments do (a write reloads them): findings follow writes.
+  const health = useLoad(() => api.health(), [api, overview.data]);
   const envs = overview.data?.environments ?? [];
   const standard = envs.filter((e) => e.kind === "standard").sort((a, b) => a.position - b.position);
   const previews = envs.filter((e) => e.kind === "ephemeral");
@@ -90,6 +94,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
     resourceName: (l) => ws.inventory.get(resourceKey({ kind: l.kind as never, ref: l.ref }))?.name ?? l.ref,
     required: required.data ?? [],
     reloadRequired: required.reload,
+    serious: (health.data ?? []).filter((f) => f.issue === "expired" || f.issue === "missing" || f.issue === "exposed").length,
   };
 
   const env = search.env ? envs.find((e) => e.slug === search.env) : undefined;
@@ -151,7 +156,7 @@ const tab = (on: boolean) =>
 
 /** Overview, one tab per standard environment, then the project-wide views. */
 function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
-  const { standard, previews, search, project } = useSecrets();
+  const { standard, previews, search, project, serious } = useSecrets();
   const path = search.path && search.path !== "/" ? search.path : undefined;
   const side: { view: View; label: string; icon: ReactNode }[] = [
     { view: "health", label: "Health", icon: <HeartPulse className="size-3.5" /> },
@@ -184,6 +189,11 @@ function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
         <Link key={s.view} href={secretsHref(project.id, { view: s.view })} className={tab(view === s.view)} title={s.label}>
           {s.icon}
           <span className="max-lg:hidden">{s.label}</span>
+          {s.view === "health" && serious > 0 && (
+            <span className="grid h-4 min-w-4 place-items-center rounded-full bg-danger/15 px-1 font-mono text-[10px] text-danger tabular-nums" aria-label={`${serious} to fix now`}>
+              {serious}
+            </span>
+          )}
         </Link>
       ))}
     </nav>
