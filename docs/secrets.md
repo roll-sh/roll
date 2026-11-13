@@ -418,10 +418,13 @@ request where the environment is protected. The Health tab and the sidebar's Sec
 the count of findings to fix now (expired, missing, exposed), and Home lists them across every
 project (`GET /v1/secrets/findings`, `roll secrets health --all`).
 
-Health, `POST …/leaks` and `GET /v1/secrets/search` filter each finding by the caller's own access,
-so roll-access lets a token limited to some environments or folders call them (they're marked
-`filters_itself` in its catalogue): its answer just leaves the rest out. Keep that filter in each:
-without it, the mark would let such a token see the whole project.
+Health, `POST …/leaks`, `GET /v1/secrets/search` and `GET /v1/secrets/findings` filter each
+finding by the caller's own access. With the roll-access swap (ready on `wip/secrets-on-mcp`, where
+roll secrets asks the caller's Grant), roll-access lets a token limited to some environments or
+folders call them (health and leaks are `filters_itself` in its catalogue, search and findings take
+any grant): its answer just leaves the rest out. Until then roll-access treats them as reads of the
+whole project, since the stopgap here sees a request it let through as the operator's. Keep the
+filter in each: without it, the mark would let such a token see the whole project.
 
 ### Compare and promote
 
