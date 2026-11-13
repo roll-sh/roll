@@ -316,6 +316,62 @@ pub struct Store {
     pub(crate) db: Db,
     /// When each grant's `last_used_at` was last written by this node.
     touched: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+    /// The audit writer's queue ([`Store::queue_audit`]); its thread ends with the store.
+    audit_tx: std::sync::mpsc::SyncSender<AuditEvent>,
+}
+
+/// Audit rows queued at most (then callers write their own), and written per transaction at most.
+const AUDIT_QUEUE: usize = 16_384;
+const AUDIT_BATCH: usize = 512;
+
+/// The audit writer: waits for a row, takes whatever else is queued, writes them together. No
+/// timer: a lone row is written at once, and rows batch by themselves under load.
+fn audit_writer(db: Db, rx: std::sync::mpsc::Receiver<AuditEvent>) {
+    while let Ok(first) = rx.recv() {
+        let mut batch = vec![first];
+        while batch.len() < AUDIT_BATCH {
+            match rx.try_recv() {
+                Ok(e) => batch.push(e),
+                Err(_) => break,
+            }
+        }
+        write_audit(&db, &batch);
+    }
+}
+
+fn write_audit(db: &Db, events: &[AuditEvent]) {
+    let r: std::result::Result<(), code_sql::Error> = db.write_unsynced(|c| {
+        for e in events {
+            let args = e.args.as_ref().and_then(|a| serde_json::to_string(a).ok());
+            c.execute(
+                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    e.id,
+                    e.at,
+                    e.grant_id,
+                    e.grant_name,
+                    e.source,
+                    e.tool,
+                    e.method,
+                    e.route,
+                    e.product,
+                    e.action,
+                    e.resource,
+                    e.decision,
+                    e.approval,
+                    e.status as i64,
+                    args,
+                    e.ip,
+                    e.duration_ms
+                ],
+            )?;
+        }
+        Ok(())
+    });
+    if let Err(err) = r {
+        tracing::warn!(error = %err, rows = events.len(), "writing the audit log");
+    }
 }
 
 /// A grant's columns, as `grant_row` reads them (21 of them: a query may add its own after).
@@ -477,7 +533,10 @@ impl Store {
         if !db.has_column("grants", "ask_otherwise")? {
             db.add_column("grants", "ask_otherwise", "INTEGER")?;
         }
-        Ok(Store { db, touched: Default::default() })
+        let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
+        let writer = db.clone();
+        std::thread::Builder::new().name("roll-access-audit".into()).spawn(move || audit_writer(writer, rx)).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(Store { db, touched: Default::default(), audit_tx })
     }
 
     /// A setting (JSON), by key: `notify` (where approvals are posted).
@@ -915,35 +974,19 @@ impl Store {
 
     // ── audit ──
 
+    /// Write an audit row now.
     pub fn audit(&self, e: &AuditEvent) {
-        let args = e.args.as_ref().and_then(|a| serde_json::to_string(a).ok());
-        let r = self.db.write_unsynced(|c| {
-            c.execute(
-                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    e.id,
-                    e.at,
-                    e.grant_id,
-                    e.grant_name,
-                    e.source,
-                    e.tool,
-                    e.method,
-                    e.route,
-                    e.product,
-                    e.action,
-                    e.resource,
-                    e.decision,
-                    e.approval,
-                    e.status as i64,
-                    args,
-                    e.ip,
-                    e.duration_ms
-                ],
-            )
-        });
-        if let Err(err) = r {
-            tracing::warn!(error = %err, "writing the audit log");
+        write_audit(&self.db, std::slice::from_ref(e));
+    }
+
+    /// Hand an audit row to this node's writer, which writes what's queued in one transaction:
+    /// a write each, serialized, held a gate to ~9k requests a second; batched, it's the gate's
+    /// own cost. A full queue hands the row back for the caller to write ([`Store::audit`]):
+    /// nothing is dropped.
+    pub fn queue_audit(&self, e: AuditEvent) -> Option<AuditEvent> {
+        match self.audit_tx.try_send(e) {
+            Ok(()) => None,
+            Err(std::sync::mpsc::TrySendError::Full(e) | std::sync::mpsc::TrySendError::Disconnected(e)) => Some(e),
         }
     }
 
