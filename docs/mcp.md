@@ -279,21 +279,28 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **As the sibling branches merge** (secrets #20, apps #21, search #22, previews #23): rerun
-   `examples/classify` on their routers, and wire their lookups in `rolld/src/access.rs`:
-   - previews' `Store::environment_of` (a Postgres branch's environment comes from `{branch}`);
+1. **Third security review** (in progress): an independent review of everything since the second
+   one (rate limits, audit sinks, leaked tokens and the GitHub endpoint, remembered approvals, the
+   idle limit, storage accounts, the signed hop decision) and of users' own tokens. Fix what it finds.
+2. **As the sibling branches merge** (secrets #20, apps #21, search #22, previews #23): rerun
+   `extract-routes.py` and `examples/classify` on their routers (every route at their heads has a
+   row today), and wire their lookups in `rolld/src/access.rs`:
+   - previews' `Store::environment_of` (done on their side, in wip/previews-on-secrets-mcp);
    - search's `resolve_id` (async: through the runtime handle);
    - apps' services to their projects;
-   - secrets' `Grant` swap and `roll_auth::Grants` for its syncs.
-   - secrets' audit sinks and access's (same wire contract already): one delivery module.
-2. **Users' own tokens** (built: branch `feature/mcp-user-tokens`, on top of
-   `integrate/mcp-accounts`): a signed-in non-admin's tokens and OAuth connections act as them,
-   checked by tests, the rolld auth matrix and a live run. Its PR opens once #18 and #19 are on
-   main; until then keep it merged with `integrate/mcp-accounts`.
-3. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+   - secrets' `Grant` swap, `roll_auth::Grants` for its syncs, and its ephemeral environments as
+     "preview";
+   - secrets' audit sinks and access's (same wire contract already): one delivery module;
+   - the products' `Product` entries in rolld, so their MCP tools appear.
+3. **Users' own tokens** (built: branch `feature/mcp-user-tokens`, on top of
+   `integrate/mcp-accounts`): its PR opens once #18 and #19 are on main; until then keep it merged.
+4. **Expiring tokens:** show tokens that expire within a week, and post them to the approvals
+   channel, as GitHub mails before a token expires.
+5. **MCP tools send `Idempotency-Key`** where a route honours it (apps' deploys), so a retried
+   call never deploys twice.
+6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-4. **Finer resources:** apps' deploys by id (once #21 is on main). Storage buckets in a named
-   account (`account/bucket`, their list filtered) are done.
+7. **Finer resources:** apps' deploys by id (once #21 is on main).
 
 Done lately: an idle limit in the token policy (`max_idle_days`: unused tokens stop); remembered approvals (docs/permissions.md: approve for an hour, a day or always,
 one action on one resource, a while never made permanent through a child token); leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
