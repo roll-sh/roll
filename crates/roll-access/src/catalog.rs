@@ -609,7 +609,7 @@ fn iam_action(b: &Value) -> Action {
 }
 
 // Credentials in answers, per product: replaced unless the grant may reveal.
-const PG_SECRETS: &[&str] = &["connection_uri", "password"];
+const PG_SECRETS: &[&str] = &["connection_uri", "app_connection_uri", "password"];
 const REDIS_SECRETS: &[&str] = &["redis_url", "rest_token", "password"];
 const NOSQL_SECRETS: &[&str] = &["password", "http_token", "secret_access_key"];
 const STREAM_SECRETS: &[&str] = &["connect", "secret", "password"];
@@ -658,6 +658,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/projects/{id}", "postgres", D, one(PG, "postgres-project")),
     row("POST", "/v1/projects/{id}/branches", "postgres", W, one(PG, "postgres-project")).reveals(PG_SECRETS),
     row("DELETE", "/v1/projects/{id}/branches/{branch}", "postgres", D, one(PG, "postgres-project")),
+    // A branch's own app role (feature/roll-previews): its answer has the role's password.
+    row("POST", "/v1/projects/{id}/branches/{branch}/app-role", "postgres", REVEAL, one(PG, "postgres-project")),
     row("GET", "/v1/projects/{id}/branches/{branch}/history", "postgres", R, one(PG, "postgres-project")),
     // Rewinds the branch in place (the old state is kept as a branch, but clients see it gone).
     row("POST", "/v1/projects/{id}/branches/{branch}/restore", "postgres", D, one(PG, "postgres-project")),
@@ -1176,6 +1178,9 @@ mod tests {
         // Static segments beat parameters; production decides deploy.
         let env = find("PUT", "/v1/secrets/projects/{project}/environments/order", "x").unwrap();
         assert_eq!(env.row.action("PUT", &[], None), Action::Admin);
+        // A branch's app role answers its password: reveal, never the branch prefix's write.
+        let f = find("POST", "/v1/projects/{id}/branches/{branch}/app-role", "x").unwrap();
+        assert_eq!(f.row.action("POST", &[], None), Action::Reveal);
         // A whole project's values out (a backup) or in (a restore) is admin, never the prefix's write.
         for r in ["backup", "restore"] {
             let f = find("POST", &format!("/v1/secrets/projects/{{project}}/{r}"), "x").unwrap();
