@@ -12,8 +12,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BIN=${ROLLD:-$ROOT/target/debug/rolld}
 CLI=${ROLL_CLI:-$ROOT/target/debug/roll}
 H=$HOME/.cache/roll-previews-apps-e2e
-P=${PREVIEW_APPS_PORTS:-28}
-API=127.0.0.1:${P}070
+PORTS=${PREVIEW_APPS_PORTS:-28}
+API=127.0.0.1:${PORTS}070
 say() { printf '\033[2m%s\033[0m\n' "$*" >&2; }
 api() { local m=$1 p=$2 b=${3:-}; if [ -n "$b" ]; then curl -sS -X "$m" "http://$API$p" -H 'content-type: application/json' -d "$b"; else curl -sS -X "$m" "http://$API$p"; fi; }
 jq_() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1], {'d': d}))" "$1"; }
@@ -36,8 +36,8 @@ cleanup() {
 trap cleanup EXIT
 if curl -s -o /dev/null --max-time 1 "http://$API/v1/info"; then echo "something answers on $API" >&2; exit 1; fi
 rm -rf "$H" && mkdir -p "$H"
-export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS=127.0.0.1:${P}380 ROLL_REDIS_HTTP=127.0.0.1:${P}081 \
-  ROLL_APPS_LISTEN=127.0.0.1:${P}080 ROLL_APPS_DOMAIN=apps.localhost ROLL_CODE_PREVIEW_DOMAIN=preview.localhost \
+export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${PORTS}432 ROLL_REDIS=127.0.0.1:${PORTS}380 ROLL_REDIS_HTTP=127.0.0.1:${PORTS}081 \
+  ROLL_APPS_LISTEN=127.0.0.1:${PORTS}080 ROLL_APPS_DOMAIN=apps.localhost ROLL_CODE_PREVIEW_DOMAIN=preview.localhost \
   ROLL_PRODUCTS=code,redis,apps RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
 nice -n 10 "$BIN" >"$H/rolld.log" 2>&1 &
@@ -93,20 +93,27 @@ T2=$(now_ms)
 VARS=$(api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "[v['name'] for v in d['vars']]")
 HOSTPART=$(echo "$URL" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
 T3=$(now_ms)
-BODY=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${P}080/" --max-time 120)
-WHERE=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${P}080/where" --max-time 30)
+BODY=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120)
+WHERE=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/where" --max-time 30)
 T4=$(now_ms)
 [ "$BODY" = "preview of change 1" ] || { echo "the preview should serve the change's page: $BODY"; exit 1; }
 
 say "a preview's own variable reaches its roll apps environment, and leaves it once removed"
 apps_vars() { api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "' '.join(sorted(v['name'] for v in d['vars']))"; }
-until_vars() { # until_vars <python test on the names>
+until_vars() { # until_vars <python test on the names, as n>
+  local cond=$1
   for _ in $(seq 1 240); do
     NAMES=$(apps_vars)
-    python3 -c "import sys; n=sys.argv[1].split(); sys.exit(0 if ($2) else 1)" "$NAMES" && return 0
+    python3 -c "import sys; n=sys.argv[1].split(); sys.exit(0 if ($cond) else 1)" "$NAMES" && return 0
     sleep 1
   done
-  echo "the environment's variables should satisfy $2: $NAMES"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:10]]"; exit 1
+  echo "the environment's variables should satisfy $cond: $NAMES"
+  api GET "/v1/previews/$PV/activity" | jq_ "[(a['at'] % 1000000, a['message']) for a in d[:12]]"
+  api GET "/v1/previews/$PV" | jq_ "{k: d[k] for k in ('state', 'error')}"
+  api GET "/v1/apps/services/$SVC/environments/$ENV/variables/values" | jq_ "d.get('ROLL_PREVIEW_SET')"
+  api GET "/v1/apps/services/$SVC/environments/$ENV/deploys" | jq_ "[(x.get('id'), x.get('status'), x.get('trigger'), x.get('created_at', 0) % 1000000) for x in (d if isinstance(d, list) else d.get('deploys', []))[:6]]"
+  grep -E "previews|PATCH|variables" "$H/rolld.log" | tail -12 | cut -c1-260
+  exit 1
 }
 ROLL_API_URL="http://$API" "$CLI" preview env "$PV" FEATURE_FLAG=on >/dev/null
 until_vars "'FEATURE_FLAG' in n and 'ROLL_PREVIEW_SET' in n"
