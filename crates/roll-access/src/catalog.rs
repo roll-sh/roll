@@ -1103,6 +1103,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // What the next deploy changes: names of variables and settings, never a value.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
     row("GET", "/v1/apps/services/{id}/environments/{env}/jobs/{job}/logs", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // ── previews (feature/roll-previews, docs/previews.md) ──
