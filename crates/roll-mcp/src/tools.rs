@@ -94,8 +94,22 @@ impl Tool {
     }
 
     /// The actions this tool's route can be, from the catalogue (a body-decided route: what its
-    /// fixed body makes it, or anything it could be).
+    /// fixed body makes it, or anything it could be). Worked out once ([`PREPARED`]).
     pub fn actions(&self) -> Vec<Action> {
+        PREPARED.get(self.name).map_or_else(|| self.find_actions(), |p| p.actions.clone())
+    }
+
+    /// Whether any grant may call it (an `AnyGrant` route).
+    pub fn open(&self) -> bool {
+        PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
+    }
+
+    /// Its MCP definition, as `tools/list` shows it.
+    pub fn definition(&self) -> Value {
+        PREPARED.get(self.name).map_or_else(|| self.build_definition(), |p| p.definition.clone())
+    }
+
+    fn find_actions(&self) -> Vec<Action> {
         let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return Vec::new() };
         match found.row.act {
             catalog::Act::Body(_) => match self.fixed {
@@ -109,11 +123,11 @@ impl Tool {
     }
 
     /// A route any connection may call (its own identity, its own approvals).
-    pub fn open(&self) -> bool {
+    fn find_open(&self) -> bool {
         catalog::by_path(self.method, &self.sample_path()).is_some_and(|f| matches!(f.row.target, catalog::Tgt::AnyGrant))
     }
 
-    pub fn definition(&self) -> Value {
+    fn build_definition(&self) -> Value {
         let mut props = Map::new();
         let mut required = Vec::new();
         for p in self.params {
@@ -134,7 +148,7 @@ impl Tool {
             "approval".into(),
             json!({ "type": "string", "description": "An approval id (apr_…) from an earlier call that needed the user's approval: waits for it, and runs once it's approved" }),
         );
-        let actions = self.actions();
+        let actions = self.find_actions();
         let read_only = !actions.is_empty() && actions.iter().all(|a| matches!(a, Action::Read | Action::Reveal));
         let destructive = self.hint == Hint::Destructive || actions.iter().any(|a| matches!(a, Action::Delete | Action::Deploy));
         let idempotent = read_only || self.method == "PUT" || self.method == "DELETE";
@@ -615,6 +629,18 @@ static TOOLS: &[Tool] = &[
 pub fn all() -> &'static [Tool] {
     TOOLS
 }
+
+/// What each tool's route is, worked out once: matching a path against every catalogue row, for
+/// every tool, on every `tools/list`, cost ~43 ms a call with every product on.
+struct Prepared {
+    actions: Vec<Action>,
+    open: bool,
+    definition: Value,
+}
+
+static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Prepared>> = std::sync::LazyLock::new(|| {
+    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), definition: t.build_definition() })).collect()
+});
 
 #[cfg(test)]
 mod tests {

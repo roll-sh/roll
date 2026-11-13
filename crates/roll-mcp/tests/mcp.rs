@@ -28,6 +28,10 @@ fn products() -> Router {
 
 impl Daemon {
     fn new() -> Daemon {
+        Daemon::with_products(vec!["postgres".into()])
+    }
+
+    fn with_products(on: Vec<String>) -> Daemon {
         let dir = tempfile::tempdir().unwrap();
         let ws = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let workspace = Arc::new(roll_workspace::Workspace::new(ws).unwrap());
@@ -37,7 +41,7 @@ impl Daemon {
         gate.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
         let layer = || axum::middleware::from_fn_with_state(gate.clone(), roll_auth::check);
         let api = products().merge(roll_workspace::router(workspace.clone())).merge(roll_access::api::router(access.clone()));
-        let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: vec!["postgres".into()], access: Some(access.clone()) };
+        let mcp_config = roll_mcp::Config { api_url: "http://127.0.0.1:7070".into(), web_url: "http://localhost:3000".into(), locked: true, products: on, access: Some(access.clone()) };
         let mcp = roll_mcp::routes(api.clone().layer(layer()), mcp_config, Vec::new());
         Daemon { router: api.merge(mcp).layer(layer()), _dir: dir }
     }
@@ -162,4 +166,25 @@ async fn tools_follow_the_tokens_rules() {
     assert!(tools.contains(&"postgres_delete_project") && tools.contains(&"postgres_list_projects"), "{log}");
     let deletes: Vec<_> = log.as_array().unwrap().iter().filter(|e| e["tool"] == "postgres_delete_project").map(|e| e["decision"].as_str().unwrap()).collect();
     assert!(deletes.contains(&"deny") && deletes.contains(&"ask"), "{log}");
+}
+
+/// What `tools/list` costs with every product on, by hand in release:
+/// `cargo test --release -p roll-mcp --test mcp tools_list_cost -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn tools_list_cost() {
+    let d = Daemon::with_products(roll_auth::scope::PRODUCTS.iter().map(|p| p.to_string()).collect());
+    let mut lat = Vec::new();
+    for i in 0..600 {
+        let start = std::time::Instant::now();
+        let list = d.rpc(OPERATOR, "tools/list", json!({})).await;
+        if i == 0 {
+            println!("{} tools, {} bytes", list["tools"].as_array().unwrap().len(), list.to_string().len());
+        }
+        if i >= 100 {
+            lat.push(start.elapsed().as_micros() as u64);
+        }
+    }
+    lat.sort_unstable();
+    println!("tools/list p50 {} µs  p99 {} µs", lat[lat.len() / 2], lat[lat.len() * 99 / 100]);
 }

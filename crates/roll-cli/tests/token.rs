@@ -77,6 +77,10 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     // Tightened to what it used: read as before (a list names no project), delete only on prj_a,
     // still asking.
     std::thread::sleep(std::time::Duration::from_millis(200));
+    // The checkup says so first: it's narrower than its rules.
+    let check = json_of(&roll(&api, "", &["--json", "token", "checkup"]));
+    let mine = check.as_array().unwrap().iter().find(|c| c["grant"]["id"] == id.as_str()).expect("in the checkup");
+    assert!(mine["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "narrower"), "{mine}");
     let tight = json_of(&roll(&api, "", &["--json", "token", "tighten", &id, "--apply"]));
     let rules = &tight["rules"];
     assert_eq!(rules, &json!([

@@ -1024,6 +1024,9 @@ static ROWS: &[Row] = &[
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // Comparing a local copy with a folder's values (by fingerprint, names only) tests a guess:
+    // reveal there, as reading the values is.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/diff", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // ── apps (feature/roll-apps, docs/apps/http-api.md) ──
     row("GET", "/v1/apps/services", "apps", R, list("id")),
     // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
@@ -1291,6 +1294,9 @@ mod tests {
             let f = by_path("GET", &route.replace('{', "x").replace('}', "")).unwrap();
             assert_eq!(f.row.action("GET", &[], None), Action::Reveal, "{route}");
         }
+        // Comparing with values (a guess tested) is reveal too, not the POST prefix's write.
+        let f = by_path("POST", "/v1/secrets/projects/x/environments/x/diff").unwrap();
+        assert_eq!(f.row.action("POST", &[], None), Action::Reveal);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
         assert_eq!(bulk_action(b"{\"index\":{\"_id\":\"1\"}}\n{\"title\":\"a\"}\n"), Action::Write);

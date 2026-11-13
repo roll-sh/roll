@@ -84,6 +84,15 @@ export interface Checkup {
   findings: { kind: "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "tighten" | "expire" | "revoke" | "limit_addresses" }[];
 }
 
+/** Checkup findings, most serious first. */
+const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["everything", "never_expires", "unused", "roams", "narrower"];
+
+/** The checkup's tokens, the most serious first (by each one's worst finding, then how many). */
+export function byConcern(list: Checkup[]): Checkup[] {
+  const worst = (c: Checkup) => Math.min(...c.findings.map((f) => FINDING_ORDER.indexOf(f.kind)));
+  return [...list].sort((a, b) => worst(a) - worst(b) || b.findings.length - a.findings.length);
+}
+
 /** What a checkup fix is called on its button. */
 export const FIX_LABEL: Record<Checkup["findings"][number]["fix"], string> = {
   tighten: "Tighten",

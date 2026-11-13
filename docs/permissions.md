@@ -157,6 +157,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.
+- Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
+  names only) tests a guess at a value: `reveal` there, as reading the values is.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
   `admin`, as in secrets itself.
 - Secrets' imports (`PUT …/environments/{env}/imports`, `[{project?, environment, path}]`) are a
@@ -545,7 +547,8 @@ writes a policy from activity:
 
 ### Checkup
 
-The access page opens with what needs attention (`GET /v1/access/checkup`, `roll_access::checkup`),
+The access page opens with what needs attention (`GET /v1/access/checkup`, `roll_access::checkup`,
+`roll token checkup`, which prints each fix's command),
 as Google's security checkup and GitHub's security overview do: each live token with a finding,
 most serious first, and its fix.
 
