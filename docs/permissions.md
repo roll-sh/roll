@@ -203,8 +203,9 @@ repeat across accounts:
 - A bucket in a named account is `<account>/<bucket>`, so a rule
   `{product: "storage", resources: [{id: "acme/logs"}]}` reaches `logs` in account `acme` only.
   A plain bucket name (`{id: "logs"}`) means the default account's bucket.
-- Anything else in a named account (its bucket list, keys, roles, IAM) is about storage as a whole:
-  only a rule for every storage resource covers it.
+- A named account's bucket list is filtered to the `<account>/<bucket>` ids a token has there.
+- Anything else in a named account (keys, roles, IAM) is about storage as a whole: only a rule for
+  every storage resource covers it.
 
 ### Presets
 

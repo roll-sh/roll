@@ -288,8 +288,8 @@ Ranked; the top item is in progress. A watchdog reads this list.
    main; until then keep it merged with `integrate/mcp-accounts`.
 3. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-4. **Finer resources:** apps' deploys by id; a named storage account's bucket list filtered to
-   the buckets a token has (one bucket in another account, `account/bucket`, is done).
+4. **Finer resources:** apps' deploys by id (once #21 is on main). Storage buckets in a named
+   account (`account/bucket`, their list filtered) are done.
 
 Done lately: leaked tokens revoke themselves (docs/permissions.md, "Leaked tokens": checksummed
 secrets, roll code's landings scanned from the land log, GitHub's secret scanning partner
