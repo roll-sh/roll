@@ -271,9 +271,10 @@ previews are listed once those products are on.
 
 Ranked; the top item is in progress. A watchdog reads this list.
 
-1. **The official MCP SDK against a live daemon.** Run the TypeScript SDK's Streamable HTTP client
-   (and its OAuth provider) against rolld: initialize, list, call, an approval, a refresh.
-   Fix what a real client trips on, and keep the script.
+1. **Per-token rate limits** (in progress): requests per minute per grant, like Stripe's and GitHub's
+   per-key limits. Over it, `429` with `Retry-After` and the `RateLimit-*` headers, over MCP an
+   error result saying when to retry. Counted in memory per node (a limit protects the daemon, not
+   a bill), set in the builder, `roll token create --rate`, and on OAuth consent.
 2. **As the sibling branches merge** (secrets #20, apps #21, search #22, previews #23): rerun
    `examples/classify` on their routers, and wire their lookups in `rolld/src/access.rs`:
    - previews' `Store::environment_of` (a Postgres branch's environment comes from `{branch}`);
@@ -282,11 +283,13 @@ Ranked; the top item is in progress. A watchdog reads this list.
    - secrets' `Grant` swap and `roll_auth::Grants` for its syncs.
 3. **Users' own tokens (with accounts, #18):** a signed-in user who isn't an admin makes tokens for
    what they can reach (their roll code owner, agents and workspace projects), and their grants
-   act as them, not as the operator. `integrate/mcp-accounts` has both branches merged and green.
-4. **Per-token rate limits:** requests per minute per grant (Stripe and GitHub have them), with
-   `429` and `Retry-After`. Set in the builder.
-5. **Audit sinks:** stream the audit log to a webhook (signed, through roll code's delivery queue)
+   act as them, not as the operator. Built on `integrate/mcp-accounts` (both branches merged).
+4. **Audit sinks:** stream the audit log to a webhook (signed, through roll code's delivery queue)
    for a SIEM, and keep a longer retention for that.
-6. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+5. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-7. **Finer resources:** storage buckets in another account, apps' deploys by id.
+6. **Finer resources:** storage buckets in another account, apps' deploys by id.
+
+Done lately: the official TypeScript (`@modelcontextprotocol/sdk` 1.32.2, OAuth included) and
+Python (`mcp` 2.3.0) SDKs drive a live rolld end to end; the only thing they tripped on,
+registration answering `"client_uri": null`, is fixed.
