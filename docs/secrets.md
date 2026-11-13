@@ -1488,6 +1488,11 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **Fix from the change**: a change's `secret_leak` blocker and `secret_missing` notice carry the
+   key and environments, and the change page links straight to that key in the project's secrets
+   (rotate it, or add it).
+2. **`roll secrets doctor`**: one command that checks a machine's setup (the token and who it is,
+   the directory's project and environment, the folder's `.env.example`, staged files for values).
 
 Waiting on other pull requests:
 
