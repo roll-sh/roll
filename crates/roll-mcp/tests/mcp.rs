@@ -133,6 +133,7 @@ async fn tools_follow_the_tokens_rules() {
     let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": { "elicitation": { "url": {} } } } });
     let (_, h, _) = d.http(&asker, Method::POST, "/v1/mcp", Some(init)).await;
     let session = h["mcp-session-id"].to_str().unwrap().to_string();
+    assert!(session.starts_with("roll-url-1.") && session.len() > 20, "unique per session: {session}");
     let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pb" } } });
     let (_, _, out) = d.http_with(&asker, Method::POST, "/v1/mcp", Some(call), &[("mcp-session-id", &session)]).await;
     let e = &out["error"]["data"]["elicitations"][0];

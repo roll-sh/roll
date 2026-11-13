@@ -84,7 +84,7 @@ pub const PRODUCTS: &[&str] = &[
 ];
 
 /// One resource: by its product's own id, or every resource in a workspace project.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Selector {
     Project {
@@ -98,6 +98,25 @@ pub enum Selector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         index: Option<String>,
     },
+}
+
+/// Exactly `{project}` or `{id, index?}`: a field that isn't one of these (`{project, index}`) is
+/// refused, never dropped, since dropping it would widen the rule.
+impl<'de> Deserialize<'de> for Selector {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            project: Option<String>,
+            id: Option<String>,
+            index: Option<String>,
+        }
+        match Raw::deserialize(d)? {
+            Raw { project: Some(project), id: None, index: None } => Ok(Selector::Project { project }),
+            Raw { project: None, id: Some(id), index } => Ok(Selector::Id { id, index }),
+            _ => Err(serde::de::Error::custom("a resource is {\"project\": …} or {\"id\": …, \"index\"?: …}")),
+        }
+    }
 }
 
 impl Selector {
@@ -379,10 +398,12 @@ impl Scope {
                         if x.is_empty() || x.len() > 200 || !plain(x) {
                             out.push(format!("{at}: a resource id must be 1-200 characters, one line without backticks"));
                         }
-                        if let Selector::Id { index: Some(ix), .. } = s
-                            && (index_names(ix).next().is_none() || ix.len() > 200 || !plain(ix))
-                        {
-                            out.push(format!("{at}: an index is 1-200 characters naming at least one index or pattern"));
+                        if let Selector::Id { index: Some(ix), .. } = s {
+                            if r.product != "search" {
+                                out.push(format!("{at}: only search resources have indices"));
+                            } else if index_names(ix).next().is_none() || ix.len() > 200 || !plain(ix) {
+                                out.push(format!("{at}: an index is 1-200 characters naming at least one index or pattern"));
+                            }
                         }
                     }
                 }
@@ -443,6 +464,11 @@ mod tests {
         let one = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-a" }], "actions": { "read": "allow" } }));
         assert!(whole.matches(&at(Some("anything"))) && whole.covers(&r) && r.covers(&one) && !one.covers(&r) && !r.covers(&whole));
         assert!(!Scope(vec![rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "-x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
+        assert!(!Scope(vec![rule(serde_json::json!({ "product": "redis", "resources": [{ "id": "rdb_1", "index": "x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
+        // A field a selector doesn't have is refused, never dropped (that would widen the rule).
+        for bad in [serde_json::json!({ "project": "p", "index": "logs-*" }), serde_json::json!({ "id": "a", "extra": 1 }), serde_json::json!({})] {
+            assert!(serde_json::from_value::<Selector>(bad.clone()).is_err(), "{bad}");
+        }
     }
 
     /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;
