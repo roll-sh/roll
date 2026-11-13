@@ -15,6 +15,7 @@
 pub mod api;
 pub mod backups;
 pub mod hooks;
+pub mod registry;
 pub mod config;
 pub mod cron;
 pub mod deploy;

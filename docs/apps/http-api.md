@@ -59,9 +59,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | | 202 `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/redeploy` | `{ message? }` | 202 `Deployment` (trigger `settings`) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/promote` | `{ from, message? }` | 202 `Deployment` (trigger `promote`: `from`'s live image, no build, with `env`'s variables; `rollback_of` names the promoted deployment) | deploy* |
-| `POST /v1/apps/services/{id}/environments/{env}/hook` | | 201 `{ path }`: a new deploy hook, its path shown once (prefix the API's base URL); the old one stops working | deploy* (the URL deploys) |
-| `DELETE /v1/apps/services/{id}/environments/{env}/hook` | | 204 | deploy* |
-| `POST /v1/apps/hooks/{id}/{env}/{token}?image=` | | 202 `Deployment` (actor `deploy hook`); `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret, outside the gate and the access log | none (the URL) |
+| `POST /v1/apps/services/{id}/environments/{env}/hook` | | 201 `{ path }`: a new deploy hook, its path shown once (prefix the API's base URL; the token is `rlh_…` with a checksum, so secret scanning finds a leaked one); the old one stops working | admin (a standing credential that deploys) |
+| `DELETE /v1/apps/services/{id}/environments/{env}/hook` | | 204 | admin |
+| `POST /v1/apps/hooks/{id}/{env}/{token}?image=` | | 202 `Deployment` (actor `deploy hook`); `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address | none (the URL) |
 | `GET /v1/apps/services/{id}/environments/{env}/volume/backups` | | `Backup[]`, newest first (7 kept) | read |
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups` | | 201 `Backup` (now) | write |
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` | | `Backup` (the volume as it was; the environment asleep meanwhile) | deploy* |

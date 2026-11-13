@@ -26,6 +26,7 @@ croner.workspace = true
 flate2.workspace = true
 futures.workspace = true
 getrandom.workspace = true
+crc32fast.workspace = true
 hex.workspace = true
 hmac.workspace = true
 http-body-util.workspace = true

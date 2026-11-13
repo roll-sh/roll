@@ -693,12 +693,15 @@ directory prints the same finding with the two commands that do it.
 An environment can have a deploy hook (Render's): a secret URL that deploys it with no API
 token, for CI or a registry's webhook (`POST …/hook`, "Deploy hook" in the environment panel,
 `roll apps hook`). Only the token's hash is kept, and a new one replaces the old. A POST to it
-deploys the service's own source as a manual deploy would (actor `deploy hook`); for an image
+deploys the service's own source as a manual deploy would (actor `deploy hook`, and an
+`audit.hook.deployed` entry with the caller's address, since the API's gate never sees it); for an image
 service, `?image=` may name another tag or digest of the same repository
 (`docker.io/library/nginx` stays nginx), never another image, so a leaked URL can only redeploy
-what the service already runs. Any token that isn't the live hook's is the same 404. The route
-is mounted outside the API's token gate and its access log (the path holds the token), and runs
-on the service's owner like every other service route.
+what the service already runs. Any token that isn't the live hook's is the same 404. The token
+is `rlh_`, 34 base32 characters and a CRC-32, as roll's other secrets, so secret scanning can
+find a leaked URL. Making or removing one is admin in roll MCP's catalogue: it's a standing
+credential. rolld's gate lets `/v1/apps/hooks` through to the hook's own check (its `RULES`);
+access lines log the route pattern, never the token; it runs on the service's owner.
 
 ## Volume backups
 
@@ -941,3 +944,6 @@ earlier security, product and integration reviews).
 13. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
 14. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+15. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
+    (`/__roll/feedback.js` before `</body>` of HTML a visitor reached through roll; the rules in
+    `roll-previews/src/runtime.rs` `add_feedback`), in the proxy.

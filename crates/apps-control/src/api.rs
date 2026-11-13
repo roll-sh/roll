@@ -110,7 +110,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services", get(list_services).post(create_service))
         .route("/v1/apps/projects/{project}/services", get(project_services).post(create_project_service))
         .merge(service_routes)
-        .with_state(apps)
+        .with_state(apps.clone())
+        .merge(hooks_router(apps))
 }
 
 /// Run a service's route on its owner.
@@ -658,9 +659,9 @@ struct HookQuery {
     image: Option<String>,
 }
 
-/// Deploy hooks: outside the API's token gate (the URL is the secret), on the service's owner.
-/// Mounted by rolld next to the gated router; the path is never logged (it holds the token).
-pub fn hooks_router(apps: Arc<Apps>) -> Router {
+/// Deploy hooks: the URL is the secret, so rolld's gate lets them through to this check (its
+/// `RULES`), on the service's owner. Access lines log the route pattern, never the token.
+fn hooks_router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps/hooks/{id}/{env}/{token}", post(run_hook))
         .route_layer(axum::middleware::from_fn_with_state(apps.clone(), hook_on_owner))
@@ -673,8 +674,11 @@ async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
 
-async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>) -> R {
+async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions) -> R {
     let d = apps.run_hook(&id, &env, &token, q.image).await?;
+    // The gate never saw it: who called is in the service's activity.
+    let address = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
+    apps.audit("hook.deployed", &id, &env, Some("deploy hook".into()), json!({ "deployment": d.id, "address": address })).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 

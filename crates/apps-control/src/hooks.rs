@@ -13,7 +13,7 @@ impl Apps {
     pub async fn put_hook(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.environment(&sid, &e)).await?;
-        let token = random(32).to_ascii_lowercase();
+        let token = new_token();
         let (sid, e, hash) = (service.to_string(), env.to_string(), crate::public::token_hash(&token));
         self.db(move |s| s.set_hook(&sid, &e, Some(&hash))).await?;
         Ok(json!({ "path": format!("/v1/apps/hooks/{service}/{env}/{token}") }))
@@ -52,3 +52,15 @@ impl Apps {
         self.deploy(service, env, body, By { trigger: Trigger::Api, actor: Some("deploy hook".into()) }, None, None).await
     }
 }
+
+/// A hook's token: `rlh_`, 34 random characters of lowercase base32 and 6 of CRC-32, as roll's
+/// other secrets (`roll_access::new_secret`), so secret scanning can find a leaked hook URL
+/// and tell it from look-alike text.
+fn new_token() -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let body = format!("rlh_{}", random(34));
+    let c = crc32fast::hash(body.as_bytes()) >> 2;
+    let sum: String = (0..6).rev().map(|i| ALPHABET[((c >> (i * 5)) & 31) as usize] as char).collect();
+    format!("{body}{sum}")
+}
+

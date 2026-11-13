@@ -1372,7 +1372,7 @@ async fn a_deploy_hook_deploys_with_its_url_alone() {
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     let base = format!("/v1/apps/services/{id}/environments/production");
-    let hooks = apps_control::api::hooks_router(w.apps.clone());
+    let hooks = w.api.clone();
     let (st, h) = call(&w.api, "POST", &format!("{base}/hook"), None).await;
     assert_eq!(st, StatusCode::CREATED, "{h}");
     let path = h["path"].as_str().unwrap().to_string();
@@ -1385,6 +1385,9 @@ async fn a_deploy_hook_deploys_with_its_url_alone() {
     assert_eq!((d["status"].as_str(), d["actor"].as_str()), (Some("active"), Some("deploy hook")), "{d}");
     assert!(d["image"].as_str().unwrap().starts_with("nginx:1.28"), "{d}");
     assert_eq!(call(&hooks, "POST", &format!("{path}?image=evil/miner:1"), None).await.0, StatusCode::BAD_REQUEST, "only its own repository");
+    assert!(path.rsplit('/').next().unwrap().starts_with("rlh_"), "a secret scanners know: {path}");
+    let (_, activity) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert!(activity.as_array().unwrap().iter().any(|e| e["kind"] == "audit.hook.deployed" && e["data"]["deployment"] == d["id"]), "{activity}");
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/hook"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(call(&hooks, "POST", &path, None).await.0, StatusCode::NOT_FOUND, "removed, it's gone");
 }

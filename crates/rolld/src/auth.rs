@@ -32,6 +32,10 @@ pub const RULES: &[Rule] = &[
     // operator's token as its admin.
     Rule { route: "/v1/code", access: Access::Product("roll code: owners, tokens, public repos, signed webhooks, device login") },
     Rule { route: "/git", access: Access::Product("roll code's git smart HTTP: its tokens, public repos") },
+    // roll apps' deploy hooks: the secret is the URL's last segment (`rlh_…`, a hash kept), for CI
+    // and registries' webhooks that send no header; anything but a live hook is a 404, and each
+    // deploy is in the service's activity with the caller's address (docs/apps/README.md).
+    Rule { route: "/v1/apps/hooks", access: Access::Product("roll apps' deploy hooks: the secret in the URL") },
     // Node-to-node hops are signed with the cluster secret; computes fetch WAL with their token.
     Rule { route: "/internal", access: Access::Product("internal: signed hops and the WAL token") },
     // Storage: IAM users signed in to the dashboard (console sessions) act as themselves.
