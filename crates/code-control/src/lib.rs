@@ -13,7 +13,7 @@ pub mod db;
 pub mod ext;
 pub mod git;
 pub mod github;
-mod leaks;
+mod secret_leaks;
 pub mod mcp;
 pub mod model;
 pub mod names;
@@ -423,7 +423,7 @@ pub struct Code {
     pub(crate) review_facts: Cache<(String, Option<ChangesetId>, ChangesetId), Arc<review::rules::Facts>>,
     /// The secrets a change's added lines hold, per (repo, head), with the merge base they were
     /// found from (`leaks.rs`).
-    pub(crate) leak_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, leaks::Leaks)>,
+    pub(crate) leak_facts: Cache<(String, ChangesetId), (Option<ChangesetId>, secret_leaks::Leaks)>,
     /// Review-app webhook deliveries.
     pub(crate) deliveries: review::Deliveries,
     /// roll's own reviewer: its job queue, the codebase index, sealed keys.
