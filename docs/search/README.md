@@ -199,7 +199,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
 | OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
 | OpenSearch SQL plugin's PPL suite | **204 of 204** |
-| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,832 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 24 suites at 100% (KQL 34 of 34, `otel-data` 68 of 68, transforms 108 of 108, watcher 89 of 89), runtime fields 243 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (954 of 1,412), ES\|QL (544 of 549), downsampling (58 of 59), `watcher-security` (5 of 9: run-as) |
+| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,903 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 24 suites at 100% (KQL 34 of 34, `otel-data` 68 of 68, transforms 108 of 108, watcher 89 of 89), runtime fields 243 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,025 of 1,412: rollup 52 of 52), ES\|QL (544 of 549), downsampling (58 of 59), `watcher-security` (5 of 9: run-as) |
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
@@ -232,9 +232,9 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    rerun of every Rally track with variance for all three targets; one allocator policy (rolld's
    against search-dev's purge governor, by a matched benchmark); `terms_enum`'s per-request
    overhead.
-3. **Compatibility gaps** from the extended suites (4,832 of the 5,541 Elasticsearch passes),
+3. **Compatibility gaps** from the extended suites (4,903 of the 5,541 Elasticsearch passes),
    largest first: platinum's machine learning (278, a product decision: anomaly detection and
-   trained models), rollup (52), security's last 13, `watcher-security`'s run-as (4), ES|QL's last 5
+   trained models), security's last 8, `watcher-security`'s run-as (4), ES|QL's last 5
    (TOP_SNIPPETS, CATEGORIZE, approximation, `unsigned_long` past `i64::MAX`). `logsdb`'s last 9 are
    decisions (`_ignored_source` binary entries, `@timestamp` doc-values skipper); runtime fields'
    last 5 (`geo_bounds` on geo_point runtime fields, ip terms tie order, highlighting runtime

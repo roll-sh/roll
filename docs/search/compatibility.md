@@ -254,7 +254,7 @@ the discovery/store plugins.
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 89 | 89 | 0 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 5 | 5 | 4 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
-| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 954 | 954 | 458 |
+| `platinum` | `rest-resources platinum:-esql,downsample,downsample-with-security,entsearch,eql,mustache,painless,transform,watcher` | security | 1728 | 1412 | 1025 | 1025 | 387 |
 | `esql` | `rest-resources platinum:esql` | plain | 619 | 549 | 544 | 544 | 5 |
 | `analysis-icu` | `plugins/analysis-icu` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `analysis-kuromoji` | `plugins/analysis-kuromoji` | plugins | 7 | 7 | 0 | 0 | 7 |
@@ -309,26 +309,26 @@ the discovery/store plugins.
 <!-- test-search: watcher >= 89 -->
 <!-- test-search: watcher-security >= 5 -->
 <!-- test-search: wildcard >= 9 -->
-<!-- test-search: platinum >= 954 -->
+<!-- test-search: platinum >= 1025 -->
 <!-- test-search: esql >= 544 -->
 
-`platinum` by directory (roll / Elasticsearch passes): `ml` 225/618, `analytics` 111/114,
-`spatial` 92/105, `security` 92/101, `rollup` 0/52, `exponential_histogram` 44/44, `vector-tile`
-34/34, `api_key` 31/32, `aggregate-metrics` 26/28, `inference` 1/23, `search.vectors` 22/23,
-`wildcard` 22/22, `terms_enum` 15/20, `rank_vectors` 0/15, `users` 14/15, `constant_keyword`
-12/13, `counted_keyword` 8/11, `data_streams` 9/11, `migrate` 0/11, `change_password` 6/8,
-`roles` 8/8, `text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 4/6,
-`versionfield` 6/6, `async_search` 4/5, `redact` 0/5, `sql` 5/5, `user_profile` 4/5,
-`authenticate` 4/4, `logsdb` 2/4, `role_mapping` 4/4, `search-business-rules` 4/4, `dlm` 0/3,
-`monitoring` 0/3, `searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2,
-`service_accounts` 1/2, `set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1,
-`health` 0/1, `vectordb_document` 0/1, `voting_only_node` 1/1.
+`platinum` by directory (roll / Elasticsearch passes): `ml` 340/618, `analytics` 113/114, `spatial`
+92/105, `security` 93/101, `rollup` 52/52, `exponential_histogram` 44/44, `vector-tile` 34/34,
+`api_key` 32/32, `aggregate-metrics` 26/28, `inference` 1/23, `search.vectors` 22/23, `wildcard`
+22/22, `terms_enum` 20/20, `rank_vectors` 0/15, `users` 15/15, `constant_keyword` 13/13,
+`counted_keyword` 8/11, `data_streams` 11/11, `migrate` 0/11, `change_password` 8/8, `roles` 8/8,
+`text_structure` 5/8, `enrich` 6/7, `privileges` 7/7, `profiling` 0/7, `token` 6/6, `versionfield`
+6/6, `async_search` 4/5, `redact` 5/5, `sql` 5/5, `user_profile` 4/5, `authenticate` 4/4, `logsdb`
+2/4, `role_mapping` 4/4, `search-business-rules` 4/4, `dlm` 0/3, `monitoring` 0/3,
+`searchable_snapshots` 1/3, `snapshot` 1/3, `logging` 0/2, `migration` 2/2, `service_accounts` 1/2,
+`set_security_user` 2/2, `xpack` 0/2, `deprecation` 0/1, `graph` 1/1, `health` 0/1,
+`vectordb_document` 0/1, `voting_only_node` 1/1.
 
 Largest gaps by suite (from the roll reports, `target/search-yaml/extended/roll-<suite>.json`):
 not implemented at all: the plugin analyzers and mappers (`analysis-icu`, `-kuromoji`, `-nori`,
 `-phonetic`, `-smartcn`, `-stempel`, `-ukrainian`, `annotated_text`, `murmur3`, `_size`),
 CCR, Fleet APIs, SLM, the `normalize_for_stream` processor (`ingest-otel`),
-`attachment`, reindex management, Prometheus ingest, rollups; roll lists no `lang-expression`,
+`attachment`, reindex management, Prometheus ingest; roll lists no `lang-expression`,
 `transport-netty4` or `user-agent` module in `_nodes`; roll ignores `xpack.license.self_generated.type: basic`
 (its license is always `enterprise`), so `rank-rrf-license`'s licence errors are missing; the
 privileges of `manage_autoscaling`, `manage_search_application`, `watcher_manager` and other
@@ -1125,6 +1125,15 @@ the rest are skipped by the tests' own prerequisites.
   checkpoint recomputes every bucket up to its bound (Elasticsearch recomputes only the
   buckets whose documents changed); `_start` of a continuous transform answers after its
   first checkpoint (or its `timeout`), a batch transform's at once.
+- Rollup jobs (`_rollup/job`, deprecated in Elasticsearch but working) also run on the job
+  scheduler at their cron times (Quartz syntax, UTC) and keep the next trigger in the stored
+  job, so a sleeping cluster is woken for a started one. Each trigger pages a composite
+  aggregation from the stored position up to the current interval and writes Elasticsearch's
+  rollup documents and ids. The caps APIs and `_rollup_search` read the jobs from the rollup
+  index's `_meta`, as Elasticsearch does. `_rollup_search` merges results in JSON: with more
+  than one job or live indices in one search, a date histogram's empty buckets are those each
+  response filled itself, and a live index's `avg` keeps the rolled average where both have
+  one.
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure
