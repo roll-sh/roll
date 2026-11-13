@@ -1166,8 +1166,7 @@ impl Apps {
         if let Some(pat) = a.log_match.as_deref() {
             let key = format!("env:{}/{}", l.service, l.env);
             let since = code_sql::now_ms() - 5 * 60_000;
-            let (lines, _) = self.logs.search(&key, pat, Some(since), a.log_count as usize + 100).await;
-            let count = lines.iter().filter(|ln| ln.stream != Stream::System).count() as u32;
+            let count = self.logs.count_recent(&key, pat, since) as u32;
             if count >= a.log_count {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }

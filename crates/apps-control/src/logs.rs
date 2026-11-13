@@ -152,6 +152,15 @@ impl LogHub {
         lines.split_off(skip)
     }
 
+    /// How many of the lines still in memory since `since` contain `q` (any case) and came from
+    /// the app (stdout, stderr): cheap, for an alert judged every minute (nothing stored is read).
+    pub fn count_recent(&self, key: &str, q: &str, since: i64) -> usize {
+        let q = q.to_lowercase();
+        let logs = self.logs.lock();
+        let Some(l) = logs.get(key) else { return 0 };
+        l.ring.iter().rev().take_while(|ln| ln.t >= since).filter(|ln| matches!(ln.stream, Stream::Stdout | Stream::Stderr) && ln.text.to_lowercase().contains(&q)).count()
+    }
+
     /// Lines that contain `q` (any case), newest last, at most `limit`: the lines in memory, then
     /// the stored chunks newest first (those older than `since` skipped by name), until `limit`
     /// matches or [`SEARCH_BYTES`] read. The flag says whether it stopped before reading all.

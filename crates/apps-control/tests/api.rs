@@ -2384,10 +2384,12 @@ async fn firewall_rules_decide_in_order() {
     let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny"}]}))).await.0, StatusCode::BAD_REQUEST, "a rule matches on something");
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/a*b"}]}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/é"}]}))).await.0, StatusCode::OK, "a path ending in a wide character");
     let rules = json!([
         {"action": "allow", "path": "/admin/health"},
         {"action": "deny", "path": "/admin/*"},
         {"action": "deny", "methods": ["delete"]},
+        {"action": "deny", "path": "/report", "methods": ["GET"]},
         {"action": "deny", "user_agent": "BadBot"},
     ]);
     let (st, env) = call(&w.api, "PUT", &base, Some(json!({"firewall": rules}))).await;
@@ -2401,7 +2403,12 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(req("GET", "/admin/users", "curl").await, StatusCode::FORBIDDEN);
     assert_eq!(req("GET", "/%61dmin/users", "curl").await, StatusCode::FORBIDDEN, "as the app would read it");
     assert_eq!(req("GET", "/x/../admin/users", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/admin", "curl").await, StatusCode::FORBIDDEN, "a prefix rule takes the bare path");
+    assert_eq!(req("GET", "/ADMIN/users", "curl").await, StatusCode::FORBIDDEN, "any case");
+    assert_eq!(req("GET", "/admin;jsessionid=1/users", "curl").await, StatusCode::FORBIDDEN, "path parameters");
+    assert_eq!(req("GET", "/admin/health/", "curl").await, StatusCode::OK, "a trailing slash is the same path");
     assert_eq!(req("DELETE", "/cart", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("HEAD", "/report", "curl").await, StatusCode::FORBIDDEN, "HEAD is a GET");
     assert_eq!(req("GET", "/", "Mozilla badbot/2").await, StatusCode::FORBIDDEN);
     assert_eq!(req("GET", "/", "Mozilla").await, StatusCode::OK, "nothing matching lets it in");
     call(&w.api, "PUT", &base, Some(json!({"firewall": null}))).await;

@@ -63,12 +63,16 @@ impl Apps {
         let (mut from_client, mut from_app) = (true, true);
         while from_client || from_app {
             tokio::select! {
-                m = rx.next(), if from_client => match m {
+                // Watched after its half-close too: a client that goes away ends the tunnel.
+                m = rx.next() => match m {
                     // The client is done sending: the app sees its end, and may still answer.
                     Some(Ok(Message::Binary(b))) if b.is_empty() => {
-                        let _ = wr.shutdown().await;
-                        from_client = false;
+                        if from_client {
+                            let _ = wr.shutdown().await;
+                            from_client = false;
+                        }
                     }
+                    Some(Ok(Message::Binary(_))) if !from_client => {}
                     Some(Ok(Message::Binary(b))) => {
                         if wr.write_all(&b).await.is_err() {
                             break;

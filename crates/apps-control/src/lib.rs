@@ -700,7 +700,8 @@ impl Apps {
         });
         // Only what the service sets: the deployment also holds what its build worked out (a
         // Dockerfile's port, a plan's start command).
-        let want = serde_json::to_value(&svc.run).unwrap_or_default();
+        // As the environment runs it: the service's settings with its own over them.
+        let want = serde_json::to_value(svc.for_env(&row).map_or(svc.run.clone(), |s| s.run)).unwrap_or_default();
         let has = serde_json::to_value(&dep.run).unwrap_or_default();
         let run: Vec<&String> = want.as_object().into_iter().flatten().filter(|(k, v)| has.get(k.as_str()) != Some(*v)).map(|(k, _)| k).collect();
         Ok(json!({ "variables": variables, "run": run }))

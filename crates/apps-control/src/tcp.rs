@@ -57,9 +57,12 @@ impl Apps {
             live.connect_failed(&lease.inst);
             return;
         };
+        // Metered as a request that took as long as it took to reach the app (a connection's
+        // lifetime isn't a latency).
+        let reached = began.elapsed();
         let _ = (conn.set_nodelay(true), app.set_nodelay(true));
         let (up, down) = tokio::io::copy_bidirectional(&mut conn, &mut app).await.unwrap_or((0, 0));
-        live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 200, up + down);
+        live.meter.lock().request(code_sql::now_ms(), reached.as_secs_f64() * 1000.0, 200, up + down);
         drop(lease);
     }
 

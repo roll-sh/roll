@@ -891,7 +891,8 @@ pub const MAX_FIREWALL_RULES: usize = 50;
 pub fn normal_path(raw: &str) -> String {
     let decoded = percent_encoding::percent_decode_str(raw).decode_utf8_lossy();
     let mut out: Vec<&str> = Vec::new();
-    for seg in decoded.split('/') {
+    // A segment's `;params` (servlet containers read `/admin;x` as `/admin`) don't count.
+    for seg in decoded.split('/').map(|s| s.split(';').next().unwrap_or("")) {
         match seg {
             "" | "." => {}
             ".." => {
@@ -913,7 +914,7 @@ impl FirewallRule {
     pub fn check(mut self) -> Result<FirewallRule> {
         let bad = |m: &str| Err(Error::BadRequest(format!("firewall: {m}")));
         if let Some(p) = &self.path
-            && (!p.starts_with('/') || p.len() > 512 || p[..p.len() - 1].contains('*'))
+            && (!p.starts_with('/') || p.len() > 512 || p.strip_suffix('*').unwrap_or(p).contains('*'))
         {
             return bad("a path starts with / (at most 512 characters, `*` only at its end)");
         }
@@ -933,11 +934,19 @@ impl FirewallRule {
         Ok(self)
     }
 
+    /// `path` as [`normal_path`] gives it. Paths compare in any case and without a trailing
+    /// slash (`/admin/*` takes `/admin` too); HEAD is a GET.
     pub fn matches(&self, method: &str, path: &str, user_agent: &str) -> bool {
+        let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_ascii_lowercase() } else { p.to_ascii_lowercase() };
+        let path = trim(path);
         let path_ok = self.path.as_deref().is_none_or(|p| match p.strip_suffix('*') {
-            Some(prefix) => path.starts_with(prefix),
-            None => path == p,
+            Some(prefix) => {
+                let prefix = prefix.to_ascii_lowercase();
+                path.starts_with(&prefix) || path == trim(&prefix)
+            }
+            None => path == trim(p),
         });
+        let method = if method.eq_ignore_ascii_case("HEAD") { "GET" } else { method };
         let method_ok = self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
         let ua_ok = self.user_agent.as_deref().is_none_or(|u| user_agent.to_ascii_lowercase().contains(u));
         path_ok && method_ok && ua_ok

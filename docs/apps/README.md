@@ -698,7 +698,9 @@ thresholds, as does `roll.toml` `[app.run.alerts]`.
 
 A log alert (`alerts.log_match`, `alerts.log_count`: Settings' "Alert: its log says") is
 `alert.log` when its output, stdout and stderr in any case, holds the text that many times
-(default 10) in the five minutes, judged with the same minute. roll's own lines don't count (the
+(default 10) in the five minutes, judged with the same minute from the lines still in memory
+(nothing stored is read, so a quiet minute costs a scan of at most 5,000 lines). roll's own and
+the build's lines don't count (the
 alert's own names the pattern), and the event holds the pattern and the count, never a line,
 since a line may hold anything the app printed. It's on for new notification targets.
 
@@ -943,9 +945,10 @@ Firewall rules (Vercel's; Settings' "Firewall", one a line, `roll apps env --fir
 /admin/*'`, `--no-firewall`) come after the allow list: at most 50, in order, and the first whose
 given fields all match decides, `allow` letting the request in and `deny` answering a 403 that
 names nothing of the rule; a request none matches is let in. A rule matches on a path (exact, or
-a prefix ending in `*`), methods and text in the `User-Agent`. The path is matched as an app is
-likely to read it, decoded with `//` and dot segments resolved, so `/%61dmin/x` and
-`/a/../admin/x` are caught by a rule on `/admin/*`. HTTP only: a TCP service has none.
+a prefix ending in `*`, which takes the bare path too), methods (HEAD counting as GET) and text in
+the `User-Agent`. The path is matched as an app is likely to read it: decoded, `//`, dot segments
+and `;params` resolved, in any case and without a trailing slash, so `/%61dmin/x`,
+`/a/../admin/x`, `/ADMIN;s=1/x` and `/admin` are all caught by a rule on `/admin/*`. HTTP only: a TCP service has none.
 
 A rate limit (Vercel's firewall rate limits; Settings' "Rate limit", `roll apps env --rate-limit
 N[:BURST]`, `--no-rate-limit`) gives each client address `burst` requests at once (default: a
