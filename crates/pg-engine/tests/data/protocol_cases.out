@@ -134,6 +134,9 @@ ib_ext_select_begin_iso	1 2 D:["1"] C:SELECT 1 1 2 E{S=ERROR|C=25001|M=SET TRANS
 ib_settxn_after_query	C:BEGIN T:0 D:["1"] C:SELECT 1 E{S=ERROR|C=25001|M=SET TRANSACTION [NOT] DEFERRABLE must be called before any query|F=guc.c|L=6825|R=call_bool_check_hook} ZE / C:ROLLBACK ZI / C:BEGIN C:SAVEPOINT E{S=ERROR|C=25001|M=SET TRANSACTION ISOLATION LEVEL must not be called in a subtransaction|F=guc.c|L=6977|R=call_enum_check_hook} ZE / C:ROLLBACK ZI
 ib_block_fail	C:BEGIN C:SET C:SAVEPOINT C:SET S:application_name=inner ZT / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} S:application_name=outer ZE / C:ROLLBACK T:0 D:["outer"] C:SHOW ZT / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK S:application_name= ZI
 ib_chain_after_error	C:BEGIN E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK ZT / T:0 D:["read committed"] C:SHOW T:0 D:["off"] C:SHOW T:0 D:["off"] C:SHOW ZT / C:ROLLBACK ZI
+ib_chain_chained_error	C:START TRANSACTION ZT / C:COMMIT ZT / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK ZT / T:0 D:["repeatable read"] C:SHOW T:0 D:["off"] C:SHOW T:0 D:["on"] C:SHOW ZT / C:ROLLBACK ZI
+ib_chain_savepoint_error	C:START TRANSACTION C:SAVEPOINT ZT / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZE / C:ROLLBACK ZT / T:0 D:["repeatable read"] C:SHOW T:0 D:["off"] C:SHOW T:0 D:["on"] C:SHOW ZT / C:ROLLBACK ZI
+ib_chain_unstarted	C:BEGIN ZT / C:COMMIT ZT / T:0 D:["serializable"] C:SHOW ZT / C:ROLLBACK ZI
 plan_div0	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
 plan_div0_described	1 t:0 T:0 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI
 plan_div0_twice	1 E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI / E{S=ERROR|C=22012|M=division by zero|F=int.c|L=870|R=int4div} ZI

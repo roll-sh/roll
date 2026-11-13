@@ -379,6 +379,13 @@ pub struct Session {
     generic_failed: bool,
     /// The plan a portal's Bind made, for the `run_query` of its Execute.
     portal_plan: Option<Arc<BoundQuery>>,
+    /// What a chain gave the block's transaction (isolation, read-only, deferrable), set
+    /// directly rather than as its settings, so an abort keeps it; None: the defaults (a BEGIN's
+    /// block, whose options an abort undoes).
+    chain_base: Option<(Isolation, bool, bool)>,
+    /// The failed block's error came outside any savepoint: its transaction's own settings
+    /// went back (AbortTransaction), not only a subtransaction's.
+    top_aborted: bool,
     /// The query string of the statements being run (pg_cursors / pg_prepared_statements
     /// show it whole).
     source: String,
@@ -547,6 +554,8 @@ impl Session {
             extended: false,
             generic_failed: false,
             portal_plan: None,
+            chain_base: None,
+            top_aborted: false,
             ro_stack: Vec::new(),
             source: String::new(),
             txn_cmds: Vec::new(),
@@ -1033,6 +1042,7 @@ impl Session {
             // now, not at the ROLLBACK (their ParameterStatus goes with the error).
             if self.status == TxnStatus::InBlock {
                 self.state.settings.borrow_mut().abort_level();
+                self.top_aborted = !self.txn.as_ref().is_some_and(|t| t.borrow().in_savepoint());
             }
             self.status = TxnStatus::Failed;
             if let Some(t) = &self.txn
@@ -1112,6 +1122,7 @@ impl Session {
         self.implicit = false;
         self.txn_time = Self::now();
         self.txn_opts = Some(opts);
+        self.chain_base = None;
         self.status = TxnStatus::InBlock;
     }
 
@@ -3423,6 +3434,7 @@ impl Session {
                     self.txn_time = Self::now();
                     self.txn_opts = Some((iso, ro));
                 }
+                self.chain_base = None;
                 self.status = TxnStatus::InBlock;
                 Ok(QueryResult::command(tag))
             }
@@ -3561,23 +3573,36 @@ impl Session {
             ));
         }
         let failed = self.status == TxnStatus::Failed;
-        // (A failed block's abort already put its characteristics back to the defaults, which
-        // the chained transaction then takes: SaveTransactionCharacteristics after it.)
-        let opts = self.txn.as_ref().filter(|_| !failed).map(|t| {
-            let t = t.borrow();
-            (t.isolation, t.read_only)
-        });
-        let deferrable = self.state.settings.borrow().get_raw("transaction_deferrable");
+        // The chained transaction takes the ending one's characteristics
+        // (SaveTransactionCharacteristics). A failed one's abort already put back those its
+        // BEGIN or SET TRANSACTION set to what it started with: the defaults, or what the chain
+        // that started it gave (set directly, not undone); an error in a savepoint undid only
+        // the subtransaction's.
+        let (opts, deferrable) = if failed && self.top_aborted {
+            match self.chain_base {
+                Some((iso, ro, d)) => (Some((iso, ro)), Some(d)),
+                None => (None, None),
+            }
+        } else {
+            let opts = self.txn.as_ref().map(|t| {
+                let t = t.borrow();
+                (t.isolation, t.read_only)
+            });
+            (opts.or(self.txn_opts), Some(self.state.settings.borrow().bool("transaction_deferrable")))
+        };
         self.finish_txn(commit && !failed)?;
         self.status = TxnStatus::InBlock;
         self.txn_opts = opts;
-        if failed {
-            default_deferrable(&self.state);
-        } else if let Some(d) = deferrable {
-            let mut st = self.state.settings.borrow_mut();
-            let _ = st.set("transaction_deferrable", Some(&d), true, true);
-            st.changed.retain(|n| n != "transaction_deferrable");
+        match deferrable {
+            Some(d) => {
+                let mut st = self.state.settings.borrow_mut();
+                let _ = st.set("transaction_deferrable", Some(if d { "on" } else { "off" }), true, true);
+                st.changed.retain(|n| n != "transaction_deferrable");
+            }
+            None => default_deferrable(&self.state),
         }
+        let (iso, ro) = opts.unwrap_or_else(|| self.default_txn_opts());
+        self.chain_base = Some((iso, ro, self.state.settings.borrow().bool("transaction_deferrable")));
         self.txn_time = Self::now();
         Ok(QueryResult::command(if commit && !failed {
             "COMMIT"

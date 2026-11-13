@@ -4507,6 +4507,22 @@ fn protocol_cases() {
             query("show transaction_isolation; show transaction_read_only; show transaction_deferrable"),
             query("rollback"),
         ])),
+        c("ib_chain_chained_error", |a| session(a, &["set default_transaction_read_only = on"], &[
+            query("start transaction isolation level repeatable read, read write, deferrable"),
+            query("commit and chain"),
+            query("select 1/0"),
+            query("commit and chain"),
+            query("show transaction_isolation; show transaction_read_only; show transaction_deferrable"),
+            query("rollback"),
+        ])),
+        c("ib_chain_savepoint_error", |a| session(a, &["set default_transaction_read_only = on"], &[
+            query("start transaction isolation level repeatable read, read write, deferrable; savepoint x"),
+            query("select 1/0"),
+            query("commit and chain"),
+            query("show transaction_isolation; show transaction_read_only; show transaction_deferrable"),
+            query("rollback"),
+        ])),
+        c("ib_chain_unstarted", |a| session(a, &[], &[query("begin isolation level serializable"), query("commit and chain"), query("show transaction_isolation"), query("rollback")])),
         // Errors planning raises (constant folding) fail the Bind (GetCachedPlan): the
         // generic plan's, and a custom plan's that has the values in; a utility statement's
         // query is planned at Execute, an expression analysis coerces fails the Parse.
