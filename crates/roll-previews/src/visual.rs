@@ -39,13 +39,22 @@ pub fn changed(before: &[u8], after: &[u8]) -> Option<f64> {
     Some(differ as f64 / (w * h) as f64)
 }
 
+/// The diff's largest picture: a screenshot is a viewport (1280 × 800, a phone's 780 × 1688), and
+/// past this a diff would cost hundreds of MiB for what nobody reads.
+const DIFF_MAX: (u32, u32) = (2048, 8192);
+
+/// One diff at a time: each holds two decoded screenshots (up to `decode`'s 256 MiB) and its
+/// own picture, and it's made on request, so callers queue rather than add up.
+static DIFFING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What changed, as a picture (Percy's and Chromatic's diff view): `after` faded to a third
 /// where it's the same as `before`, and every pixel that differs (or that only one of them has)
-/// marked in a solid red. `None` when either isn't a PNG it can read.
+/// marked in a solid red, up to [`DIFF_MAX`]. `None` when either isn't a PNG it can read.
 pub fn diff(before: &[u8], after: &[u8]) -> Option<Vec<u8>> {
     const MARK: [u8; 4] = [235, 52, 82, 255];
+    let _one = DIFFING.lock().unwrap_or_else(|e| e.into_inner());
     let (a, b) = (decode(before)?, decode(after)?);
-    let (w, h) = (a.width().max(b.width()), a.height().max(b.height()));
+    let (w, h) = (a.width().max(b.width()).min(DIFF_MAX.0), a.height().max(b.height()).min(DIFF_MAX.1));
     let out = RgbaImage::from_fn(w, h, |x, y| {
         let (p, q) = (a.get_pixel_checked(x, y).map(|p| p.0), b.get_pixel_checked(x, y).map(|p| p.0));
         match (p, q) {

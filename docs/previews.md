@@ -807,7 +807,9 @@ type Settings = {
     Where a page changed is a picture too (Percy's and Chromatic's diff view): `?diff=base` or
     `?diff=previous` (with `view` and `page` as for the screenshot) fades what's the same and marks
     what differs, the area only one of them has included; the sheet's Diff shows it against main
-    (else the push before), so whoever accepts a visual change sees what they accept.
+    (else the push before), so whoever accepts a visual change sees what they accept. Diffs are
+    made on request one at a time, up to 2048 × 8192, so asking for many can't add up to
+    gigabytes of decoded screenshots.
     With `visual_review` (`off` by default, `check` or `required`) a change's pages are reviewed as
     Chromatic's UI Review does: once compared with the baseline, the change has `visual_review`
     (the most any page differs, at either width), and a `roll/visual` commit status that's
