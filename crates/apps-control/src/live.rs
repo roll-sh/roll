@@ -123,6 +123,14 @@ pub struct Lease {
     pub h2c: bool,
     /// How long the app has to answer (a web service's `timeout_s`); None: as long as it takes.
     pub timeout: Option<Duration>,
+    /// Its deployment keeps visitors on one instance ([`crate::model::Run::affinity`]).
+    pub affinity: bool,
+}
+
+/// What a visitor's affinity cookie holds for an instance: a short digest of its name (the name
+/// itself stays roll's).
+pub fn affinity_key(instance: &str) -> String {
+    crate::public::token_hash(instance)[..12].to_string()
 }
 
 impl Drop for Lease {
@@ -549,7 +557,18 @@ impl EnvLive {
             .filter(|(i, _)| over || i.in_flight() < concurrency)
             .min_by_key(|(i, _)| i.in_flight())?;
         best.0.in_flight.fetch_add(1, Ordering::SeqCst);
-        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None })
+        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
+    }
+
+    /// The instance a visitor's affinity cookie names, if it's up with room.
+    fn pick_affine(&self, deployment: &str, concurrency: u32, key: &str) -> Option<Lease> {
+        let insts = self.insts.lock();
+        let (i, a) = insts.iter().filter(|i| i.deployment == deployment && i.in_flight() < concurrency && affinity_key(&i.name) == key).find_map(|i| match i.phase() {
+            Phase::Running(Some(a)) => Some((i, a)),
+            _ => None,
+        })?;
+        i.in_flight.fetch_add(1, Ordering::SeqCst);
+        Some(Lease { addr: a, inst: i.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None, affinity: false })
     }
 
     /// Take an idle instance out of rotation before stopping or suspending it: under the lock
@@ -633,12 +652,22 @@ impl EnvLive {
         self.acquire_pinned(tpl, false).await
     }
 
+    /// [`Self::acquire_tpl`], to the instance `prefer` (an affinity cookie) names when it can.
+    pub async fn acquire_preferring(self: &Arc<Self>, tpl: Arc<Template>, prefer: Option<&str>) -> Result<Lease, WakeError> {
+        if let Some(k) = prefer.filter(|_| tpl.run.affinity)
+            && let Some(mut l) = self.pick_affine(&tpl.deployment, tpl.run.concurrency, k)
+        {
+            (l.h2c, l.timeout, l.affinity) = (tpl.run.h2c, tpl.run.timeout_s.map(|s| Duration::from_secs(s as u64)), true);
+            return Ok(l);
+        }
+        self.acquire_pinned(tpl, false).await
+    }
+
     /// `pinned`: the request asked for this deployment (its own URL), and gets it or nothing.
     async fn acquire_pinned(self: &Arc<Self>, tpl: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {
-        let (h2c, timeout) = (tpl.run.h2c, tpl.run.timeout_s.map(|s| Duration::from_secs(s as u64)));
+        let (h2c, timeout, affinity) = (tpl.run.h2c, tpl.run.timeout_s.map(|s| Duration::from_secs(s as u64)), tpl.run.affinity);
         self.acquire_inner(tpl, pinned).await.map(|mut l| {
-            l.h2c = h2c;
-            l.timeout = timeout;
+            (l.h2c, l.timeout, l.affinity) = (h2c, timeout, affinity);
             l
         })
     }

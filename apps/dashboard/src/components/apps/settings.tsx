@@ -53,6 +53,7 @@ interface Form {
   public: boolean;
   restart: "always" | "on_failure" | "never";
   restartTries: string;
+  affinity: boolean;
   scaleStream: string;
   scaleGroup: string;
   scalePer: string;
@@ -103,6 +104,7 @@ export function formOf(s: Service): Form {
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
     restartTries: str(s.run.restart_tries),
+    affinity: !!s.run.affinity,
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
     scalePer: str(s.run.scale?.per_instance),
@@ -161,6 +163,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
+  if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
     run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
@@ -377,6 +380,12 @@ export function SettingsTab({
               </Field>
               <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                 {t("cpuTarget", "70")}
+              </Field>
+              <Field label="Session affinity" hint="each visitor stays on one instance while it's up (a cookie)">
+                <select value={form.affinity ? "on" : "off"} onChange={(e) => set("affinity", e.target.value === "on")} className={`${input} w-full`}>
+                  <option value="off">Off</option>
+                  <option value="on">On</option>
+                </select>
               </Field>
               <Field label="Suspend after (s)" hint="idle; 0 never suspends">
                 {t("suspendAfter", "30")}

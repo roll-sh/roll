@@ -407,6 +407,10 @@ pub struct Run {
     pub restart: Restart,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart_tries: Option<u32>,
+    /// A visitor keeps going to the same instance while it's up and has room (Cloud Run's
+    /// session affinity: a cookie), for apps that keep sessions in memory.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub affinity: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,6 +541,7 @@ impl Default for Run {
             cpu_target: None,
             restart: Restart::Always,
             restart_tries: None,
+            affinity: false,
         }
     }
 }
@@ -592,6 +597,9 @@ impl Run {
         }
         if self.drain_s.is_some_and(|d| !(1..=300).contains(&d)) {
             return bad("drain_s is 1–300");
+        }
+        if self.affinity && self.kind != RunType::Web {
+            return bad("affinity is for a web service");
         }
         if self.restart != Restart::Always && self.kind != RunType::Worker {
             return bad("restart is for a worker (a web service starts on its requests, a cron run once)");

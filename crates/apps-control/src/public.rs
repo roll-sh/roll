@@ -320,17 +320,25 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
 /// A visitor's gradual-rollout bucket (docs/apps/README.md, "Gradual rollouts").
 const BUCKET: &str = "roll_bucket";
 
+/// A visitor's instance, for a service with affinity ([`crate::live::affinity_key`]).
+const AFFINITY: &str = "roll_instance";
+
 /// The visitor's rollout bucket from its cookie (0–99), taken out of the cookies the app sees.
 fn take_bucket(req: &mut Request) -> Option<u8> {
-    let mut bucket = None;
+    take_cookie(req, BUCKET).and_then(|n| n.parse::<u8>().ok()).filter(|n| *n < 100)
+}
+
+/// One of roll's cookies, taken out of the cookies the app sees.
+fn take_cookie(req: &mut Request, name: &str) -> Option<String> {
+    let mut found = None;
     let mut kept = Vec::new();
     let mut ours = false;
     for v in req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()) {
         for c in v.split(';').map(str::trim).filter(|c| !c.is_empty()) {
-            match c.strip_prefix(&format!("{BUCKET}=")) {
+            match c.strip_prefix(&format!("{name}=")) {
                 Some(n) => {
                     ours = true;
-                    bucket = n.parse::<u8>().ok().filter(|n| *n < 100);
+                    found = Some(n.to_string());
                 }
                 None => kept.push(c.to_string()),
             }
@@ -344,7 +352,7 @@ fn take_bucket(req: &mut Request) -> Option<u8> {
             req.headers_mut().insert(header::COOKIE, v);
         }
     }
-    bucket
+    found
 }
 
 /// The 401 of a private environment. A preview's (`pv-…`) links into the dashboard, which signs
@@ -463,6 +471,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
     // gave them (never passed to the app), or a new one while a canary runs.
     let mut bucket = take_bucket(&mut req);
+    let affine = take_cookie(&mut req, AFFINITY);
     let fresh = deployment.is_none() && bucket.is_none() && live.canary().is_some();
     if fresh {
         let mut b = [0u8; 1];
@@ -488,7 +497,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
                 }
                 return r;
             }
-            Ok(Some(t)) => live.acquire_tpl(t).await,
+            Ok(Some(t)) => live.acquire_preferring(t, affine.as_deref()).await,
             Ok(None) => Err(WakeError::NoDeployment),
             Err(e) => Err(e),
         },
@@ -625,6 +634,16 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         return resp.map(Body::new);
     }
     strip_hop_by_hop(resp.headers_mut(), false);
+    // Affinity: the visitor's cookie names the instance that answered.
+    if lease.affinity {
+        let key = crate::live::affinity_key(&lease.inst.name);
+        if affine.as_deref() != Some(key.as_str()) {
+            let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+            if let Ok(c) = HeaderValue::from_str(&format!("{AFFINITY}={key}; Path=/; HttpOnly; SameSite=Lax{secure}")) {
+                resp.headers_mut().append(header::SET_COOKIE, c);
+            }
+        }
+    }
     if let (true, Some(b)) = (fresh, bucket) {
         let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
         if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {

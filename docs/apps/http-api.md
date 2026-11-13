@@ -205,6 +205,10 @@ type Run = {
    *  deploy or `…/restart`. 400 on another type. */
   restart?: "always" | "on_failure" | "never";
   restart_tries?: number;
+  /** A web service keeps each visitor on one instance while it's up with room (Cloud Run's
+   *  session affinity): a `roll_instance` cookie (a digest of the instance, never shown to the
+   *  app), moved when another instance answers. 400 on another type. */
+  affinity?: boolean;
 };
 
 type Service = {

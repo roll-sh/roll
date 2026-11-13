@@ -2228,3 +2228,50 @@ async fn a_workers_restart_policy_decides_whether_it_runs_again() {
     assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/restart"), None).await.0, StatusCode::ACCEPTED);
     assert!(ticks(&live, &w, &id, 1).await, "running after a restart");
 }
+
+/// Affinity keeps a visitor on the instance their cookie names while it's up (the app never sees
+/// the cookie); when it's gone they go elsewhere and the cookie follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn affinity_keeps_a_visitor_on_one_instance() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "sessions", json!({"port": 80, "min_instances": 2, "max_instances": 2, "affinity": true})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let live = w.apps.live(&id, "production");
+    let running = || w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).map(|(n, _, _)| n).collect::<Vec<_>>();
+    for _ in 0..100 {
+        live.tick().await;
+        if running().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let up = running();
+    assert_eq!(up.len(), 2, "{:?}", w.fake.instances(&id));
+    let get = |cookie: Option<String>| {
+        let mut b = Request::builder().uri("/").header("host", h.as_str());
+        if let Some(c) = cookie {
+            b = b.header("cookie", format!("theme=dark; roll_instance={c}"));
+        }
+        let (public, req) = (w.public.clone(), b.body(Body::empty()).unwrap());
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let set = r.headers().get("set-cookie").map(|v| v.to_str().unwrap().to_string());
+            let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+            (body["instance"].as_str().unwrap_or("").to_string(), body["cookie"].as_str().unwrap_or("").to_string(), set)
+        }
+    };
+    // Pointed at the second instance, it stays there.
+    let second = up[1].clone();
+    let key = apps_control::live::affinity_key(&second);
+    for _ in 0..4 {
+        let (inst, cookie, set) = get(Some(key.clone())).await;
+        assert_eq!((inst.as_str(), cookie.as_str(), set), (second.as_str(), "theme=dark", None), "kept, and the app sees only its own cookies");
+    }
+    // Gone: another answers, and the cookie follows it.
+    w.fake.crash(&second);
+    live.tick().await;
+    let (inst, _, set) = get(Some(key)).await;
+    assert_ne!(inst, second);
+    assert!(set.is_some_and(|s| s.starts_with(&format!("roll_instance={};", apps_control::live::affinity_key(&inst)))), "the cookie follows the instance that answered");
+}
