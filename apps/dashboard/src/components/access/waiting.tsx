@@ -1,6 +1,6 @@
 import { Hand } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { accessApi, approvalWhere, productName, RISKY, type Approval } from "@/lib/access-api";
+import { accessApi, approvableTogether, approvalWhere, productName, RISKY, type Approval } from "@/lib/access-api";
 import { Link } from "../link";
 import { usePending } from "./use-access";
 
@@ -62,6 +62,9 @@ export function WaitingApprovals() {
           open ? "scale-100 opacity-100" : "pointer-events-none scale-95 opacity-0"
         }`}
       >
+        {approvableTogether(waiting).map((g) => (
+          <Together key={g.grant_id} group={g} onDecided={(ids) => setDecided((d) => new Set([...d, ...ids]))} />
+        ))}
         <ul className="max-h-[60vh] divide-y divide-line overflow-y-auto">
           {waiting.slice(0, 6).map((a) => (
             <Waiting key={a.id} a={a} onDecided={() => setDecided((d) => new Set(d).add(a.id))} />
@@ -71,6 +74,34 @@ export function WaitingApprovals() {
           {waiting.length > 6 ? `All ${waiting.length} waiting` : "Open approvals"}: details, and approve for a while
         </Link>
       </div>
+    </div>
+  );
+}
+
+/** A token's reads and writes waiting together, approved in one go (each once). */
+function Together({ group, onDecided }: { group: { grant_name: string; ids: string[] }; onDecided: (ids: string[]) => void }) {
+  const [busy, setBusy] = useState(false);
+  const approveAll = async () => {
+    setBusy(true);
+    const done: string[] = [];
+    try {
+      for (const id of group.ids) {
+        await accessApi.approve(id);
+        done.push(id);
+      }
+    } finally {
+      onDecided(done);
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-[12px]">
+      <span className="min-w-0 flex-1 truncate text-muted">
+        <b className="font-medium text-fg">{group.grant_name}</b> has {group.ids.length} reads and writes waiting
+      </span>
+      <button type="button" onClick={() => void approveAll()} disabled={busy} className="shrink-0 rounded-md border border-fg/30 px-2 py-0.5 text-fg hover:border-fg/60">
+        {busy ? <span className="shimmer">Approving…</span> : `Approve ${group.ids.length}`}
+      </button>
     </div>
   );
 }
