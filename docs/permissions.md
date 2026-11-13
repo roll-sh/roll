@@ -334,7 +334,9 @@ The decision is the same wherever the request comes from: the HTTP API, the CLI,
 A request forwarded to another node is evaluated again there, which is cheap (one indexed
 read): roll code's repo owners get the request as it was, and the signed hops to storage's metadata
 owner and the tasks cell's leader (`/internal/storage/control`, `/internal/tasks`) are decided as
-the original request their header carries (`x-roll-storage-uri`, `x-roll-tasks-uri`). Those routes
+the original request their header carries (`x-roll-storage-uri`, `x-roll-tasks-uri`), and only
+their own product's (a storage hop carrying a workspace route is refused: another product's row
+would decide while storage's handler ran it). Those routes
 take only signed requests, so nobody outside the cluster can put a path there. On the owner:
 
 - the client's address is the one the first node saw (`x-roll-code-client`, signed), so IP

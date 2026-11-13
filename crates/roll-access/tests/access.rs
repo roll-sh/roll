@@ -831,13 +831,15 @@ async fn a_users_token_acts_as_them() {
     assert_eq!(d.as_user("usr_alice", Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
     assert!(d.send(&token, Method::DELETE, &path, None, &[("x-roll-approval", &apr)]).await.0.is_success());
 
-    // On a signed hop, the request it carries is judged as hers too.
+    // On a signed hop, the request it carries is judged as hers too (tasks is the operator's), and
+    // a hop carries only its own product's routes.
     let hop = |carried: &'static str| {
         let (d, t) = (&d, token.clone());
         async move { d.send(&t, Method::GET, "/internal/tasks", None, &[("x-roll-tasks-uri", carried)]).await }
     };
-    assert_eq!(hop("/v1/projects").await.1["code"], "operator_only");
-    assert_eq!(hop("/v1/workspace/projects").await.0, StatusCode::OK);
+    assert_eq!(hop("/v1/tasks/queues").await.1["code"], "operator_only");
+    let (s, e) = hop("/v1/workspace/projects").await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{e}");
 
     // Her account turned off: the token stops on its next request, and for a product's own
     // background work (a sync it made looks its grant up), at once too.
