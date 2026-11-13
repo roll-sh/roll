@@ -1453,6 +1453,9 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **CircleCI sync**: a project's environment variables (`POST`/`DELETE …/project/{slug}/envvar`)
+   with a CircleCI token held as a roll secret.
+2. **Bitbucket Pipelines sync**: a repository's (or deployment environment's) secured variables.
 
 Waiting on other pull requests:
 
