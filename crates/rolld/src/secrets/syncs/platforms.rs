@@ -28,11 +28,16 @@ pub(super) struct Http {
     ssm: Option<String>,
     render: String,
     netlify: String,
+    fly: String,
+    railway: String,
 }
 
 impl Http {
     pub(super) fn new() -> Http {
-        Http::with_bases("https://api.vercel.com", "https://api.cloudflare.com", None, "https://api.render.com", "https://api.netlify.com")
+        let mut h = Http::with_bases("https://api.vercel.com", "https://api.cloudflare.com", None, "https://api.render.com", "https://api.netlify.com");
+        h.fly = "https://api.fly.io/graphql".into();
+        h.railway = "https://backboard.railway.com/graphql/v2".into();
+        h
     }
 
     fn with_bases(vercel: &str, cloudflare: &str, ssm: Option<&str>, render: &str, netlify: &str) -> Http {
@@ -43,7 +48,7 @@ impl Http {
             .user_agent("roll-secrets-sync")
             .build()
             .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into() }
+        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2") }
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -355,7 +360,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new() };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -444,6 +449,157 @@ impl SyncTarget for Render {
                 let (status, _) = self.0.send(self.0.client.delete(format!("{base}/{}", urlencoding::encode(name))).bearer_auth(token), &what).await?;
                 if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
                     return Err(Error::Link(format!("{what}: deleting {name}: {status}")));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── fly ──
+
+/// A Fly.io app's secrets, through Fly's GraphQL API (as flyctl's `fly-go` sends them).
+pub(super) struct Fly(pub(super) Http);
+
+/// The `Authorization` header for a Fly token, as fly-go forms it: `FlyV1` when it holds a
+/// macaroon (`fm1r_`, `fm1a_`, `fm2_`), else `Bearer`; a scheme already on it is dropped first.
+fn fly_auth(token: &str) -> String {
+    let mut t = token.trim();
+    while let Some((scheme, rest)) = t.split_once(' ') {
+        if scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("flyv1") {
+            t = rest.trim();
+        } else {
+            break;
+        }
+    }
+    let macaroon = t.split(',').any(|p| ["fm1r_", "fm1a_", "fm2_"].iter().any(|m| p.trim().starts_with(m)));
+    format!("{}{t}", if macaroon { "FlyV1 " } else { "Bearer " })
+}
+
+/// A GraphQL answer's error, by code or message (never variables, which hold values).
+fn graphql_error(v: &Json) -> Option<String> {
+    let e = v["errors"].as_array()?.first()?;
+    Some(e["extensions"]["code"].as_str().or(e["message"].as_str()).unwrap_or("error").chars().take(200).collect())
+}
+
+impl SyncTarget for Fly {
+    fn kind(&self) -> &str {
+        "fly"
+    }
+    fn label(&self) -> &str {
+        "Fly.io app secrets"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "app", label: "App", required: true, placeholder: "shop-api" },
+            SyncField { name: "token_key", label: "Key holding a deploy token", required: true, placeholder: "FLY_API_TOKEN" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        let [app, token_key] = target("fly", t, [("app", true), ("token_key", true)])?;
+        if !ident(&app.unwrap_or_default(), 63, "-") {
+            return Err(bad("app is a Fly.io app's name"));
+        }
+        key_field("fly", "token_key", token_key).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        self.check("", &Default::default(), t)?;
+        let (app, token_key) = (t["app"].as_str().unwrap_or_default().trim().to_string(), t["token_key"].as_str().unwrap_or_default().trim().to_string());
+        let auth = fly_auth(credential(p, &token_key)?);
+        let what = format!("fly {app}");
+        block_on(async {
+            let set: Vec<Json> = p.changed.iter().filter_map(|n| p.values.get(n).map(|v| json!({ "key": n, "value": v.expose() }))).collect();
+            let calls = [
+                (!set.is_empty()).then(|| json!({ "query": "mutation($input: SetSecretsInput!) { setSecrets(input: $input) { release { id } } }", "variables": { "input": { "appId": app, "secrets": set } } })),
+                (!p.removed.is_empty()).then(|| json!({ "query": "mutation($input: UnsetSecretsInput!) { unsetSecrets(input: $input) { release { id } } }", "variables": { "input": { "appId": app, "keys": p.removed } } })),
+            ];
+            for body in calls.into_iter().flatten() {
+                let (status, answer) = self.0.send(self.0.client.post(&self.0.fly).header("authorization", &auth).json(&body), &what).await?;
+                if !status.is_success() || graphql_error(&answer).is_some() {
+                    return Err(Error::Link(format!("{what}: {status} {}", graphql_error(&answer).unwrap_or_default())));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── railway ──
+
+/// A Railway service's variables in one environment (or the environment's shared ones).
+pub(super) struct Railway(pub(super) Http);
+
+impl Railway {
+    /// (project, environment, service, token_key, project token?)
+    fn target(&self, t: &Json) -> Result<(String, String, Option<String>, String, bool)> {
+        let [project, environment, service, token_key, token_kind] = target("railway", t, [("project", true), ("environment", true), ("service", false), ("token_key", true), ("token_kind", false)])?;
+        let id = |v: &str| ident(v, 64, "-");
+        let (project, environment) = (project.unwrap_or_default(), environment.unwrap_or_default());
+        if !id(&project) || !id(&environment) || service.as_deref().is_some_and(|s| !id(s)) {
+            return Err(bad("project, environment and service are Railway ids"));
+        }
+        let project_token = match token_kind.as_deref() {
+            None | Some("project") => true,
+            Some("account") => false,
+            Some(_) => return Err(bad("token_kind is project (a project token) or account")),
+        };
+        Ok((project, environment, service, key_field("railway", "token_key", token_key)?, project_token))
+    }
+}
+
+impl SyncTarget for Railway {
+    fn kind(&self) -> &str {
+        "railway"
+    }
+    fn label(&self) -> &str {
+        "Railway variables"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "project", label: "Project id", required: true, placeholder: "f3a9…" },
+            SyncField { name: "environment", label: "Environment id", required: true, placeholder: "7c21…" },
+            SyncField { name: "service", label: "Service id (empty: shared variables)", required: false, placeholder: "b8e4…" },
+            SyncField { name: "token_key", label: "Key holding a project token", required: true, placeholder: "RAILWAY_TOKEN" },
+            SyncField { name: "token_kind", label: "Token kind", required: false, placeholder: "project (default) or account" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (project, environment, service, token_key, project_token) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        let what = format!("railway {project}");
+        let with_auth = |r: reqwest::RequestBuilder| if project_token { r.header("project-access-token", token) } else { r.bearer_auth(token) };
+        block_on(async {
+            let mut calls = vec![];
+            let vars: serde_json::Map<String, Json> = p.changed.iter().filter_map(|n| p.values.get(n).map(|v| (n.clone(), json!(v.expose())))).collect();
+            if !vars.is_empty() {
+                let mut input = json!({ "projectId": project, "environmentId": environment, "variables": vars });
+                if let Some(s) = &service {
+                    input["serviceId"] = json!(s);
+                }
+                calls.push(json!({ "query": "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }", "variables": { "input": input } }));
+            }
+            for name in p.removed {
+                let mut input = json!({ "projectId": project, "environmentId": environment, "name": name });
+                if let Some(s) = &service {
+                    input["serviceId"] = json!(s);
+                }
+                calls.push(json!({ "query": "mutation($input: VariableDeleteInput!) { variableDelete(input: $input) }", "variables": { "input": input } }));
+            }
+            for body in calls {
+                let (status, answer) = self.0.send(with_auth(self.0.client.post(&self.0.railway)).json(&body), &what).await?;
+                if !status.is_success() || graphql_error(&answer).is_some() {
+                    return Err(Error::Link(format!("{what}: {status} {}", graphql_error(&answer).unwrap_or_default())));
                 }
             }
             Ok(())
@@ -593,7 +749,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(code_control::review::apps::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new() };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -915,6 +1071,22 @@ mod tests {
             ]
         );
         assert_eq!((seen[0].2.clone(), seen[2].2.clone()), (json!({ "value": "v-123" }), json!({ "context": "production", "value": "v-123" })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fly_and_railway_send_graphql_mutations_with_the_right_auth() {
+        assert_eq!(fly_auth("FlyV1 fm2_abc,fm1r_def"), "FlyV1 fm2_abc,fm1r_def");
+        assert_eq!(fly_auth("personal-oauth-token"), "Bearer personal-oauth-token");
+        let (base, seen) = mock().await;
+        push(Arc::new(Fly(http(&base))), json!({ "app": "shop-api", "token_key": "FLY_API_TOKEN" }), &[("FLY_API_TOKEN", "fm2_tok")]).await.unwrap();
+        push(Arc::new(Railway(http(&base))), json!({ "project": "p1", "environment": "e1", "service": "s1", "token_key": "RAILWAY_TOKEN" }), &[("RAILWAY_TOKEN", "rw")]).await.unwrap();
+        let seen = seen.lock().unwrap();
+        let paths: Vec<&str> = seen.iter().map(|s| s.1.as_str()).collect();
+        assert_eq!(paths, ["/graphql", "/graphql", "/graphql/v2", "/graphql/v2"]);
+        assert_eq!(seen[0].2["variables"]["input"], json!({ "appId": "shop-api", "secrets": [{ "key": "NEW", "value": "v-123" }] }));
+        assert_eq!(seen[1].2["variables"]["input"], json!({ "appId": "shop-api", "keys": ["OLD"] }));
+        assert_eq!(seen[2].2["variables"]["input"], json!({ "projectId": "p1", "environmentId": "e1", "serviceId": "s1", "variables": { "NEW": "v-123" } }));
+        assert_eq!(seen[3].2["variables"]["input"]["name"], "OLD");
     }
 
     #[tokio::test(flavor = "multi_thread")]

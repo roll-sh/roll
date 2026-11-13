@@ -77,6 +77,8 @@ function targetSummary(s: Sync): string {
   if (s.kind === "gitlab") return `${str("project")} · ${str("environment_scope") || "*"}`;
   if (s.kind === "render") return str("service");
   if (s.kind === "netlify") return `${str("site")} · ${str("context") || "all"}`;
+  if (s.kind === "fly") return str("app");
+  if (s.kind === "railway") return `${str("project")} · ${str("environment")}${str("service") ? ` · ${str("service")}` : ""}`;
   if (str("url")) {
     try {
       return new URL(str("url")).host;

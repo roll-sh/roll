@@ -596,8 +596,8 @@ open it.
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
-they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Cloudflare
-Workers, AWS Parameter Store, a Kubernetes Secret, an endpoint
+they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
+Railway, Cloudflare Workers, AWS Parameter Store, a Kubernetes Secret, an endpoint
 of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
 syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
@@ -702,7 +702,7 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
   it.
 
-### `render` and `netlify`
+### `render`, `netlify`, `fly` and `railway`
 
 - **`render`**, `{service, token_key}`: a Render service's own environment variables (not a linked
   environment group's). A changed key is set (`PUT /v1/services/{id}/env-vars/{key}`), a removed one
@@ -712,7 +712,17 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   changed key sets that context's value (or creates the variable with it), a removed key deletes
   the variable.
 
-Like Vercel's, they use the platforms' fixed API hosts.
+- **`fly`**, `{app, token_key}`: a Fly.io app's secrets through Fly's GraphQL API, as flyctl sends
+  them (`setSecrets` for changed keys, `unsetSecrets` for removed ones; a macaroon deploy token goes
+  as `FlyV1 …`, anything else as `Bearer …`). Setting secrets makes a release, as `fly secrets set`
+  does.
+- **`railway`**, `{project, environment, service?, token_key, token_kind?}`: a Railway service's
+  variables in one environment (the environment's shared variables without `service`), through its
+  public GraphQL API (`variableCollectionUpsert`, `variableDelete`). The token is a project token
+  (`Project-Access-Token`) by default, or an account token with `token_kind: "account"`.
+
+Like Vercel's, they use the platforms' fixed API hosts, and a GraphQL answer's `errors` fail the
+push by code, never with a value.
 
 ### `gitlab`
 
@@ -1139,8 +1149,8 @@ Done and in PR #20:
 - leaked secrets don't land, plus scans of a repo's default branch and history;
 - required and typed keys; insights and rotation reminders;
 - one-time sharing, and sharing across projects;
-- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Cloudflare Workers, AWS Parameter Store,
-  Kubernetes, sealed webhooks and deploy notifications;
+- syncs: GitHub, GitLab CI, Vercel, Netlify, Render, Fly.io, Railway, Cloudflare Workers, AWS
+  Parameter Store, Kubernetes, sealed webhooks and deploy notifications;
 - audit sinks, purge and retention, workload identities (OIDC logins for CI);
 - the dashboard's Secrets surface;
 - the fixes from three security reviews and a phone-width pass;
@@ -1163,10 +1173,8 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Fly.io and Railway syncs**, checked against their own clients' sources. Fly is GraphQL
-   `setSecrets`/`unsetSecrets` `{appId, secrets: [{key, value}]}` / `{appId, keys}`.
-3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-4. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
+3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+4. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
