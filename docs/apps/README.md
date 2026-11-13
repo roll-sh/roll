@@ -791,9 +791,9 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **First five minutes**: templates (a service and its database in one step) and link lines on
-   the canvas. (Done: New service links the project's databases before the first deploy,
-   `links` on create.)
+1. **Templates**: a service and its database in one step (Railway's templates, Render's
+   blueprints). (Done: New service links the project's databases before the first deploy; the
+   canvas draws a service's links.)
 2. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).
 3. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
     (Vercel's rolling releases, Cloud Run's traffic splits).

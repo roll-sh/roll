@@ -86,6 +86,8 @@ export interface Service {
   run: Run;
   /** The private registry login its image pulls with (the password is never returned). */
   registry: { server: string; username: string } | null;
+  /** What it links (the canvas draws them). */
+  links?: { kind: LinkKind; ref: string }[];
   created_at: number;
   environments: EnvironmentSummary[];
 }

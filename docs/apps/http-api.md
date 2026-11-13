@@ -173,6 +173,7 @@ type Service = {
   build: Build;
   run: Run;
   registry: { server: string; username: string } | null; // a private registry's login (never the password)
+  links: { kind: LinkKind; ref: string }[]; // what it links (no variables): the canvas draws them
   created_at: number;
   environments: EnvironmentSummary[];
 };

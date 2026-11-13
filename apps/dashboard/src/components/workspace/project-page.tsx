@@ -72,6 +72,13 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
     ],
     [project.resources, staged, ws.inventory, ws.status],
   );
+  // A service and the databases it links, joined on the canvas (Railway's lines).
+  const edges = useMemo(() => {
+    const placed = new Set(cards.map((c) => c.key));
+    return (live.services ?? []).flatMap((s) =>
+      (s.links ?? []).map((l) => [`service:${s.id}`, `${l.kind}:${l.ref}`] as [string, string]).filter(([a, b]) => placed.has(a) && placed.has(b)),
+    );
+  }, [live.services, cards]);
   const current = cards.find((c) => c.key === selected) ?? null;
 
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
@@ -149,6 +156,7 @@ function Project({ ws, project }: { ws: WorkspaceState; project: WorkspaceProjec
         <Board
           shift={agentsOpen ? 272 : 0}
           cards={cards}
+          edges={edges}
           selected={selected}
           onSelect={(k) => {
             setSelected(k);

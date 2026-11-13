@@ -505,8 +505,17 @@ pub struct Service {
     pub run: Run,
     /// The private registry login its image pulls with (never the password).
     pub registry: Option<Registry>,
+    /// What it links (the canvas draws them), without their variables.
+    pub links: Vec<LinkRef>,
     pub created_at: i64,
     pub environments: Vec<EnvironmentSummary>,
+}
+
+/// A link's resource, as `Service.links` names it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LinkRef {
+    pub kind: LinkKind,
+    pub r#ref: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

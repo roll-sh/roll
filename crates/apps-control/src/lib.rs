@@ -423,8 +423,9 @@ impl Apps {
             summaries.push(self.summary(e).await?);
         }
         let id = r.id.clone();
-        let registry = self.db(move |s| s.registry(&id)).await?;
-        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, created_at: r.created_at, environments: summaries })
+        let (registry, links) = self.db(move |s| Ok((s.registry(&id)?, s.links(&id)?))).await?;
+        let links = links.into_iter().map(|(kind, r#ref, _)| LinkRef { kind, r#ref }).collect();
+        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, links, created_at: r.created_at, environments: summaries })
     }
 
     /// `PUT …/registry`: the login a service's image pulls with. `server` defaults to the image's
