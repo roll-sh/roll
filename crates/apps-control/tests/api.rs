@@ -2112,3 +2112,18 @@ async fn a_web_service_scales_on_its_cpu() {
     }
     until(&w, &id, 1).await;
 }
+
+/// A web service's `timeout_s`: a request the app hasn't answered by then is a 504 (in its
+/// access log as one); one answered in time is the app's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_past_its_timeout_is_a_504() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "slowpoke", json!({"port": 80, "timeout_s": 1})).await;
+    let id = svc["id"].as_str().unwrap();
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"timeout_s": 3601}}))).await.0, StatusCode::BAD_REQUEST);
+    let h = host(&svc["environments"][0]["url"]);
+    assert_eq!(visit(&w, &h, "/sleep/100").await.0, StatusCode::OK);
+    let began = std::time::Instant::now();
+    assert_eq!(visit(&w, &h, "/sleep/1500").await.0, StatusCode::GATEWAY_TIMEOUT);
+    assert!(began.elapsed() < Duration::from_millis(1400), "{:?}", began.elapsed());
+}

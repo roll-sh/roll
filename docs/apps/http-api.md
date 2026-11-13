@@ -160,7 +160,7 @@ type Run = {
                             // the project network (no volume), before the switch: a migration. A
                             // non-zero exit fails the deploy; the old one keeps serving
   schedule?: string;        // cron: five fields, UTC
-  timeout_s?: number;       // cron: a run's limit (default 3600)
+  timeout_s?: number;       // cron: a run's limit (default 3600); web: a request's time to its answer's head, 1–3600, then a 504 (unset: no limit; upgrades and streams that began are the app's)
   min_instances: number;    // web: 0 scales to zero (default 0); worker: at least 1
   max_instances: number;    // default 3
   concurrency: number;      // requests in flight per instance before scaling out (default 50)

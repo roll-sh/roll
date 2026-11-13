@@ -857,6 +857,11 @@ costs nothing meanwhile. A deployment's own URL still answers, to try a fix firs
 network is untouched. The setting is kept with the environment's live state on its owner, read
 from the store once, so a request pays nothing for it.
 
+A web service's `run.timeout_s` (1–3600, Cloud Run's request timeout; `roll apps set
+--timeout`) is how long a request has until the app answers: past it the visitor gets a 504 and
+the access log a 504. It runs to the answer's head, so a WebSocket or a stream that has begun is
+the app's to keep; unset, there's no limit, as before.
+
 `run.drain_s` (1–300, Render's `maxShutdownDelaySeconds`; `roll apps set --drain`) is how long
 an instance being replaced (a deploy, a promoted or aborted canary) or scaled in gets: its
 requests in flight finish, then SIGTERM, and SIGKILL when the time is up (a second after SIGTERM
@@ -1237,39 +1242,36 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **A request timeout per service** (Cloud Run's, default 300 s, up to an hour): `run.timeout_s`
-   for a web service ends a request the app hasn't answered with a 504 and says so in the
-   access log; WebSockets and streams that have started are left alone.
-2. **Cron in a time zone** (Cloud Scheduler's): `run.timezone` (IANA) for a cron service's
+1. **Cron in a time zone** (Cloud Scheduler's): `run.timezone` (IANA) for a cron service's
    schedule, daylight saving handled as the zone does; UTC when unset.
-3. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-4. **Region**: the region shown on the overview and each environment, defaulting to the project's
+3. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-10. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
-    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
-    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+9. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+   `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
+   another name), then `DomainTls::wildcards` true there; the routing and verification are done.
+10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+11. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-13. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

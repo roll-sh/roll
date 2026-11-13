@@ -612,6 +612,10 @@ impl Run {
             }
             RunType::Web => {
                 self.schedule = None;
+                // A request's time to its answer (Cloud Run's request timeout, at most an hour).
+                if self.timeout_s.is_some_and(|t| !(1..=3600).contains(&t)) {
+                    return bad("timeout_s is 1–3600 for a web service (the time a request has to its answer)");
+                }
             }
         }
         Ok(self)

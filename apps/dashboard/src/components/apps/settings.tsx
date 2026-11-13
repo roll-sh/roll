@@ -355,6 +355,9 @@ export function SettingsTab({
                 {t("healthPath", "/healthz")}
               </Field>
               <Field label="Health timeout (s)">{t("healthTimeout", "60")}</Field>
+              <Field label="Request timeout (s)" hint="a request unanswered by then is a 504; empty: no limit">
+                {t("timeout", "300")}
+              </Field>
               <Field label="Drain (s)" hint="a replaced instance finishes its requests, then gets SIGTERM; killed when it's up">
                 {t("drain", "30")}
               </Field>

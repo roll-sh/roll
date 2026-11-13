@@ -542,7 +542,21 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     }
     let request_id = h.get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or("").chars().take(64).collect::<String>();
     let (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
-    let sent = if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await };
+    let send = async { if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await } };
+    // Its timeout runs to the answer's head: an upgrade, or a stream that has begun, is the
+    // app's to keep.
+    let sent = match lease.timeout.filter(|_| !upgrade) {
+        Some(t) => match tokio::time::timeout(t, send).await {
+            Ok(r) => r,
+            Err(_) => {
+                live.answered(&lease.inst, 504);
+                live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, 504, 0);
+                access.write(504, began, 0, &instance, &request_id, cold, waited_ms);
+                return page(StatusCode::GATEWAY_TIMEOUT, "Timed out", &format!("The service didn't answer within its {} s.", t.as_secs()));
+            }
+        },
+        None => send.await,
+    };
     let mut resp = match sent {
         Ok(r) => r,
         Err(e) if e.is_connect() => {

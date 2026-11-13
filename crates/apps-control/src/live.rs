@@ -118,6 +118,8 @@ pub struct Lease {
     pub cold: bool,
     /// Its deployment speaks HTTP/2 without TLS ([`crate::model::Run::h2c`]).
     pub h2c: bool,
+    /// How long the app has to answer (a web service's `timeout_s`); None: as long as it takes.
+    pub timeout: Option<Duration>,
 }
 
 impl Drop for Lease {
@@ -532,7 +534,7 @@ impl EnvLive {
             .filter(|(i, _)| over || i.in_flight() < concurrency)
             .min_by_key(|(i, _)| i.in_flight())?;
         best.0.in_flight.fetch_add(1, Ordering::SeqCst);
-        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false })
+        Some(Lease { addr: best.1, inst: best.0.clone(), waited: Duration::ZERO, cold: false, h2c: false, timeout: None })
     }
 
     /// Take an idle instance out of rotation before stopping or suspending it: under the lock
@@ -618,9 +620,10 @@ impl EnvLive {
 
     /// `pinned`: the request asked for this deployment (its own URL), and gets it or nothing.
     async fn acquire_pinned(self: &Arc<Self>, tpl: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {
-        let h2c = tpl.run.h2c;
+        let (h2c, timeout) = (tpl.run.h2c, tpl.run.timeout_s.map(|s| Duration::from_secs(s as u64)));
         self.acquire_inner(tpl, pinned).await.map(|mut l| {
             l.h2c = h2c;
+            l.timeout = timeout;
             l
         })
     }
