@@ -180,6 +180,10 @@ pub fn create(def: &AggDef, spec: &AutoDateHistogramSpec, ctx: &mut BindCtx<'_>)
         finished: false,
         rounding_count: n,
         os,
+        seg_bounds: None,
+        prep: None,
+        slot_ords: Vec::new(),
+        batch: Default::default(),
     }))
 }
 
@@ -233,9 +237,83 @@ struct AutoAgg {
     /// Set for profiled opensearch-dialect requests (`skiplist_collectors_used` and the filter
     /// rewrite replay join the debug map).
     os: Option<Box<Option<crate::filter_rewrite::FilterRewrite>>>,
+    /// The segment's value bounds (single-owner collection rounds through a prepared array
+    /// over them, as `date_histogram` does).
+    seg_bounds: Option<(i64, i64)>,
+    /// The rounding index the array was prepared for, and the array (`None`: too many points).
+    prep: Option<(usize, Option<crate::rounding::PreparedRounding>)>,
+    /// The bucket ordinal of each array slot (`u32::MAX`: not seen yet); cleared whenever the
+    /// ordinals are rebuilt.
+    slot_ords: Vec<u32>,
+    batch: crate::values::NumBatch,
 }
 
 impl AutoAgg {
+    /// The prepared-array slot of `v` under rounding `idx`, preparing the array for this
+    /// segment when the rounding changed.
+    #[inline]
+    fn slot(&mut self, idx: usize, v: i64) -> Option<usize> {
+        if self.prep.as_ref().is_none_or(|(i, _)| *i != idx) {
+            let p = self.seg_bounds.and_then(|(lo, hi)| self.roundings[idx].rounding.prepare(lo, hi));
+            self.slot_ords.clear();
+            self.slot_ords.resize(p.as_ref().map_or(0, |p| p.len()), u32::MAX);
+            self.prep = Some((idx, p));
+        }
+        self.prep.as_ref()?.1.as_ref()?.index(v)
+    }
+
+    /// Collects document `i` of the batch, whose values (ascending) are `vals`.
+    #[inline]
+    fn collect_values(&mut self, b: &Batch<'_>, i: usize, vals: &[i64]) -> Result<()> {
+        if vals.is_empty() {
+            return Ok(());
+        }
+        let doc = b.docs[i];
+        let score = b.score(i);
+        let inc = self.doc_counter.count(doc);
+        let owning = b.ords[i];
+        // Successive values of a document use the rounding in force at that point.
+        let mut prev = i64::MIN;
+        if self.many {
+            let mut idx = self.rounding_index_for(owning);
+            for &v in vals {
+                let rounded = self.roundings[idx].rounding.round(v);
+                if rounded == prev {
+                    continue;
+                }
+                idx = self.collect_many(owning, idx, doc, rounded, score, inc)?;
+                prev = rounded;
+            }
+        } else {
+            for &v in vals {
+                let idx = self.single.idx;
+                let slot = self.slot(idx, v);
+                let rounded = match (slot, &self.prep) {
+                    (Some(at), Some((_, Some(p)))) => p.point(at),
+                    _ => self.roundings[idx].rounding.round(v),
+                };
+                if rounded == prev {
+                    continue;
+                }
+                prev = rounded;
+                if let Some(at) = slot {
+                    let o = self.slot_ords[at];
+                    if o != u32::MAX {
+                        self.collect_bucket(doc, o, score, inc)?;
+                        continue;
+                    }
+                }
+                if let Some(ord) = self.collect_single(owning, doc, rounded, score, inc)?
+                    && let Some(at) = slot
+                    && let Some(o) = self.slot_ords.get_mut(at)
+                {
+                    *o = ord;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn rounding_index_for(&self, owning: u32) -> usize {
         if self.many { self.multi.idx.get(owning as usize).copied().unwrap_or(0) as usize } else { self.single.idx }
     }
@@ -283,6 +361,7 @@ impl AutoAgg {
 
     /// Re-rounds every bucket of every owning ordinal with its current rounding.
     fn rebucket_with(&mut self, rounding_of: impl Fn(&Self, u32) -> usize) -> Vec<u32> {
+        self.prep = None;
         let old = std::mem::take(&mut self.ords);
         let mut by_owning: Vec<Vec<u32>> = Vec::new();
         for (o, &(owning, _)) in old.keys().iter().enumerate() {
@@ -304,14 +383,19 @@ impl AutoAgg {
     }
 
     /// `FromSingle.collectValue`.
-    fn collect_single(&mut self, owning: u32, doc: u32, rounded: i64, score: f32, inc: u64) -> Result<()> {
+    /// Returns the bucket's ordinal, `None` when collecting it rebuilt the ordinals.
+    fn collect_single(&mut self, owning: u32, doc: u32, rounded: i64, score: f32, inc: u64) -> Result<Option<u32>> {
         // `owning` is always 0 here (one owning bucket).
         let (ord, new) = self.ords.add(owning, rounded as u64);
         self.collect_bucket(doc, ord, score, inc)?;
         if new {
+            let idx = self.single.idx;
             self.increase_single(rounded);
+            if self.single.idx != idx {
+                return Ok(None);
+            }
         }
-        Ok(())
+        Ok(Some(ord))
     }
 
     /// `FromSingle.increaseRoundingIfNeeded`.
@@ -464,6 +548,11 @@ impl Aggregator for AutoAgg {
         }
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         self.reader = if self.has_values { Some(self.vs.numeric_reader(seg)?) } else { None };
+        self.prep = None;
+        self.seg_bounds = match self.reader.as_ref().and_then(|r| r.raw()) {
+            Some((dv, decode @ (crate::values::Decode::Long | crate::values::Decode::Nanos))) => dv.raw_bounds().map(|(lo, hi)| (decode.to_i64(lo), decode.to_i64(hi))),
+            _ => None,
+        };
         if self.record {
             let ord = self.searcher.segments().iter().position(|s| s.base == seg.base).unwrap_or(0);
             if self.segments.last().is_none_or(|s| s.seg != ord) {
@@ -477,42 +566,31 @@ impl Aggregator for AutoAgg {
     fn collect(&mut self, b: Batch<'_>) -> Result<()> {
         let Some(mut r) = self.reader.take() else { return Ok(()) };
         let mut vals: smallvec::SmallVec<[i64; 4]> = smallvec::SmallVec::new();
-        let res = (|| {
-            for i in 0..b.len() {
-                let doc = b.docs[i];
-                let score = b.score(i);
-                vals.clear();
-                vals.extend_from_slice(r.longs(doc, score)?);
-                if vals.is_empty() {
-                    continue;
-                }
-                let inc = self.doc_counter.count(doc);
-                let owning = b.ords[i];
-                // Successive values of a document use the rounding in force at that point.
-                let mut prev = i64::MIN;
-                if self.many {
-                    let mut idx = self.rounding_index_for(owning);
-                    for &v in &vals {
-                        let rounded = self.roundings[idx].rounding.round(v);
-                        if rounded == prev {
-                            continue;
-                        }
-                        idx = self.collect_many(owning, idx, doc, rounded, score, inc)?;
-                        prev = rounded;
+        let res = match r.raw() {
+            // Plain long (or nanosecond) doc values: the batch's values decode in one run.
+            Some((dv, decode @ (crate::values::Decode::Long | crate::values::Decode::Nanos))) => {
+                let mut batch = std::mem::take(&mut self.batch);
+                dv.load_batch(b.docs, &mut batch);
+                let res = (|| {
+                    for (i, raw) in batch.docs() {
+                        vals.clear();
+                        vals.extend(raw.iter().map(|&v| decode.to_i64(v)));
+                        self.collect_values(&b, i, &vals)?;
                     }
-                } else {
-                    for &v in &vals {
-                        let rounded = self.roundings[self.single.idx].rounding.round(v);
-                        if rounded == prev {
-                            continue;
-                        }
-                        self.collect_single(owning, doc, rounded, score, inc)?;
-                        prev = rounded;
-                    }
-                }
+                    Ok(())
+                })();
+                self.batch = batch;
+                res
             }
-            Ok(())
-        })();
+            _ => (|| {
+                for i in 0..b.len() {
+                    vals.clear();
+                    vals.extend_from_slice(r.longs(b.docs[i], b.score(i))?);
+                    self.collect_values(&b, i, &vals)?;
+                }
+                Ok(())
+            })(),
+        };
         self.reader = Some(r);
         res
     }
