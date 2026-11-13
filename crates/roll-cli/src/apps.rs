@@ -897,7 +897,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !json_out {
                 for d in v.as_array().into_iter().flatten() {
                     let rev = d["revision"].as_str().map(|r| &r[..r.len().min(8)]).unwrap_or("-").to_string();
-                    println!("{}  {:<10} {:<8} {rev:<8} {}", s(&d["id"]), s(&d["status"]), s(&d["trigger"]), s(&d["message"]));
+                    let by = d["actor"].as_str().map(|a| format!("  ({a})")).unwrap_or_default();
+                    println!("{}  {:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["status"]), s(&d["trigger"]), s(&d["message"]));
                 }
                 return Ok(());
             }

@@ -282,6 +282,8 @@ pub struct NewDeployment {
     pub upload: Option<String>,
     /// Starts `deploying` instead of `queued` (nothing to build: a rollback).
     pub status: DeployStatus,
+    /// Who asked for it ([`crate::model::Deployment::actor`]).
+    pub actor: Option<String>,
 }
 
 /// One minute of one environment's metrics.
@@ -336,7 +338,7 @@ pub struct Store {
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
 const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at";
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash";
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -392,6 +394,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         ready_ms: r.get(14)?,
         run: json(&r.get::<_, String>(15)?)?,
         vars_hash: r.get(16)?,
+        actor: r.get(17)?,
         steps: Vec::new(),
     })
 }
@@ -427,6 +430,7 @@ impl Store {
         db.add_column("domains", "tls_error", "TEXT")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
+        db.add_column("deployments", "actor", "TEXT")?;
         Ok(Store { db, sealer })
     }
 
@@ -830,7 +834,7 @@ impl Store {
                 params![now, service, env],
             )?;
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, ?)"),
                 params![
                     id,
                     service,
@@ -845,6 +849,7 @@ impl Store {
                     now,
                     to_json(&d.run),
                     vars_hash,
+                    d.actor,
                     d.upload
                 ],
             )?;

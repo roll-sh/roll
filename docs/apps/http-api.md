@@ -223,6 +223,7 @@ type Deployment = {
   environment: string;
   status: DeployStatus;
   trigger: "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote"; // settings: a redeploy
+  actor: string | null;     // who asked: a push's commit author, the calling token or connection ("operator" for the operator's token); null when roll did it on its own
   revision: string | null;   // git commit of a repo source
   message: string;
   image: string | null;      // the built or pinned image, by digest once known

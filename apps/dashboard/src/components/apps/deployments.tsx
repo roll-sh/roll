@@ -85,7 +85,10 @@ export function Deployments({
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <DeployBadge status={d.status} />
                       {active && <span className="rounded border border-accent/40 px-1.5 font-mono text-[10.5px] text-accent">live</span>}
-                      <span className="text-[11.5px] text-subtle">{TRIGGER_LABEL[d.trigger]}</span>
+                      <span className="text-[11.5px] text-subtle">
+                        {TRIGGER_LABEL[d.trigger]}
+                        {d.actor && <> by {d.actor}</>}
+                      </span>
                       {d.revision && <span className="font-mono text-[11.5px] text-muted">{shortSha(d.revision)}</span>}
                     </div>
                     <p className="mt-1 truncate text-[13px]">{d.message || (d.rollback_of ? `Rollback to ${d.rollback_of}` : <span className="text-muted">No message</span>)}</p>

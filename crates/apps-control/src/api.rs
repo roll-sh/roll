@@ -6,10 +6,10 @@
 //! "Permissions and MCP").
 
 use crate::logs::LogLine;
-use crate::model::Trigger;
+use crate::model::{By, Trigger};
 use crate::{Apps, Error, lease_key};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{Extensions, HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -186,12 +186,12 @@ async fn project_services(State(apps): S, Path(project): Path<String>) -> R {
     ok(apps.services(Some(project)).await?)
 }
 
-async fn create_service(State(apps): S, b: Bytes) -> R {
-    let s = apps.create_service(body(&b)?).await?;
+async fn create_service(State(apps): S, ext: Extensions, b: Bytes) -> R {
+    let s = apps.create_service(body(&b)?, actor(&ext)).await?;
     Ok((StatusCode::CREATED, Json(s)).into_response())
 }
 
-async fn create_project_service(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+async fn create_project_service(State(apps): S, Path(project): Path<String>, ext: Extensions, b: Bytes) -> R {
     let mut v = body(&b)?;
     if let Some(p) = v.get("project").and_then(Value::as_str)
         && p != project
@@ -199,7 +199,7 @@ async fn create_project_service(State(apps): S, Path(project): Path<String>, b: 
         return Err(Error::BadRequest("project in the body isn't the path's".into()));
     }
     v["project"] = Value::String(project);
-    let s = apps.create_service(v).await?;
+    let s = apps.create_service(v, actor(&ext)).await?;
     Ok((StatusCode::CREATED, Json(s)).into_response())
 }
 
@@ -297,7 +297,8 @@ async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
 }
 
 /// JSON (`NewDeploy`), or a gzipped tar of the tree (`roll up`).
-async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, headers: HeaderMap, b: Bytes) -> R {
+async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    let actor = actor(&ext);
     let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let key = match headers.get("idempotency-key") {
         Some(v) => Some(v.to_str().map_err(|_| Error::BadRequest("Idempotency-Key is printable ASCII".into()))?),
@@ -307,9 +308,9 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         // Percent-encoded UTF-8 (a commit subject isn't ASCII): `roll up` sends it so.
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
-        apps.deploy(&id, &env, json!({ "message": message, "revision": revision }), Trigger::Upload, Some(b), key).await?
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else {
-        apps.deploy(&id, &env, body(&b)?, Trigger::Manual, None, key).await?
+        apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
@@ -444,18 +445,25 @@ async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query
     stream_log(&apps, format!("env:{id}/{env}"), q, None).await
 }
 
-async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
-    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }).await?;
+/// Who made a request, for the deployments it makes: what rolld's gate put in its extensions
+/// (the operator's token today; on roll-mcp a scoped token's or connection's name,
+/// `roll_auth::Grant`). Nothing a client sends is believed.
+fn actor(ext: &Extensions) -> Option<String> {
+    roll_auth::Operator::on(ext).then(|| "operator".to_string())
+}
+
+async fn redeploy(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let d = apps.redeploy(&id, &env, if b.is_empty() { Value::Null } else { body(&b)? }, actor(&ext)).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
-    let d = apps.promote(&id, &env, body(&b)?).await?;
+async fn promote(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let d = apps.promote(&id, &env, body(&b)?, actor(&ext)).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
-    let d = apps.rollback(&id, &env, &dep).await?;
+async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let d = apps.rollback(&id, &env, &dep, actor(&ext)).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 

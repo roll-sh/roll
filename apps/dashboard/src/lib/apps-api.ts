@@ -215,6 +215,8 @@ export interface Deployment {
   environment: string;
   status: DeployStatus;
   trigger: DeployTrigger;
+  /** Who asked: a push's commit author, the calling token ("operator" for the operator's); null when roll did it on its own. */
+  actor: string | null;
   revision: string | null;
   message: string;
   image: string | null;

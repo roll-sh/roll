@@ -253,7 +253,8 @@ impl Apps {
         }
     }
 
-    pub async fn create_service(self: &Arc<Self>, body: Value) -> Result<Service> {
+    /// `actor`: who asked (the first deployment's).
+    pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
             if !["project", "name", "source", "build", "run", "variables", "x", "y"].contains(&k.as_str()) {
@@ -319,7 +320,7 @@ impl Apps {
         }
         // A repo or an image deploys at once; an upload waits for `roll up`.
         if !matches!(source, Source::Upload) {
-            self.deploy(&row.id, PRODUCTION, json!({}), Trigger::Api, None, None).await?;
+            self.deploy(&row.id, PRODUCTION, json!({}), By { trigger: Trigger::Api, actor: actor.clone() }, None, None).await?;
         }
         self.service(&row.id).await
     }

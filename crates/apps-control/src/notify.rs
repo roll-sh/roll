@@ -206,6 +206,12 @@ impl Apps {
         let name = self.db(move |s| s.service(&sid)).await.map(|s| s.name).unwrap_or_else(|_| e.service.clone());
         let what = format!("{name} in {}", e.environment);
         let rev = e.data["revision"].as_str().map(|r| format!(" ({})", &r[..r.len().min(8)])).unwrap_or_default();
+        // Who asked for the deploy, when someone did.
+        let by = match e.deployment.clone() {
+            Some(d) => self.db(move |s| s.deployment(&d)).await.ok().and_then(|d| d.actor).map(|a| format!(" by {a}")).unwrap_or_default(),
+            None => String::new(),
+        };
+        let rev = format!("{rev}{by}");
         match e.kind.as_str() {
             "deploy.failed" => (format!("{what}: deploy failed"), format!("The deploy{rev} failed: {}. The live deployment keeps serving.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "deploy.active" => (format!("{what}: deployed"), format!("A new deployment{rev} is live.")),

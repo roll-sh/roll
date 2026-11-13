@@ -22,6 +22,8 @@ pub struct Landing {
     pub repo: String,
     pub branch: String,
     pub revision: Revision,
+    /// The landed commit's author (the deployment's actor).
+    pub author: Option<String>,
 }
 
 /// roll code repos (GitHub repos are mirrored into roll code, so they come this way too).

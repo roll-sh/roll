@@ -592,6 +592,19 @@ impl DeployStatus {
     }
 }
 
+/// Why a deployment was made and who asked.
+#[derive(Clone, Debug)]
+pub struct By {
+    pub trigger: Trigger,
+    pub actor: Option<String>,
+}
+
+impl By {
+    pub fn roll(trigger: Trigger) -> By {
+        By { trigger, actor: None }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Trigger {
@@ -648,6 +661,9 @@ pub struct Deployment {
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
     pub ready_ms: Option<i64>,
+    /// Who asked for it: a push's commit author, the token or connection that called the API
+    /// (`operator` for the operator's token), none when roll did it on its own or nothing said.
+    pub actor: Option<String>,
     /// The settings this deployment runs with (frozen when it was made).
     #[serde(skip)]
     pub run: Run,

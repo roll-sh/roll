@@ -173,6 +173,12 @@ every deployment is immutable with instant rollback.
   promote --from staging`, Railway's) deploys the image `from` runs, with no build or pull, under
   the target's own variables and the service's current settings: staging's tested image goes to
   production as it was tested.
+- **Who deployed** (`Deployment.actor`): a push names its commit's author; the API, the CLI and
+  the dashboard name the caller rolld's gate saw (`operator` for the operator's token; on
+  roll-mcp a scoped token's or connection's name, from `roll_auth::Grant`), never anything a
+  client says about itself; deploys roll makes on its own (cron, a settings redeploy it starts)
+  name nobody. The deployments list, `roll apps deploys` and notifications ("deploy failed … by
+  Ada") show it.
 - **Health checks while running** (Render's, Fly's `checks`): with a `health_path`, every
   running web instance is checked every 10 s (`LiveConfig::health_every`); three failures in a
   row (`health_failures`: an app that hangs or answers errors with its port still open) replace
@@ -643,7 +649,8 @@ Ours are done or in `## Next`; theirs (each thread has been told):
   the variables). The tools' fields match, `apps_events.after` is an integer, and its sinks sign
   as roll code and apps do. Ours on merge: register an environment resolver for `"apps"` in
   rolld/src/access.rs (`Resolvers::environments`) answering `Some("preview")` for an ephemeral
-  environment, so the "previews only" preset reaches `pv-<id>` and not a hand-named one. mcp's new `roll-net`
+  environment, so the "previews only" preset reaches `pv-<id>` and not a hand-named one. Also
+  on merge: `api::actor` reads `roll_auth::Grant::on(ext)`'s name before the operator's. mcp's new `roll-net`
   is the SSRF guard everyone should share: apps' `net.rs` and `model::private_ip` move onto it
   once #19 is on main (the ranges and `no_proxy` already match).
 - **roll-previews** drives apps over HTTP (`RollApps`): names, limits, tokens, the bypass hash,
@@ -669,27 +676,25 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Who deployed**: `Deployment.actor` (the token's caller, the pusher, `roll`), in the
-   dashboard, the CLI and notifications.
-2. **Spend limits**: a project's monthly alert threshold (a notification) and a hard limit that
+1. **Spend limits**: a project's monthly alert threshold (a notification) and a hard limit that
    puts its services to sleep, from the metering already kept.
-3. **CLI polish**: confirm `roll apps delete`/`env-delete` (`--yes`), `roll logs -f --grep`, the
+2. **CLI polish**: confirm `roll apps delete`/`env-delete` (`--yes`), `roll logs -f --grep`, the
    hints that name `roll apps set`/`roll deploy` wrongly, `roll apps vars --from-file .env`,
    `roll apps set` flags for timings, volume, type and watch paths.
-4. **Dashboard costs**: pause polling while the tab is hidden; the service page from the event
+3. **Dashboard costs**: pause polling while the tab is hidden; the service page from the event
    log instead of three requests every 15 s.
-5. **Config as code**: `[app]` in `roll.toml` covering run settings (type, size, instances,
+4. **Config as code**: `[app]` in `roll.toml` covering run settings (type, size, instances,
    schedule) and per-environment blocks, with an end-to-end test.
-6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+8. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-10. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+9. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-11. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.
+10. EFS volumes and Cloud Map private DNS on the fleet; TCP services; log drains.

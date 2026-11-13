@@ -37,7 +37,7 @@ impl FakeCode {
         *self.head.lock() = (sha.to_string(), message.to_string());
         let mut l = self.landings.lock();
         let seq = l.len() as i64 + 1;
-        l.push(Landing { seq, repo: "acme/site".into(), branch: "main".into(), revision: Revision { sha: sha.into(), message: message.into() } });
+        l.push(Landing { seq, repo: "acme/site".into(), branch: "main".into(), revision: Revision { sha: sha.into(), message: message.into() }, author: Some("Ada Lovelace".into()) });
     }
 }
 
@@ -273,6 +273,7 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     }
     assert_eq!(d2["status"], "active", "{d2}");
     assert_eq!(d2["trigger"], "push");
+    assert_eq!(d2["actor"], "Ada Lovelace", "a push names its commit's author");
     assert_eq!(settled(&w, &id, "production", &first).await["status"], "inactive");
     // A rollback runs the old image again: no build.
     let builds = Fake::count(&w.fake.counts.builds);

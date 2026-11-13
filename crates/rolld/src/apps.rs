@@ -199,12 +199,14 @@ impl Sources for CodeSources {
             for (seq, l) in this.0.store.land_log(after, limit)? {
                 let Some(branch) = l.ref_name.strip_prefix("refs/heads/") else {
                     // Tags and roll's own refs (`refs/roll/…`) never deploy.
-                    out.push(Landing { seq, repo: String::new(), branch: String::new(), revision: Revision { sha: String::new(), message: String::new() } });
+                    out.push(Landing { seq, repo: String::new(), branch: String::new(), revision: Revision { sha: String::new(), message: String::new() }, author: None });
                     continue;
                 };
                 let row = names.entry(l.repo.clone()).or_insert_with(|| this.0.repo_by_id(&l.repo).ok()).clone();
                 let Some(r) = row else { continue };
-                out.push(Landing { seq, repo: r.full_name(), branch: branch.to_string(), revision: Revision { sha: l.git_commit.to_string(), message: l.summary.clone() } });
+                // Who the deployment it makes names: the landed commit's author.
+                let author = this.0.store.changeset(&l.repo, &l.changeset).ok().flatten().map(|c| c.author.name()).filter(|n| !n.is_empty());
+                out.push(Landing { seq, repo: r.full_name(), branch: branch.to_string(), revision: Revision { sha: l.git_commit.to_string(), message: l.summary.clone() }, author });
             }
             Ok(out)
         })

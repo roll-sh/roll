@@ -37,6 +37,7 @@ percent-encoding.workspace = true
 pg-storage.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 roll-cluster.workspace = true
+roll-auth.workspace = true
 roll-fetch.workspace = true
 roll-workspace.workspace = true
 serde.workspace = true

@@ -49,7 +49,7 @@ impl Apps {
     /// `POST …/deploys`: queue a deployment of the service's source (`revision` for a repo,
     /// `image` to deploy another image), or of `upload` (a `roll up` tree).
     /// With `key` (an `Idempotency-Key`), a retry answers the deployment the first call queued.
-    pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, trigger: Trigger, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
+    pub async fn deploy(self: &Arc<Self>, service: &str, env: &str, body: Value, by: By, upload: Option<Bytes>, key: Option<&str>) -> Result<Deployment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
             if !["revision", "image", "message"].contains(&k.as_str()) {
@@ -91,6 +91,7 @@ impl Apps {
             }
         };
         let mut message = message.unwrap_or_default();
+        let trigger = by.trigger;
         let (revision, image, trigger) = match (&svc.source, upload.is_some(), image) {
             // An upload from a git checkout names its commit (for the list; nothing reads it).
             (_, true, _) => (revision.clone(), None, Trigger::Upload),
@@ -132,7 +133,7 @@ impl Apps {
                 }
             }
         }
-        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.run.clone(), upload: upload_key, status: DeployStatus::Queued };
+        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.run.clone(), upload: upload_key, status: DeployStatus::Queued, actor: by.actor };
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
@@ -153,7 +154,7 @@ impl Apps {
     /// settings and variables (variables are read when its instances are made), without a build
     /// and without moving to another revision. What a change of variables or settings needs,
     /// for every source (an upload service has no source to deploy again).
-    pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Deployment> {
+    pub async fn redeploy(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| k.as_str() != "message") {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -182,6 +183,7 @@ impl Apps {
             run,
             upload: None,
             status: DeployStatus::Queued,
+            actor,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -193,7 +195,7 @@ impl Apps {
     /// `POST …/environments/{env}/promote` `{from}`: deploy what `from` runs (its image, the
     /// revision it was built from) to `env`, without a build, with `env`'s own variables and the
     /// service's current settings (Railway's promotion: staging's tested image to production).
-    pub async fn promote(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Deployment> {
+    pub async fn promote(self: &Arc<Self>, service: &str, env: &str, body: Value, actor: Option<String>) -> Result<Deployment> {
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| !["from", "message"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
@@ -222,6 +224,7 @@ impl Apps {
             run,
             upload: None,
             status: DeployStatus::Queued,
+            actor,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -232,7 +235,7 @@ impl Apps {
 
     /// `POST …/deploys/{dep}/rollback`: deploy an earlier deployment's image and settings
     /// again, without a build.
-    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
+    pub async fn rollback(self: &Arc<Self>, service: &str, env: &str, dep: &str, actor: Option<String>) -> Result<Deployment> {
         let old = self.deployment(service, env, dep).await?;
         let Some(image) = old.image.clone() else { return Err(Error::Conflict(format!("{dep} never built an image, so there's nothing to roll back to"))) };
         let d = NewDeployment {
@@ -245,6 +248,7 @@ impl Apps {
             run: old.run.clone(),
             upload: None,
             status: DeployStatus::Queued,
+            actor,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -974,7 +978,7 @@ impl Apps {
                 let body = serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") });
                 // The owner queues it (it may be another node: the queue is in the store).
                 let key = format!("landing:{}", l.seq);
-                self.deploy(&svc.id, &e.name, body, Trigger::Push, None, Some(&key)).await?;
+                self.deploy(&svc.id, &e.name, body, By { trigger: Trigger::Push, actor: l.author.clone() }, None, Some(&key)).await?;
                 info!(service = %svc.id, env = %e.name, revision = %l.revision.sha, "apps: deploying a push");
             }
         }

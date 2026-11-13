@@ -301,6 +301,7 @@ dependencies = [
  "percent-encoding",
  "pg-storage",
  "reqwest",
+ "roll-auth",
  "roll-cluster",
  "roll-fetch",
  "roll-workspace",
