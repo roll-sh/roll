@@ -586,6 +586,12 @@ async fn a_change_that_adds_a_secrets_value_is_blocked_until_it_is_removed() {
     let scan = b.ok("GET", &format!("{P}/leaks"), None).await;
     assert_eq!((scan["files"].as_u64(), &scan["found"]), (Some(2), &json!([{ "key": "STRIPE_KEY", "environment": "production", "path": "src/pay.js", "line": 2 }])));
     assert!(!scan.to_string().contains("sk_live"));
+    // Removed since: gone from the head, still in history, so it's still out.
+    let fixed = b.ok("POST", &format!("{P}/land"), Some(json!({ "message": "use the env", "files": { "src/pay.js": { "content": "const key = process.env.STRIPE_KEY;\n" } } }))).await;
+    assert!(fixed["changeset"].is_string(), "{fixed}");
+    let scan = b.ok("GET", &format!("{P}/leaks?history=10"), None).await;
+    assert_eq!((scan["found"].as_array().unwrap().len(), scan["commits"].as_u64()), (0, Some(2)));
+    assert_eq!((scan["history"][0]["key"].as_str(), scan["history"][0]["path"].as_str(), scan["history"].as_array().unwrap().len()), (Some("STRIPE_KEY"), Some("src/pay.js"), 1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

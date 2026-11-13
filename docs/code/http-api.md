@@ -484,9 +484,11 @@ Webhook = {id /* wh_… */, url, events: string[], active, created_by, created_a
 Status  = {context, state: "pending" | "success" | "failure" | "error", target_url: string | null,
            description: string | null, creator, created_at, updated_at}
 
-GET    /v1/code/repos/{owner}/{repo}/leaks → {head, files, found: [{key, environment, path, line}], skipped, truncated}
-       roll secrets' values in the default branch's head (docs/secrets.md), never the values; managers
-       (401 anonymous, 403 others and agent tokens); 400 without roll secrets
+GET    /v1/code/repos/{owner}/{repo}/leaks?history= → {head, files, found: [{key, environment, path, line}], skipped,
+       truncated, commits, history: [{key, environment, changeset, path}]}
+       roll secrets' values in the default branch's head (docs/secrets.md), never the values; with
+       history=N (at most 1000) also the first-parent commits that added one; managers (401 anonymous,
+       403 others and agent tokens); 400 without roll secrets or a bad history
 GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                       writers (401 anonymous, 403 others)
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}

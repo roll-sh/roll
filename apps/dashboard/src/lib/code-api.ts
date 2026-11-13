@@ -849,6 +849,9 @@ export interface LeakScan {
   skipped: string[];
   /** The scan stopped at its limit. */
   truncated: boolean;
+  /** Commits read with `history`, and the ones that added a value (newest first). */
+  commits: number;
+  history: { key: string; environment: string; changeset: string; path: string }[];
 }
 
 // ── webhooks and commit statuses ──
@@ -1365,7 +1368,7 @@ export function createCodeApi(
     release: (id: string, agent?: string) => call<WorkItem>("POST", `${wk(id)}/release`, { agent }),
     complete: (id: string, agent?: string) => call<WorkItem>("POST", `${wk(id)}/complete`, { agent }),
 
-    scanLeaks: (repo: string) => call<LeakScan>("GET", `${rp(repo)}/leaks`),
+    scanLeaks: (repo: string, history = 0) => call<LeakScan>("GET", `${rp(repo)}/leaks${history ? `?history=${history}` : ""}`),
     webhooks: (repo: string) => call<Webhook[]>("GET", `${rp(repo)}/webhooks`),
     createWebhook: (repo: string, input: WebhookInput & { url: string }) =>
       call<{ webhook: Webhook; ping: string; secret?: string }>("POST", `${rp(repo)}/webhooks`, input),
