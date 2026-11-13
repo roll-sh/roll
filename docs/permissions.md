@@ -136,9 +136,12 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   name), which the gate takes like a bearer token; roll code's git server then takes the gate's
   word (`code_git::Vouched`) and records the push as `token:<name>`. An `ask` push is bound to its
   ref updates; resend it with `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
+- An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
+  with its variables: `admin` in every environment, as an agent's shell is.
 - Copying another environment's values is reading them: a row with `copies_from` (apps' `PUT
   …/environments/{env}` and its `variables_from`) also needs `reveal` on the same resource in the
-  environment the body names, and the request gets the weaker of the two decisions.
+  environment the body names, and the request gets the weaker of the two decisions. When the copy
+  decides, the approval is about the environment copied from, so remembering it allows exactly that.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,

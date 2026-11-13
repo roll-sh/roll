@@ -100,7 +100,13 @@ export interface Approval {
   decided_at: number | null;
   decided_by: string | null;
   expires_at: number;
+  /** The environment and path the request is about (what remembering it keeps to). */
+  environment?: string | null;
+  scope_path?: string | null;
 }
+
+/** Actions that destroy, ship, expose a credential or change who may do what: approve them with care. */
+export const RISKY: Action[] = ["delete", "deploy", "reveal", "admin"];
 
 export interface AuditEvent {
   id: string;
