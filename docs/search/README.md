@@ -198,13 +198,16 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-1. **Benchmarks against ES 9.5.5 and OpenSearch 3.9** on this machine, pinned and repeated with
-   the variance reported: idle RAM per tenant, cold start (wake from object storage), indexing
-   throughput, p50/p99 latency and RAM/CPU per query; Rally nyc_taxis, http_logs, geonames, so.
-   Write docs/benchmarks/search.md fresh for this round, then optimise where roll loses (round 6
-   lost k-NN on HNSW, range fields, nyc_taxis histograms, nested aggregations), landing a change
-   only on a measured win. Settle one allocator policy: rolld's (purge delay 0, collect on park)
-   against search-dev's purge governor, by a matched benchmark.
+1. **Benchmarks against ES 9.5.5 and OpenSearch 3.9** (docs/benchmarks/search.md, round 7):
+   footprint and micro suite done; Rally http_logs and geonames done for all three targets
+   (geonames: roll loses only `field_value_script_score` and `decay_geo_gauss_script_score`),
+   nyc_taxis done for roll and Elasticsearch (OpenSearch queued), so to finish. Fixed since the
+   nyc_taxis race: date histograms count from the points tree (20-40x), `auto_date_histogram`
+   about 2x, constant-score queries collect in blocks. Next: `distance_amount_agg` (a histogram
+   with a `stats` sub-aggregation, 1.9x behind), the two Painless script scores, nyc_taxis
+   indexing, then a full rerun of every track with variance. Settle one allocator policy:
+   rolld's (purge delay 0, collect on park) against search-dev's purge governor, by a matched
+   benchmark.
 2. **Fleet under load**: `rolld/tests/search_cluster_e2e.rs` (two real `rolld` processes,
    Postgres leases, MinIO; `ROLL_E2E=1`) passes: writes through both nodes, a SIGTERM handover,
    a restart, and a SIGKILL of the owner under a running writer (every acknowledged write
@@ -223,4 +226,6 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `roll_secrets::LinkProvider` (fields `url`, `username`, `password`), private networking for
    apps; wire `resolve_id` into roll-access once #19 lands.
 7. **CI**: measure on GitHub whether a search crate's lib tests fit the one-minute gate; the
-   extended workflow (`search.yml`) runs on demand.
+   extended workflow (`search.yml`) runs on demand. `search-store`'s
+   `wal::mass_recovery_after_node_loss_downloads_each_wal_object_once` failed once on the loaded
+   host while four crates' tests ran together (it passes alone): find what it races on.

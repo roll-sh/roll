@@ -232,6 +232,114 @@ the end of the race: roll 256 MiB, Elasticsearch 2,649 MiB.
 | sort_country_code_can_match_shortcut | p50 service time (ms) | 8.67 (8.67-8.67) | 5.41 (5.41-5.41) |
 | sort_country_code_no_can_match_shortcut | p50 service time (ms) | 8.95 (8.95-8.95) | 6.59 (6.59-6.59) |
 
+`geonames`, all three targets (two races each: roll and Elasticsearch on the binaries and
+containers above, OpenSearch two rounds of one race after its product and version checks were
+skipped). roll indexes at 2x either and wins every task but two Painless script scores:
+`field_value_script_score` (46.8 ms against Elasticsearch's 41.3 and OpenSearch's 42.1) and
+`decay_geo_gauss_script_score` (79.1 against 70.7 and 88.6). `painless_dynamic`, a loss in
+round 0's single run, is a tie (76.5 against 78.3; roll's two runs spread 58.6-94.4). RSS at the
+end: roll 256 MiB, Elasticsearch 2,649-2,756 MiB, OpenSearch 2,797-2,806 MiB.
+
+| task | metric | roll | es | os |
+|---|---|---:|---:|---:|
+| index-append | median throughput (docs/s) | 57491.27 (53983.60-60998.94) | 28085.74 (26573.43-29598.04) | 28683.16 (24578.01-32788.31) |
+| index-append | p50 service time (ms) | 806.99 (747.20-866.78) | 900.07 (864.09-936.06) | 989.34 (972.92-1005.76) |
+| index-stats | median throughput (docs/s) | 419.23 (392.21-446.24) | 178.15 (165.76-190.54) | 213.85 (190.66-237.04) |
+| index-stats | p50 service time (ms) | 1.48 (1.28-1.68) | 3.29 (3.16-3.42) | 2.72 (2.48-2.96) |
+| node-stats | p50 service time (ms) | 1.65 (1.58-1.72) | 6.64 (6.57-6.70) | 4.30 (3.87-4.74) |
+| default | p50 service time (ms) | 1.74 (1.70-1.77) | 4.50 (4.49-4.51) | 3.61 (3.40-3.81) |
+| term | p50 service time (ms) | 0.80 (0.69-0.92) | 2.86 (2.84-2.87) | 2.37 (2.05-2.69) |
+| phrase | p50 service time (ms) | 0.84 (0.83-0.86) | 2.86 (2.81-2.90) | 2.52 (2.27-2.77) |
+| country_agg_uncached | p50 service time (ms) | 23.37 (22.71-24.04) | 27.60 (27.36-27.85) | 39.82 (38.88-40.76) |
+| country_agg_cached | p50 service time (ms) | 1.32 (1.28-1.36) | 3.42 (3.37-3.47) | 3.14 (3.05-3.23) |
+| scroll | p50 service time (ms) | 479.18 (472.25-486.12) | 568.92 (547.15-590.69) | 526.81 (511.78-541.84) |
+| expression | p50 service time (ms) | 58.86 (58.73-58.99) | 71.30 (67.53-75.07) | 81.98 (78.43-85.54) |
+| painless_static | p50 service time (ms) | 83.95 (78.01-89.88) | 89.85 (85.53-94.16) | 91.93 (84.21-99.66) |
+| painless_dynamic | p50 service time (ms) | 76.49 (58.59-94.40) | 78.31 (74.38-82.23) | 94.16 (90.15-98.17) |
+| decay_geo_gauss_function_score | p50 service time (ms) | 62.62 (60.93-64.31) | 66.90 (62.75-71.05) | 72.99 (71.85-74.13) |
+| decay_geo_gauss_script_score | p50 service time (ms) | 79.10 (73.79-84.42) | 70.72 (68.46-72.97) | 88.57 (77.82-99.32) |
+| field_value_function_score | p50 service time (ms) | 14.46 (12.07-16.86) | 25.77 (24.66-26.88) | 28.66 (27.67-29.65) |
+| field_value_script_score | p50 service time (ms) | 46.78 (46.22-47.34) | 41.27 (39.07-43.47) | 42.07 (40.94-43.21) |
+| large_terms | p50 service time (ms) | 105.47 (97.43-113.52) | 144.34 (135.32-153.36) | 196.33 (191.65-201.01) |
+| large_filtered_terms | p50 service time (ms) | 118.75 (111.06-126.44) | 151.69 (141.53-161.84) | 218.25 (172.10-264.40) |
+| large_prohibited_terms | p50 service time (ms) | 107.68 (105.08-110.27) | 155.87 (146.78-164.96) | 203.94 (188.57-219.30) |
+| desc_sort_population | p50 service time (ms) | 4.13 (3.99-4.28) | 6.37 (5.86-6.88) | 6.54 (6.33-6.74) |
+| desc_sort_population_can_match_shortcut | p50 service time (ms) | 4.23 (3.99-4.47) | 6.41 (5.99-6.83) | 8.11 (7.11-9.11) |
+| desc_sort_population_no_can_match_shortcut | p50 service time (ms) | 3.61 (3.51-3.72) | 6.64 (6.47-6.81) | 7.99 (7.12-8.86) |
+| asc_sort_population | p50 service time (ms) | 3.96 (3.94-3.98) | 4.56 (4.45-4.68) | 4.58 (4.31-4.86) |
+| asc_sort_with_after_population | p50 service time (ms) | 3.90 (3.64-4.16) | 5.47 (5.20-5.74) | 5.02 (5.00-5.03) |
+| desc_sort_geonameid | p50 service time (ms) | 5.79 (5.45-6.13) | 6.69 (5.23-8.15) | 8.31 (8.06-8.57) |
+| desc_sort_with_after_geonameid | p50 service time (ms) | 6.33 (5.60-7.06) | 7.60 (7.25-7.96) | 8.11 (8.03-8.19) |
+| asc_sort_geonameid | p50 service time (ms) | 4.61 (4.50-4.72) | 4.77 (4.16-5.37) | 5.70 (5.54-5.85) |
+| asc_sort_with_after_geonameid | p50 service time (ms) | 3.38 (2.90-3.87) | 6.29 (5.90-6.69) | 5.45 (5.34-5.57) |
+| sort_country_code_can_match_shortcut | p50 service time (ms) | 4.85 (4.30-5.41) | 7.68 (6.68-8.67) | 9.25 (7.66-10.85) |
+| sort_country_code_no_can_match_shortcut | p50 service time (ms) | 5.72 (4.85-6.59) | 7.48 (6.01-8.95) | 9.30 (7.69-10.91) |
+
+`nyc_taxis` (`RALLY_DOCS=2000000`: the first 2M trips, one shard), all three targets (two races
+each, as geonames), on the binaries before the date histogram work below. roll indexes fastest
+(49.7k docs/s against 45.8k and 40.6k) and wins the searches 1.3-8x, but loses every
+aggregation: `date_histogram_agg` 46.3 ms against 10.8 and 8.9, `autohisto_agg` 109.0 against
+32.2 and 13.0 (OpenSearch counts it from the points tree), `distance_amount_agg` 161.6 against
+86.3 and 144.1. RSS at the end: roll 198-361 MiB, Elasticsearch 2,502-2,629 MiB, OpenSearch
+2,682-2,692 MiB. Fixed since, measured on the same 2M documents (tuning log): date histograms
+count from the points tree (`date_histogram_agg` 65.9 -> 3.4 ms), `auto_date_histogram` rounds
+through a prepared array, constant-score queries collect in blocks and numeric histograms cache
+bucket ordinals (`autohisto_agg` 138 -> 65-74 ms, `distance_amount_agg` 256 -> 194 ms on the
+loaded host, where Rally's service times are about 0.6x these).
+
+| task | metric | roll | es | os |
+|---|---|---:|---:|---:|
+| index | median throughput (docs/s) | 49696.77 (47460.11-51933.43) | 45766.77 (33557.60-57975.95) | 40594.88 (35717.17-45472.59) |
+| index | p50 service time (ms) | 1557.29 (1474.58-1639.99) | 1229.05 (1189.13-1268.97) | 1474.31 (1440.62-1507.99) |
+| default_no_target | p50 service time (ms) | 1.15 (1.09-1.21) | 9.37 (6.22-12.51) | 7.30 (6.44-8.15) |
+| default_1k | p50 service time (ms) | 10.71 (10.01-11.41) | 17.98 (14.61-21.35) | 21.79 (19.77-23.80) |
+| range | p50 service time (ms) | 5.39 (5.33-5.45) | 10.26 (7.65-12.87) | 7.23 (6.54-7.93) |
+| distance_amount_agg | p50 service time (ms) | 161.64 (152.04-171.24) | 86.33 (77.99-94.67) | 144.14 (131.36-156.91) |
+| autohisto_agg | p50 service time (ms) | 109.00 (77.63-140.37) | 32.20 (29.22-35.18) | 12.99 (7.87-18.11) |
+| date_histogram_agg | p50 service time (ms) | 46.27 (45.35-47.19) | 10.82 (10.31-11.34) | 8.88 (7.72-10.05) |
+
+`http_logs`, all three targets (two races each). roll indexes at 140k docs/s against 94k and 95k
+and beats Elasticsearch on every task but `sort-status-asc-after-force-merge-1-seg` (a tie,
+5.26 against 5.11 ms). OpenSearch wins two: `terms_enum` (0.57 against 1.01 ms) and
+`hourly_agg` (14.0 against 72.7 ms: its filter rewrite counts the hourly buckets from the points
+tree; roll's date histograms do the same now, measured below). RSS at the end: roll 330-348 MiB,
+Elasticsearch 2,338-2,756 MiB, OpenSearch 2,682-2,709 MiB.
+
+| task | metric | roll | es | os |
+|---|---|---:|---:|---:|
+| index-append | median throughput (docs/s) | 139566.64 (130688.58-148444.71) | 93681.85 (91171.81-96191.90) | 95421.78 (94317.75-96525.81) |
+| index-append | p50 service time (ms) | 260.19 (259.37-261.02) | 360.05 (358.40-361.69) | 385.83 (368.82-402.83) |
+| default | p50 service time (ms) | 2.27 (2.21-2.33) | 5.68 (5.55-5.81) | 4.83 (4.55-5.12) |
+| term | p50 service time (ms) | 2.64 (2.63-2.65) | 5.43 (5.16-5.70) | 5.04 (4.93-5.16) |
+| terms_enum | p50 service time (ms) | 1.01 (0.86-1.16) | 3.43 (3.40-3.45) | 0.57 (0.41-0.73) |
+| range | p50 service time (ms) | 1.31 (1.23-1.40) | 3.54 (3.41-3.67) | 3.21 (3.15-3.28) |
+| 200s-in-range | p50 service time (ms) | 8.05 (7.03-9.08) | 10.18 (9.82-10.54) | 9.38 (8.48-10.29) |
+| 400s-in-range | p50 service time (ms) | 2.20 (2.00-2.40) | 6.22 (6.20-6.23) | 6.15 (6.03-6.26) |
+| hourly_agg | p50 service time (ms) | 72.68 (63.50-81.86) | 121.10 (120.82-121.38) | 14.00 (9.99-18.01) |
+| scroll | p50 service time (ms) | 447.67 (446.29-449.05) | 489.04 (472.52-505.56) | 483.48 (466.32-500.63) |
+| desc_sort_timestamp | p50 service time (ms) | 9.44 (7.45-11.43) | 14.97 (14.35-15.59) | 13.33 (12.78-13.88) |
+| asc_sort_timestamp | p50 service time (ms) | 5.81 (5.59-6.03) | 12.42 (12.00-12.85) | 8.90 (8.31-9.50) |
+| desc_sort_with_after_timestamp | p50 service time (ms) | 7.12 (7.08-7.17) | 14.17 (12.66-15.68) | 7.47 (7.45-7.50) |
+| asc_sort_with_after_timestamp | p50 service time (ms) | 1.82 (1.72-1.92) | 6.14 (5.95-6.32) | 4.59 (4.53-4.65) |
+| desc_sort_timestamp_can_match_shortcut | p50 service time (ms) | 9.62 (6.98-12.26) | 12.45 (12.19-12.72) | 21.01 (20.44-21.59) |
+| desc_sort_timestamp_no_can_match_shortcut | p50 service time (ms) | 9.53 (6.55-12.51) | 22.09 (21.60-22.57) | 22.96 (22.45-23.47) |
+| sort_size_desc | p50 service time (ms) | 6.21 (5.87-6.56) | 7.34 (7.26-7.41) | 6.84 (6.34-7.33) |
+| sort_size_asc | p50 service time (ms) | 3.88 (3.70-4.05) | 6.75 (6.23-7.27) | 6.19 (5.72-6.65) |
+| sort_status_desc | p50 service time (ms) | 5.34 (4.93-5.75) | 7.51 (6.48-8.54) | 7.06 (6.93-7.19) |
+| sort_status_asc | p50 service time (ms) | 5.95 (5.17-6.73) | 7.02 (6.83-7.22) | 6.53 (6.38-6.67) |
+| sort_keyword_can_match_shortcut | p50 service time (ms) | 4.02 (3.62-4.43) | 6.67 (6.54-6.80) | 6.63 (6.60-6.67) |
+| sort_keyword_no_can_match_shortcut | p50 service time (ms) | 4.69 (4.59-4.78) | 5.97 (5.65-6.29) | 6.13 (6.03-6.23) |
+| sort_numeric_can_match_shortcut | p50 service time (ms) | 5.63 (5.49-5.77) | 8.23 (7.79-8.67) | 8.85 (8.28-9.41) |
+| sort_numeric_no_can_match_shortcut | p50 service time (ms) | 4.99 (4.75-5.23) | 7.65 (7.41-7.88) | 8.37 (7.64-9.10) |
+| desc-sort-timestamp-after-force-merge-1-seg | p50 service time (ms) | 6.11 (5.67-6.56) | 18.19 (10.53-25.85) | 14.72 (12.12-17.33) |
+| asc-sort-timestamp-after-force-merge-1-seg | p50 service time (ms) | 6.72 (6.32-7.13) | 6.79 (6.05-7.54) | 7.08 (5.69-8.48) |
+| desc-sort-with-after-timestamp-after-force-merge-1-seg | p50 service time (ms) | 6.13 (6.06-6.20) | 17.53 (9.31-25.74) | 6.77 (6.26-7.28) |
+| asc-sort-with-after-timestamp-after-force-merge-1-seg | p50 service time (ms) | 1.44 (1.42-1.47) | 4.84 (4.78-4.89) | 4.62 (4.37-4.87) |
+| sort-size-desc-after-force-merge-1-seg | p50 service time (ms) | 5.41 (5.20-5.61) | 9.26 (8.17-10.35) | 6.66 (6.22-7.11) |
+| sort-size-asc-after-force-merge-1-seg | p50 service time (ms) | 5.12 (5.07-5.18) | 6.50 (5.41-7.58) | 6.42 (6.01-6.83) |
+| sort-status-desc-after-force-merge-1-seg | p50 service time (ms) | 4.10 (4.08-4.12) | 6.89 (5.90-7.88) | 7.03 (6.41-7.66) |
+| sort-status-asc-after-force-merge-1-seg | p50 service time (ms) | 5.26 (4.88-5.64) | 5.11 (4.99-5.23) | 6.31 (5.70-6.92) |
+
 ## Round 6: every Rally track, indexing, memory and cold start (perf-bench lane, 2026-10-28)
 
 A busy host this time (1-minute load 30–58 on 36 threads, other lanes building): Rally ran
@@ -865,6 +973,10 @@ totals, ids, scores, sort values and aggregations).
 | term dictionary intersections step a table DFA (`Automaton::as_dfa`) with inlined lookups instead of three virtual calls per byte | `search-codec` `automaton/`, `terms.rs` | geonames `wildcard` `*berg*` on `name.raw` CPU 117–127 ms | 84–86 ms (Elasticsearch 78–93); wall 20 vs 22 ms |
 | batched doc-values reads of a sparse field rank a batch's docs in one pass (`DocSet::for_each_rank`: each block looked up once, a running count from word to word in dense blocks, a forward search in sparse ones) instead of a block lookup, a rank-table read and up to eight popcounts per doc | `search-codec` `docset.rs`, `docvalues.rs` (`batch_ranks`) | geonames `histogram` of `elevation` (sparse) with `avg` and `max` sub-aggregations CPU 60 ms (wall 19), `rank` 80% of it | 32 ms (wall 13; Elasticsearch 53, wall 16) |
 | `significant_terms` on a keyword with ordinals maps each (owning bucket, segment ordinal) to its key once per segment: a seen term costs one hash probe instead of decoding the term and building and cloning its identity | `search-aggs` `bucket/significant.rs` (`SegOrds`) | geonames `significant_terms` of `feature_code.raw` under a `term` query CPU 30–32 ms (wall 12–20) | 12 ms (wall 5.2; Elasticsearch 13–18, wall 5.8–8.7) |
+| a top-level `date_histogram` without sub-aggregations under a `match_all`, an `exists` or a range on its field (UTC, no offset) counts each bucket from the points tree on every segment without deletions or `_doc_count` values, collecting none of its documents (Elasticsearch's `FromDateRange` rewrite); the shard query now reaches the aggregations whenever it alone decides what is collected | `search-aggs` `filter_rewrite.rs` (`FilterRewrite::counting`), `bucket/histogram.rs`; `search-index` `query/range.rs` (`PointRangeQuery::count_points`); `search-es` `search/mod.rs` | nyc_taxis (2M docs, one shard, wall p50) `date_histogram_agg` 65.9 ms, `date_histogram_calendar_interval` 102.8, `date_histogram_fixed_interval` 98.7 | 3.4, 2.5, 2.5 ms (Elasticsearch in Rally: 11.3 ms for the first) |
+| `auto_date_histogram` with one owning bucket rounds through the segment's prepared rounding array (re-prepared when it moves to a coarser rounding) with a per-slot bucket ordinal cache cleared on every rebucket, and decodes a batch's long doc values in one run | `search-aggs` `bucket/auto_histogram.rs` | nyc_taxis `autohisto_agg` 138.4 ms, `auto_date_histogram` 246.0 ms (wall p50) | 92.4, 156.2 ms |
+| constant-score scorers (a point range's doc set, `constant_score` and filter-only `bool` wrappers) hand collectors that skip nothing blocks of 256 matches (`LeafCollector::collect_block`, as `match_all` did) instead of a call per doc through the multi-collector; a numeric `histogram` caches each key's bucket ordinal in a slot per key of the segment's value range (at most 4,096) instead of a hash lookup per value | `search-index` `search/mod.rs` (`Scorer::constant_score`, `DefaultBulkScorer`), `query/basic.rs`; `search-aggs` `bucket/histogram.rs` (`add_numeric`) | nyc_taxis `autohisto_agg` 90.6 ms, `auto_date_histogram` 159.2, `distance_amount_agg` 256.3, `date_histogram_calendar_interval` 2.75 (wall p50) | 64.9-74.1, 109.8, 194.3, 1.47 ms |
+| a numeric `histogram` floors its keys without a libm call (baseline x86-64 has no rounding instruction; exact below 2^52, `f64::floor` otherwise), and `stats` adds a doc's single value in straight-line code (count, compensated sum, Java min and max) instead of the generic loop over a one-value slice | `search-aggs` `bucket/histogram.rs` (`floor`), `metrics/simple.rs` (`add_one`) | nyc_taxis `distance_amount_agg` 187.3 ms (wall p50) | 152.1 ms |
 
 Measured and not adopted in round 6: slicing field sorts and queries with score bounds. Their
 serial competitive pruning is so effective that slices only add work: on geonames

@@ -261,6 +261,15 @@ impl SimpleAgg {
                 self.sums[ord] = k.value;
                 self.comps[ord] = k.delta;
             }
+            SimpleKind::Stats => {
+                self.counts[ord] += 1;
+                let mut k = CompensatedSum::new(self.sums[ord], self.comps[ord]);
+                k.add(v);
+                self.sums[ord] = k.value;
+                self.comps[ord] = k.delta;
+                self.mins[ord] = java_min(self.mins[ord], v);
+                self.maxs[ord] = java_max(self.maxs[ord], v);
+            }
             _ => self.add_values(ord, &[v]),
         }
     }
@@ -587,6 +596,10 @@ impl Aggregator for SimpleAgg {
                         for (p, raw) in batch.docs() {
                             let ord = b.ords[p];
                             self.ensure(ord)?;
+                            if let [v] = raw {
+                                self.add_one(ord as usize, decode.to_f64(*v));
+                                continue;
+                            }
                             dbuf.clear();
                             dbuf.extend(raw.iter().map(|&v| decode.to_f64(v)));
                             self.add_values(ord as usize, &dbuf);

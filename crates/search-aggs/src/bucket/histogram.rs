@@ -468,6 +468,7 @@ pub fn create_histogram(def: &AggDef, spec: &HistogramSpec, ctx: &mut BindCtx<'_
         batch: Default::default(),
         prepared: None,
         slot_ords: Vec::new(),
+        num_min: None,
         name: def.name.clone(),
         out: Out::Numeric { cfg, empty },
         starts: None,
@@ -546,6 +547,7 @@ pub fn create_date_histogram(def: &AggDef, spec: &DateHistogramSpec, ctx: &mut B
         batch: Default::default(),
         prepared: None,
         slot_ords: Vec::new(),
+        num_min: None,
         name: def.name.clone(),
         out: Out::Date { cfg, empty, offset: rounding.offset },
         starts,
@@ -598,6 +600,22 @@ fn min_bucket_millis(r: &Rounding) -> f64 {
     }
 }
 
+/// `x.floor()` without a libm call (baseline x86-64 has no rounding instruction): exact below
+/// 2^52 in magnitude, where truncating to an integer is exact; zeros (their sign), NaN and
+/// larger values go to `f64::floor`.
+#[inline]
+fn floor(x: f64) -> f64 {
+    if x != 0.0 && x.abs() < 4_503_599_627_370_496.0 {
+        let t = x as i64 as f64;
+        if t > x { t - 1.0 } else { t }
+    } else {
+        x.floor()
+    }
+}
+
+/// Most keys a numeric histogram caches bucket ordinals for, per segment.
+const NUM_SLOTS: f64 = 4096.0;
+
 struct HistoAgg {
     /// Batch-decoded doc values (fields without script or `missing`).
     batch: crate::values::NumBatch,
@@ -625,6 +643,9 @@ struct HistoAgg {
     /// value costs a binary search and no hash lookup.
     prepared: Option<crate::rounding::PreparedRounding>,
     slot_ords: Vec<u64>,
+    /// histogram: the smallest key of the segment's value range; key `k` then caches its
+    /// `(owning << 32 | ord)` in `slot_ords[k - min]` (a range of at most `NUM_SLOTS` keys).
+    num_min: Option<f64>,
     /// Profiled opensearch-dialect date histograms: OpenSearch's leaf collector counts and
     /// filter rewrite replay.
     os: Option<Box<OsDateDebug>>,
@@ -717,6 +738,28 @@ impl HistoAgg {
         Ok(())
     }
 
+    /// [`add`](Self::add) of a numeric key through the segment's slot cache.
+    #[inline]
+    fn add_numeric(&mut self, owning: u32, key: f64, doc: u32, score: f32) -> Result<()> {
+        // -0.0 is a bucket of its own (keys are double bits, as in Elasticsearch).
+        if let Some(min) = self.num_min
+            && !(key == 0.0 && key.is_sign_negative())
+        {
+            let at = key - min;
+            if at >= 0.0 && (at as usize) < self.slot_ords.len() {
+                let at = at as usize;
+                let c = self.slot_ords[at];
+                if c != u64::MAX && c >> 32 == u64::from(owning) {
+                    return self.add_existing(c as u32, doc, score);
+                }
+                let ord = self.add_ord(owning, key.to_bits(), doc, score)?;
+                self.slot_ords[at] = u64::from(owning) << 32 | u64::from(ord);
+                return Ok(());
+            }
+        }
+        self.add(owning, key.to_bits(), doc, score)
+    }
+
     #[inline]
     fn add(&mut self, owning: u32, key: u64, doc: u32, score: f32) -> Result<()> {
         self.add_ord(owning, key, doc, score).map(|_| ())
@@ -758,14 +801,14 @@ impl HistoAgg {
                     let mut prev = f64::NEG_INFINITY;
                     let mut first = true;
                     for &rv in raw {
-                        let key = ((decode.to_f64(rv) - offset) / interval).floor();
+                        let key = floor((decode.to_f64(rv) - offset) / interval);
                         if !first && key == prev {
                             continue;
                         }
                         first = false;
                         prev = key;
                         if hard.is_none_or(|h| h.contain(key * interval)) {
-                            self.add(b.ords[p], key.to_bits(), doc, b.score(p))?;
+                            self.add_numeric(b.ords[p], key, doc, b.score(p))?;
                         }
                     }
                 }
@@ -969,6 +1012,21 @@ impl Aggregator for HistoAgg {
             self.reader = if self.vs.unmapped && self.vs.missing.is_none() { None } else { Some(self.vs.numeric_reader(seg)?) };
         }
         self.prepared = None;
+        self.num_min = None;
+        if let (KeyFn::Numeric { interval, offset, .. }, Some(r)) = (&self.key_fn, &self.reader)
+            && let Some((dv, decode)) = r.raw()
+            && let Some((lo, hi)) = dv.raw_bounds()
+        {
+            // Any key in range has its slot: the cache is keyed by the key itself, so the
+            // bounds only size it (they needn't decode monotonically).
+            let (a, b) = (((decode.to_f64(lo) - offset) / interval).floor(), ((decode.to_f64(hi) - offset) / interval).floor());
+            let (min, max) = (a.min(b), a.max(b));
+            if min.is_finite() && max.is_finite() && max - min < NUM_SLOTS {
+                self.num_min = Some(min);
+                self.slot_ords.clear();
+                self.slot_ords.resize((max - min) as usize + 1, u64::MAX);
+            }
+        }
         if let (KeyFn::Date { rounding, .. }, Some(r)) = (&self.key_fn, &self.reader)
             && let Some((dv, decode @ (crate::values::Decode::Long | crate::values::Decode::Nanos))) = r.raw()
             && let Some((lo, hi)) = dv.raw_bounds()
@@ -1624,4 +1682,22 @@ impl MultiBuckets for DateHistogram {
 /// Count of inner buckets (for `bucket_count`-style accounting of removed buckets).
 pub fn inner(aggs: &Aggs) -> usize {
     count_inner_buckets(aggs)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn floor_is_f64_floor() {
+        let edge = [0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 1e-300, -1e-300, 2.5, -2.5, 4_503_599_627_370_495.5, -4_503_599_627_370_495.5, 4_503_599_627_370_496.0, 9e15, -9e15, 1e300, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, f64::MIN_POSITIVE];
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let random = (0..100_000).map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            f64::from_bits(x)
+        });
+        for v in edge.into_iter().chain(random) {
+            assert_eq!(super::floor(v).to_bits(), v.floor().to_bits(), "{v:e}");
+        }
+    }
 }
