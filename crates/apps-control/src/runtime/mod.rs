@@ -1,15 +1,18 @@
 //! Where instances run (docs/apps/README.md, "The runtime"): [`docker::Docker`] on this host (one
-//! node and development) and [`fake::Fake`] in process (tests). The Fargate runtime for the fleet
-//! goes behind the same trait.
+//! node and development), [`fargate::Fargate`] on the fleet (builds by [`codebuild::CodeBuild`],
+//! settings in [`aws::FleetConfig`]) and [`fake::Fake`] in process (tests).
 //!
 //! An instance is made ahead of time ([`Runtime::create`]: the image pulled, the container
 //! created, nothing running), so a wake is a start, not a pull. [`Runtime::suspend`] freezes a
 //! running instance where the runtime can (memory kept, no CPU); [`Runtime::stop`] stops it and
 //! keeps it created.
 
+pub mod aws;
+pub mod codebuild;
 pub mod docker;
 pub mod engine;
 pub mod fake;
+pub mod fargate;
 
 use crate::logs::LogSink;
 use async_trait::async_trait;

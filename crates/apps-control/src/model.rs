@@ -81,15 +81,21 @@ pub fn registry_host(image: &str) -> Option<&str> {
 
 /// A host on this machine or a private network: loopback, private, link-local, unique-local
 /// addresses and `localhost`.
-fn private_host(host: &str) -> bool {
+pub(crate) fn private_host(host: &str) -> bool {
     let name = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h).trim_start_matches('[').trim_end_matches(']');
     if name.eq_ignore_ascii_case("localhost") || name.to_ascii_lowercase().ends_with(".localhost") {
         return true;
     }
-    match name.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(a)) => a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified() || a.octets()[0] == 100 && (a.octets()[1] & 0xc0) == 64,
-        Ok(std::net::IpAddr::V6(a)) => a.is_loopback() || a.is_unspecified() || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80,
-        Err(_) => false,
+    name.parse().is_ok_and(private_ip)
+}
+
+pub(crate) fn private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(a) => a.is_loopback() || a.is_private() || a.is_link_local() || a.is_unspecified() || a.octets()[0] == 100 && (a.octets()[1] & 0xc0) == 64,
+        std::net::IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(v4) => private_ip(v4.into()),
+            None => a.is_loopback() || a.is_unspecified() || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80,
+        },
     }
 }
 
