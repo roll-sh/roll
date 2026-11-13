@@ -661,14 +661,16 @@ one's instances drain, and the deploy fails with the numbers ("rolled back at 10
 deployment (`switch_active`, the same compare-and-swap) and the old instances drain. Canceling
 the deploy, or Roll back on the service page, does the same as a failed step. The environment
 shows `canary` (deployment and share) while one runs, and each step is in the deployment's
-steps (`canary_10`).
+steps (`canary_10`). A visitor stays on one deployment through a step (Vercel's rolling
+releases): while a canary runs, the proxy gives a visitor without one a `roll_bucket` cookie
+(0–99, a day) and sends buckets under the share to the new deployment; the cookie never reaches
+the app. A client that keeps no cookies is routed by turns, as above.
 
 A rollout splits requests, so it needs a web service whose old deployment is running. The first
 deployment, an environment that's asleep, a worker and a cron service switch at once, and a
 service with a volume refuses `steps` (one instance writes it). The state lives on the owner.
 If the owner changes mid-rollout, the new owner runs the deploy again from the start, like any
-other deploy it takes over. A visitor isn't pinned to one deployment yet: within a step, their
-requests can reach either.
+other deploy it takes over.
 
 ## A service and its database
 
@@ -892,41 +894,38 @@ Ranked; the top item not marked *waiting* is what's being worked on. A product r
 2026-11-13 against Railway, Render, Fly, Vercel, Cloud Run and Heroku set this order (after the
 earlier security, product and integration reviews).
 
-1. **Sticky rollouts**: a visitor stays on one deployment through a gradual rollout (a
-   `roll_bucket` cookie compared with the step's share, as Vercel's rolling releases), so the
-   numbers are clean and a page's client and server versions match.
-2. **Deploy hooks and image tag watching**: a secret deploy URL per environment (only its hash
+1. **Deploy hooks and image tag watching**: a secret deploy URL per environment (only its hash
    stored; it can only deploy the service's own image repository), as Render's, and an opt-in
    watch that redeploys an image service when its tag moves, as Railway's Image Auto Updates.
-3. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
+2. **A URL per deployment, and deploying without traffic**: `<dep>--<slug>` hostnames behind the
    environment's access token, and `no_traffic` deploys promoted later (Cloud Run's revision
    tags, Vercel's deployment URLs).
-4. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
+3. **Static sites from the CDN**: a static plan's output under a per-deployment prefix in a roll
    bucket, served by the CDN Worker with the SPA fallback; no instance, no cold start, no meter
    (Render's and Vercel's static sites).
-5. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
+4. **HTTP/2 to the app (gRPC)**: `run.h2c`, an HTTP/2-only upstream client and health check
    (Cloud Run's `--use-http2`, Fly's `h2_backend`); then TCP services.
-6. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
+5. **A project in one file**: `[apps.<name>]` and `[[databases]]` in a root `roll.toml`, applied
    by `roll up --all` with the plan shown first (Render's Blueprints), then importing a Compose
    file's image services (Railway's).
-7. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
+6. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-8. **Region**: the region shown on the overview and each environment, defaulting to the project's
+7. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-9. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+8. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-10. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+9. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-11. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+10. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-12. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-13. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+11. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+12. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-14. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+13. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-15. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+14. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

@@ -161,6 +161,36 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     None
 }
 
+/// A visitor's gradual-rollout bucket (docs/apps/README.md, "Gradual rollouts").
+const BUCKET: &str = "roll_bucket";
+
+/// The visitor's rollout bucket from its cookie (0–99), taken out of the cookies the app sees.
+fn take_bucket(req: &mut Request) -> Option<u8> {
+    let mut bucket = None;
+    let mut kept = Vec::new();
+    let mut ours = false;
+    for v in req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()) {
+        for c in v.split(';').map(str::trim).filter(|c| !c.is_empty()) {
+            match c.strip_prefix(&format!("{BUCKET}=")) {
+                Some(n) => {
+                    ours = true;
+                    bucket = n.parse::<u8>().ok().filter(|n| *n < 100);
+                }
+                None => kept.push(c.to_string()),
+            }
+        }
+    }
+    if ours {
+        req.headers_mut().remove(header::COOKIE);
+        if !kept.is_empty()
+            && let Ok(v) = HeaderValue::from_str(&kept.join("; "))
+        {
+            req.headers_mut().insert(header::COOKIE, v);
+        }
+    }
+    bucket
+}
+
 /// The 401 of a private environment. A preview's (`pv-…`) links into the dashboard, which signs
 /// the reviewer in and sends them on with the link that has the token.
 async fn denied(apps: &Arc<Apps>, service: &str, env: &str) -> Response {
@@ -224,7 +254,16 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
         Ok(l) => l,
         Err(e) => return page(StatusCode::NOT_FOUND, "Not deployed", &e.to_string()),
     };
-    let lease = match live.acquire().await {
+    // A gradual rollout keeps each visitor on one deployment: their bucket, from the cookie it
+    // gave them (never passed to the app), or a new one while a canary runs.
+    let mut bucket = take_bucket(&mut req);
+    let fresh = bucket.is_none() && live.canary().is_some();
+    if fresh {
+        let mut b = [0u8; 1];
+        getrandom::fill(&mut b).expect("system randomness");
+        bucket = Some(b[0] % 100);
+    }
+    let lease = match live.acquire_for(bucket).await {
         Ok(l) => l,
         Err(WakeError::NoDeployment) => return page(StatusCode::NOT_FOUND, "Not deployed yet", "This service has no deployment in this environment yet."),
         Err(WakeError::NotWeb) => return page(StatusCode::NOT_FOUND, "Not a web service", "This service is a worker or a cron job: it doesn't answer HTTP."),
@@ -334,6 +373,12 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, mut req: Request) -> R
         return resp.map(Body::new);
     }
     strip_hop_by_hop(resp.headers_mut(), false);
+    if let (true, Some(b)) = (fresh, bucket) {
+        let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+        if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
+            resp.headers_mut().append(header::SET_COOKIE, c);
+        }
+    }
     // Count the bytes out, and keep the instance leased until the body is sent.
     let counted = Arc::new(AtomicU64::new(0));
     let (parts, body) = resp.into_parts();

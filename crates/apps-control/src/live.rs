@@ -291,13 +291,14 @@ impl EnvLive {
         self.insts.lock().clone()
     }
 
-    /// The deployment a request goes to: the canary's share of them, by turns (37 is coprime
-    /// with 100, so each hundred requests sends exactly that many, spread out), else the active
-    /// one.
-    fn route(&self) -> Option<Arc<Template>> {
+    /// The deployment a request goes to: a visitor's bucket (0–99, its `roll_bucket` cookie)
+    /// below the canary's share goes to the canary, so a visitor stays on one deployment through
+    /// a step; without one, the canary's share of requests by turns (37 is coprime with 100, so
+    /// each hundred requests sends exactly that many, spread out).
+    fn route(&self, bucket: Option<u8>) -> Option<Arc<Template>> {
         if let Some((c, share)) = self.canary.lock().clone() {
-            let n = self.routed.fetch_add(1, Ordering::Relaxed) % 100;
-            if (n * 37) % 100 < share as u64 {
+            let b = bucket.map_or_else(|| (self.routed.fetch_add(1, Ordering::Relaxed) % 100 * 37) % 100, u64::from);
+            if b < share as u64 {
                 return Some(c);
             }
         }
@@ -483,6 +484,11 @@ impl EnvLive {
     /// started (the cold start), within `wake_timeout`. Requests that come while one wakes wait
     /// for the same wake.
     pub async fn acquire(self: &Arc<Self>) -> Result<Lease, WakeError> {
+        self.acquire_for(None).await
+    }
+
+    /// [`Self::acquire`] for a visitor in rollout `bucket` (0–99).
+    pub async fn acquire_for(self: &Arc<Self>, bucket: Option<u8>) -> Result<Lease, WakeError> {
         let began = Instant::now();
         if self.closed.load(Ordering::SeqCst) {
             return Err(WakeError::NoDeployment);
@@ -493,7 +499,7 @@ impl EnvLive {
         if self.held.load(Ordering::SeqCst) {
             return Err(WakeError::Busy);
         }
-        let tpl = self.route().ok_or(WakeError::NoDeployment)?;
+        let tpl = self.route(bucket).ok_or(WakeError::NoDeployment)?;
         if tpl.run.kind != RunType::Web {
             return Err(WakeError::NotWeb);
         }

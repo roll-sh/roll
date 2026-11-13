@@ -1250,7 +1250,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gradual_rollout_shares_requests_and_rolls_back_a_deployment_that_errors() {
     let w = world().await;
-    let run = json!({"port": 80, "min_instances": 1, "rollout": {"steps": [50], "step_s": 1, "error_pct": 20}});
+    let run = json!({"port": 80, "min_instances": 1, "rollout": {"steps": [50], "step_s": 2, "error_pct": 20}});
     // The first deployment has nothing to share requests with: it switches at once.
     let (svc, d1) = image_service(&w, "api", run).await;
     assert_eq!(d1["status"], "active", "{d1}");
@@ -1280,8 +1280,31 @@ async fn a_gradual_rollout_shares_requests_and_rolls_back_a_deployment_that_erro
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let t = traffic(&w, stop.clone());
     let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    // A visitor keeps their deployment through the step: bucket 10 is under the 50% share, 90
+    // isn't; a visitor without a bucket is given one.
+    let canary = get_until(&w.api, &base, |e| e["canary"].is_object()).await;
+    let new_id = canary["canary"]["deployment"].clone();
+    let as_visitor = |cookie: Option<&'static str>| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move {
+            let mut req = Request::builder().uri("/").header("host", &h);
+            if let Some(c) = cookie {
+                req = req.header("cookie", c);
+            }
+            let resp = public.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            let set = resp.headers().get("set-cookie").map(|v| v.to_str().unwrap().to_string());
+            let b = resp.into_body().collect().await.unwrap().to_bytes();
+            (serde_json::from_slice::<Value>(&b).unwrap()["deployment"].clone(), set)
+        }
+    };
+    for _ in 0..5 {
+        assert_eq!(as_visitor(Some("theme=dark; roll_bucket=10")).await, (new_id.clone(), None));
+        assert_eq!(as_visitor(Some("roll_bucket=90")).await, (d1["id"].clone(), None));
+    }
+    assert!(as_visitor(None).await.1.is_some_and(|c| c.starts_with("roll_bucket=")), "a new visitor gets a bucket");
     let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
     assert_eq!(d2["status"], "active", "{d2}");
+    assert_eq!(new_id, d2["id"]);
     assert!(d2["steps"].as_array().unwrap().iter().any(|s| s["step"] == "canary_50"), "{d2}");
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let seen = t.await.unwrap();
