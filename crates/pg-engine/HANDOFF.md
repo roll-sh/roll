@@ -10985,6 +10985,115 @@ the full regression suite against a private PostgreSQL 18.6 reference 51,148 / 5
 none newly differing; isolation 1647/1648 permutations (the known one); pg_dump_tap 14,609
 passed. No format change.
 
+## Bulk writes, round 14 (agent 228)
+
+BENCH.md "Bulk writes, round 14" has the measurements: on the 1M-row bulk sequence, settled and
+with the background work counted, all steps 66.5 -> 61.9 G user instructions (median of ten
+rounds, every round lower: 1.27x -> 1.18x PostgreSQL's, 1.49x -> 1.39x pgrust's); CREATE INDEX
+-3.3 to -8.9% and its compaction (1.0-2.9 G) gone, CREATE UNIQUE INDEX -4.0 to -12.1% and its
+compaction (1.2-2.7 G) gone; every other step within 0.5% at the median but DELETE (+1.1%, base's
+own spread 3.8%); MB written the same (median 201), cgroup peak median 343 -> 301 MB;
+pgbench select-only and tpcb-like flat. Three changes, each its own commit, gated together (the
+first two are what lets the third go in):
+
+- **Compaction merges only the L1 files an L0 file has keys in** (`SstReader::has_user_key_in`,
+  `Store::compact`), not every file its range meets: for each L1 file in an L0 file's range the
+  L0 file's block that would hold the L1 file's first key is read once (uncached) and the file
+  is merged only when it holds a key in the L1 file's range. A commit's tiny L0 file of catalog
+  rows and size estimates spans the store's own keys and a table or two; it now compacts with
+  the few small files it has keys in. Test `compaction_leaves_l1_files_an_l0_file_has_no_keys_in`.
+- **Compaction policy** (`Store::maybe_compact`):
+  - **due on L0's deletions** (`deletions_due`): when L0's files hold 2^16 deletions or more,
+    an eighth or more of the entries of the L1 files their ranges meet (a bulk DELETE's
+    tombstones of rows and index entries), not only at four L0 files. Each file's writer counts
+    its deletions (`SstMeta::deletes`, plain tombstones or a spilled run's tagged ones); the
+    count is not stored (a file of an earlier session counts 0, and the file count applies as
+    before), so the manifest's and files' formats are unchanged.
+  - **waits for the committing statement's own snapshot** (`wait_unpinned`): at the trigger,
+    up to 250 ms (1 ms polls of `gc_horizon`) while the horizon is at or past the commit before
+    the newest one L0 holds but before the newest: a compaction started under the bulk
+    UPDATE's or DELETE's own snapshot kept every version the commit replaced (agent 224's
+    round 13: the table's file kept 1.5M entries), and nothing compacted them until L0 filled
+    again. An older snapshot (a long transaction's) isn't waited for.
+  - **small L0 files go to L1 at once**: when L0 holds a sixty-fourth of `target_file_bytes`
+    (1 MB) or less, it is compacted when the L1 files its keys are in are as small
+    (`compact_within`), or whatever they are after a commit linked a run straight into L1 (an
+    index build's, a load's: `linked_bottom`), as the compaction of the build's runs in L0 took
+    them before. Without the latter, pgbench's initialisation left a 3 kB file spanning the
+    store's keys, pgbench_accounts and its primary key in L0, and select-only took 7-8% more
+    instructions a transaction (every index probe seeks in it).
+  - Tests: `deletions_and_small_files_compact_below_the_file_count` (storage),
+    `kill_during_compactions_after_deletes` (`tests/crash_bulk.rs`: kill -9 while batches COPY
+    44,000 rows, delete half of the batch before (66,000 deletions with the two indexes'
+    entries, a compaction due each time) and update a small table; every committed batch there
+    after reopening, the one cut short all or nothing, indexes agreeing).
+- **A parallel index build's entries go in as one run** (agent 224's `index-build-one-run.patch`,
+  `Txn::put_index_run`): the participants' sorted entries merged into one linked run, alone in
+  its range, so it goes to L1 at commit; the compaction merging three runs after each index
+  build (1.0-2.9 and 1.2-2.7 G instructions in base) is gone. Round 13 dropped it because without that
+  compaction nothing cleared the tiny L0 files: the trigger then fell on the bulk UPDATE's
+  commit (under its snapshot) and DELETE's runs stayed in L0 (ANALYZE +43%, count(*) +64%), and
+  pgbench select-only took +3.4%. The policy above is what fixes each.
+
+Measured and not kept (patches and notes in `~/.cache/a228/patches/`):
+- **One zstd context per thread** (compression and decompression contexts made once per thread,
+  not per block by `zstd::bulk`): same bytes, no measurable change (COPY in -0.1%). Offline, on
+  the compaction's 97 MB of raw blocks: no zstd parameter makes compression cheaper without
+  more bytes (level -1: -15% CPU, +13% bytes; minMatch 4: +9% CPU, -12% bytes).
+- **Agent 208's compact lock set growing without rehashing, and `int % int` in 64 bits**, on
+  top of the kept set: DELETE -3.1 / -1.8 / -5.1 / +8.8 / +1.7%, UPDATE -0.6 to -1.4%: not 3% in
+  every round (as in round 11).
+- **Agent 217's fold** (lead 1's re-measure: a 2^16-entry L0 file holding a quarter of the
+  entries of the L1 files it meets compacts at once, after the pin wait), on top of the kept
+  set: UPDATE +2.7 to +4.4% and 2.6-5.0 G of background after it, DELETE -1.7%, the compaction
+  after DELETE -8%; all steps +2.4 to +4.8 G. The table is rewritten once more before DELETE's
+  compaction rewrites it with both indexes again.
+- Step 0 of this round: `wire::big_bytea_values_go_out_in_linear_time` alone in debug on
+  `0d34ba0ee`, pinned to the build CPUs, three runs: passed, 17.5 / 15.2 / 16.6 s against its
+  20 s bound (the build CPUs 61-71% busy at each start; they were never quieter). It passes, with
+  less margin than its bound suggests on a loaded machine; round 13's 21.8 s was under load.
+
+Not done, for the next round (BENCH.md has the profiles):
+- **The compaction after DELETE (6.0-6.9 G) is two thirds zstd compression** (instruction
+  profile: `ZSTD_compressBlock_fast` 30%, `ZSTD_encodeSequences` 16%, the entropy tables 13%;
+  decompression 12%, the merge and `SstWriter::add` 14%): it rewrites the table and both
+  indexes (97 MB of raw blocks, 21 MB compressed) for a quarter of them deleted. Compression
+  can't get cheaper at the same size; what can is writing less: an index entry's value is its
+  row's key, which the file form stores again (the cache form already derives it: about half
+  an index file's raw bytes), or copying the compressed blocks a compaction doesn't change
+  (none here, every block has a deleted row; it would for tiny L0 files over big L1 files).
+- DELETE (3.6x PostgreSQL): flat profile: the scan merging UPDATE's versions with the table's
+  (`Cursor::head`, `Merge::min`, `Block::read` 27% of its instructions), the tombstone runs
+  (`SstWriter::add` 10%, the bloom 2.4%, the sort), the lock set (5%).
+- COPY in (1.58x): zstd 17%, `parse_copy_data` and line splitting 13%, the insert node and
+  size model about 15%.
+- count(*) (2.7x PostgreSQL, 7.8x pgrust): the batch aggregation path (agent 226's) takes no
+  float8 sum: `sum(c)` is collected row by row (`Partial::Floats`) and summed in row order on
+  the executor's thread; a float8 lane that keeps each chunk's values in row order for that sum
+  would let count(*) and sum(float8) take the batch path.
+
+Commits: `d23bfde2d` (compaction's L1 inputs), `7c8da4c1b` (the policy), `3647b3556` (one-run
+index builds). No format change: the files and the manifest are written as before
+(`SstMeta::deletes` is not stored).
+
+Verification: before the push, on the changes rebased on `7305dbc23`, release lib tests (221),
+compact_locks, big_tables, txn_spill, crash_bulk (6, the new kill test included), golden,
+storage_format, storage_linked_gc, storage_read_once, storage_upgrade_batches, drop_storage,
+crash_random seeds 1-30; on `5894d1f7a` (the same changes on `7867694b9`) also parallel_scan;
+release Clippy 20 warnings, none in the files changed. `storage_linked_gc`'s
+`linked_tombstones_preserve_snapshots_and_conflicts_until_gc` now commits a key inside the L1
+file's range too (b55): its newer L0 file had keys only beside that range, which no longer
+makes compaction merge the file. After the push, the full `tools/verification-train.sh` on
+`3647b3556`: release crate tests 542 passed, 0 failed; Clippy 20 warnings, none in the files
+changed; crash_random seeds 1-30 x 4; the power stage (power_cut 4 passed, `CRASH_POWER=1`
+seeds 1-30 x 4, with and without `CRASH_ASYNC=1`); debug crate tests 536 passed and one abort:
+the new `kill_during_compactions_after_deletes` overflowed the test thread's stack in debug
+(engine statements on a 2 MB test thread); it now runs on a 64 MB thread as other tests' sessions
+do, with the subquery and the IN list of every batch out of its checks (`ebd405d64`: debug
+and release crash_bulk 6 passed); the full regression suite against a private PostgreSQL 18.6
+reference 51,148 / 51,150 units, none newly differing; isolation 1647/1648 permutations (the
+known one); pg_dump_tap 14,609 passed.
+
 ## Short write transactions, round 1 (agent 197)
 
 BENCH.md "Short write transactions, round 1" has the measurements: `short_txn` at 8 clients
