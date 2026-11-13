@@ -200,7 +200,11 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         let name = info["name"].as_str()?;
         roll_access::evaluate::client_name(&format!("{name} {}", info["version"].as_str().unwrap_or("")))
     });
-    let client: Option<Arc<str>> = named.clone().or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client)).map(Arc::from);
+    let client: Option<Arc<str>> = named
+        .clone()
+        .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
+        .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
+        .map(Arc::from);
     let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, toolsets, client });
     let mut resp = if wants_sse(&ctx.headers) {
         let stream = futures::stream::once(async move { process(&ctx, messages).await }).flat_map(|responses| {
