@@ -237,7 +237,10 @@ function Approvals({ list }: { list: Approval[] }) {
 
 function Requests({ id, events }: { id: string; events: AuditEvent[] | null }) {
   return (
-    <Panel title="Recent requests">
+    <Panel
+      title="Recent requests"
+      aside={events?.[0]?.client ? <span className="truncate text-[12px] text-subtle">Last from {events[0].client}</span> : undefined}
+    >
       {events === null ? (
         <div className="p-5">
           <Connecting />

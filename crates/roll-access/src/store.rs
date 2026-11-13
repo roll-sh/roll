@@ -295,6 +295,10 @@ pub struct AuditEvent {
     pub args: Option<Value>,
     pub ip: Option<String>,
     pub duration_ms: i64,
+    /// What made the request: an MCP client's name and version, else its User-Agent (one line,
+    /// at most 120 characters; what the client says, so a hint, never a proof).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -347,8 +351,8 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
         for e in events {
             let args = e.args.as_ref().and_then(|a| serde_json::to_string(a).ok());
             c.execute(
-                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms, client) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     e.id,
                     e.at,
@@ -366,7 +370,8 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
                     e.status as i64,
                     args,
                     e.ip,
-                    e.duration_ms
+                    e.duration_ms,
+                    e.client
                 ],
             )?;
         }
@@ -416,7 +421,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
     })
 }
 
-pub(crate) const AUDIT_COLUMNS: &str = "id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms";
+pub(crate) const AUDIT_COLUMNS: &str = "id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms, client";
 
 pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
     let a: Option<String> = r.get(14)?;
@@ -438,6 +443,7 @@ pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
         args: a.and_then(|a| serde_json::from_str(&a).ok()),
         ip: r.get(15)?,
         duration_ms: r.get(16)?,
+        client: r.get(17)?,
     })
 }
 
@@ -515,6 +521,9 @@ impl Store {
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
+        }
+        if !db.has_column("audit", "client")? {
+            db.add_column("audit", "client", "TEXT")?;
         }
         // What environment and path a request was about (a remembered approval keeps to them).
         for col in ["environment", "scope_path", "scope_index"] {

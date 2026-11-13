@@ -447,6 +447,9 @@ type AuditEvent = {
   args: Json | null;                   // MCP arguments, redacted
   ip: string | null;
   duration_ms: number;
+  client?: string;                     // what made it, as it says: an MCP client's name and version
+                                       // (from initialize, carried in the session id), else its
+                                       // User-Agent; one line, at most 120 characters
 };
 ```
 
