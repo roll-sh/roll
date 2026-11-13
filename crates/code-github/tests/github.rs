@@ -860,13 +860,11 @@ fn webhook_events() {
         (PullRequestAction::Closed, PrState::Merged, None, "")
     );
 
-    assert_eq!(
-        parse("pull_request", "pull_request_labeled"),
-        Event::Ignored {
-            event: "pull_request".into(),
-            action: Some("labeled".into())
-        }
-    );
+    // A label's change carries the pull request's labels (roll previews reads them).
+    let Event::PullRequest(pr) = parse("pull_request", "pull_request_labeled") else {
+        panic!()
+    };
+    assert_eq!(pr.action, PullRequestAction::Labeled);
 
     let Event::Issues(i) = parse("issues", "issues_labeled") else {
         panic!()

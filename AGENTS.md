@@ -101,6 +101,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - the HTTP API (`http/`): the control plane, a connectionless data plane, and Confluent REST v3
   - Produce and fetch never decode records: batches go to disk and back to clients as received. Only compaction, timestamp lookups, compacted-topic key checks and the HTTP API decode them, through `records.rs`.
   - Compaction rewrites uploaded chunks into new objects with `.c<generation>.kb` keys and swaps them in atomically, keeping offsets. Never reuse a chunk key.
+  - Branches (`branch.rs`) share chunk objects by key across streams, so an object under one stream's prefix may be another stream's data. Delete a chunk object only when the catalog says no row references it: the keys `Store::delete_chunks`, `replace_chunks`, `delete_topic` and `delete_stream` return from the same transaction. Never `delete_prefix` a stream's or topic's objects (`Broker::sweep` skips referenced keys).
   - Local disk is a cache: closed partitions drop their local copies (`evict_on_unload`), and `local_disk_bytes` caps open ones. Never drop a segment that isn't fully uploaded or that holds an open transaction (`keep_local_from`): transaction state is rebuilt from local segments.
   - On the fleet (`fleet.rs`, the broker README's "On the fleet") a stream has one owner (lease `stream:cluster:<id>`) and only it opens the stream's partitions; connections are spliced to it after SASL and HTTP is forwarded. Every catalog write that belongs to a stream is fenced (`Store::fenced`: the stream's generation checked in the same transaction), and object keys written there carry the tenure. Acknowledgements wait for the owner's write-ahead log object in object storage (`LogConfig::remote`): never move a high watermark past what object storage has, and never trust a node's local copy of a stream it just took over.
   - Encoding fails if a response sets a field outside its version range. Gate every field on `ctx.version`. `tests/protocol.rs` encodes every API at every version.
@@ -299,6 +300,28 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   products. The dashboard reads it through `lib/workspace-api.ts` (change both together), joins it
   with every product's own API in `lib/workspace-resources.ts`, and holds it in `lib/workspace-store.ts`
   for the sidebar, Home and `/dashboard/projects/$id`. A new resource kind needs its row in all three.
+- **Apps (roll apps: hosting the user's own code; docs/apps/README.md):**
+  - `crates/apps-build` detects how to build a tree and writes the Dockerfile (reads files only);
+    `crates/apps-control` is the store, the deploy queue, the runtimes (`runtime/`: Docker, a fake
+    for tests), the waking proxy (`public.rs`, `live.rs`) and `/v1/apps`; rolld wires it in
+    `crates/rolld/src/apps.rs`. `docs/apps/http-api.md` is the contract with
+    `apps/dashboard/src/lib/apps-api.ts` and `roll-cli/src/apps.rs`: change them together.
+  - A service is the workspace resource kind `service`; its owner is the holder of
+    `apps:service:<id>`, and every `/v1/apps/services/{id}/…` route runs there (`Cluster::dispatch`).
+    Put the service id, and the environment where an action targets one, in the path: the
+    permissions catalogue (feature/roll-mcp) classifies routes by pattern, and production deploys
+    are `deploy`, not `write`. Don't add token or scope checks in roll apps.
+  - Deployments are immutable: a rollback deploys an old image again, never rebuilds. An
+    environment's active deployment moves only through `Store::switch_active` (a compare-and-swap).
+  - Customer code never runs on a fleet node: instances and builds go through the `Runtime` and
+    `Builder` traits. Everything made is named `roll-apps-…` and labelled `sh.roll.apps=<service>`.
+    Variables are sealed at rest, go to containers as Engine API `Env` values (a 0600 env file
+    only over the CLI; never argv), and are
+    returned in the clear only by `…/variables/values`.
+  - An idle service costs nothing: only running instances are metered. Keep cold starts measured
+    (`pnpm test:apps --docker` prints them; the numbers live in docs/apps/README.md, "Measured").
+  - After touching anything apps-related, run `pnpm test:apps` (`--docker` for real Docker). New
+    tests go in `apps-control/tests/api.rs` (in process, fake runtime) or `tests/docker.rs`.
 - **Accounts (sign-in to roll.sh):** `crates/roll-accounts` (docs/accounts.md: invites, email
   codes, GitHub, Google, TOTP), mounted by `crates/rolld/src/accounts.rs`. Sessions are hashed
   cookies that rolld's gate (`roll_auth::check`) resolves on every request, never cached, with

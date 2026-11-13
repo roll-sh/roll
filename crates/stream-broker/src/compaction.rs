@@ -251,28 +251,31 @@ impl Broker {
             return Ok(None);
         }
         let firsts: Vec<i64> = plan.chunks.iter().map(|c| c.first).collect();
-        if let Err(err) = self.store.replace_chunks(&stream.id, &topic.id, p.index, &firsts, &written, now()) {
-            // The catalog still points at the old chunks, which are intact; the in-memory log
-            // serves the new ones until the partition is reopened.
-            warn!(topic = %topic.name, partition = p.index, error = %err, "recording compacted chunks");
-            return Err(err);
-        }
+        let old = match self.store.replace_chunks(&stream.id, &topic.id, p.index, &firsts, &written, now()) {
+            // Only the old chunks no branch still reads.
+            Ok(free) => free,
+            Err(err) => {
+                // The catalog still points at the old chunks, which are intact; the in-memory
+                // log serves the new ones until the partition is reopened.
+                warn!(topic = %topic.name, partition = p.index, error = %err, "recording compacted chunks");
+                return Err(err);
+            }
+        };
         debug!(
             stream = %stream.id, topic = %topic.name, partition = p.index,
             records_in = stats.records_in, records_out = stats.records_out, bytes_in = stats.bytes_in, bytes_out = stats.bytes_out,
             "compacted"
         );
-        let old: Vec<Chunk> = plan.chunks.clone();
-        for c in &old {
-            self.remote.remove(&c.key);
+        for key in &old {
+            self.remote.remove(key);
         }
         let grace = Duration::from_millis(self.config.compaction_grace_ms);
         let objects = self.objects.clone();
         tokio::spawn(async move {
             tokio::time::sleep(grace).await;
-            for c in old {
-                if let Err(e) = objects.delete(&c.key).await {
-                    warn!(key = %c.key, error = %e, "deleting a compacted-away chunk");
+            for key in old {
+                if let Err(e) = objects.delete(&key).await {
+                    warn!(%key, error = %e, "deleting a compacted-away chunk");
                 }
             }
         });

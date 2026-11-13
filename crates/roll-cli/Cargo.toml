@@ -16,6 +16,7 @@ roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"
 
 [dependencies]
 agent-host.workspace = true
+apps-build.workspace = true
 agent-proto.workspace = true
 libc.workspace = true
 # `roll gateway`: the standalone model gateway.
@@ -34,6 +35,9 @@ nosql-storage = { workspace = true, optional = true }
 nosql-types.workspace = true
 # rustls: the released CLI talks to https://api.roll.sh (dev-dependencies hid that it had no TLS).
 reqwest = { workspace = true, features = ["stream", "rustls"] }
+roll-fetch.workspace = true
+# `roll up`: what git, docker and `.rollignore` leave out stays out of the upload.
+ignore.workspace = true
 rustls-pemfile.workspace = true
 rustyline.workspace = true
 serde.workspace = true
@@ -42,9 +46,13 @@ tempfile.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
+# `roll apps ssh`: a shell in an instance, over a WebSocket.
+futures.workspace = true
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 unicode-width.workspace = true
 url.workspace = true
 urlencoding.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
@@ -58,6 +66,9 @@ code-sql.workspace = true
 pg-storage.workspace = true
 tempfile.workspace = true
 aws-sdk-s3.workspace = true
+# `tests/preview.rs`: roll previews on a real roll code.
+roll-previews.workspace = true
+code-preview.workspace = true
 # `tests/nosql_api.rs`: the real control API in process.
 nosql-control.workspace = true
 nosql-server.workspace = true

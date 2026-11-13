@@ -10,6 +10,7 @@ pub mod control;
 pub mod history;
 pub mod ids;
 pub mod reconciler;
+pub mod roles;
 pub mod store;
 
 pub use config::Config;
