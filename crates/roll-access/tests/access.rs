@@ -65,6 +65,7 @@ fn postgres() -> Router {
         .route("/v1/storage/buckets/{name}", get(|| async { axum::Json(json!({ "name": "logs" })) }))
         .route("/v1/storage/buckets", get(|| async { axum::Json(json!([{ "name": "logs" }, { "name": "media" }])) }))
         .route("/v1/apps/services", post(|| async { axum::Json(json!({ "id": "svc_new" })) }))
+        .route("/v1/apps/services/{id}", axum::routing::patch(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
@@ -995,6 +996,15 @@ async fn a_link_needs_reveal_on_what_it_links() {
     let create = json!({ "project": "p", "name": "web", "source": { "image": "nginx" }, "links": [{ "kind": "redis", "ref": "rdb_9" }] });
     let (s, e) = d.call(&apps, Method::POST, "/v1/apps/services", Some(create)).await;
     assert_eq!((s, e["needs"]["product"].as_str()), (StatusCode::FORBIDDEN, Some("redis")), "{e}");
+    // A worker scaled on a stream group's lag: apps reads that stream for it, so read there too.
+    let scale = json!({ "run": { "scale": { "stream": "st_9", "group": "workers", "per_instance": 100 } } });
+    let (s, e) = d.call(&apps, Method::PATCH, "/v1/apps/services/svc_a", Some(scale.clone())).await;
+    assert_eq!((s, e["needs"]["product"].as_str(), e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("streams"), Some("read")), "{e}");
+    let (reader, _) = d.token(json!([
+        { "product": "apps", "resources": "*", "actions": { "write": "allow" } },
+        { "product": "streams", "resources": [{ "id": "st_9" }], "actions": { "read": "allow" } },
+    ]), json!({})).await;
+    assert_eq!(d.call(&reader, Method::PATCH, "/v1/apps/services/svc_a", Some(scale)).await.0, StatusCode::OK);
 
     let (both, both_id) = d.token(json!([
         { "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } },

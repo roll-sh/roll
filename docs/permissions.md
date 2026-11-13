@@ -160,7 +160,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   `links` in a new service's body) puts its address and password in the service's variables, where
   the service's code reads them: it also needs `reveal` on each linked resource (a `postgres` link
   on that Postgres project, `redis` on that database, `bucket`, `stream`, `queue`, `nosql` likewise;
-  a kind roll doesn't know is refused). When that decides, the approval is about the linked
+  a kind roll doesn't know is refused). A worker scaled on a stream group's lag (`run.scale.stream`
+  in a new service or a `PATCH`) has apps read that stream for it: `read` on it too. When that decides, the approval is about the linked
   resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.

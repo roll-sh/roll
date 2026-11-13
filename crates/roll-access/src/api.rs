@@ -180,11 +180,11 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         (outcome, action) = (copied, Action::Reveal);
     }
     let mut about: (&str, Option<String>) = (row.product, None);
-    if let Some((lent, product, id, _)) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope).await
-        && crate::evaluate::rank(lent) < crate::evaluate::rank(outcome)
+    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope).await
+        && crate::evaluate::rank(l.outcome) < crate::evaluate::rank(outcome)
     {
-        (outcome, action) = (lent, Action::Reveal);
-        about = (product, Some(id));
+        (outcome, action) = (l.outcome, l.action);
+        about = (l.product, Some(l.id));
     }
     if outcome == Outcome::Deny && ask_otherwise && catalog::placement(row, &params).is_none() {
         outcome = Outcome::Ask;

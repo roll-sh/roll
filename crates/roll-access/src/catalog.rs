@@ -81,13 +81,40 @@ pub struct Row {
     pub lends: Option<Lend>,
 }
 
-/// Where a request names the resources it links ([`Row::lends`]), as `(kind, ref)`.
+/// Where a request names other resources it hands to this one ([`Row::lends`]).
 #[derive(Clone, Copy, Debug)]
 pub enum Lend {
-    /// Two path parameters: the kind and the ref.
+    /// Two path parameters, the kind and the ref, of a link: `reveal` on it.
     Path(&'static str, &'static str),
-    /// A top-level JSON array of `{kind, ref}`.
-    Body(&'static str),
+    /// What the JSON body names, each with the action it needs there.
+    Each(fn(&Value) -> Vec<Lent>),
+}
+
+/// Another resource a request hands to this one, as an apps link kind names it, and the action
+/// that needs there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lent {
+    pub kind: String,
+    pub r#ref: String,
+    pub action: Action,
+}
+
+/// Apps' `links: [{kind, ref}]`: each linked resource's credentials go to the service (reveal).
+/// An entry that isn't `{kind, ref}` names a kind roll doesn't know, so it's refused.
+fn apps_links(b: &Value) -> Vec<Lent> {
+    b.get("links").and_then(Value::as_array).into_iter().flatten().map(|l| Lent { kind: l["kind"].as_str().unwrap_or("").into(), r#ref: l["ref"].as_str().unwrap_or("").into(), action: Action::Reveal }).collect()
+}
+
+/// A worker's `run.scale.stream`: apps reads that stream group's lag for it (read on the stream).
+fn apps_scale(b: &Value) -> Vec<Lent> {
+    b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read }).into_iter().collect()
+}
+
+/// A new service: its links and its scaling stream.
+fn apps_create_lends(b: &Value) -> Vec<Lent> {
+    let mut out = apps_links(b);
+    out.extend(apps_scale(b));
+    out
 }
 
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
@@ -119,7 +146,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Body(_)))
+        matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -1031,10 +1058,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/services", "apps", R, list("id")),
     // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
     // Its `links` hand each linked resource's credentials to the service: reveal on each too.
-    row("POST", "/v1/apps/services", "apps", Act::Body(apps_create_action), Tgt::Product).env(EnvFrom::Fixed("production")).lends(Lend::Body("links")),
+    row("POST", "/v1/apps/services", "apps", Act::Body(apps_create_action), Tgt::Product).env(EnvFrom::Fixed("production")).lends(Lend::Each(apps_create_lends)),
     row("POST", "/v1/apps/projects/{project}/services", "apps", Act::Body(apps_create_action), Tgt::Create { project: Some("project"), place: None, id_field: "id" })
         .env(EnvFrom::Fixed("production"))
-        .lends(Lend::Body("links")),
+        .lends(Lend::Each(apps_create_lends)),
     row("GET", "/v1/apps/events", "apps", R, Tgt::Product),
     // A project's notifications: the URL is stored sealed and never answered; a webhook's signing
     // secret comes back once, so making one is reveal (Slack and Discord ones are write).
@@ -1060,6 +1087,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
+    // A worker scaled on a stream group's lag has apps read that stream for it: read there too.
+    row("PATCH", "/v1/apps/services/{id}", "apps", W, one(PG, "service")).lends(Lend::Each(apps_scale)),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // `variables_from` copies another environment's values into this one: reveal there too.
     row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
