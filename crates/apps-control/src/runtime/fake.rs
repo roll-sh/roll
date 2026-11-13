@@ -66,8 +66,9 @@ pub struct Fake {
     volumes: Mutex<HashMap<String, Vec<u8>>>,
     /// What a tag points at in its registry ([`Fake::move_tag`]); zeros when unset.
     tags: Mutex<HashMap<String, String>>,
-    /// Who's at an instance's port without rolld ([`Fake::set_callers`]).
-    callers: Mutex<HashMap<String, super::Callers>>,
+    /// Connections each instance's network accepted, and how many are open from other services
+    /// ([`Fake::connect`], [`Fake::set_private`]).
+    accepted: Mutex<HashMap<String, (u64, u32)>>,
 }
 
 impl Fake {
@@ -80,9 +81,15 @@ impl Fake {
         self.busy.lock().insert(name.to_string(), (share, std::time::Instant::now()));
     }
 
-    /// The project's other services at `name`'s port (what Docker reads from its sandbox).
-    pub fn set_callers(&self, name: &str, c: super::Callers) {
-        self.callers.lock().insert(name.to_string(), c);
+    /// Another service connects to `name`'s port while it sleeps (what Docker counts in its
+    /// sandbox).
+    pub fn connect(&self, name: &str) {
+        self.accepted.lock().entry(name.to_string()).or_default().0 += 1;
+    }
+
+    /// `n` connections from other services are open to `name` now.
+    pub fn set_private(&self, name: &str, n: u32) {
+        self.accepted.lock().entry(name.to_string()).or_default().1 = n;
     }
 
     pub fn state(&self, name: &str) -> Option<FakeState> {
@@ -215,8 +222,12 @@ impl Runtime for Fake {
         "fake"
     }
 
-    async fn callers(&self, name: &str) -> Option<super::Callers> {
-        self.callers.lock().get(name).copied()
+    async fn take_callers(&self, name: &str) -> bool {
+        self.accepted.lock().get_mut(name).is_some_and(|a| std::mem::take(&mut a.0) > 0)
+    }
+
+    async fn private_peers(&self, name: &str) -> Option<u32> {
+        Some(self.accepted.lock().get(name).map_or(0, |a| a.1))
     }
 
     fn can_suspend(&self) -> bool {
@@ -289,6 +300,9 @@ impl Runtime for Fake {
         if let Some(i) = self.instances.lock().get_mut(name) {
             i.state = FakeState::Paused;
         }
+        if let Some(a) = self.accepted.lock().get_mut(name) {
+            a.0 = 0;
+        }
         Ok(())
     }
 
@@ -302,6 +316,9 @@ impl Runtime for Fake {
 
     async fn stop(&self, name: &str, _grace: Duration) -> anyhow::Result<()> {
         self.counts.stops.fetch_add(1, Ordering::SeqCst);
+        if let Some(a) = self.accepted.lock().get_mut(name) {
+            a.0 = 0;
+        }
         if let Some(i) = self.instances.lock().get_mut(name) {
             if let Some(s) = i.server.take() {
                 s.abort();

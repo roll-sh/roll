@@ -492,9 +492,15 @@ every deployment is immutable with instant rollback.
   with its service name as an alias. On the fleet, tasks of one project and environment share a
   security group that admits only itself, and names resolve through Cloud Map (in `## Next`).
 - **A private caller wakes a sleeping service** (Railway's private network, Fly's Flycast).
-  rolld never sees that traffic, so it reads the instance's own socket tables instead
-  (`runtime/netns.rs`: the sandbox's `/proc/<pid>/net/tcp` and `tcp6`, readable by anyone and
-  still readable while the app is frozen), five times a second for sleeping instances:
+  rolld never sees that traffic, so it reads the instance's own network numbers instead
+  (`runtime/netns.rs`, the sandbox's `/proc/<pid>/net/…`, readable by anyone and still while the
+  app is frozen). Cheaply: TCP `PassiveOpens` in `snmp` counts the connections the namespace
+  accepted (34 µs a read), marked when the instance goes to sleep and asked five times a second.
+  The socket tables (`tcp`, `tcp6`) would say who's connected, but for another namespace the
+  kernel walks the whole host's table: 5.6 ms a read on ai-server, so the first version, which
+  read them five times a second per sleeping instance, would have spent a core on 36 of them.
+  They're read now only where nothing else tells: a running instance about to sleep (at most
+  every 5 s), and arming a waker (a few reads, off any request's path):
   - Frozen (suspended): a connection in the app's backlog resumes it (about 100 ms more than
     an awake call).
   - Stopped: a waker in the sandbox (`<instance>-wake`, busybox `nc` with no capabilities, a
@@ -506,7 +512,8 @@ every deployment is immutable with instant rollback.
     calls it once through the published port, which frees it in a millisecond (killing its
     container took Docker 70), and the app's bind never races it.
   - Running: connections from peers other than the host (rolld's own come through the
-    network's gateway) count as use, so a service in use only privately doesn't sleep.
+    network's gateway) count as use when it would otherwise sleep, so a service in use only
+    privately doesn't. An idle pooled connection counts too, as on Railway.
   - Measured on real Docker (`a_private_caller_wakes_a_sleeping_service`, a caller on the
     project network with `docker exec … wget`, which is about 90 ms of the time): awake 86–115
     ms, stopped 281–457 ms, frozen 185–214 ms. A public cold start with the waker armed was

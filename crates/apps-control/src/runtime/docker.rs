@@ -57,6 +57,12 @@ struct Known {
     containers: HashMap<String, (String, Option<u16>, Option<i64>)>,
     /// Instance → its sandbox's network, while the sandbox runs.
     sandboxes: HashMap<String, Sandbox>,
+    /// Instance → its waker: listening, with the connections its network had accepted when it
+    /// was armed (`Some`), or not armed (`None`). Absent: not known (an earlier process's).
+    wakers: HashMap<String, Option<u64>>,
+    /// Instance → the connections its network had accepted when it went to sleep, or when it
+    /// was last asked about callers ([`super::Runtime::take_callers`]).
+    marks: HashMap<String, u64>,
 }
 
 /// Where to read who's at an instance's port: its sandbox's process (`/proc/<pid>/net`), the
@@ -75,10 +81,15 @@ impl Sandbox {
         (read("tcp"), read("tcp6"))
     }
 
-    /// Whether something listens on the app's port (the app, or the waker).
+    /// Whether something listens on the app's port (the app, or the waker): a dear read.
     fn listening(&self) -> bool {
         let (tcp, tcp6) = self.tables();
         super::netns::listening(&tcp, &tcp6, self.port)
+    }
+
+    /// The connections its network has accepted: a cheap read.
+    fn accepted(&self) -> Option<u64> {
+        super::netns::passive_opens(&std::fs::read_to_string(format!("/proc/{}/net/snmp", self.pid)).ok()?)
     }
 }
 
@@ -157,12 +168,24 @@ impl Docker {
     /// has already, and hands that caller to the app). rolld calls it once through the published
     /// port: accepting closes its listener in a millisecond, where killing its container takes
     /// Docker some 70. The empty call it then hands the app is closed at once. A waker that
-    /// doesn't let go is killed.
+    /// doesn't let go is killed. What it knows comes from the cheap count of accepted
+    /// connections; only a waker an earlier process armed costs a read of the socket table.
     async fn quiet_waker(&self, engine: &Engine, instance: &str) {
         let Some(sb) = self.sandbox(instance).await else { return };
-        // Not listening: not armed (a stop arms it and waits for it to listen), or holding a
-        // caller already.
-        if !sb.listening() {
+        let known = self.known.lock().wakers.get(instance).copied();
+        let armed_at = match known {
+            Some(None) => return,
+            Some(Some(at)) => at,
+            None if !sb.listening() => {
+                self.known.lock().wakers.insert(instance.to_string(), None);
+                return;
+            }
+            None => sb.accepted().unwrap_or(0),
+        };
+        self.known.lock().wakers.insert(instance.to_string(), None);
+        let Some(now) = sb.accepted() else { return };
+        // It accepted a caller since it was armed: its listener is closed already.
+        if now > armed_at {
             return;
         }
         let free = |within: Duration| {
@@ -182,27 +205,40 @@ impl Docker {
             Ok((_, Some(hp))) => tokio::time::timeout(Duration::from_millis(200), tokio::net::TcpStream::connect(("127.0.0.1", hp))).await.is_ok_and(|c| c.is_ok()),
             _ => false,
         };
-        if poked && free(Duration::from_millis(200)).await {
-            return;
+        // Taken: the count moves when it accepts, and accepting closed its listener.
+        if poked {
+            let until = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < until {
+                if sb.accepted().is_some_and(|a| a > now) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
         let _ = engine.kill(&waker_name(instance)).await;
         // Its socket goes with its process: wait for that, so the app's bind never fails.
         free(Duration::from_secs(2)).await;
     }
 
-    /// Asleep: the waker listens for private callers (waited for, so a start right after can
-    /// tell it's there).
+    /// Asleep: the waker listens for private callers, armed with the count of accepted
+    /// connections now (one more is its caller). Waited for (off any request's path, a socket
+    /// table read every 25 ms, some 150 ms in all), so a request right after the sleep finds it
+    /// listening and frees the port with a poke, not a kill.
     async fn arm_waker(&self, engine: &Engine, instance: &str) {
         let Some(sb) = self.sandbox(instance).await else { return };
         let w = waker_name(instance);
         let _ = engine.kill(&w).await;
+        let at = sb.accepted().unwrap_or(0);
+        self.known.lock().marks.insert(instance.to_string(), at);
         if let Err(e) = engine.start(&w).await {
             tracing::debug!(instance, error = %e, "apps: the waker didn't start");
+            self.known.lock().wakers.insert(instance.to_string(), None);
             return;
         }
+        self.known.lock().wakers.insert(instance.to_string(), Some(at));
         let until = std::time::Instant::now() + Duration::from_secs(2);
         while !sb.listening() && std::time::Instant::now() < until {
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
 
@@ -443,6 +479,10 @@ impl Runtime for Docker {
     }
 
     async fn suspend(&self, name: &str) -> anyhow::Result<()> {
+        // Marked before the pause: a connection in between is answered, not missed.
+        if let Some(n) = self.sandbox(name).await.and_then(|sb| sb.accepted()) {
+            self.known.lock().marks.insert(name.to_string(), n);
+        }
         match &self.engine {
             Some(e) => e.pause(name).await,
             None => docker(&["pause", name]).await.map(|_| ()),
@@ -483,17 +523,27 @@ impl Runtime for Docker {
         let mut k = self.known.lock();
         k.containers.remove(name);
         k.sandboxes.remove(name);
+        k.wakers.remove(name);
+        k.marks.remove(name);
     }
 
-    async fn callers(&self, name: &str) -> Option<super::Callers> {
-        let sb = self.sandbox(name).await?;
-        let (tcp, tcp6) = sb.tables();
-        if tcp.is_empty() && tcp6.is_empty() {
+    async fn take_callers(&self, name: &str) -> bool {
+        let Some(sb) = self.sandbox(name).await else { return false };
+        let Some(now) = sb.accepted() else {
             // Its sandbox went (or another process took the pid): look it up again next time.
             self.known.lock().sandboxes.remove(name);
-            return None;
-        }
-        Some(super::netns::callers(&tcp, &tcp6, sb.port, &sb.host))
+            return false;
+        };
+        let mut k = self.known.lock();
+        // Not marked (an earlier process put it to sleep): from now on.
+        let mark = k.marks.entry(name.to_string()).or_insert(now);
+        std::mem::replace(mark, now) < now
+    }
+
+    async fn private_peers(&self, name: &str) -> Option<u32> {
+        let sb = self.sandbox(name).await?;
+        let (tcp, tcp6) = sb.tables();
+        (!tcp.is_empty() || !tcp6.is_empty()).then(|| super::netns::private_peers(&tcp, &tcp6, sb.port, &sb.host))
     }
 
     async fn wait(&self, name: &str) -> anyhow::Result<i32> {

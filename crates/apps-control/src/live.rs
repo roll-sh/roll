@@ -59,6 +59,8 @@ pub struct Inst {
     crashes: AtomicU32,
     /// A worker its restart policy leaves stopped: it isn't started again or replaced.
     done: AtomicBool,
+    /// When its private connections were last counted (a dear read, at most every 5 s).
+    private_checked: Mutex<Option<Instant>>,
     /// Failed health checks in a row while running.
     health_fails: AtomicU32,
     /// The stop a crash started: a start of the same instance waits for it, so it never stops
@@ -78,6 +80,7 @@ impl Inst {
             cpu_seen: Mutex::new(None),
             crashes: AtomicU32::new(0),
             done: AtomicBool::new(false),
+            private_checked: Mutex::new(None),
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
         })
@@ -829,17 +832,30 @@ impl EnvLive {
         if tpl.run.kind != RunType::Web || self.answering.load(Ordering::SeqCst) {
             return;
         }
+        // A running instance's private connections are counted only near its sleep (5.6 ms a
+        // read on a busy host, see `runtime::netns`): idle for all but its last two seconds.
+        let run = &tpl.run;
+        let rest = [run.suspend_after_s, run.sleep_after_s].into_iter().filter(|s| *s > 0).min().unwrap_or(run.sleep_after_s);
+        let near_sleep = Duration::from_secs(rest as u64).saturating_sub(Duration::from_secs(2));
         let mut asked = Vec::new();
         for i in self.instances().into_iter().filter(|i| i.deployment == tpl.deployment) {
-            let phase = i.phase();
-            let sleeping = matches!(phase, Phase::Suspended(_) | Phase::Created);
-            if !sleeping && !(running && matches!(phase, Phase::Running(_))) {
-                continue;
-            }
-            let Some(c) = self.runtime.callers(&i.name).await else { continue };
-            match phase {
-                Phase::Running(_) if c.private > 0 => *i.last_used.lock() = Instant::now(),
-                _ if sleeping && c.waiting => asked.push(i),
+            match i.phase() {
+                // Asleep: a connection its network accepted since is a caller.
+                Phase::Suspended(_) | Phase::Created => {
+                    if self.runtime.take_callers(&i.name).await {
+                        asked.push(i);
+                    }
+                }
+                Phase::Running(_) => {
+                    let idle = i.last_used.lock().elapsed();
+                    let due = i.private_checked.lock().is_none_or(|t| t.elapsed() >= Duration::from_secs(5));
+                    if running && idle >= near_sleep && due {
+                        *i.private_checked.lock() = Some(Instant::now());
+                        if self.runtime.private_peers(&i.name).await.is_some_and(|n| n > 0) {
+                            *i.last_used.lock() = Instant::now();
+                        }
+                    }
+                }
                 _ => {}
             }
         }

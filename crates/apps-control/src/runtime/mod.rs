@@ -15,8 +15,6 @@ pub mod fake;
 pub mod fargate;
 pub mod netns;
 
-pub use netns::Callers;
-
 use crate::logs::LogSink;
 use async_trait::async_trait;
 use std::net::SocketAddr;
@@ -113,10 +111,16 @@ pub struct Usage {
 pub trait Runtime: Send + Sync {
     /// `docker`, `fargate`, `fake`.
     fn name(&self) -> &'static str;
-    /// Who's at a web instance's port without rolld ([`Callers`]): the project's other services
-    /// over the private network. None where the runtime can't tell (then only rolld's own
-    /// requests wake and keep it awake).
-    async fn callers(&self, _name: &str) -> Option<Callers> {
+    /// Whether a sleeping web instance's network accepted a connection since it went to sleep
+    /// (its stop or suspend) or since it was last asked ([`netns`]: cheap, asked often): a
+    /// caller rolld didn't see, one of the project's other services. False where the runtime
+    /// can't tell (then only rolld's requests wake it).
+    async fn take_callers(&self, _name: &str) -> bool {
+        false
+    }
+    /// Connections to it now from the project's other services (not rolld's): dear, read only
+    /// when it's about to sleep.
+    async fn private_peers(&self, _name: &str) -> Option<u32> {
         None
     }
     /// Whether [`Runtime::suspend`] freezes (Docker's pause) rather than stops.

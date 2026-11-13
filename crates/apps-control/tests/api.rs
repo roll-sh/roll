@@ -1883,7 +1883,6 @@ async fn cron_fires_on_its_schedule_and_skips_while_the_last_run_goes() {
 /// stays awake though rolld sees no request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
-    use apps_control::runtime::Callers;
     let w = world().await;
     let (svc, _) = image_service(&w, "internal", json!({"port": 80, "public": false})).await;
     let id = svc["id"].as_str().unwrap().to_string();
@@ -1900,22 +1899,23 @@ async fn a_private_caller_wakes_a_sleeping_service_and_keeps_it_awake() {
     };
     assert_eq!(state().await, "stopped");
     let name = w.fake.instances(&id)[0].0.clone();
-    w.fake.set_callers(&name, Callers { waiting: true, private: 1 });
+    let live = w.apps.live(&id, "production");
+    // A caller connects while it's asleep.
+    w.fake.connect(&name);
     until("running").await;
     // Connected: in use, however long since rolld's last request.
-    w.fake.set_callers(&name, Callers { waiting: false, private: 1 });
-    let live = w.apps.live(&id, "production");
+    w.fake.set_private(&name, 1);
     live.backdate(Duration::from_secs(31));
     live.answer_private(true).await;
     live.tick().await;
     assert_eq!(state().await, "running");
     // Gone: it sleeps, frozen; the next caller thaws it.
-    w.fake.set_callers(&name, Callers::default());
+    w.fake.set_private(&name, 0);
     live.backdate(Duration::from_secs(31));
     live.tick().await;
     assert_eq!(state().await, "suspended");
     let resumes = Fake::count(&w.fake.counts.resumes);
-    w.fake.set_callers(&name, Callers { waiting: true, private: 0 });
+    w.fake.connect(&name);
     until("running").await;
     assert_eq!(Fake::count(&w.fake.counts.resumes), resumes + 1, "resumed, not started again");
 }
