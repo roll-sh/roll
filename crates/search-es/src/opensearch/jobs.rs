@@ -1,16 +1,18 @@
-//! The OpenSearch job scheduler of one cluster: runs Index State Management jobs when they
-//! are due ([`super::ism_run`]).
+//! The job scheduler of one cluster: runs what is due in the background — OpenSearch's Index
+//! State Management jobs ([`super::ism_run`]) and the triggers of started x-pack transforms
+//! ([`crate::xpack::transform`]).
 //!
 //! One task per cluster, started when the cluster may run background work
-//! ([`Cluster::enable_background_tasks`]) and has managed indices. It sleeps until the earliest
-//! `next_run` of an enabled job and is woken early by every published state change (a new
-//! managed index, a retry, a setting change), so it never polls: an idle cluster's scheduler
-//! is a parked task with no timer, and a cluster without ISM jobs has none at all (the task
-//! ends when the last job goes and starts again with the next). The task holds only a weak
-//! handle while it waits, so it never keeps an unloaded cluster alive; dropping the cluster
-//! ends it.
+//! ([`Cluster::enable_background_tasks`]) and has a job. It sleeps until the earliest due
+//! time (an ISM job's `next_run`, a started transform's next trigger) and is woken early by
+//! every published state change (a new managed index, a retry, a setting change, a transform
+//! started or scheduled now), so it never polls: an idle cluster's scheduler is a parked task
+//! with no timer, and a cluster without jobs has none at all (the task ends when the last job
+//! goes and starts again with the next). The task holds only a weak handle while it waits, so
+//! it never keeps an unloaded cluster alive; dropping the cluster ends it. Jobs keep their
+//! schedule in the cluster state, so what came due while the cluster slept runs when it loads.
 //!
-//! While jobs run, [`Jobs::busy`] is true: the host must not unload the cluster then (its
+//! While jobs run, [`Jobs::busy`] is true: the host must not unload the cluster then (their
 //! steps write through the cluster like requests do).
 
 use crate::cluster::Cluster;
@@ -41,14 +43,14 @@ impl Drop for Jobs {
 }
 
 impl Jobs {
-    /// Called after every published state change of an opensearch-dialect cluster: wakes the
-    /// task, or starts it when jobs exist and background work is enabled.
+    /// Called after every published state change: wakes the task, or starts it when jobs
+    /// exist and background work is enabled.
     pub fn kick(&self, cluster: &Cluster) {
         if self.shared.started.load(Ordering::SeqCst) {
             self.shared.wake.notify_one();
             return;
         }
-        if super::ism_run::next_due(&cluster.state()).is_none() {
+        if next_due(&cluster.state()).is_none() {
             return;
         }
         let Some(strong) = cluster.handle() else { return };
@@ -65,14 +67,14 @@ impl Jobs {
                     break;
                 }
                 let due = match weak.upgrade() {
-                    Some(c) => super::ism_run::next_due(&c.state()),
+                    Some(c) => next_due(&c.state()),
                     None => break,
                 };
                 let Some(due) = due else {
                     // No job left: end; the next managed index starts a new task. Recheck
                     // after clearing the flag, so a job added meanwhile isn't missed.
                     shared.started.store(false, Ordering::SeqCst);
-                    let again = weak.upgrade().is_some_and(|c| super::ism_run::next_due(&c.state()).is_some());
+                    let again = weak.upgrade().is_some_and(|c| next_due(&c.state()).is_some());
                     if again && !shared.started.swap(true, Ordering::SeqCst) {
                         continue;
                     }
@@ -90,10 +92,11 @@ impl Jobs {
                 shared.running.fetch_add(1, Ordering::SeqCst);
                 let now = crate::time::now_millis();
                 super::ism_run::run_due(&c, now).await;
+                crate::xpack::transform::run_due(&c, now).await;
                 shared.running.fetch_sub(1, Ordering::SeqCst);
                 // A run whose writes failed (a store refusing) leaves its jobs due: retry them
                 // a little later instead of spinning.
-                let stuck = super::ism_run::next_due(&c.state()).is_some_and(|t| t <= now);
+                let stuck = next_due(&c.state()).is_some_and(|t| t <= now);
                 drop(c);
                 if stuck {
                     tokio::select! {
@@ -110,6 +113,11 @@ impl Jobs {
     pub fn busy(&self) -> bool {
         self.shared.running.load(Ordering::SeqCst) > 0
     }
+}
+
+/// The earliest due time of any job.
+fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
+    [super::ism_run::next_due(st), crate::xpack::transform::next_due(st)].into_iter().flatten().min()
 }
 
 #[cfg(test)]

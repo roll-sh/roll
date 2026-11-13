@@ -321,6 +321,13 @@ pub fn resolve_existing(st: &ClusterState, expr: &str) -> Option<Arc<IndexMeta>>
     write_index_of(st, expr).ok().flatten().map(|t| t.index)
 }
 
+/// The concrete index a write to `expr` lands in (an alias's write index, a data stream's
+/// write index), `None` when nothing by that name exists, or the error of an alias without
+/// a write index.
+pub fn write_index_name(st: &ClusterState, expr: &str) -> EsResult<Option<String>> {
+    write_index_of(st, expr).map(|t| t.map(|t| t.index.name.clone()))
+}
+
 fn write_index_of(st: &ClusterState, expr: &str) -> EsResult<Option<Target>> {
     if let Some(idx) = st.metadata.indices.get(expr) {
         return Ok(Some(Target { index: idx.clone(), alias_routing: None, alias: None, data_stream: st.metadata.data_stream_of(expr).map(|d| d.name.clone()) }));

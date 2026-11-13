@@ -226,7 +226,7 @@ the discovery/store plugins.
 | `slm` | `x-pack/plugin/slm` | security | 8 | 8 | 1 | 1 | 7 |
 | `snapshot-repo-test-kit` | `x-pack/plugin/snapshot-repo-test-kit/qa/rest` | basic | 6 | 6 | 3 | 3 | 3 |
 | `stack` | `x-pack/plugin/stack` | security | 6 | 6 | 6 | 6 | 0 |
-| `transform` | `x-pack/plugin/transform` | security | 109 | 108 | 55 | 55 | 53 |
+| `transform` | `x-pack/plugin/transform` | security | 109 | 108 | 108 | 108 | 0 |
 | `watcher` | `x-pack/plugin/watcher:mustache,painless,watcher` | plain | 92 | 89 | 43 | 43 | 46 |
 | `watcher-security` | `x-pack/plugin/watcher:security` | security | 9 | 9 | 0 | 0 | 9 |
 | `wildcard` | `x-pack/plugin/wildcard` | plain | 9 | 9 | 9 | 9 | 0 |
@@ -242,7 +242,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 3691 | 3652 | 1889 |
+| **total** | | | 6044 | 5541 | 3744 | 3705 | 1836 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -280,7 +280,7 @@ the discovery/store plugins.
 <!-- test-search: slm >= 1 -->
 <!-- test-search: snapshot-repo-test-kit >= 3 -->
 <!-- test-search: stack >= 6 -->
-<!-- test-search: transform >= 55 -->
+<!-- test-search: transform >= 108 -->
 <!-- test-search: watcher >= 43 -->
 <!-- test-search: wildcard >= 9 -->
 <!-- test-search: platinum >= 829 -->
@@ -1089,6 +1089,12 @@ the rest are skipped by the tests' own prerequisites.
 - Highlighting: weighted unified matches, `matched_fields` masks, inner hits of nested-in-
   nested objects. `exists` on fields without doc values or norms reads roll's own field-names
   terms (printed and counted as Elasticsearch's `_field_names` term query).
+- Transforms run in the background on the cluster's job scheduler, like Elasticsearch's, and
+  keep their schedule in the stored transform: a cluster sleeping with a started transform
+  isn't woken for it, and runs the triggers that came due when it loads again. A continuous
+  checkpoint recomputes every bucket up to its bound (Elasticsearch recomputes only the
+  buckets whose documents changed); `_start` of a continuous transform answers after its
+  first checkpoint (or its `timeout`), a batch transform's at once.
 - x-pack (`crates/search-es/src/xpack/`): security (native realm, API keys, tokens, role
   mappings, privileges, request authorization), ES|QL, SQL, EQL, enrich, transforms, async
   search, ILM, search applications, query rules, connectors, graph, terms enum, text structure

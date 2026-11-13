@@ -64,6 +64,8 @@ pub struct Runtime {
     pub file_roles: std::sync::OnceLock<security::FileRoles>,
     /// ES|QL usage counters (`_xpack/usage` `esql`).
     pub esql_telemetry: esql::telemetry::Telemetry,
+    /// Transforms running a trigger right now.
+    pub transforms: transform::Runs,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.

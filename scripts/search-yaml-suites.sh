@@ -855,7 +855,8 @@ for name in sorted(suites):
     path = os.path.join(base, f"es-{version}-{name}.txt")
     es = set()
     if os.path.exists(path):
-        es = {l.strip() for l in open(path) if l.strip() and not l.startswith("#")}
+        # Ids keep their trailing spaces (a few tests' names end in one).
+        es = {l.rstrip("\r\n") for l in open(path) if l.strip() and not l.startswith("#")}
     rows.append((name, s["tests"], len(es), len(s["pass"]), len(s["pass"] & es), len(es - s["pass"])))
 with open(out, "w") as f:
     f.write("suite\ttests\tes\troll\troll_of_es\tregressions\n")

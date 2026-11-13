@@ -574,10 +574,9 @@ impl Cluster {
     /// end before the response is sent.
     pub fn enable_background_tasks(self: &Arc<Self>) {
         let _ = self.background.set(Arc::downgrade(self));
-        // Index State Management jobs due while the cluster was unloaded run now.
-        if self.dialect == Dialect::OpenSearch {
-            self.jobs.kick(self);
-        }
+        // Jobs due while the cluster was unloaded (Index State Management steps, started
+        // transforms' triggers) run now.
+        self.jobs.kick(self);
     }
 
     /// A strong handle for background work, when enabled.
@@ -681,12 +680,9 @@ impl Cluster {
             None => EsError::internal(format!("failed to persist cluster state: {e}")),
         })?;
         let version = next.version;
-        let opensearch = next.dialect == Dialect::OpenSearch;
         *self.state.write() = Arc::new(next);
         self.changes.send_replace(version);
-        if opensearch {
-            self.jobs.kick(self);
-        }
+        self.jobs.kick(self);
         Ok(r)
     }
 }
