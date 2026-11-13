@@ -987,13 +987,14 @@ Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/rol
   in `api::router` resolves to a catalogue row, and http-api.md's
   classes follow the catalogue (restore is `delete`, a domain's PATCH `deploy*`, a job's logs
   `reveal`, hooks `admin`, wake `write`, all of a shell session `admin`). Ours on merge:
-  - `/v1/apps/hooks` is in rolld's `UNSCOPED`, and `rlk_` (not `rlh_`, main's automations'
-    prefix) in `SECRET_PREFIXES` and the product mapping, on #24; the GitHub partner pattern is
-    `rlk_[a-z2-7]{40}`. Ours on merge: rolld registers `Access::on_leaked("rlk_", …)`, parsing
-    the service and environment from the URL around the secret, calling `Apps::delete_hook`.
-  - An environment resolver for `"apps"` in rolld/src/access.rs answering `Some("preview")` for
-    an ephemeral environment; `api::actor` reads `roll_auth::Grant::on(ext)`'s name before the
-    operator's; `put_link` (and create's `links`) checks `Grant::allows(<resource>, reveal)`.
+  - Done in the stacking merge (1f0caf874, with accounts #18): `/v1/apps/hooks` in rolld's
+    `UNSCOPED`; `rlk_` (not `rlh_`, main's automations' prefix) in `SECRET_PREFIXES` and the
+    product mapping, and `Access::on_leaked("rlk_")` revoking through
+    `Apps::revoke_leaked_hook`; the `"apps"` environment resolver (ephemeral is "preview");
+    `api::actor` naming the token's grant, then a signed-in admin, then the operator. The GitHub
+    partner pattern is `rlk_[a-z2-7]{40}`.
+  - Still open: `put_link` (and create's `links`) checking `Grant::allows(<resource>, reveal)`
+    itself (the catalogue's `.lends()` does it at the gate today).
   - `net.rs` and `model::private_ip` move onto mcp's `roll-net`.
   - MCP tools (#24): `apps_deploy` takes `no_traffic`; `apps_set_environment` covers `PUT
     …/environments/{env}` but `access` (a person sets an environment's token, not an agent).
