@@ -18,6 +18,12 @@ pub struct Settings {
     pub branches: Vec<String>,
     /// Previews for draft changes too.
     pub drafts: bool,
+    /// Gitignore-style patterns (CODEOWNERS'): a change gets a preview only when it touches a path
+    /// one matches (empty: any path) …
+    pub paths: Vec<String>,
+    /// … that none of these match (empty: none ignored). A change's paths are everything since
+    /// its merge base with the default branch.
+    pub ignore_paths: Vec<String>,
     /// `"<kind>:<ref>"` → `branch`, `schema` or `skip`; resources not listed get `data`.
     pub resources: BTreeMap<String, ResourceRule>,
     pub data: Mode,
@@ -110,6 +116,8 @@ impl Default for Settings {
             enabled: false,
             branches: vec!["*".into()],
             drafts: false,
+            paths: Vec::new(),
+            ignore_paths: Vec::new(),
             resources: BTreeMap::new(),
             data: Mode::Branch,
             reset_every_hours: 0,
@@ -167,6 +175,11 @@ impl Settings {
         let bad = |m: String| Err(Error::BadRequest(m));
         if self.branches.is_empty() || self.branches.len() > MAX_BRANCH_GLOBS || self.branches.iter().any(|b| b.is_empty() || b.len() > 200) {
             return bad(format!("branches: 1–{MAX_BRANCH_GLOBS} globs of 1–200 characters"));
+        }
+        for (name, list) in [("paths", &self.paths), ("ignore_paths", &self.ignore_paths)] {
+            if list.len() > MAX_BRANCH_GLOBS || list.iter().any(|p| p.len() > 200 || code_control::review::pattern::Pattern::new(p).is_none()) {
+                return bad(format!("{name}: at most {MAX_BRANCH_GLOBS} patterns of 1–200 characters"));
+            }
         }
         for key in self.resources.keys() {
             let Some((kind, r)) = key.split_once(':') else { return bad(format!("resources: {key:?} isn't \"<kind>:<ref>\"")) };

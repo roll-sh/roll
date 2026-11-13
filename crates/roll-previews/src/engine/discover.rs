@@ -69,7 +69,7 @@ impl Engine {
         let existing = self.store.rows(Some(project_id))?;
         // Changes that match the rules and have no preview yet.
         for c in open.values() {
-            if !wants(s, c) {
+            if !self.wanted(s, c).await? {
                 continue;
             }
             if existing.iter().any(|r| r.change_id.as_deref() == Some(&c.id)) || self.store.dismissed(&c.id, &c.head)? {
@@ -107,8 +107,12 @@ impl Engine {
             }
             let ttl_ms = s.ttl_hours as i64 * 3_600_000;
             if let Some(change) = &r.change_id {
+                let wanted = match open.get(change) {
+                    Some(c) => self.wanted(s, c).await?,
+                    None => false,
+                };
                 match open.get(change) {
-                    Some(c) if wants(s, c) => {
+                    Some(c) if wanted => {
                         if c.head != r.head || c.title != r.title || c.trusted != r.trusted || c.github_pr != r.github_pr {
                             let moved = c.head != r.head;
                             let (head, title, trusted, pr) = (c.head.clone(), c.title.clone(), c.trusted, c.github_pr);

@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct FakeCode {
     pub changes: Mutex<HashMap<String, ChangeInfo>>,
     pub heads: Mutex<HashMap<String, String>>,
+    /// The paths a head changes, by head (unlisted: not known).
+    pub paths: Mutex<HashMap<String, Vec<String>>>,
     pub reports: Mutex<Vec<Preview>>,
     pub forgotten: Mutex<Vec<String>>,
     /// Budget alerts sent: (the repos told, the alert).
@@ -46,6 +48,9 @@ impl Source for FakeCode {
     }
     async fn head(&self, repo: &str, branch: Option<&str>) -> anyhow::Result<Option<String>> {
         Ok(self.heads.lock().get(&format!("{repo}@{}", branch.unwrap_or("main"))).cloned())
+    }
+    async fn paths(&self, _repo: &str, head: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(self.paths.lock().get(head).cloned())
     }
     async fn services(&self, repo: &str, _revision: &str) -> anyhow::Result<Vec<ServiceSpec>> {
         let name = repo.rsplit('/').next().unwrap().to_string();

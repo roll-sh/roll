@@ -103,6 +103,10 @@ export interface PreviewSettings {
   /** Globs on the change's branch. */
   branches: string[];
   drafts: boolean;
+  /** Gitignore-style patterns: a change must touch a path one matches (`[]`: any path)… */
+  paths: string[];
+  /** …that none of these match. */
+  ignore_paths: string[];
   /** `"<kind>:<ref>"` → mode; resources not listed get `data`. A patch replaces the whole map. */
   resources: Record<string, ResourceRule>;
   data: "branch" | "schema";

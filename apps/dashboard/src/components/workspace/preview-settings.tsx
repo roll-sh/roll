@@ -47,6 +47,13 @@ export function PreviewSettingsDialog({
   );
 }
 
+/** A comma- or space-separated list. */
+const words = (text: string) =>
+  text
+    .split(/[\s,]+/)
+    .map((w) => w.trim())
+    .filter(Boolean);
+
 /** The fields that changed, as the API's patch (`resources` and `env` go whole). */
 export function settingsPatch(a: PreviewSettings, b: PreviewSettings): SettingsPatch {
   const patch: Record<string, unknown> = {};
@@ -71,19 +78,20 @@ function Form({
 }) {
   const [s, setS] = useState(saved);
   const [branches, setBranches] = useState(saved.branches.join(", "));
+  const [paths, setPaths] = useState(saved.paths.join(", "));
+  const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
   const [env, setEnv] = useState<[string, string][]>(Object.entries(saved.env));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, env]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, env]);
 
   const next: PreviewSettings = {
     ...s,
-    branches: branches
-      .split(/[\s,]+/)
-      .map((b) => b.trim())
-      .filter(Boolean),
+    branches: words(branches),
+    paths: words(paths),
+    ignore_paths: words(ignorePaths),
     env: Object.fromEntries(env.filter(([k]) => k.trim()).map(([k, v]) => [k.trim(), v])),
   };
   const patch = settingsPatch(saved, next);
@@ -119,6 +127,12 @@ function Form({
           <input value={branches} onChange={(e) => setBranches(e.target.value)} className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
         </Field>
         <Toggle label="Draft changes too" checked={s.drafts} onChange={(v) => set("drafts", v)} />
+        <Field label="Paths" note="A change must touch one of these, gitignore-style (apps/web/, *.ts). Empty is any path.">
+          <input value={paths} onChange={(e) => setPaths(e.target.value)} placeholder="any path" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+        </Field>
+        <Field label="Ignored paths" note="Touching only these doesn't count (docs/, *.md).">
+          <input value={ignorePaths} onChange={(e) => setIgnorePaths(e.target.value)} className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+        </Field>
         <p className="text-muted">
           A change's title overrides these: <span className="font-mono text-[12px]">[skip preview]</span> skips it, <span className="font-mono text-[12px]">[preview]</span> asks for one.
         </p>

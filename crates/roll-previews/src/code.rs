@@ -191,6 +191,12 @@ impl Source for CodeSource {
         Ok(specs)
     }
 
+    async fn paths(&self, repo: &str, head: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let r = self.repo(repo)?;
+        let Some(cs) = self.code.store.resolve(&r.id, head)? else { return Ok(None) };
+        Ok(Some(self.code.change_paths(&r, &cs)?))
+    }
+
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;

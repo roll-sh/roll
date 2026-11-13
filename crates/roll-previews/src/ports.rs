@@ -140,6 +140,11 @@ pub trait Source: Send + Sync {
     async fn head(&self, repo: &str, branch: Option<&str>) -> anyhow::Result<Option<String>>;
     /// The services `repo` runs at `revision`.
     async fn services(&self, repo: &str, revision: &str) -> anyhow::Result<Vec<ServiceSpec>>;
+    /// The paths `head` of `repo` changes since it left the default branch (`None`: not known,
+    /// which the path filters take as a match).
+    async fn paths(&self, _repo: &str, _head: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(None)
+    }
     /// The git commit of a changeset.
     async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
         Ok(None)

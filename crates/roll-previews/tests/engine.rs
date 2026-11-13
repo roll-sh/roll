@@ -341,3 +341,17 @@ async fn another_repo_runs_its_branch_of_the_same_name() {
     e.engine.pass().await.unwrap();
     assert_eq!(rev("api").as_deref(), Some("cs_api_feat2"));
 }
+
+#[tokio::test]
+async fn path_filters_leave_out_a_change_that_touches_only_ignored_paths() {
+    let e = env(json!({ "enabled": true, "ignore_paths": ["docs/", "*.md"] }));
+    e.code.paths.lock().insert("cs_9a".into(), vec!["docs/setup.md".into(), "README.md".into()]);
+    e.code.open(change("chg_d", 9));
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_d").unwrap().is_none(), "docs only: no preview");
+    // A push that touches code gets one.
+    e.code.paths.lock().insert("cs_9b".into(), vec!["README.md".into(), "src/app.ts".into()]);
+    e.code.edit("chg_d", |c| c.head = "cs_9b".into());
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_d").unwrap().is_some());
+}

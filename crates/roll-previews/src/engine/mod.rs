@@ -91,6 +91,9 @@ pub struct Engine {
     deploying_since: Mutex<HashMap<(String, String), i64>>,
     /// The unresolved secrets last told per preview (each set once in its activity).
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
+    /// The paths a head changes (`repo`, `head`), for the path filters: a head's paths never
+    /// change. Cleared past [`PATHS_KEPT`] heads.
+    paths_seen: Mutex<HashMap<(String, String), HeadPaths>>,
     /// One pass at a time.
     passing: tokio::sync::Mutex<()>,
 }
@@ -138,6 +141,7 @@ impl Engine {
             cluster: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
             secrets_told: Mutex::new(HashMap::new()),
+            paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
             shooting: Arc::new(tokio::sync::Semaphore::new(1)),
             deploying_since: Mutex::new(HashMap::new()),
@@ -261,6 +265,32 @@ impl Engine {
     /// What another repo of the project runs in a preview of `branch`: its own `branch` when it
     /// has one (a feature split across repos previews as one), else its default branch's head
     /// (`default`, when the caller read it already).
+    /// Whether `c` gets a preview: [`wants`], then the path filters on what it touches (unless
+    /// its title asked for one).
+    pub(super) async fn wanted(&self, s: &Settings, c: &ChangeInfo) -> anyhow::Result<bool> {
+        if !wants(s, c) {
+            return Ok(false);
+        }
+        if (s.paths.is_empty() && s.ignore_paths.is_empty()) || title_says(&c.title) == Some(true) {
+            return Ok(true);
+        }
+        let key = (c.repo.clone(), c.head.clone());
+        let cached = self.paths_seen.lock().get(&key).cloned();
+        let paths = match cached {
+            Some(p) => p,
+            None => {
+                let p = self.source.paths(&c.repo, &c.head).await?.map(Arc::new);
+                let mut seen = self.paths_seen.lock();
+                if seen.len() >= PATHS_KEPT {
+                    seen.clear();
+                }
+                seen.insert(key, p.clone());
+                p
+            }
+        };
+        Ok(paths.is_none_or(|p| touches(s, &p)))
+    }
+
     pub(super) async fn head_for(&self, repo: &str, branch: Option<&str>, default: Option<Option<String>>) -> anyhow::Result<Option<String>> {
         if let Some(b) = branch
             && let Some(h) = self.source.head(repo, Some(b)).await?
@@ -347,6 +377,21 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     }
 }
 
+/// The paths a head changes (`None`: not known).
+type HeadPaths = Option<Arc<Vec<String>>>;
+
+/// Heads whose paths [`Engine::wanted`] keeps.
+const PATHS_KEPT: usize = 4096;
+
+/// Whether `paths` has one the path filters count: matched by `paths` (or `paths` is empty) and
+/// not by `ignore_paths`.
+fn touches(s: &Settings, paths: &[String]) -> bool {
+    use code_control::review::pattern::{any_match, Pattern};
+    let take: Vec<Pattern> = s.paths.iter().filter_map(|p| Pattern::new(p)).collect();
+    let ignore: Vec<Pattern> = s.ignore_paths.iter().filter_map(|p| Pattern::new(p)).collect();
+    paths.iter().any(|p| (take.is_empty() || any_match(&take, p)) && !any_match(&ignore, p))
+}
+
 /// What a change's title says about its preview, as Render's `[skip render]` does: `[skip preview]`
 /// (or `[preview skip]`, `[no preview]`) skips it, and `[preview]` asks for one the project's
 /// `branches` or `drafts` rules would leave out. `None` leaves it to the rules.
@@ -408,6 +453,14 @@ mod tests {
         assert!(!wants(&s, &ChangeInfo { title: "Fix typo [Skip Preview]".into(), ..ch.clone() }));
         assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
+        let paths = |v: &[&str]| v.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let docs = Settings { ignore_paths: paths(&["docs/", "*.md"]), ..s.clone() };
+        assert!(!touches(&docs, &paths(&["docs/a/b.txt", "README.md"])));
+        assert!(touches(&docs, &paths(&["README.md", "src/main.rs"])));
+        let web = Settings { paths: paths(&["apps/web/**"]), ignore_paths: paths(&["*.md"]), ..s.clone() };
+        assert!(touches(&web, &paths(&["apps/web/src/a.ts"])));
+        assert!(!touches(&web, &paths(&["apps/web/README.md", "apps/api/x.rs"])));
+        assert!(!touches(&web, &[]));
         assert_eq!(env_suffix("prj_ab-c"), "PRJ_AB_C");
     }
 }

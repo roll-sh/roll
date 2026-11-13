@@ -67,9 +67,14 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - A change gets a preview when the project's rules match it: its branch matches `branches`
     (globs, `*` by default), it is not a draft unless `drafts`, and it is trusted or its head is
     approved.
+  - With `paths` or `ignore_paths` set (gitignore-style patterns, as CODEOWNERS and
+    `.roll/review.yaml` read them), a change also has to touch a path that `paths` matches (any
+    path, when it's empty) and `ignore_paths` doesn't: Render's build filters, Vercel's ignored
+    build step. A change's paths are everything since its merge base with the default branch,
+    as reviews read them, so a change that later only touches ignored paths loses its preview.
   - The change's title can say otherwise (Render's `[skip render]`): `[skip preview]` (or
     `[no preview]`) skips it, and deletes the preview it has; `[preview]` asks for one the
-    `branches` or `drafts` rules would leave out. A fork still waits for `approve-run`. GitHub
+    `branches`, `drafts` or path rules would leave out. A fork still waits for `approve-run`. GitHub
     pull requests carry their title into the change, so the same words work there.
   - `roll preview create --repo acme/web --branch feat-x` (or `POST /v1/previews`) makes one for a
     branch with no change. It lives until it is deleted or its TTL passes.
@@ -602,6 +607,8 @@ type Settings = {
   enabled: boolean;
   branches: string[];                 // globs on the change's branch; ["*"]
   drafts: boolean;                    // previews for draft changes (false)
+  paths: string[];                    // what a change must touch (gitignore-style); [] is anything
+  ignore_paths: string[];             // touching only these doesn't count ([])
   resources: Record<string, "branch" | "schema" | "skip">;   // "<kind>:<ref>" → mode; unlisted: `data`
   data: "branch" | "schema";          // the default mode ("branch")
   reset_every_hours: number;          // 0: never
@@ -717,7 +724,8 @@ Ranked by what a person notices first. Done so far:
   signed, expiring link;
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
-- `[skip preview]` and `[preview]` in a change's title;
+- `[skip preview]` and `[preview]` in a change's title, and path filters (`paths`,
+  `ignore_paths`) on what a change touches since its merge base;
 - the same branch across a project's repos (another repo runs its own branch of the change's name,
   and a push to it reaches the preview);
 - a look at the Previews tab and sheet from screenshots of the real thing (each row says its state
@@ -738,10 +746,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Path filters**: `paths` and `ignore_paths` globs on what a change touches (Render's build
-   filters, Vercel's ignored build step), so a docs-only change in a monorepo gets no preview, and
-   a push that touches only ignored paths doesn't redeploy. The change's paths are everything since
-   its merge base (as reviews read them), from roll code's diff.
+1. **A push that touches only ignored paths keeps the running services**: with path filters
+   on, a docs-only push to a change with a preview still redeploys it at the new head. Render
+   skips that deploy; here the preview would need to say which head its services run.
 2. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
    words do now. roll code changes have no labels yet; GitHub's go through the mirror.
 3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
