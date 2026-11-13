@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS audit (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS audit_at ON audit (at);
 CREATE INDEX IF NOT EXISTS audit_grant ON audit (grant_id, at);
+CREATE INDEX IF NOT EXISTS audit_resource ON audit (resource, at);
 CREATE TABLE IF NOT EXISTS oauth_clients (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -304,6 +305,9 @@ pub struct AuditQuery {
     pub product: Option<String>,
     pub decision: Option<String>,
     pub source: Option<String>,
+    /// What it was about: this resource, or anything under it (`cl_1` finds `cl_1/logs-a`).
+    pub resource: Option<String>,
+    pub action: Option<String>,
     pub before: Option<i64>,
     pub limit: Option<usize>,
 }
@@ -312,6 +316,65 @@ pub struct Store {
     pub(crate) db: Db,
     /// When each grant's `last_used_at` was last written by this node.
     touched: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+    /// The audit writer's queue ([`Store::queue_audit`]); its thread ends with the store.
+    audit_tx: std::sync::mpsc::SyncSender<AuditEvent>,
+}
+
+/// Audit rows deleted per transaction when pruning.
+const PRUNE_BATCH: i64 = 5_000;
+
+/// Audit rows queued at most (then callers write their own), and written per transaction at most.
+const AUDIT_QUEUE: usize = 16_384;
+const AUDIT_BATCH: usize = 512;
+
+/// The audit writer: waits for a row, takes whatever else is queued, writes them together. No
+/// timer: a lone row is written at once, and rows batch by themselves under load.
+fn audit_writer(db: Db, rx: std::sync::mpsc::Receiver<AuditEvent>) {
+    while let Ok(first) = rx.recv() {
+        let mut batch = vec![first];
+        while batch.len() < AUDIT_BATCH {
+            match rx.try_recv() {
+                Ok(e) => batch.push(e),
+                Err(_) => break,
+            }
+        }
+        write_audit(&db, &batch);
+    }
+}
+
+fn write_audit(db: &Db, events: &[AuditEvent]) {
+    let r: std::result::Result<(), code_sql::Error> = db.write_unsynced(|c| {
+        for e in events {
+            let args = e.args.as_ref().and_then(|a| serde_json::to_string(a).ok());
+            c.execute(
+                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    e.id,
+                    e.at,
+                    e.grant_id,
+                    e.grant_name,
+                    e.source,
+                    e.tool,
+                    e.method,
+                    e.route,
+                    e.product,
+                    e.action,
+                    e.resource,
+                    e.decision,
+                    e.approval,
+                    e.status as i64,
+                    args,
+                    e.ip,
+                    e.duration_ms
+                ],
+            )?;
+        }
+        Ok(())
+    });
+    if let Err(err) = r {
+        tracing::warn!(error = %err, rows = events.len(), "writing the audit log");
+    }
 }
 
 /// A grant's columns, as `grant_row` reads them (21 of them: a query may add its own after).
@@ -473,7 +536,10 @@ impl Store {
         if !db.has_column("grants", "ask_otherwise")? {
             db.add_column("grants", "ask_otherwise", "INTEGER")?;
         }
-        Ok(Store { db, touched: Default::default() })
+        let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
+        let writer = db.clone();
+        std::thread::Builder::new().name("roll-access-audit".into()).spawn(move || audit_writer(writer, rx)).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(Store { db, touched: Default::default(), audit_tx })
     }
 
     /// A setting (JSON), by key: `notify` (where approvals are posted).
@@ -743,17 +809,29 @@ impl Store {
 
     /// The grant was used now, from `ip`: written at most once a minute per grant per node.
     pub fn touch(&self, id: &str, ip: Option<&str>) {
-        let now = code_sql::now_ms();
-        {
-            let mut t = self.touched.lock().unwrap_or_else(|e| e.into_inner());
-            if t.get(id).is_some_and(|last| now - last < TOUCH_MS) {
-                return;
-            }
-            if t.len() > 4 * MAX_GRANTS {
-                t.clear();
-            }
-            t.insert(id.to_string(), now);
+        if self.touch_due(id) {
+            self.record_use(id, ip);
         }
+    }
+
+    /// Whether this node should write a grant's last use now (at most once a minute per grant),
+    /// claiming it if so: in memory, so the request that isn't due costs nothing more.
+    pub fn touch_due(&self, id: &str) -> bool {
+        let now = code_sql::now_ms();
+        let mut t = self.touched.lock().unwrap_or_else(|e| e.into_inner());
+        if t.get(id).is_some_and(|last| now - last < TOUCH_MS) {
+            return false;
+        }
+        if t.len() > 4 * MAX_GRANTS {
+            t.clear();
+        }
+        t.insert(id.to_string(), now);
+        true
+    }
+
+    /// Write a grant's last use (after [`Store::touch_due`]).
+    pub fn record_use(&self, id: &str, ip: Option<&str>) {
+        let now = code_sql::now_ms();
         if let Err(e) = self.db.write_unsynced(|c| c.execute("UPDATE grants SET last_used_at = ?, last_used_ip = ? WHERE id = ?", params![now, ip, id])) {
             tracing::warn!(error = %e, "recording a token's last use");
         }
@@ -899,35 +977,19 @@ impl Store {
 
     // ── audit ──
 
+    /// Write an audit row now.
     pub fn audit(&self, e: &AuditEvent) {
-        let args = e.args.as_ref().and_then(|a| serde_json::to_string(a).ok());
-        let r = self.db.write_unsynced(|c| {
-            c.execute(
-                "INSERT INTO audit (id, at, grant_id, grant_name, source, tool, method, route, product, action, resource, decision, approval, status, args, ip, duration_ms) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    e.id,
-                    e.at,
-                    e.grant_id,
-                    e.grant_name,
-                    e.source,
-                    e.tool,
-                    e.method,
-                    e.route,
-                    e.product,
-                    e.action,
-                    e.resource,
-                    e.decision,
-                    e.approval,
-                    e.status as i64,
-                    args,
-                    e.ip,
-                    e.duration_ms
-                ],
-            )
-        });
-        if let Err(err) = r {
-            tracing::warn!(error = %err, "writing the audit log");
+        write_audit(&self.db, std::slice::from_ref(e));
+    }
+
+    /// Hand an audit row to this node's writer, which writes what's queued in one transaction:
+    /// a write each, serialized, held a gate to ~9k requests a second; batched, it's the gate's
+    /// own cost. A full queue hands the row back for the caller to write ([`Store::audit`]):
+    /// nothing is dropped.
+    pub fn queue_audit(&self, e: AuditEvent) -> Option<AuditEvent> {
+        match self.audit_tx.try_send(e) {
+            Ok(()) => None,
+            Err(std::sync::mpsc::TrySendError::Full(e) | std::sync::mpsc::TrySendError::Disconnected(e)) => Some(e),
         }
     }
 
@@ -935,11 +997,18 @@ impl Store {
         let limit = q.limit.unwrap_or(100).clamp(1, 1000) as i64;
         let mut sql = format!("SELECT {AUDIT_COLUMNS} FROM audit WHERE at < ?");
         let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Int(q.before.unwrap_or(i64::MAX))];
-        for (col, v) in [("grant_id", &q.grant), ("product", &q.product), ("decision", &q.decision), ("source", &q.source)] {
+        for (col, v) in [("grant_id", &q.grant), ("product", &q.product), ("decision", &q.decision), ("source", &q.source), ("action", &q.action)] {
             if let Some(v) = v.as_deref().filter(|v| !v.is_empty()) {
                 sql.push_str(&format!(" AND {col} = ?"));
                 args.push(code_sql::Value::Text(v.to_string()));
             }
+        }
+        // "Who touched this?": the resource, or what's under it (its indices, its objects).
+        if let Some(r) = q.resource.as_deref().filter(|r| !r.is_empty()) {
+            let escaped: String = r.chars().flat_map(|c| if matches!(c, '%' | '_' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
+            sql.push_str(" AND (resource = ? OR resource LIKE ? ESCAPE '\\')");
+            args.push(code_sql::Value::Text(r.to_string()));
+            args.push(code_sql::Value::Text(format!("{escaped}/%")));
         }
         sql.push_str(" ORDER BY at DESC, id DESC LIMIT ?");
         args.push(code_sql::Value::Int(limit));
@@ -992,8 +1061,21 @@ impl Store {
     /// expired secrets.
     pub fn prune(&self, days: i64) -> Result<()> {
         let now = code_sql::now_ms();
+        // The audit log in bounded batches, oldest first: one huge delete would hold the write
+        // lock (every grant, approval and audit write) for as long as it runs.
+        let before = now - days * 24 * 3600 * 1000;
+        loop {
+            let n = self.db.write(|c| {
+                Ok::<_, Error>(c.execute(
+                    "DELETE FROM audit WHERE id IN (SELECT id FROM audit WHERE at < ? ORDER BY at LIMIT ?)",
+                    params![before, PRUNE_BATCH],
+                )?)
+            })?;
+            if (n as i64) < PRUNE_BATCH {
+                break;
+            }
+        }
         self.db.write(|c| {
-            c.execute("DELETE FROM audit WHERE at < ?", [now - days * 24 * 3600 * 1000])?;
             c.execute("DELETE FROM approvals WHERE expires_at < ?", [now - 24 * 3600 * 1000])?;
             c.execute("DELETE FROM oauth_codes WHERE expires_at < ?", [now])?;
             c.execute("DELETE FROM grant_secrets WHERE expires_at IS NOT NULL AND expires_at < ?", [now])?;

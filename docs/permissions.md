@@ -138,8 +138,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   word (`code_git::Vouched`) and records the push as `token:<name>`. An `ask` push is bound to its
   ref updates; push again once it's approved (the same push finds its approval), or wait on it with
   `git -c http.extraHeader="X-Roll-Approval: apr_…" push`.
-- An apps shell (its WebSocket, sessions, keys and screen) runs any command where the service runs,
-  with its variables: `admin` in every environment, as an agent's shell is.
+- An apps shell (its WebSocket, and all of a session: opening, keys, screen, resizing, closing) runs
+  any command where the service runs, with its variables: `admin` in every environment, as an
+  agent's shell is. Waking a sleeping environment starts compute someone pays for: `write`.
 - A route whose product filters its answer per environment and path itself, asking the caller's
   `Grant` for each finding, can be matched by rules limited to some environments or paths too
   (`Row::filters_itself`): a token for staging would get staging's findings, never production's,
@@ -453,8 +454,15 @@ type AuditEvent = {
   strings and headers are not.
 - Arguments are redacted before they're stored: any field named like a password, secret, token,
   key, credential or value has its value replaced with `"[redacted]"`, and strings are cut at 2 KiB.
-- The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`) and read through `/v1/access/audit`,
+- The log is kept for 90 days (`ROLL_ACCESS_AUDIT_DAYS`; older rows are deleted 5,000 at a time,
+  so a large prune never holds the database's write lock) and read through `/v1/access/audit`,
   filtered by grant, product, decision and time.
+
+Each node writes its audit rows through one writer, which takes what's queued and writes it in one
+transaction (`Store::queue_audit`): a write per request, serialized, held a token's requests to
+~9k a second on one node; batched, ~110k (`gate_latency`, release, 32 callers), every row kept. A
+full queue (16,384 rows) has the request write its own row: nothing is dropped. As before, these
+writes aren't synced: a crash can lose the last moment's rows.
 
 ### Audit sinks
 
@@ -599,7 +607,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
-| `GET /v1/access/audit` | access read | `?grant=&product=&decision=&source=&before=&limit=`; `&format=jsonl` answers one event per line, as a download |
+| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line, as a download |
 | `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |
 | `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |

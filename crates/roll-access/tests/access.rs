@@ -913,6 +913,15 @@ async fn a_rule_can_grant_some_indices() {
     assert_eq!(d.call(&logs, Method::POST, "/v1/search/clusters/cl_1/request", Some(json!({}))).await.0, StatusCode::FORBIDDEN);
     // Tightened to what it used: the two expressions it searched, nothing else.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Who touched cl_1: the cluster and what's under it; an index alone; a pattern is literal.
+    let who = |q: &str| {
+        let (d, path) = (&d, format!("/v1/access/audit?{q}"));
+        async move { d.call(OPERATOR, Method::GET, &path, None).await.1.as_array().unwrap().iter().map(|e| e["resource"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>() }
+    };
+    let all = who("resource=cl_1").await;
+    assert!(all.contains(&"cl_1".to_string()) && all.contains(&"cl_1/logs-2025".to_string()), "{all:?}");
+    assert!(who("resource=cl_1/logs-2025&action=read").await.iter().all(|r| r == "cl_1/logs-2025"));
+    assert!(who("resource=cl_%25").await.is_empty(), "a % is a percent sign");
     let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{logs_id}/tighten"), None).await;
     assert_eq!(t["narrower"], true, "{t}");
     assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*,-logs-old" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
@@ -976,4 +985,90 @@ async fn a_link_needs_reveal_on_what_it_links() {
     assert_eq!(asked["resource"], "prj_y, prj_z", "{asked}");
     let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// What the gate costs a request: a token's request against the same one by the operator (no
+/// evaluator), on a list and on one resource. Run by hand, in release:
+/// `cargo test --release -p roll-access --test access gate_latency -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn gate_latency() {
+    let d = Daemon::new(50);
+    let (token, token_id) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
+    let (narrow, _) = d.token(json!([{ "product": "postgres", "resources": [{ "id": "pa" }, { "id": "pb" }], "actions": { "read": "allow", "delete": "allow" } }]), json!({})).await;
+    for (what, method, path) in [("list", Method::GET, "/v1/projects"), ("one", Method::DELETE, "/v1/projects/pa")] {
+        for (who, t) in [("operator", OPERATOR), ("token *", token.as_str()), ("token ids", narrow.as_str())] {
+            let mut lat = Vec::new();
+            for i in 0..2200 {
+                let start = std::time::Instant::now();
+                let (s, _) = d.call(t, method.clone(), path, None).await;
+                assert!(s.is_success(), "{who} {what}: {s}");
+                if i >= 200 {
+                    lat.push(start.elapsed().as_micros() as u64);
+                }
+            }
+            lat.sort_unstable();
+            println!("{what:5} {who:10} p50 {:>5} µs  p99 {:>5} µs", lat[lat.len() / 2], lat[lat.len() * 99 / 100]);
+        }
+    }
+    // Throughput: 32 callers at once, each request audited (a token's) or not (the operator's).
+    let d = Arc::new(d);
+    for (who, t) in [("operator", OPERATOR.to_string()), ("token *", token.clone())] {
+        let start = std::time::Instant::now();
+        let tasks: Vec<_> = (0..32)
+            .map(|_| {
+                let (d, t) = (d.clone(), t.clone());
+                tokio::spawn(async move {
+                    for _ in 0..300 {
+                        assert!(d.call(&t, Method::DELETE, "/v1/projects/pa", None).await.0.is_success());
+                    }
+                })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        println!("32 at once {who:10} {:>6.0} requests/s", 9600.0 / start.elapsed().as_secs_f64());
+    }
+    // Every request audited: none lost in the writer's queue.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let activity = d.access.store.activity().unwrap();
+    assert_eq!(activity.get(&token_id).map(|a| a.0), Some(2 * 2200 + 9600), "every request of the token is in the log");
+}
+
+/// The audit log keeps its days and drops what's older, however much there is (in batches, so a
+/// big prune never holds the database).
+#[tokio::test]
+async fn the_audit_log_keeps_its_days() {
+    let d = Daemon::new(50);
+    let day = 24 * 3600 * 1000;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let row = |n: i64, at: i64| roll_access::store::AuditEvent {
+        id: format!("aud_{n:06}"),
+        at,
+        grant_id: None,
+        grant_name: None,
+        source: "api".into(),
+        tool: None,
+        method: "GET".into(),
+        route: "/v1/projects".into(),
+        product: Some("postgres".into()),
+        action: Some("read".into()),
+        resource: None,
+        decision: "allow".into(),
+        approval: None,
+        status: 200,
+        args: None,
+        ip: None,
+        duration_ms: 1,
+    };
+    for n in 0..12_000 {
+        d.access.store.audit(&row(n, now - 91 * day + n));
+    }
+    for n in 0..3 {
+        d.access.store.audit(&row(100_000 + n, now - day));
+    }
+    d.access.store.prune(90).unwrap();
+    let (_, kept) = d.call(OPERATOR, Method::GET, "/v1/access/audit?limit=1000", None).await;
+    assert_eq!(kept.as_array().map(Vec::len), Some(3), "only the last 90 days");
 }

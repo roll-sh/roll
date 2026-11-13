@@ -215,8 +215,10 @@ impl Ctx {
             ip: self.ip.map(|i| i.to_string()),
             duration_ms: self.started.elapsed().as_millis() as i64,
         };
-        let access = self.access.clone();
-        tokio::task::spawn_blocking(move || access.store.audit(&e));
+        if let Some(e) = self.access.store.queue_audit(e) {
+            let access = self.access.clone();
+            tokio::task::spawn_blocking(move || access.store.audit(&e));
+        }
     }
 }
 
@@ -264,9 +266,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     // Used: from an address it may be used from (a refused address neither keeps it from idling
     // nor becomes its last address).
-    if !decided_before {
+    if !decided_before && access.store.touch_due(&ctx.grant.id) {
         let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
-        tokio::task::spawn_blocking(move || a.store.touch(&id, ip.as_deref()));
+        tokio::task::spawn_blocking(move || a.store.record_use(&id, ip.as_deref()));
     }
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
