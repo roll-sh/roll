@@ -103,6 +103,8 @@ pub struct ChangeInfo {
     pub head: String,
     pub open: bool,
     pub draft: bool,
+    /// Its labels (`preview` asks for one, `no-preview` skips it, as the title words do).
+    pub labels: Vec<String>,
     pub trusted: bool,
     /// A writer approved running the current head (roll code's `approve-run`).
     pub approved: bool,

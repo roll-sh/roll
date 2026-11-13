@@ -70,6 +70,7 @@ impl CodeSource {
             head,
             open: matches!(c.state, ChangeState::Open | ChangeState::Queued | ChangeState::Conflict),
             draft: c.draft,
+            labels: c.labels.clone(),
             trusted: c.trusted,
             approved: c.run_approved,
             github_pr: c.github_pr.map(|n| n as i64),

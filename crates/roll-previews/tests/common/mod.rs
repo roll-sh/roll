@@ -258,6 +258,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         head: format!("cs_{n}a"),
         open: true,
         draft: false,
+        labels: Vec::new(),
         trusted: true,
         approved: false,
         github_pr: Some(100 + n),

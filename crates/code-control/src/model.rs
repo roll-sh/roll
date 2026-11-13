@@ -451,6 +451,10 @@ pub struct Change {
     pub run_approved: bool,
     /// Not ready: it can't be queued or landed.
     pub draft: bool,
+    /// Its labels (a GitHub pull request's, or set with `PATCH`); roll previews reads
+    /// `preview` and `no-preview`.
+    #[serde(default)]
+    pub labels: Vec<String>,
     pub checks: Vec<Check>,
     pub preview: Option<Preview>,
     pub landed_as: Option<String>,

@@ -373,6 +373,8 @@ export interface Change {
   /** A writer approved running this untrusted change's current head. */
   run_approved?: boolean;
   draft?: boolean;
+  /** A GitHub pull request's labels, or set with `PATCH`; roll previews reads `preview` and `no-preview`. */
+  labels?: string[];
   /** Its latest time in the merge queue. */
   queue?: QueueInfo | null;
   /** Why it can't be queued or land right now; empty when it can. */
@@ -1279,7 +1281,7 @@ export function createCodeApi(
     /** `bypass` (admin token) lands past the merge queue; it's audited. */
     landChange: (id: string, opts: { bypass?: boolean; lane?: Lane } = {}) =>
       land(`${ch(id)}/land`, opts.bypass || opts.lane ? opts : undefined),
-    updateChange: (id: string, patch: { title?: string; body?: string; draft?: boolean; work_item?: string }) => call<Change>("PATCH", ch(id), patch),
+    updateChange: (id: string, patch: { title?: string; body?: string; draft?: boolean; labels?: string[]; work_item?: string }) => call<Change>("PATCH", ch(id), patch),
     approveRun: (id: string) => call<Change>("POST", `${ch(id)}/approve-run`),
     enqueue: (id: string, lane?: Lane) => land(`${ch(id)}/enqueue`, lane ? { lane } : {}),
     /** Moves a queued change to the other lane, keeping its place in time. */

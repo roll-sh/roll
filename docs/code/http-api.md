@@ -158,6 +158,7 @@ Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, tit
            trusted: bool /* false for a pull request from a fork: no automatic checks or preview */,
            run_approved: bool /* a writer approved running this untrusted change's current head */,
            draft: bool,
+           labels: string[] /* a GitHub pull request's, or set with PATCH; roll previews reads "preview" and "no-preview" */,
            checks: Check[], preview: Preview | null,
            landed_as: string | null, conflict: {paths, head} | null,
            queue: QueueInfo | null /* its latest time in the merge queue */,
@@ -180,7 +181,7 @@ GET  /v1/code/repos/{owner}/{repo}/changes?state= → Change[]
 POST /v1/code/repos/{owner}/{repo}/changes {title, body?, changeset | (base + message + files), work_item?, author?, draft?} → Change
 GET  /v1/code/repos/{owner}/{repo}/changes/{number} → Change
 GET  /v1/code/changes/{id} → Change (404 when missing)
-PATCH /v1/code/changes/{id} {title?, body?, draft?, work_item?} → Change    marking a queued change draft dequeues it; work_item (wi_…, of the change's repo) links it as if it had been opened with it: 409 if it does another item or is landed/closed
+PATCH /v1/code/changes/{id} {title?, body?, draft?, labels?: string[] /* at most 20, 50 characters each */, work_item?} → Change    marking a queued change draft dequeues it; work_item (wi_…, of the change's repo) links it as if it had been opened with it: 409 if it does another item or is landed/closed
 POST /v1/code/changes/{id}/approve-run → Change                       writers; recorded in the audit log
 POST /v1/code/changes/{id}/revise {changeset | (base + message + files)} → Change
 POST /v1/code/changes/{id}/land {bypass?, lane?} → same bodies as /land (409 if landed or closed)

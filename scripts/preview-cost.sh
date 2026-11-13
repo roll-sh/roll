@@ -342,8 +342,8 @@ cat <<EOF
 | Cost while running (from the preview) | $ACTIVE |
 | Cost while asleep (from the preview) | $SLEEPING |
 | The first service's screenshot (taken in the service container's own network) | $SHOT |
-| A preview's own variable (`roll preview env`) in the running service / `DATABASE_URL` as one | FEATURE_FLAG=$VAR_SEEN / refused |
+| A preview's own variable (\`roll preview env\`) in the running service / \`DATABASE_URL\` as one | FEATURE_FLAG=$VAR_SEEN / refused |
 | ignore_paths: docs/ | $KEPT |
-| `[skip preview]` in the title, then without it | removed, then a new preview |
+| \`[skip preview]\` in the title, then without it | removed, then a new preview |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 3 / $BRANCHES_LEFT |
 EOF

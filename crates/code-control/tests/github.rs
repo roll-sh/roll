@@ -642,6 +642,13 @@ async fn connect_import_webhooks_and_mirror() {
     let c5 = changes.as_array().unwrap().iter().find(|c| c["github_pr"] == 5).unwrap().clone();
     let c5_git = a.code.store.derive_git(&repo_id, &a.code.store.resolve(&repo_id, c5["head"].as_str().unwrap()).unwrap().unwrap()).unwrap().0;
     assert_eq!(c5_git.hex(), topic_sha);
+    // A label on the pull request is the change's (roll previews reads `no-preview`, `preview`).
+    let mut labelled = pr5.clone();
+    labelled["labels"] = json!([{ "name": "no-preview" }]);
+    let ev = json!({ "action": "labeled", "number": 5, "pull_request": labelled, "repository": repo_json(&g.mock), "installation": { "id": INSTALLATION } });
+    assert_eq!(hook(&a, "pull_request", "d-4l", &ev, SECRET).await, StatusCode::OK);
+    let c5_now = a.ok("GET", &format!("/v1/code/changes/{}", c5["id"].as_str().unwrap()), None).await;
+    assert_eq!(c5_now["labels"], json!(["no-preview"]));
 
     // Checks on a PR's change become check runs.
     let c5_id = c5["id"].as_str().unwrap();

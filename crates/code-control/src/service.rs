@@ -813,6 +813,10 @@ impl Code {
             Some(Value::Bool(d)) => Some(*d),
             Some(_) => return Err(Error::Invalid("draft must be true or false".into())),
         };
+        let labels = patch.get("labels").filter(|v| !v.is_null()).map(|v| Self::labels(Some(v))).transpose()?;
+        if labels.as_ref().is_some_and(|l| l.len() > 20) {
+            return Err(Error::Invalid("labels: at most 20".into()));
+        }
         let work = match patch.get("work_item") {
             None | Some(Value::Null) => None,
             Some(Value::String(id)) if !id.trim().is_empty() => {
@@ -830,7 +834,7 @@ impl Code {
         {
             return Err(Error::Conflict(format!("change {} does another work item", c.number)));
         }
-        self.db.update_change_meta(&c.id, title.as_deref(), body.as_deref(), draft)?;
+        self.db.update_change_meta(&c.id, title.as_deref(), body.as_deref(), draft, labels.as_deref())?;
         if draft == Some(true) && c.state == ChangeState::Queued {
             self.queued_change_moved(r, c, false)?;
             self.db.set_change_state(&c.id, ChangeState::Open, None, None)?;

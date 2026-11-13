@@ -80,7 +80,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - The change's title can say otherwise (Render's `[skip render]`): `[skip preview]` (or
     `[no preview]`) skips it, and deletes the preview it has; `[preview]` asks for one the
     `branches`, `drafts` or path rules would leave out. A fork still waits for `approve-run`. GitHub
-    pull requests carry their title into the change, so the same words work there.
+    pull requests carry their title into the change, so the same words work there. So do labels:
+    `no-preview` skips and `preview` asks (a GitHub pull request's, or a roll change's through
+    `PATCH /v1/code/changes/{id} {labels}`); a skip, from the title or a label, wins.
   - `roll preview create --repo acme/web --branch feat-x` (or `POST /v1/previews`) makes one for a
     branch with no change. It lives until it is deleted or its TTL passes.
 - **Update**: every new head redeploys the services of the change's repo at that head. Services
@@ -475,12 +477,16 @@ own rates (the same ones its usage page shows).
 2. puts 20 MiB of objects and 20,000 1 KiB keys into the parents;
 3. opens a change, writes 1 MiB and 1,000 keys into the preview's branches, and opens the
    preview through its link (without it: 401);
-4. sleeps it and lands the change.
+4. sets a variable of the preview's own, pushes a docs-only revision with `ignore_paths:
+   ["docs/"]`, then one that touches code, and puts `[skip preview]` in the title and takes it
+   out again;
+5. sleeps it and lands the change.
 
 These are the numbers from 2026-11-12 and 2026-11-13 on ai-server (36 threads, ext4, load 25–35
 from other sessions, debug build). It also checks, each run: the link access (401 without it,
 the bypass secret's header, a wrong secret refused), the NoSQL and Postgres masks, the service's
-Postgres role, the schema diff after a migration, a pushed log line, and `roll preview wait`.
+Postgres role, the schema diff after a migration, a pushed log line, `roll preview wait`, a
+preview's own variable, a kept build and `[skip preview]`.
 
 | What | Measured |
 | --- | --- |
@@ -496,6 +502,9 @@ Postgres role, the schema diff after a migration, a pushed log line, and `roll p
 | Containers left once it sleeps | 0 |
 | **Cost asleep** | **$0.0006–0.0007 a month** once idle for an hour (the Postgres branch evicted to a ~4 MB base backup; Redis $0.0006); $0.006 a month in its first idle hour (the directory) |
 | **Cost running** | **$0.012 an hour**: the container's 128 MiB, $0.002; Postgres at 0.25 CU, $0.010; Redis memory |
+| A preview's own variable (`roll preview env FEATURE_FLAG=on`) / `DATABASE_URL` as one | seen by the running service / refused |
+| `ignore_paths: ["docs/"]`, a docs-only push, then one to `index.html` | the services keep the earlier head (`runs`) while the preview reports the new one and `roll preview wait` passes; the next push redeploys (the page shows it) |
+| `[skip preview]` in the title, then without it | the preview removed, then a new one |
 | After landing | every branch gone, every parent intact |
 
 So a hundred sleeping previews of this project cost about 7 cents a month, and an hour of
@@ -750,7 +759,8 @@ Ranked by what a person notices first. Done so far:
 - a Postgres role of its own per preview branch (no superuser, no file or WAL reads, unknown on
   the parent), so masking holds against the preview's own code too;
 - a preview's own variables over the project's (`…/env`, the sheet, `roll preview env`);
-- `[skip preview]` and `[preview]` in a change's title, a `manual` mode, and path filters (`paths`,
+- `[skip preview]` and `[preview]` in a change's title and `no-preview`/`preview` labels (GitHub's
+  or roll's), a `manual` mode, and path filters (`paths`,
   `ignore_paths`) on what a change touches since its merge base, and pushes that touch only
   ignored paths keep the running services;
 - the same branch across a project's repos (another repo runs its own branch of the change's name,
@@ -761,6 +771,8 @@ Ranked by what a person notices first. Done so far:
   starts closed instead of covering the page);
 - branch roles in pg-control (`app_role`, `app_connection_uri`, kept across in-place resets) with
   its e2e test, which previews use;
+- this round checked live in `scripts/preview-cost.sh` (a preview's own variable, a kept build,
+  `[skip preview]`);
 - a sixth review and its fixes (only `ignore_paths` keeps a build, never past `roll.toml`; hand-made
   previews outlive the rules; warnings for a keep running out; atomic preview variables; a
   pending `roll/preview` settled when a preview goes before it was ready);
@@ -776,15 +788,13 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **This round live in `scripts/preview-cost.sh`**: the title words, path filters, kept builds and
-   a preview's own variables were measured against fake products only. Live: a docs-only push
-   keeps the services and reports the new head (`runs`), a push to `src/` redeploys, a variable
-   set with `roll preview env` reaches the running service, and `[skip preview]` removes it.
-2. **GitHub labels**: `no-preview` skips a pull request and `preview` asks for one, as the title
-   words do now. roll code changes have no labels yet; GitHub's go through the mirror.
-3. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+1. **Feedback on the preview page** (Vercel Comments, Netlify's drawer): a small toolbar the
+   preview's proxy adds to its pages, for people signed in to roll, that pins a comment to the
+   page, the element and the screenshot, and lands as a thread on the change (and its pull
+   request), so review happens where the change is seen.
+2. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+3. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.

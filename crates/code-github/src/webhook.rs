@@ -96,6 +96,9 @@ pub enum PullRequestAction {
     ConvertedToDraft,
     /// Someone asked a person or team for a review ([`PullRequestEvent::requested_reviewer`]).
     ReviewRequested,
+    /// A label was added or removed (the pull request carries the new set).
+    Labeled,
+    Unlabeled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -488,6 +491,8 @@ impl Event {
                     "ready_for_review" => PullRequestAction::ReadyForReview,
                     "converted_to_draft" => PullRequestAction::ConvertedToDraft,
                     "review_requested" => PullRequestAction::ReviewRequested,
+                    "labeled" => PullRequestAction::Labeled,
+                    "unlabeled" => PullRequestAction::Unlabeled,
                     _ => return Ok(ignored()),
                 };
                 let p: PrPayload = decode(event, value)?;

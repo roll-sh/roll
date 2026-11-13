@@ -299,7 +299,7 @@ impl Engine {
         if !wants(s, c) {
             return false;
         }
-        if (s.paths.is_empty() && s.ignore_paths.is_empty()) || title_says(&c.title) == Some(true) {
+        if (s.paths.is_empty() && s.ignore_paths.is_empty()) || asks(c) == Some(true) {
             return true;
         }
         match self.paths_of(&c.repo, &c.head, None).await {
@@ -438,7 +438,7 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     if !c.open {
         return false;
     }
-    match title_says(&c.title) {
+    match asks(c) {
         Some(asked) => asked,
         None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")),
     }
@@ -464,6 +464,17 @@ fn all_ignored(s: &Settings, paths: &[String]) -> bool {
     use code_control::review::pattern::{any_match, Pattern};
     let ignore: Vec<Pattern> = s.ignore_paths.iter().filter_map(|p| Pattern::new(p)).collect();
     paths.iter().all(|p| p != "roll.toml" && any_match(&ignore, p))
+}
+
+/// What a change says about its preview: its title's words, or its labels (`no-preview`,
+/// `preview`; GitHub's or roll's). A skip wins over an ask.
+fn asks(c: &ChangeInfo) -> Option<bool> {
+    let label = |n: &str| c.labels.iter().any(|l| l.eq_ignore_ascii_case(n));
+    match (title_says(&c.title), label("no-preview"), label("preview")) {
+        (Some(false), _, _) | (_, true, _) => Some(false),
+        (Some(true), _, _) | (_, _, true) => Some(true),
+        _ => None,
+    }
 }
 
 /// What a change's title says about its preview, as Render's `[skip render]` does: `[skip preview]`
@@ -517,6 +528,7 @@ mod tests {
             head: "cs_1".into(),
             open: true,
             draft: false,
+            labels: Vec::new(),
             trusted: true,
             approved: false,
             github_pr: None,
@@ -544,6 +556,10 @@ mod tests {
         assert_eq!(goes_soon(0, None, None, 4, 3 * h), Some(4 * h));
         let manual = Settings { manual: true, ..s.clone() };
         assert!(!wants(&manual, &ch));
+        let labelled = |l: &[&str]| ChangeInfo { labels: l.iter().map(|x| x.to_string()).collect(), ..ch.clone() };
+        assert!(wants(&manual, &labelled(&["Preview"])));
+        assert!(!wants(&s, &labelled(&["no-preview"])));
+        assert!(!wants(&manual, &labelled(&["preview", "no-preview"])), "a skip wins");
         assert!(wants(&manual, &ChangeInfo { title: "Try the nav [Preview]".into(), ..ch.clone() }));
         let paths = |v: &[&str]| v.iter().map(|p| p.to_string()).collect::<Vec<_>>();
         let docs = Settings { ignore_paths: paths(&["docs/", "*.md"]), ..s.clone() };

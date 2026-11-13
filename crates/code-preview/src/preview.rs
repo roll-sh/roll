@@ -700,6 +700,7 @@ mod tests {
             trusted: true,
             run_approved: false,
             draft: false,
+            labels: Vec::new(),
             checks: Vec::new(),
             preview: None,
             landed_as: None,
