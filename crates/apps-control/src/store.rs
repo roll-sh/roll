@@ -1190,12 +1190,17 @@ impl Store {
             .collect()
     }
 
-    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>) -> Result<()> {
+    /// Make or update a link. A credential the link already has stays (two requests making it
+    /// at once both minted one; the first stored wins): whether `minted` is the one it keeps.
+    pub fn put_link(&self, service: &str, kind: LinkKind, r#ref: &str, prefix: &str, minted: Option<&crate::integrations::Minted>) -> Result<bool> {
         let sealed = minted.map(|m| self.sealer.seal(&format!("link:{service}:{}:{ref}", kind.as_str()), &serde_json::to_string(m).expect("JSON")));
         self.db.write(|c| {
-            c.execute("DELETE FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref])?;
-            c.execute("INSERT INTO links (service, kind, ref, prefix, minted) VALUES (?, ?, ?, ?, ?)", params![service, kind.as_str(), r#ref, prefix, sealed])?;
-            Ok(())
+            c.execute(
+                "INSERT INTO links (service, kind, ref, prefix, minted) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, kind, ref) DO UPDATE SET prefix = excluded.prefix, minted = COALESCE(links.minted, excluded.minted)",
+                params![service, kind.as_str(), r#ref, prefix, sealed],
+            )?;
+            let kept: Option<String> = c.query_row("SELECT minted FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref], |r| r.get(0))?;
+            Ok(sealed.is_none() || kept == sealed)
         })
     }
 

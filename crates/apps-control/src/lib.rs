@@ -1132,13 +1132,14 @@ impl Apps {
         Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources })
     }
 
-    /// What reads a job's output needs when the environment has values from roll secrets: the
-    /// job may have printed them, so roll secrets' own rule for revealing them.
+    /// What reads a job's output or opens a shell needs when the environment has values from
+    /// roll secrets (a job may print them, a shell reads them all): roll secrets' own rule for
+    /// revealing them.
     pub async fn check_secret_reveal(self: &Arc<Self>, service: &str, env: &str, who: integrations::Asker<'_>) -> Result<()> {
         let (svc, row) = self.service_env(service, env).await?;
         let r = self.resolve_vars(&svc, &row, row.active.as_deref().unwrap_or("")).await?;
         if r.sources.values().any(|s| *s == "secret") && !self.deps.secrets.may_reveal(who, &svc.project, env).await {
-            return Err(Error::Forbidden(format!("this environment's values come from roll secrets, which you may not reveal in {env}, and a job's output can hold them")));
+            return Err(Error::Forbidden(format!("this environment's values come from roll secrets, which you may not reveal in {env} (a shell or a job's output shows them)")));
         }
         Ok(())
     }
@@ -1255,6 +1256,7 @@ impl Apps {
         // (setting its prefix again never makes another).
         let (sid, r) = (service.to_string(), r#ref.to_string());
         let had = self.db(move |s| s.links_minted(&sid)).await?.into_iter().find(|(k, rr, _, _)| *k == kind && *rr == r).and_then(|(_, _, _, m)| m);
+        let fresh = had.is_none();
         let minted = match had {
             Some(m) => Some(m),
             None => self.deps.resources.link(kind, r#ref, service).await.map_err(|e| Error::BadRequest(e.to_string()))?,
@@ -1264,13 +1266,25 @@ impl Apps {
             None => self.link_vars(&svc, kind, r#ref, "production").await.map_err(|e| Error::BadRequest(e.to_string()))?,
         };
         let (sid, r, p, m) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone());
-        if let Err(e) = self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref())).await {
-            // Not kept: what was just made for it goes again.
-            if let Some(m) = &minted {
-                let _ = self.deps.resources.unlink(kind, r#ref, &m.kept).await;
+        let vars = match self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref())).await {
+            Ok(true) => vars,
+            // Another request made the link first, with credentials of its own: those stay,
+            // and what this one made goes again.
+            Ok(false) => {
+                if let Some(m) = minted.as_ref().filter(|_| fresh) {
+                    self.revoke_link(service, kind, r#ref, &m.kept).await;
+                }
+                let (sid, r) = (service.to_string(), r#ref.to_string());
+                self.db(move |s| s.links_minted(&sid)).await?.into_iter().find(|(k, rr, _, _)| *k == kind && *rr == r).and_then(|(_, _, _, m)| m).map_or(vars, |m| m.vars)
             }
-            return Err(e);
-        }
+            Err(e) => {
+                // Not kept: what was just made for it goes again.
+                if let Some(m) = minted.as_ref().filter(|_| fresh) {
+                    let _ = self.deps.resources.unlink(kind, r#ref, &m.kept).await;
+                }
+                return Err(e);
+            }
+        };
         Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix })
     }
 

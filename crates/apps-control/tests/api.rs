@@ -141,6 +141,8 @@ impl apps_control::integrations::Resources for FakeResources {
         if (kind.as_str(), r#ref) != ("redis", "cache") {
             return Ok(None);
         }
+        // A provider takes a moment: two requests at once both get here.
+        tokio::time::sleep(Duration::from_millis(30)).await;
         let mut m = MINTED.lock();
         let key = format!("key{}", m.len());
         m.push(format!("link {service} {key}"));
@@ -633,6 +635,16 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let (st, _) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "broken", "source": {"kind": "image", "image": "nginx:1.27"}, "links": [{"kind": "postgres", "ref": "nope"}] }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     assert!(call(&w.api, "GET", "/v1/apps/services", None).await.1.as_array().unwrap().iter().all(|s| s["name"] != "broken"), "nothing was left behind");
+    // Two requests making one link at once: one credential stays, the other is revoked.
+    let (racer, _) = image_service(&w, "racer", json!({"port": 80})).await;
+    let rid = racer["id"].as_str().unwrap().to_string();
+    let path = format!("/v1/apps/services/{rid}/links/redis/cache");
+    let before = MINTED.lock().len();
+    let (a, b) = tokio::join!(call(&w.api, "PUT", &path, Some(json!({}))), call(&w.api, "PUT", &path, Some(json!({}))));
+    assert_eq!((a.0, b.0), (StatusCode::OK, StatusCode::OK));
+    let log: Vec<String> = MINTED.lock()[before..].to_vec();
+    assert_eq!(log.iter().filter(|l| l.starts_with("link ")).count(), 2, "{log:?}");
+    assert_eq!(log.iter().filter(|l| l.starts_with("unlink ")).count(), 1, "the loser's goes: {log:?}");
 }
 
 /// Requests that pile up past an instance's concurrency start more instances, up to
@@ -2063,6 +2075,11 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     assert_eq!(resp.status(), StatusCode::OK);
     let v: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(v["DB_PASSWORD"], "s3cret");
+    // A shell reads them all and a job can print them: the same rule.
+    let base = values.trim_end_matches("/variables/values").to_string();
+    assert_eq!(call(&w.api, "POST", &format!("{base}/shell/sessions"), None).await.0, StatusCode::FORBIDDEN);
+    let (_, job) = call(&w.api, "POST", &format!("{base}/jobs"), Some(json!({"command": "exit 0"}))).await;
+    assert_eq!(call(&w.api, "GET", &format!("{base}/jobs/{}/logs", job["id"].as_str().unwrap()), None).await.0, StatusCode::FORBIDDEN);
 }
 
 

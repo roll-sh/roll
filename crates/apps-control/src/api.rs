@@ -622,6 +622,11 @@ async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query
 /// `roll_auth::Grant`). Nothing a client sends is believed.
 /// Who acted, for the activity log: a scoped token by its name, a signed-in admin by their user
 /// id, else the operator.
+/// Who asks, for another product's rule (roll secrets' reveal): what rolld's gate put on it.
+fn asker(ext: &Extensions) -> crate::integrations::Asker<'_> {
+    crate::integrations::Asker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(ext) }
+}
+
 fn actor(ext: &Extensions) -> Option<String> {
     if let Some(g) = roll_auth::Grant::on(ext) {
         return Some(format!("token:{}", g.name));
@@ -740,7 +745,7 @@ async fn variables(State(apps): S, Path((id, env)): Path<(String, String)>) -> R
 }
 
 async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
-    let who = crate::integrations::Asker { operator: roll_auth::Operator::on(&ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(&ext) };
+    let who = asker(&ext);
     let v = apps.variables(&id, &env, Some(who)).await?;
     apps.audit("variables.revealed", &id, &env, actor(&ext), json!({})).await;
     ok(v)
@@ -779,7 +784,9 @@ struct ShellQuery {
 }
 
 /// `GET …/shell` (a WebSocket): a shell in a running instance; see `crate::shell`.
-async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<ShellQuery>, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+async fn shell(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<ShellQuery>, ext: Extensions, ws: axum::extract::ws::WebSocketUpgrade) -> R {
+    // A shell reads every variable: roll secrets' reveal rule, as for their values.
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let slot = apps.shell_slot(&id, &env)?;
     let target = apps.shell_target(&id, &env, q.instance.as_deref()).await?;
     let (cols, rows) = (q.cols.unwrap_or(80).clamp(10, 1000), q.rows.unwrap_or(24).clamp(2, 500));
@@ -806,7 +813,8 @@ struct OpenSession {
 }
 
 /// `POST …/shell/sessions`: a shell over HTTP (the dashboard's terminal); see `crate::shell`.
-async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+async fn open_session(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
     let o: OpenSession = if b.is_empty() { OpenSession { instance: None, cols: None, rows: None } } else { serde_json::from_slice(&b).map_err(|e| Error::BadRequest(e.to_string()))? };
     let sh = apps.open_session(&id, &env, o.instance.as_deref(), o.cols.unwrap_or(80).clamp(10, 1000), o.rows.unwrap_or(24).clamp(2, 500)).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": sh }))).into_response())
@@ -881,7 +889,7 @@ async fn cancel_job(State(apps): S, Path((id, env, job)): Path<(String, String, 
 /// A job's output; `follow` streams it until the job ends.
 async fn job_logs(State(apps): S, Path((id, env, job)): Path<(String, String, String)>, Query(q): Query<LogQuery>, ext: Extensions) -> R {
     let j = apps.job(&id, &env, &job).await?;
-    let who = crate::integrations::Asker { operator: roll_auth::Operator::on(&ext), user: ext.get::<roll_auth::SignedIn>(), grant: roll_auth::Grant::on(&ext) };
+    let who = asker(&ext);
     apps.check_secret_reveal(&id, &env, who).await?;
     let (tx, rx) = tokio::sync::watch::channel(j.status != crate::model::RunStatus::Running);
     if j.status == crate::model::RunStatus::Running {
