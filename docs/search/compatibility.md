@@ -1090,8 +1090,8 @@ the rest are skipped by the tests' own prerequisites.
   nested objects. `exists` on fields without doc values or norms reads roll's own field-names
   terms (printed and counted as Elasticsearch's `_field_names` term query).
 - Transforms run in the background on the cluster's job scheduler, like Elasticsearch's, and
-  keep their schedule in the stored transform: a cluster sleeping with a started transform
-  isn't woken for it, and runs the triggers that came due when it loads again. A continuous
+  keep their schedule in the stored transform: a cluster sleeping with a started transform is
+  woken when its next trigger comes due (architecture.md, "Idle cost"). A continuous
   checkpoint recomputes every bucket up to its bound (Elasticsearch recomputes only the
   buckets whose documents changed); `_start` of a continuous transform answers after its
   first checkpoint (or its `timeout`), a batch transform's at once.
