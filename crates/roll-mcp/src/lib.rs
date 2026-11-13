@@ -397,9 +397,16 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     Ok(v) => rpc_result(id, v),
                     Err((message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": message, "data": data } }),
                 },
+                Some(uri) if resources::project_of(uri).is_some() && tool_names(ctx).iter().any(|t| t == "workspace_list_projects") => {
+                    let project = resources::project_of(uri).unwrap_or_default();
+                    match read_route(ctx, &format!("/v1/workspace/projects/{project}"), uri).await {
+                        Ok(answer) => rpc_result(id, resources::project(uri, &answer)),
+                        Err((message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": message, "data": data } }),
+                    }
+                }
                 other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
             },
-            "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": [] })),
+            "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": resources::templates(&tool_names(ctx)) })),
             "prompts/list" => rpc_result(id, prompts::list(&tool_names(ctx))),
             "completion/complete" => rpc_result(id, complete(ctx, &params).await),
             "prompts/get" => match prompts::get(params.get("name").and_then(Value::as_str).unwrap_or(""), params.get("arguments").unwrap_or(&Value::Null), &tool_names(ctx)) {
@@ -418,13 +425,23 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
 /// tool the connection lacks: a suggestion never reaches past a call it could make.
 async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Value {
     let empty = json!({ "completion": { "values": [], "hasMore": false } });
-    if params["ref"]["type"] != "ref/prompt" {
-        return empty;
-    }
-    let (prompt, arg) = (params["ref"]["name"].as_str().unwrap_or(""), params["argument"]["name"].as_str().unwrap_or(""));
+    let (kind, arg) = (params["ref"]["type"].as_str().unwrap_or(""), params["argument"]["name"].as_str().unwrap_or(""));
     let typed: String = params["argument"]["value"].as_str().unwrap_or("").chars().take(200).collect();
-    let Some(src) = prompts::source(prompt, arg) else { return empty };
-    if !tool_names(ctx).iter().any(|t| t == src.tool) || !prompts::offered_to(prompt, &tool_names(ctx)) {
+    let tools = tool_names(ctx);
+    let src = match kind {
+        "ref/prompt" => {
+            let prompt = params["ref"]["name"].as_str().unwrap_or("");
+            if !prompts::offered_to(prompt, &tools) {
+                return empty;
+            }
+            prompts::source(prompt, arg)
+        }
+        // A project page's id completes from the workspace's list.
+        "ref/resource" if params["ref"]["uri"] == resources::PROJECT_TEMPLATE && arg == "project" => Some(prompts::workspace_projects()),
+        _ => None,
+    };
+    let Some(src) = src else { return empty };
+    if !tools.iter().any(|t| t == src.tool) {
         return empty;
     }
     let others = params["context"]["arguments"].clone();
@@ -528,13 +545,19 @@ async fn call(ctx: &Arc<Ctx>, name: &str, args: Value) -> Option<Value> {
 /// tool's request is, put in words.
 /// A refusal comes back with its HTTP status (and `Retry-After` when rate limited) in `data`.
 async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
+    let answer = read_route(ctx, resources::ME_ROUTE, resources::ME).await?;
+    Ok(resources::me(&answer, code_sql_now()))
+}
+
+/// A resource's route read through the gated router with the caller's token, like a tool.
+async fn read_route(ctx: &Arc<Ctx>, route: &str, uri: &str) -> Result<Value, (String, Value)> {
     let fail = |e: String| (e, json!({}));
-    let mut req = Request::builder().method("GET").uri(resources::ME_ROUTE);
+    let mut req = Request::builder().method("GET").uri(route);
     for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
         req = req.header(k, v);
     }
     let mut req = req.body(Body::empty()).map_err(|e| fail(e.to_string()))?;
-    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": resources::ME })), ip: ctx.ip, elicits: false, client: ctx.client.clone() });
+    req.extensions_mut().insert(McpCall { tool: "resources/read".into(), args: Arc::new(json!({ "uri": uri })), ip: ctx.ip, elicits: false, client: ctx.client.clone() });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {},
@@ -549,8 +572,7 @@ async fn read_me(ctx: &Arc<Ctx>) -> Result<Value, (String, Value)> {
         }
         return Err((format!("{status}: {}", String::from_utf8_lossy(&bytes).trim()), data));
     }
-    let answer: Value = serde_json::from_slice(&bytes).map_err(|e| fail(e.to_string()))?;
-    Ok(resources::me(&answer, code_sql_now()))
+    serde_json::from_slice(&bytes).map_err(|e| fail(e.to_string()))
 }
 
 fn code_sql_now() -> i64 {
