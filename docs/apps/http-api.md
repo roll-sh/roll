@@ -226,6 +226,11 @@ type EnvironmentPut = {
   /** An image service whose image has a tag: deploy when the tag points at a new digest
    *  (checked every 5 minutes on the owner; actor `tag watch`). 400 otherwise. */
   follow_tag?: boolean;
+  /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
+   *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
+   *  before `</body>`, served from the preview's host), sending notes to the preview in roll's
+   *  dashboard. 400 on another environment. */
+  feedback?: boolean;
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
    *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
    *  service's, null goes back to it; checked with the service's settings as one run. */
@@ -247,6 +252,7 @@ type Environment = EnvironmentSummary & {
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
+  feedback: boolean;          // a preview's pages carry roll previews' feedback button
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
   created_at: number;

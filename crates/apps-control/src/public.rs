@@ -343,9 +343,30 @@ fn strip_roll_headers(h: &mut axum::http::HeaderMap) {
 /// answer metered.
 async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&str>, mut req: Request) -> Response {
     let began = Instant::now();
+    // Came in through roll: the private environment's access cookie (checked just below).
+    let cookie = format!("roll_access_{env}=");
+    let via_link = env.starts_with("pv-") && req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).any(|v| v.split(';').any(|c| c.trim().starts_with(&cookie)));
     // A private environment answers only visitors with its token, before anything wakes.
     if let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         return turned_away;
+    }
+    // roll previews' feedback button: its script from the preview's own host, and a page load
+    // (a browser's document, else a GET asking for HTML) gets the tag.
+    let target = if via_link { apps.feedback_target(service, env).await } else { None };
+    if let Some(t) = &target
+        && req.uri().path() == crate::feedback::PATH
+    {
+        return crate::feedback::script(t);
+    }
+    let page_load = req.method() == axum::http::Method::GET
+        && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {
+            Some(dest) => dest.eq_ignore_ascii_case("document"),
+            None => req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html")),
+        };
+    let feedback = target.is_some() && page_load;
+    if feedback {
+        // The page as the app wrote it, so the tag can go in as it streams.
+        req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     }
     let live = match apps.load_live(service, env).await {
         Ok(l) => l,
@@ -363,14 +384,14 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
     let acquired = match deployment {
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
-            Ok(t) if t.site.is_some() => return serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await,
+            Ok(t) if t.site.is_some() => return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await),
             Ok(t) => live.acquire_deployment(t).await,
             Err(e) => return page(StatusCode::NOT_FOUND, "No such deployment", &e.to_string()),
         },
         None => match live.may_wake().map(|_| live.route(bucket)) {
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
             Ok(Some(t)) if t.site.is_some() => {
-                let mut r = serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await;
+                let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
                 if let (true, Some(b)) = (fresh, bucket) {
                     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
                     if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {
@@ -524,7 +545,11 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         }
         frame
     });
-    Response::from_parts(parts, Body::new(http_body_util::StreamBody::new(frames)))
+    with_feedback(feedback, Response::from_parts(parts, Body::new(http_body_util::StreamBody::new(frames))))
+}
+
+fn with_feedback(on: bool, r: Response) -> Response {
+    if on { crate::feedback::add(r) } else { r }
 }
 
 /// Meters a request when its body is sent (or the client went away).

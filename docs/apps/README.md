@@ -527,6 +527,15 @@ public contract so they need no private hook:
 - Preview environments scale to zero like any other, so an open pull request costs nothing
   until someone opens its URL.
 
+roll previews' feedback button works on a preview environment of roll apps too, when roll
+previews turns it on for the project (`feedback` on the environment): a visitor who came in
+through the preview's access link (its cookie; an automation's bypass header doesn't count) gets
+`<script src="/__roll/feedback.js" defer>` before `</body>` of a page load (a browser's document,
+else a GET that asks for HTML), the page asked of the app uncompressed and sent `private,
+no-cache` with no length or ETag; the script itself comes from the preview's own host. It holds no
+credential: notes go to the preview in roll's dashboard. The script and the tagger are roll
+previews', copied (`assets/feedback.js`, `feedback.rs`) until one copy serves both.
+
 ### Permissions and MCP
 
 roll apps adds no token or scope checks of its own. Its routes sit behind rolld's gate
@@ -991,7 +1000,9 @@ Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/rol
   override removed today stays in the `pv-` environment); once secrets is wired, PATCH only the
   link redirects, not `t.vars` (a second copy of project secrets in apps); `catalog()`'s
   memory ignores `[app.previews.run]` and per-environment `run`; `--env K=V` on argv in
-  `code-preview/src/docker.rs`.
+  `code-preview/src/docker.rs`; and send `feedback: true` in its PUT of a `pv-` environment when
+  the project has feedback on (apps then serves the button: one copy of `feedback.js` and its
+  tagger after the merge).
 - **roll-secrets** (see "Secrets and environments"). Ours on wiring:
   - Skip `Secrets::ensure_environment` for ephemeral environments: previews ensures them with
     their base and trust, and ensuring again with other values is a 409 `mismatch`.
@@ -1001,9 +1012,15 @@ Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/rol
   - Seal with secrets' `Keyring` (`ROLL_SECRET_KEY_PREVIOUS`, `ROLL_SECRET_KEY_KMS`), not
     `ROLL_SECRET_KEY` alone, so a key rotation by secrets' guide keeps apps' sealed variables,
     registry logins and target URLs readable, and KMS works on a fleet.
-  - `SecretSource` needs a digest (so `needs_deploy`'s cache isn't an audited resolve a minute).
-  - Theirs: `rolld/src/secrets/syncs.rs` uses `code_control::review::apps::PublicOnly`, which
-    mcp makes `pub(crate)`: secrets stops compiling after mcp unless it moves to `roll-net`.
+  - `SecretSource` gains `digest`, on `Secrets::digest(project, env, path, caller)` (what `roll
+    run --watch` polls: keys, versions, fingerprints and links; it decrypts nothing and isn't
+    audited), for `needs_deploy`'s minute-long cache. A live link's resource rotating on its own
+    doesn't move it, as with `roll run --watch`.
+  - A value whose source is a secret needs `Caller::allows(Reveal, Scope::at(project, env,
+    path))` on top of apps' `reveal` (secrets confirmed: otherwise apps' reveal gets around
+    protected environments). `Keyring::new(current, previous)`, the same key material.
+  - `rolld/src/secrets/syncs.rs`'s `PublicOnly` is resolved on wip/secrets-on-mcp (`roll_net`),
+    which whichever of #19 and #20 merges second takes.
 - **roll-search** touches nothing of apps; its conflicts with apps are additions side by side
   (`Product`/`Kind` arrays grow).
 - **Conflicts with apps**: Cargo.toml/Cargo.lock everywhere (keep both); `rolld/src/main.rs`
@@ -1032,33 +1049,30 @@ platform branches".
 
 1. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-2. **Preview feedback**: for `pv-…` environments, the feedback button roll previews injects
-    (`/__roll/feedback.js` before `</body>` of HTML a visitor reached through roll; the rules in
-    `roll-previews/src/runtime.rs` `add_feedback`), in the proxy.
-3. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
+2. **A project in one file, imported**: done: `roll up --all` from `[apps]` and `[databases]`;
    next, importing a Compose file's image services (Railway's) and an end-to-end run against a
    live rolld with Postgres and Redis.
-4. **Region**: the region shown on the overview and each environment, defaulting to the project's
+3. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-5. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-6. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-7. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-8. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-9. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-11. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+10. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-12. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

@@ -17,6 +17,7 @@ pub mod backups;
 pub mod hooks;
 pub mod tags;
 pub mod sites;
+pub mod feedback;
 pub mod registry;
 pub mod config;
 pub mod cron;
@@ -734,6 +735,7 @@ impl Apps {
             run: r.run.clone(),
             hook: r.hook_hash.is_some(),
             follow_tag: r.follow_tag,
+            feedback: r.feedback,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
             created_at: r.created_at,
@@ -745,7 +747,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "feedback"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -830,6 +832,19 @@ impl Apps {
             let (sid, e, run) = (service.to_string(), env.to_string(), row.run);
             self.db(move |s| s.set_env_run(&sid, &e, &run)).await?;
             self.settings_changed();
+        }
+        match o.get("feedback") {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(on)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                let row = self.db(move |s| s.environment(&sid, &e)).await?;
+                if *on && !row.ephemeral {
+                    return Err(Error::BadRequest("feedback is for a preview environment (ephemeral)".into()));
+                }
+                let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+                self.db(move |s| s.set_feedback(&sid, &e, on)).await?;
+            }
+            Some(_) => return Err(Error::BadRequest("feedback is a boolean".into())),
         }
         match o.get("follow_tag") {
             None | Some(Value::Null) => {}
@@ -1351,6 +1366,17 @@ impl Apps {
             return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep)));
         }
         self.db(move |s| s.domain_owner(&host)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active).map(|(s, e, _)| (s, e, None))
+    }
+
+    /// Where a preview's feedback goes (the preview in roll's dashboard), for a visitor who came
+    /// in through its access link, when roll previews turned the button on and the dashboard is
+    /// known.
+    pub(crate) async fn feedback_target(self: &Arc<Self>, service: &str, env: &str) -> Option<String> {
+        let web = self.cfg.web_url.clone()?;
+        let preview = env.strip_prefix("pv-")?.to_string();
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await.ok()?;
+        (row.ephemeral && row.feedback).then(|| format!("{}/dashboard/projects/{}/previews?preview={preview}", web.trim_end_matches('/'), svc.project))
     }
 
     /// What a deployment's own URL runs: that deployment of a web service, built and not
