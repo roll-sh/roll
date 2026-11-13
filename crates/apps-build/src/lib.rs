@@ -19,12 +19,14 @@ mod static_site;
 #[cfg(test)]
 mod tests;
 mod tree;
+mod uses;
 mod version;
 
 use serde::{Deserialize, Serialize};
 
 pub use tree::{DirTree, MapTree, Tree};
 pub use node::{WorkspaceApp, workspace_app};
+pub use uses::{Datastore, uses};
 
 /// The port a generated image listens on. The image sets `PORT` to it.
 pub const DEFAULT_PORT: u16 = 8080;
@@ -88,6 +90,10 @@ pub struct Plan {
     /// has no file for answers `index.html` (roll's proxy does it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spa: bool,
+    /// Datastores its manifests have client libraries for ([`uses`]): New service offers to
+    /// make and link them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<Datastore>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -127,6 +133,15 @@ pub enum Error {
 
 /// Detects how `tree` builds and runs. `tree` is the service's root directory.
 pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
+    let mut p = detect(tree, overrides)?;
+    for (store, why) in uses(tree) {
+        p.uses.push(store);
+        p.notes.push(format!("{why}: it uses {}", store.label()));
+    }
+    Ok(p)
+}
+
+fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     let o = overrides.trimmed();
     if o.builder == Builder::Dockerfile || tree.read("Dockerfile").is_some() {
         return docker::plan(tree, &o);
@@ -242,6 +257,7 @@ impl Draft {
             dockerfile,
             notes,
             spa: false,
+            uses: Vec::new(),
         }
     }
 }

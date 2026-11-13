@@ -268,6 +268,10 @@ type Plan = {
   port: number;
   dockerfile: string;        // what builds the image (the tree's own, or generated)
   notes: string[];           // why: "found pnpm-lock.yaml", "next build → .next"
+  spa?: boolean;             // a static site with a client-side router
+  /** Datastores the root's manifests have client libraries for ("pg in package.json"): New
+   *  service offers to make and link them. Absent when none. */
+  uses?: ("postgres" | "redis")[];
 };
 
 /** Wired on a node today: postgres (DATABASE_URL) and redis (REDIS_URL, REDIS_REST_URL/TOKEN). */

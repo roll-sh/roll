@@ -796,6 +796,16 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
             };
             let svc = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await?;
             eprintln!("made service {} in project {}", s(&svc["name"]), project);
+            // What the code talks to, said once: roll apps links the database's variables in.
+            let tree = apps_build::DirTree::new(&dir);
+            for (store, why) in apps_build::uses(&tree) {
+                let make = match store {
+                    apps_build::Datastore::Postgres => format!("roll db create {name}-db"),
+                    apps_build::Datastore::Redis => format!("roll redis create {name}-cache"),
+                };
+                let kind = if store == apps_build::Datastore::Postgres { "postgres" } else { "redis" };
+                eprintln!("the code uses {} ({why}): `{make}`, then `roll apps link {kind} <its id>` puts its URL in", store.label());
+            }
             svc
         }
     };

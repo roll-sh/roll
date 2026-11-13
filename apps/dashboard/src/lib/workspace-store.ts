@@ -202,6 +202,14 @@ export const workspace = {
     set({ staged: { ...state.staged, [projectId]: (state.staged[projectId] ?? []).filter((s) => id !== undefined && s.id !== id) } });
   },
 
+  /** Creates a resource in its product and places it on the project's canvas at `at`; its ref. */
+  async make(projectId: string, kind: ResourceKind, name: string, at: { x: number; y: number }) {
+    const ref = await createResource(kind, name);
+    await workspaceApi.place(projectId, kind, ref, at.x, at.y);
+    withProject(projectId, (p) => ({ ...p, resources: [...p.resources, { kind, ref, x: at.x, y: at.y, added_at: Date.now() }] }));
+    return ref;
+  },
+
   /** Creates every staged resource in its product and places it where its card is. Failures stay staged, with the reason. */
   async deploy(projectId: string) {
     const todo = (state.staged[projectId] ?? []).filter((s) => s.phase !== "creating");
@@ -209,12 +217,7 @@ export const workspace = {
     await Promise.all(
       todo.map(async (s) => {
         try {
-          const ref = await createResource(s.kind, s.name);
-          await workspaceApi.place(projectId, s.kind, ref, s.x, s.y);
-          withProject(projectId, (p) => ({
-            ...p,
-            resources: [...p.resources, { kind: s.kind, ref, x: s.x, y: s.y, added_at: Date.now() }],
-          }));
+          await workspace.make(projectId, s.kind, s.name, s);
           workspace.unstage(projectId, s.id);
         } catch (e) {
           workspace.updateStaged(projectId, s.id, { phase: "failed", error: errorText(e) });

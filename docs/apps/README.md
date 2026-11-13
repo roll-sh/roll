@@ -632,6 +632,22 @@ does the same, as `heroku rollback`. A failed or timed-out cron run is a `cron.f
 notified by default; a failed one-off job is `job.failed`, off by default (someone ran it and saw
 it). Both carry the exit code.
 
+## A service and its database
+
+Railway's and Render's templates make an app and its database together. roll does it without a
+template: the plan reads what the code talks to (`Plan.uses`, from the root's manifests: `pg`,
+`psycopg`, `pgx`, `sqlx` with `postgres`, `org.postgresql`, and `redis`, `ioredis`, `sidekiq`,
+`go-redis`… in package.json, requirements.txt, pyproject.toml, Pipfile, Gemfile, go.mod,
+Cargo.toml/Cargo.lock, composer.json and Maven/Gradle files; only `dependencies` in
+package.json, since a dev dependency is usually a test's), with the reason in the notes. New
+service ticks the project's one database of that kind, or a New Postgres/New Redis chip when the
+project has none (with two or more, the user picks), and stops guessing once the user touches a
+chip. On Deploy the sheet makes each new database in its product (`roll db`, `roll redis`),
+places it beside the service on the canvas, and creates the service linked to it, so
+`DATABASE_URL`/`REDIS_URL` are in the first deploy. A database made before a failed create stays
+in the project, and a retry links it rather than making another. The first `roll up` in a
+directory prints the same finding with the two commands that do it.
+
 ## Volume backups
 
 A volume is backed up to object storage as a tar (`apps/volumes/<service>/<env>/<unix ms>.tar`),
@@ -814,26 +830,24 @@ Ours are done or in `## Next`; theirs (each thread has been told):
 Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 2026-11-13
 (security, product against Railway/Render/Fly/Cloud Run, integration) set this order.
 
-1. **Templates**: a service and its database in one step (Railway's templates, Render's
-   blueprints). (Done: New service links the project's databases before the first deploy; the
-   canvas draws a service's links.)
-2. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
+1. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
     (Vercel's rolling releases, Cloud Run's traffic splits).
-3. Then: per-environment run settings in the dashboard, (done: `roll apps metrics --range`, `roll apps drains`, `notifications`, `activity`).
-4. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
+2. **Per-environment run settings**: an environment's own size, instances and sleep from the
+   API, the CLI and the dashboard (today only roll.toml's `[app.environments.<name>.run]`).
+3. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every
    15 s, and an environment's `needs_deploy` from a stored digest instead of decrypting every
    variable on each read (with roll secrets, `Secrets::digest`).
-5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+4. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+5. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-8. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+6. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+7. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-9. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+8. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-10. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+9. EFS volumes and Cloud Map private DNS on the fleet; TCP services.

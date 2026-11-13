@@ -651,3 +651,31 @@ fn a_static_build_with_a_client_router_is_a_single_page_app() {
     assert!(spa.spa && spa.notes.iter().any(|n| n.contains("react-router-dom")), "{:?}", spa.notes);
     assert!(!vite(r#""react":"18.0.0""#).spa, "no router: unknown paths are 404s");
 }
+
+#[test]
+fn the_datastores_an_app_uses_come_from_its_manifests() {
+    use Datastore::{Postgres, Redis};
+    let found = |files: &[(&str, &str)]| uses(&tree(files)).into_iter().map(|(d, _)| d).collect::<Vec<_>>();
+    type Files<'a> = &'a [(&'a str, &'a str)];
+    let cases: &[(Files, &[Datastore])] = &[
+        (&[("package.json", r#"{"dependencies":{"pg":"8","ioredis":"5"},"devDependencies":{"redis":"4"}}"#)], &[Postgres, Redis]),
+        (&[("package.json", r#"{"dependencies":{"express":"4"},"devDependencies":{"pg":"8"}}"#)], &[]),
+        (&[("requirements.txt", "Django==5.1\npsycopg[binary]>=3 # db\n")], &[Postgres]),
+        (&[("pyproject.toml", "[project]\ndependencies = [\"fastapi\", \"redis>=5\", \"asyncpg\"]\n")], &[Postgres, Redis]),
+        (&[("pyproject.toml", "[tool.poetry.dependencies]\npython = \"^3.12\"\nPsycopg2_Binary = \"*\"\n")], &[Postgres]),
+        (&[("Gemfile", "gem \"rails\"\ngem 'sidekiq', '~> 7'\n")], &[Redis]),
+        (&[("go.mod", "module x\n\nrequire (\n\tgithub.com/jackc/pgx/v5 v5.7.1\n)\n")], &[Postgres]),
+        (&[("Cargo.toml", "[dependencies]\nsqlx = { version = \"0.8\", features = [\"postgres\", \"runtime-tokio\"] }\n")], &[Postgres]),
+        (&[("Cargo.toml", "[workspace]\n"), ("Cargo.lock", "[[package]]\nname = \"redis\"\nversion = \"0.27.0\"\n")], &[Redis]),
+        (&[("composer.json", r#"{"require":{"laravel/framework":"^11","predis/predis":"^2"}}"#)], &[Redis]),
+        (&[("pom.xml", "<dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId></dependency>")], &[Postgres]),
+        (&[("Dockerfile", "FROM scratch\n"), ("go.mod", "module x\nrequire github.com/redis/go-redis/v9 v9.7.0\n")], &[Redis]),
+    ];
+    for (files, want) in cases {
+        assert_eq!(&found(files), want, "{files:?}");
+    }
+    // The plan says so, with why, whatever builds it.
+    let p = detect(&[("Dockerfile", "FROM scratch\n"), ("package.json", r#"{"dependencies":{"pg":"8"}}"#)]);
+    assert_eq!(p.uses, vec![Postgres]);
+    assert!(p.notes.iter().any(|n| n == "pg in package.json: it uses Postgres"), "{:?}", p.notes);
+}

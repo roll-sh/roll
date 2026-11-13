@@ -48,6 +48,7 @@ pub(crate) fn plan(tree: &dyn Tree, o: &Overrides) -> Result<Plan, Error> {
         dockerfile,
         notes,
         spa: false,
+        uses: Vec::new(),
     })
 }
 

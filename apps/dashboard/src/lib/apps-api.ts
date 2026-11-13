@@ -224,6 +224,8 @@ export interface Plan {
   notes: string[];
   /** A single-page app: the proxy answers a page path with no file with index.html. */
   spa?: boolean;
+  /** Datastores the code has client libraries for (New service offers to make and link them). */
+  uses?: ("postgres" | "redis")[];
 }
 
 export type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };

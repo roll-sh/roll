@@ -1,15 +1,19 @@
-import { ChevronRight, GitBranch, Image, LoaderCircle, Terminal } from "lucide-react";
+import { ChevronRight, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Service, type ServiceType, type Source } from "@/lib/apps-api";
 import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
-import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
-import { useWorkspace } from "@/lib/workspace-store";
+import { freeSpot, KIND_LABEL, resourceKey, suggestName, type ResourceView } from "@/lib/workspace-resources";
+import { refreshInventory, useWorkspace, workspace } from "@/lib/workspace-store";
 import { LINKABLE } from "./variables";
 import { CopyField, Head, Label, Rows } from "../workspace/inspector";
 import { KindTile } from "../workspace/kind";
 
 type From = "repo" | "image" | "upload";
+
+/** Databases New service can make with the service (a template without a template). */
+type Store = "postgres" | "redis";
+const STORES: Store[] = ["postgres", "redis"];
 
 const FROM: { value: From; label: string; Icon: typeof GitBranch }[] = [
   { value: "repo", label: "Repository", Icon: GitBranch },
@@ -67,6 +71,12 @@ export function NewServiceSheet({
     [project.resources, ws.inventory],
   );
   const [links, setLinks] = useState<Set<string>>(new Set());
+  // New databases, made just before the service; those already made (a retry links them).
+  const [make, setMake] = useState<Set<Store>>(new Set());
+  const [made, setMade] = useState<{ kind: Store; ref: string }[]>([]);
+  const [touched, setTouched] = useState(false);
+  const makeable = STORES.filter((k) => ws.kinds.has(k));
+  const [step, setStep] = useState("");
   const [plan, setPlan] = useState<{ key: string; plan?: Plan; error?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,6 +120,31 @@ export function NewServiceSheet({
     };
   }, [from, repo, root, planKey]);
 
+  // What the code uses, ticked until the user picks: the project's one database of that kind,
+  // else a new one (with two or more, they choose).
+  const uses = from === "repo" && plan?.key === planKey ? plan.plan?.uses : undefined;
+  useEffect(() => {
+    if (touched || !uses) return;
+    const link = new Set<string>();
+    const fresh = new Set<Store>();
+    for (const k of uses) {
+      const have = linkable.filter((v) => v.kind === k);
+      if (have.length === 1) link.add(resourceKey(have[0]!));
+      else if (have.length === 0 && ws.kinds.has(k)) fresh.add(k);
+    }
+    setLinks(link);
+    setMake(fresh);
+  }, [uses, touched, linkable, ws.kinds]);
+  const toggle = <T,>(set: (f: (s: Set<T>) => Set<T>) => void, v: T) => {
+    setTouched(true);
+    set((s) => {
+      const n = new Set(s);
+      if (n.has(v)) n.delete(v);
+      else n.add(v);
+      return n;
+    });
+  };
+
   const source: Source | null =
     from === "repo" ? (repo ? { kind: "repo", repo, ...(root.trim() ? { root: root.trim() } : {}) } : null) : from === "image" ? (image.trim() ? { kind: "image", image: image.trim() } : null) : null;
   const portN = port.trim() ? Number(port) : undefined;
@@ -126,13 +161,39 @@ export function NewServiceSheet({
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
       const run = kind === "web" ? (portN ? { port: portN } : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
       const registry = from === "image" && regUser.trim() && regPassword ? { registry: { username: regUser.trim(), password: regPassword } } : {};
-      const chosen = linkable.filter((v) => links.has(resourceKey(v))).map((v) => ({ kind: LINKABLE[v.kind]!, ref: v.ref }));
+      // The new databases first, each placed beside the service, so their variables are in the
+      // first deploy. One made before a failure stays in the project, and a retry links it.
+      const fresh = [...made];
+      const taken: { x: number; y: number }[] = [...project.resources, spot];
+      for (const k of make) {
+        setStep(`Making the ${KIND_LABEL[k]} database…`);
+        const names = new Set([...ws.inventory.values()].map((v) => v.name));
+        const at = freeSpot(taken);
+        taken.push(at);
+        const ref = await workspace.make(project.id, k, suggestName(k, project.name, names), at);
+        fresh.push({ kind: k, ref });
+        setMade([...fresh]);
+        setMake((m) => {
+          const n = new Set(m);
+          n.delete(k);
+          return n;
+        });
+        setLinks((l) => new Set(l).add(resourceKey({ kind: k, ref })));
+      }
+      if (fresh.length) void refreshInventory();
+      setStep("");
+      const freshKeys = new Set(fresh.map(resourceKey));
+      const chosen = [
+        ...fresh.map((r) => ({ kind: LINKABLE[r.kind]!, ref: r.ref })),
+        ...linkable.filter((v) => links.has(resourceKey(v)) && !freshKeys.has(resourceKey(v))).map((v) => ({ kind: LINKABLE[v.kind]!, ref: v.ref })),
+      ];
       const s = await appsApi.create({ project: project.id, name, source, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
     } finally {
       setBusy(false);
+      setStep("");
     }
   };
 
@@ -256,10 +317,10 @@ export function NewServiceSheet({
                 <input value={schedule} onChange={(e) => setSchedule(e.target.value)} placeholder="0 3 * * *" spellCheck={false} className={`${field} font-mono ${schedule && !scheduleOk ? "border-danger/60" : ""}`} />
               </>
             )}
-            {linkable.length > 0 && (
+            {(linkable.length > 0 || makeable.length > 0) && (
               <>
                 <Label>
-                  Link <span className="font-normal">their connection variables (DATABASE_URL…) are in the first deploy</span>
+                  Databases <span className="font-normal">their connection variables (DATABASE_URL…) are in the first deploy</span>
                 </Label>
                 <div className="flex flex-wrap gap-1.5">
                   {linkable.map((v) => {
@@ -270,21 +331,34 @@ export function NewServiceSheet({
                         key={k}
                         type="button"
                         aria-pressed={on}
-                        onClick={() =>
-                          setLinks((s) => {
-                            const n = new Set(s);
-                            if (on) n.delete(k);
-                            else n.add(k);
-                            return n;
-                          })
-                        }
+                        onClick={() => toggle(setLinks, k)}
                         className={`h-7 rounded-md border px-2 text-[12px] transition-colors ${on ? "border-accent/50 bg-accent/[0.08] text-fg" : "border-line text-muted hover:text-fg"}`}
                       >
                         {v.name} <span className="text-subtle">{v.kind}</span>
                       </button>
                     );
                   })}
+                  {makeable.map((k) => {
+                    const on = make.has(k);
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() => toggle(setMake, k)}
+                        className={`flex h-7 items-center gap-1 rounded-md border border-dashed px-2 text-[12px] transition-colors ${on ? "border-accent/50 bg-accent/[0.08] text-fg" : "border-line-2 text-muted hover:text-fg"}`}
+                      >
+                        <Plus className="size-3" strokeWidth={1.5} />
+                        New {KIND_LABEL[k]}
+                      </button>
+                    );
+                  })}
                 </div>
+                {!touched && uses && uses.length > 0 && (
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">
+                    The code uses {uses.map((k) => KIND_LABEL[k]).join(" and ")}, so {uses.length > 1 ? "they're" : "it's"} ticked.
+                  </p>
+                )}
               </>
             )}
             <Label>
@@ -317,7 +391,7 @@ export function NewServiceSheet({
             className="flex h-7 items-center gap-1.5 rounded-md bg-fg px-2.5 text-[12px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {busy && <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" />}
-            {busy ? "Deploying…" : "Deploy"}
+            {busy ? step || "Deploying…" : "Deploy"}
           </button>
         )}
       </div>
