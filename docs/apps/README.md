@@ -714,8 +714,11 @@ or `redis`. `roll apps import-compose [file] [--write]` turns a Compose file int
 (Railway's Compose import): image and build services become `[apps]` (the container's port,
 its environment as variables), Postgres and Redis containers become roll databases linked from
 what `depends_on` them, and what isn't carried over (volumes, networks, commands, health checks)
-is said. The plan, the checks and the import are unit-tested in roll-cli. The calls are the API's routes
-as documented and haven't run against a live rolld yet: that needs Postgres and Redis up.
+is said. The plan, the checks and the import are unit-tested in roll-cli, and the whole run was
+checked against a live rolld (apps and Redis on Docker, 2026-11-13): the plan, a Redis database
+made and placed, the image service made with its link, port and variables and deployed, and a
+second run finding everything there. The calls are the API's routes
+as documented.
 
 ## A service and its database
 
@@ -1053,29 +1056,27 @@ platform branches".
 
 1. **Workers that scale on their work**: a worker's instances follow its linked queue's depth or
    its stream consumer group's lag, which only roll can do natively.
-2. **`roll up --all` against a live rolld**: done: the file, the plan and the Compose import
-   (unit-tested); next, an end-to-end run with Postgres and Redis up.
-3. **Region**: the region shown on the overview and each environment, defaulting to the project's
+2. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+3. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
     Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
     user's first AWS run.*
-5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+4. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
     settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
     warm window or `min_instances` 1 by default there until a wake is fast), and
     allocation-based metering for Fargate.
-8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-9. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+8. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-10. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
+9. **The rest of a cold start**: dockerd starting the container on its network (≈250 ms here);
     snapshot restore (CRIU, or Firecracker on the fleet) is next, Firecracker microVM hosts after.
-11. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
+10. EFS volumes and Cloud Map private DNS on the fleet; TCP services.
