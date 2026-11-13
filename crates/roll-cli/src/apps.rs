@@ -991,11 +991,11 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
         None => dir.file_name().and_then(|n| n.to_str()).unwrap_or("app").to_ascii_lowercase(),
     };
     // Looked up, not guessed from an error: a failed request must never make a second project.
-    let project = if pname.starts_with("prj_") {
-        Some(pname.clone())
-    } else {
-        api.get("/v1/workspace/projects").await?.as_array().into_iter().flatten().find(|x| x["name"] == pname.as_str()).map(|x| s(&x["id"]))
-    };
+    let found = api.get("/v1/workspace/projects").await?.as_array().into_iter().flatten().find(|x| x["name"] == pname.as_str() || x["id"] == pname.as_str()).cloned();
+    let project = found.as_ref().map(|x| s(&x["id"]));
+    // Its databases are the ones on its canvas: another project's `db` is never this one's.
+    let placed: std::collections::HashSet<(String, String)> =
+        found.iter().flat_map(|x| x["resources"].as_array().into_iter().flatten()).map(|r| (s(&r["kind"]), s(&r["ref"]))).collect();
     // What's there: the project's services, databases by name, links by service.
     let mut services = std::collections::BTreeMap::new();
     let mut links: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
@@ -1009,13 +1009,21 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
     let mut dbs = std::collections::BTreeMap::new();
     let wants = |k: &str| f.databases.values().any(|d| d.kind == k);
     if wants("postgres") {
-        for p in api.get("/v1/projects").await?.as_array().into_iter().flatten() {
+        for p in api.get("/v1/projects").await?.as_array().into_iter().flatten().filter(|p| placed.contains(&("postgres".to_string(), s(&p["id"])))) {
             dbs.insert(("postgres".to_string(), s(&p["name"])), s(&p["id"]));
         }
     }
     if wants("redis") {
-        for d in api.get("/v1/redis/databases").await?.as_array().into_iter().flatten() {
+        for d in api.get("/v1/redis/databases").await?.as_array().into_iter().flatten().filter(|d| placed.contains(&("redis".to_string(), s(&d["id"])))) {
             dbs.insert(("redis".to_string(), s(&d["name"])), s(&d["id"]));
+        }
+    }
+    // A service the file names with another source is a mistake to stop at, not to convert.
+    for (n, a) in &f.apps {
+        if let Some(svc) = services.get(n) {
+            let kind = s(&svc["source"]["kind"]);
+            let want = if a.image.is_some() { "image" } else { "upload" };
+            anyhow::ensure!(kind == want, "service {n} exists with a {kind} source; the file makes it {want}: rename one");
         }
     }
     let plan = plan_lines(&f, &services, &dbs, &links);

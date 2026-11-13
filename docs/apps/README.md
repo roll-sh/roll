@@ -666,7 +666,8 @@ releases): while a canary runs, the proxy gives a visitor without one a `roll_bu
 (0–99, a day) and sends buckets under the share to the new deployment; the cookie never reaches
 the app. A client that keeps no cookies is routed by turns, as above.
 
-A rollout splits requests, so it needs a web service whose old deployment is running. The first
+A rollout splits requests, so it needs a web service whose old deployment is running, outside
+a preview environment (a reviewer or two is nothing to judge a canary by). The first
 deployment, an environment that's asleep, a worker and a cron service switch at once, and a
 service with a volume refuses `steps` (one instance writes it). The state lives on the owner.
 If the owner changes mid-rollout, the new owner runs the deploy again from the start, like any
@@ -690,8 +691,10 @@ kind = "redis"
 ```
 
 `roll up --all` (the project is `--project` or the directory's name, made if missing) prints the
-plan first (`+` made, `=` there, `~` linked, `↑` deployed; `--dry-run` stops there), then makes
-the missing databases and places them on the project's canvas, makes the missing services with
+plan first (`+` made, `=` there, `~` linked, `↑` deployed; `--dry-run` stops there). A database
+counts as there only when it's on the project's canvas (another project's `db` is never this
+one's), and a service the file names with another kind of source stops it (renaming one is the
+fix, never a quiet conversion). Then it makes the missing databases and places them on the project's canvas, makes the missing services with
 their links so the first deploy has the variables, links what an existing service lacks,
 uploads each `root`, and redeploys an image service whose image changed. Names are matched, so
 running it again only does what changed. Nothing is ever deleted: a service or database removed
@@ -726,7 +729,7 @@ deploys the service's own source as a manual deploy would (actor `deploy hook`, 
 service, `?image=` may name another tag or digest of the same repository
 (`docker.io/library/nginx` stays nginx), never another image, so a leaked URL can only redeploy
 what the service already runs. Any token that isn't the live hook's is the same 404. The token
-is `rlh_`, 34 base32 characters and a CRC-32, as roll's other secrets, so secret scanning can
+is `rlk_`, 34 base32 characters and a CRC-32, as roll's other secrets, so secret scanning can
 find a leaked URL. Making or removing one is admin in roll MCP's catalogue: it's a standing
 credential. rolld's gate lets `/v1/apps/hooks` through to the hook's own check (its `RULES`);
 access lines log the route pattern, never the token; it runs on the service's owner.
@@ -771,9 +774,14 @@ deployment's image, variables and settings), gone a minute after its last reques
 the environment. The active one's URL is just its instances. With `no_traffic` (`roll deploy
 --no-traffic`), a deploy builds, pulls and health-checks, then stops at `ready` without
 switching anything, so it can be tried at its URL; "Put live" (a rollback to it) runs its image
-again, no build, through a gradual rollout when the service has one. The proxy tries the whole
-label as an environment's slug first, so a slug that happens to contain `--` still resolves.
-A service with a volume has neither: one instance writes it.
+again, no build, through a gradual rollout when the service has one. A no-traffic deploy neither
+supersedes a queued deploy nor is superseded by one, decides on the run it built (a roll.toml
+that makes it a worker fails it), and doesn't run `pre_deploy` (a try-out never migrates the
+shared database; putting it live does). No environment's slug contains `--` (slugs collapse
+runs of `-`), so no hostname a tenant can get looks like another's deployment. A deployment's
+URL answers with that deployment or not at all, never quietly with the live one; its instance is
+metered even when nothing's live, and isn't counted in the environment's scaling or a canary's
+judgement. A service with a volume has neither: one instance writes it.
 
 ## Following a tag
 
@@ -784,7 +792,9 @@ through `Runtime::remote_digest`, no pull, with the service's registry login whe
 registry's, after the same public-address check a deploy makes) and compares it with the digest
 its live deployment pinned. A new one deploys (actor `tag watch`, "nginx:1.27 moved to
 …"), through everything a deploy does: pulled and pinned again, health-checked, a gradual
-rollout when the service has one. A deploy already on its way is left alone, and a registry
+rollout when the service has one. Each environment remembers the digest it last acted on, and
+only a move past it deploys: a rollback while following isn't undone, and a digest whose deploy
+failed isn't tried again every five minutes. A deploy already on its way is left alone, and a registry
 that doesn't answer is a line in the environment's log. Off by default: a deployment runs the
 digest it pinned until someone deploys, so a push to a tag never changes production by
 itself unless asked.
@@ -955,45 +965,62 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
 
 ## With the other platform branches
 
-A review on 2026-11-13 of feature/roll-secrets (069e03378), feature/roll-mcp (40cac2631),
-feature/roll-previews (6f108fb71) and feature/roll-search (877bf261e) against apps found these.
-Ours are done or in `## Next`; theirs (each thread has been told):
+Reviewed on 2026-11-13 against the heads feature/roll-mcp bfaa9bffb, feature/roll-secrets
+926e6bb83, feature/roll-previews 8890f61f4 and feature/roll-search a59b01088 (pairwise
+`git merge-tree` too). Ours are done or in `## Next`; theirs have been told.
 
-- **roll-mcp** (899310491): every apps route is classified, notifications too (a webhook's
-  creation is `reveal`: its secret comes back once; a job's logs are `reveal`: its output can be
-  the variables). The tools' fields match, `apps_events.after` is an integer, and its sinks sign
-  as roll code and apps do. Ours on merge: register an environment resolver for `"apps"` in
-  rolld/src/access.rs (`Resolvers::environments`) answering `Some("preview")` for an ephemeral
-  environment, so the "previews only" preset reaches `pv-<id>` and not a hand-named one. Also
-  on merge: `api::actor` reads `roll_auth::Grant::on(ext)`'s name before the operator's. And `put_link` (and
-  create's `links`) checks `Grant::allows(<resource>, reveal)`, as roll-mcp's gate does (836a7b4f2):
-  a link puts the resource's password where the service's code reads it. mcp's new `roll-net`
-  is the SSRF guard everyone should share: apps' `net.rs` and `model::private_ip` move onto it
-  once #19 is on main (the ranges and `no_proxy` already match).
-- **roll-previews** drives apps over HTTP (`RollApps`): names, limits, tokens, the bypass hash,
-  Idempotency-Keys and 404-on-teardown all match apps. Theirs to change: a deploy answered 202 is
-  only queued (read `…/deploys/{id}` or `deploy.failed` from `/v1/apps/events` before calling it
-  deployed); only a 404 means an environment is gone (`find()` swallows 5xx and timeouts); skip
-  upload-source services (they deploy only uploads); take secrets' `code-preview/src/docker.rs`
-  (no `--env K=V` on argv).
-- **roll-secrets**: see "Secrets and environments". Theirs: `roll_net` instead of
-  `code_control::review::apps::PublicOnly` (mcp makes it `pub(crate)`), and docs/secrets.md's
-  `Secrets::resolve`/`Consumer::App`.
+- **roll-mcp**: every route in `api::router` resolves to a catalogue row, and http-api.md's
+  classes follow the catalogue (restore is `delete`, a domain's PATCH `deploy*`, a job's logs
+  `reveal`, hooks `admin`, wake `write`, all of a shell session `admin`). Ours on merge:
+  - `crates/rolld/tests/auth.rs`: add `("/v1/apps/hooks", "deploy hooks: the secret in the
+    URL")` to `UNSCOPED` (mcp's version fails any API route classed "none" not listed there).
+  - Leaked hook URLs: rolld registers `Access::on_leaked("rlk_", …)`, parsing the service and
+    environment from the URL around the secret, calling `Apps::delete_hook`. The prefix is
+    `rlk_` (`rlh_` is main's automations' webhook prefix); mcp's `SECRET_PREFIXES`, its product
+    mapping and the GitHub partner pattern `rlk_[a-z2-7]{40}` follow it.
+  - An environment resolver for `"apps"` in rolld/src/access.rs answering `Some("preview")` for
+    an ephemeral environment; `api::actor` reads `roll_auth::Grant::on(ext)`'s name before the
+    operator's; `put_link` (and create's `links`) checks `Grant::allows(<resource>, reveal)`.
+  - `net.rs` and `model::private_ip` move onto mcp's `roll-net`.
+  - Theirs (MCP tools): `apps_deploy` could take `no_traffic`; a tool for `PUT
+    …/environments/{env}` (run, follow_tag, wait_for_ci); `apps_get_service` doesn't return
+    deploys (a Service has environment summaries).
+- **roll-previews** (`RollApps`): new Environment fields are ignored safely, `ready` falls into
+  its success branch (it never sends `no_traffic`), and apps no longer runs canaries in
+  ephemeral environments. Theirs: `unset` the variables it set before and no longer wants (an
+  override removed today stays in the `pv-` environment); once secrets is wired, PATCH only the
+  link redirects, not `t.vars` (a second copy of project secrets in apps); `catalog()`'s
+  memory ignores `[app.previews.run]` and per-environment `run`; `--env K=V` on argv in
+  `code-preview/src/docker.rs`.
+- **roll-secrets** (see "Secrets and environments"). Ours on wiring:
+  - Skip `Secrets::ensure_environment` for ephemeral environments: previews ensures them with
+    their base and trust, and ensuring again with other values is a 409 `mismatch`.
+  - `GET …/variables/values` must not return values whose `source` is `secret` unless the caller
+    may reveal the secret itself (a second catalogue check, as `copies_from` does): today apps'
+    `reveal` alone would read a project's production secrets.
+  - Seal with secrets' `Keyring` (`ROLL_SECRET_KEY_PREVIOUS`, `ROLL_SECRET_KEY_KMS`), not
+    `ROLL_SECRET_KEY` alone, so a key rotation by secrets' guide keeps apps' sealed variables,
+    registry logins and target URLs readable, and KMS works on a fleet.
+  - `SecretSource` needs a digest (so `needs_deploy`'s cache isn't an audited resolve a minute).
+  - Theirs: `rolld/src/secrets/syncs.rs` uses `code_control::review::apps::PublicOnly`, which
+    mcp makes `pub(crate)`: secrets stops compiling after mcp unless it moves to `roll-net`.
+- **roll-search** touches nothing of apps; its conflicts with apps are additions side by side
+  (`Product`/`Kind` arrays grow).
+- **Conflicts with apps**: Cargo.toml/Cargo.lock everywhere (keep both); `rolld/src/main.rs`
+  with mcp, secrets and previews (open the workspace once; open secrets before `apps::start`;
+  merge every product's router, then take the copies secrets' `products_api` and mcp's
+  `auth.layer` keep); `rolld/src/cluster.rs` `DbBudget` with secrets (code 2, the rest 1, total
+  12); `project-page.tsx` with previews (keep `working` for the agent count, apps'
+  `live = useProjectServices`, and the Inspector open on `canvas && (!!current || !!newService)`);
+  roll-workspace's `Kind` array and the dashboard's kind maps with search and previews (keep
+  both).
 - **Every product sharing the system database** reserves its own share of
-  `ROLL_SYSTEM_DB_CONNECTIONS`, as secrets and search do: apps has `DbBudget::apps` (weight 1,
-  4 by default); previews and mcp still borrow the workspace's.
+  `ROLL_SYSTEM_DB_CONNECTIONS`: apps has `DbBudget::apps`; previews and mcp still borrow the
+  workspace's.
 - `scripts/test-apps.sh` runs its own `cargo test -p` calls, not `scripts/lib/gate.sh`'s shared
-  package set: adding the apps crates there would slow roll code's and agents' gates, so it's
-  for those gates' owners to decide (AGENTS.md asks new suites to use it).
-- **rolld/src/main.rs on merge**: open the workspace once, open secrets before `apps::start`
-  (which takes the `SecretSource` instead of `NoSecrets`), merge every product's router, and only
-  then take the copies secrets (`products_api`) and mcp (`auth.layer`, last) keep.
-- `crates/rolld/tests/auth.rs` `every_control_plane_route_needs_the_operator_token` fails on main
-  too (`/v1/storage/` from `nest_service`); mcp and search carry the one-line fix.
-- **Deploy hooks' leaked tokens** (roll-mcp 98e0e3980 knows `rlh_`): on merge, rolld registers
-  `Access::on_leaked("rlh_", …)`, parsing the service and environment from the URL around the
-  secret and calling `Apps::delete_hook`. GitHub's partner program needs the pattern
-  `rlh_[a-z2-7]{40}` registered before its reports include it.
+  package set (adding apps there would slow roll code's and agents' gates).
+- `crates/rolld/tests/auth.rs` fails on main too (`/v1/storage/` from `nest_service`); mcp and
+  search carry the one-line fix.
 - Merge order: mcp, secrets, search, apps (then the secrets wiring), previews.
 
 ## Next

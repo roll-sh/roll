@@ -53,12 +53,12 @@ impl Apps {
     }
 }
 
-/// A hook's token: `rlh_`, 34 random characters of lowercase base32 and 6 of CRC-32, as roll's
+/// A hook's token: `rlk_`, 34 random characters of lowercase base32 and 6 of CRC-32, as roll's
 /// other secrets (`roll_access::new_secret`), so secret scanning can find a leaked hook URL
 /// and tell it from look-alike text.
 fn new_token() -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let body = format!("rlh_{}", random(34));
+    let body = format!("rlk_{}", random(34));
     let c = crc32fast::hash(body.as_bytes()) >> 2;
     let sum: String = (0..6).rev().map(|i| ALPHABET[((c >> (i * 5)) & 31) as usize] as char).collect();
     format!("{body}{sum}")

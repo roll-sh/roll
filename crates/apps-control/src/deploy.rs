@@ -146,21 +146,13 @@ impl Apps {
                 }
             }
         }
-        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.for_env(&row)?.run, upload: upload_key, status: DeployStatus::Queued, actor: by.actor };
+        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.for_env(&row)?.run, upload: upload_key, status: DeployStatus::Queued, actor: by.actor, no_traffic };
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
         if no_traffic && (svc.run.kind != RunType::Web || svc.run.volume.is_some()) {
             return Err(Error::BadRequest("no_traffic is for a web service without a volume (its deployment runs next to the live one)".into()));
         }
-        let dep = self
-            .db(move |s| {
-                let d = s.create_deployment(&sid, &e, d, "", k.as_deref())?;
-                if no_traffic {
-                    s.set_no_traffic(&d.id)?;
-                }
-                Ok(d)
-            })
-            .await?;
+        let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", k.as_deref())).await?;
         self.changed(service);
         if let Some(up) = ours {
             let id = dep.id.clone();
@@ -210,6 +202,7 @@ impl Apps {
             upload: None,
             status: DeployStatus::Queued,
             actor,
+            no_traffic: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -252,6 +245,7 @@ impl Apps {
             upload: None,
             status: DeployStatus::Queued,
             actor,
+            no_traffic: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -277,6 +271,7 @@ impl Apps {
             upload: None,
             status: DeployStatus::Queued,
             actor,
+            no_traffic: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -484,7 +479,13 @@ impl Apps {
             }
         }
         let tpl = Arc::new(self.template(&svc, &env, &dep).await?);
-        if let Some(cmd) = tpl.run.pre_deploy.clone() {
+        let did = d.id.clone();
+        let no_traffic = self.db(move |s| s.no_traffic(&did)).await?;
+        // What was built decides: a roll.toml can make it a worker, or give it a volume.
+        anyhow::ensure!(!no_traffic || (tpl.run.kind == RunType::Web && tpl.run.volume.is_none()), "no_traffic is for a web service without a volume, and this build isn't one");
+        // A try-out never migrates the shared database: its pre-deploy command runs when it's put
+        // live.
+        if let Some(cmd) = tpl.run.pre_deploy.clone().filter(|_| !no_traffic) {
             self.step(&d.service, &d.id, "pre_deploy").await;
             self.pre_deploy(&tpl, &cmd, log, &cancel).await?;
         }
@@ -515,8 +516,7 @@ impl Apps {
             log.stream(Stream::System).line(format!("healthy after {:.1} s", took.as_secs_f64()));
         }
         // No traffic: healthy is as far as it goes; its own URL wakes it when asked.
-        let did = d.id.clone();
-        if self.db(move |s| s.no_traffic(&did)).await? {
+        if no_traffic {
             for i in &made {
                 self.deps.runtime.remove(&i.name).await;
             }
@@ -528,7 +528,8 @@ impl Apps {
         }
         // A gradual rollout needs something to split: the old deployment running and taking
         // requests. Asleep, it switches at once (nothing would judge the new one).
-        let gradual = !tpl.run.rollout.steps.is_empty() && tpl.run.kind == RunType::Web && env.active.is_some() && live.awake() > 0;
+        // Not in a preview: its traffic is a reviewer or two, nothing to judge a canary by.
+        let gradual = !tpl.run.rollout.steps.is_empty() && tpl.run.kind == RunType::Web && !env.ephemeral && env.active.is_some() && live.awake() > 0;
         if !tpl.run.rollout.steps.is_empty() && !gradual && tpl.run.kind == RunType::Web {
             log.stream(Stream::System).line("nothing else is running, so it switches at once");
         }
@@ -608,8 +609,17 @@ impl Apps {
                     _ = cancel.cancelled() => anyhow::bail!("canceled"),
                 }
                 anyhow::ensure!(self.owns(service), "this node no longer holds the service; the node that took it over deploys");
+                // The old one is the live one: a deployment opened by its own URL meanwhile isn't
+                // either side.
+                let active = live.template().map(|t| t.deployment.clone());
                 for (dep, s) in live.take_served() {
-                    let into = if dep == tpl.deployment { &mut new } else { &mut old };
+                    let into = if dep == tpl.deployment {
+                        &mut new
+                    } else if active.as_deref() == Some(dep.as_str()) {
+                        &mut old
+                    } else {
+                        continue;
+                    };
                     into.requests += s.requests;
                     into.errors += s.errors;
                     into.crashes += s.crashes;
