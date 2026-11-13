@@ -344,6 +344,8 @@ export interface PreviewEnvironment {
   head?: string;
   /** What the change did to the Postgres schema (`+ …`, `- …`). */
   schema_changes?: string[];
+  /** A public preview's screenshot behind a signed, expiring link. */
+  screenshot_url?: string;
 }
 
 export interface Change {

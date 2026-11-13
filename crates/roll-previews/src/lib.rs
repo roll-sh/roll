@@ -198,6 +198,10 @@ pub struct Preview {
     pub kept_until: Option<i64>,
     /// When its screenshot was taken (`GET …/screenshot`), if it has one.
     pub screenshot_at: Option<i64>,
+    /// The screenshot's signed link (`(expiry, signature)`), for roll code's summary; never in
+    /// API answers.
+    #[serde(skip)]
+    pub screenshot_link: Option<(i64, String)>,
     pub last_reset_at: Option<i64>,
     pub last_active_at: i64,
     pub expires_at: Option<i64>,

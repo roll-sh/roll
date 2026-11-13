@@ -18,6 +18,7 @@ code-sql.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+hmac.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 parking_lot.workspace = true

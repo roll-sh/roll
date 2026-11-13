@@ -292,6 +292,9 @@ pub struct PreviewEnvironment {
     /// read; untrusted text (a fork's migrations name the objects).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_changes: Option<Vec<String>>,
+    /// A signed, expiring link to the first service's screenshot (public previews only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

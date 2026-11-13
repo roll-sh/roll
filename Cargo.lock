@@ -6407,6 +6407,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "hex",
+ "hmac 0.12.1",
  "hyper 1.12.0",
  "hyper-util",
  "parking_lot",

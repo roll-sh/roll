@@ -196,6 +196,19 @@ done
 curl -sS -o "$HOME_DIR/screenshot.png" "http://$API/v1/previews/$PV/screenshot"
 SHOT=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print(f'{len(b)} bytes, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')" "$HOME_DIR/screenshot.png")
 case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1;; esac
+# A public preview's change carries a signed link to it (the pull request comment's image),
+# which opens without credentials; a changed signature doesn't.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
+SHOT_URL=""
+for _ in $(seq 1 120); do
+  SHOT_URL=$(api GET "/v1/code/changes/$CHG" | jq_ "((d.get('preview') or {}).get('environment') or {}).get('screenshot_url') or ''")
+  [ -n "$SHOT_URL" ] && break
+  sleep 0.5
+done
+SHOT_PATH="/${SHOT_URL#*://*/}"
+[ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API$SHOT_PATH")" = image/png ] || { echo "the signed link should open the screenshot: $SHOT_URL"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API${SHOT_PATH%?}0")" = 403 ] || { echo "a changed signature should be refused"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null

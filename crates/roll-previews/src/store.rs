@@ -90,6 +90,10 @@ CREATE TABLE IF NOT EXISTS activity (
     message TEXT NOT NULL,
     PRIMARY KEY (preview_id, seq)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS keys (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS screenshots (
     preview_id TEXT PRIMARY KEY,
     head TEXT NOT NULL,
@@ -110,6 +114,9 @@ CREATE TABLE IF NOT EXISTS bypass (
     created_at INTEGER NOT NULL
 );
 ";
+
+/// How long a screenshot link (in a pull request comment) works after the screenshot was taken.
+pub const SCREENSHOT_LINK_MS: i64 = 30 * 24 * 3_600_000;
 
 /// The newest activity lines kept per preview.
 pub const ACTIVITY_KEEP: i64 = 200;
@@ -864,6 +871,42 @@ impl Store {
         Ok(row.and_then(|(at, b64)| base64::engine::general_purpose::STANDARD.decode(b64).ok().map(|png| (at, png))))
     }
 
+    /// The key screenshot links are signed with: made once, the same on every node.
+    fn signing_key(&self) -> Result<Vec<u8>> {
+        let mut raw = [0u8; 32];
+        getrandom::fill(&mut raw).expect("system randomness");
+        let fresh = hex::encode(raw);
+        self.db.write(|c| {
+            c.execute("INSERT INTO keys (name, value) VALUES ('screenshots', ?) ON CONFLICT (name) DO NOTHING", [fresh.as_str()])?;
+            Ok::<_, Error>(())
+        })?;
+        let v: String = self.db.read(|c| c.query_row("SELECT value FROM keys WHERE name = 'screenshots'", (), |r| r.get(0)))?;
+        hex::decode(v).map_err(|e| Error::Internal(format!("the screenshot key: {e}")))
+    }
+
+    /// A link to the preview's screenshot anyone can open until it expires (30 days after it was
+    /// taken): `(expiry in ms, signature)`. `None` when there's no screenshot.
+    pub fn screenshot_link(&self, id: &str) -> Result<Option<(i64, String)>> {
+        use hmac::Mac;
+        let Some(at) = self.screenshot_at(id)? else { return Ok(None) };
+        let exp = at + SCREENSHOT_LINK_MS;
+        Ok(Some((exp, hex::encode(self.link_mac(id, exp)?.finalize().into_bytes()))))
+    }
+
+    /// Whether `sig` is the screenshot link's signature for `exp` and it hasn't expired.
+    pub fn screenshot_link_ok(&self, id: &str, exp: i64, sig: &str) -> Result<bool> {
+        use hmac::Mac;
+        let Ok(sig) = hex::decode(sig) else { return Ok(false) };
+        Ok(exp > self.now_ms()? && self.link_mac(id, exp)?.verify_slice(&sig).is_ok())
+    }
+
+    fn link_mac(&self, id: &str, exp: i64) -> Result<hmac::Hmac<sha2::Sha256>> {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
+        m.update(format!("screenshot\n{id}\n{exp}").as_bytes());
+        Ok(m)
+    }
+
     fn screenshot_at(&self, id: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT at FROM screenshots WHERE preview_id = ? AND png <> ''", [id], |r| r.get(0)).optional())?)
     }
@@ -977,6 +1020,7 @@ impl Store {
         let schema_changes = self.schema_changes(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
         let screenshot_at = self.screenshot_at(&r.id)?;
+        let screenshot_link = self.screenshot_link(&r.id)?;
         Ok(Preview {
             id: r.id,
             project: r.project_id,
@@ -1009,6 +1053,7 @@ impl Store {
             schema_changes,
             kept_until,
             screenshot_at,
+            screenshot_link,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,
@@ -1059,6 +1104,27 @@ pub fn month_start(now_ms: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    /// The pull request comment's screenshot link opens it until it expires; a link anyone
+    /// changed (another preview, a later expiry, a guessed signature) doesn't.
+    #[test]
+    fn a_screenshot_link_is_signed_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap();
+        assert_eq!(store.screenshot_link("pv_a").unwrap(), None, "no screenshot, no link");
+        store.set_screenshot("pv_a", "cs_1", b"\x89PNG...").unwrap();
+        let (exp, sig) = store.screenshot_link("pv_a").unwrap().unwrap();
+        assert!(store.screenshot_link_ok("pv_a", exp, &sig).unwrap());
+        assert!(!store.screenshot_link_ok("pv_b", exp, &sig).unwrap(), "another preview");
+        assert!(!store.screenshot_link_ok("pv_a", exp + 1, &sig).unwrap(), "a moved expiry");
+        assert!(!store.screenshot_link_ok("pv_a", exp, &"0".repeat(64)).unwrap(), "a guess");
+        let past = store.now_ms().unwrap() - 1;
+        let stale = hex::encode({
+            use hmac::Mac;
+            store.link_mac("pv_a", past).unwrap().finalize().into_bytes()
+        });
+        assert!(!store.screenshot_link_ok("pv_a", past, &stale).unwrap(), "expired");
+    }
+
     use super::*;
 
     fn store() -> (tempfile::TempDir, Store) {

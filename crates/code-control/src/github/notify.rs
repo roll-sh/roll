@@ -303,6 +303,12 @@ fn preview_comment(c: &Change) -> String {
                     .collect();
                 out.push_str(&format!("Data, branched copy-on-write: {}.\n\n", data.join(", ")));
             }
+            if let Some(url) = e.screenshot_url.as_ref().filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
+                // roll's own signed link; nothing in it can end the image's markdown.
+                if !url.contains([')', ' ', '\n']) {
+                    out.push_str(&format!("![The preview's first page]({url})\n\n"));
+                }
+            }
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
                 out.push_str(&schema_block(lines));
             }
@@ -358,6 +364,7 @@ mod preview_tests {
             github: PreviewGithub::default(),
             head: None,
             schema_changes: None,
+            screenshot_url: None,
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));

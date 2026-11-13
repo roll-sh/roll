@@ -24,6 +24,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/screenshot", get(screenshot))
+        .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
         // These act on running services, which live on the preview's holder in a cluster.
         .merge(
@@ -160,6 +161,20 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>) -> crate::Result<Resp
     match shot.filter(|(_, png)| !png.is_empty()) {
         Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
         None => Err(Error::NotFound("the preview has no screenshot".into())),
+    }
+}
+
+/// The screenshot behind a signed, expiring link (a public route: GitHub fetches the pull request
+/// comment's image without credentials). Anything else is 403.
+async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let (Some(exp), Some(sig)) = (q.get("exp").and_then(|x| x.parse::<i64>().ok()), q.get("sig").cloned()) else {
+        return Ok((StatusCode::FORBIDDEN, "a signed link only").into_response());
+    };
+    let shot = blocking(e, move |e| if e.store.screenshot_link_ok(&id, exp, &sig)? { e.store.screenshot(&id) } else { Ok(None) }).await?;
+    match shot.filter(|(_, png)| !png.is_empty()) {
+        Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=3600")], png).into_response()),
+        None => Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
     }
 }
 

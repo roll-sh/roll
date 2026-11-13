@@ -148,7 +148,8 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           sleeping_usd_month, active_usd_hour, dashboard_url: string | null,
                           github: {comment, status, deployment},
                           head?: string /* the changeset it runs: statuses are about it */,
-                          schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */} /* roll previews (docs/previews.md) */}
+                          schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */,
+                          screenshot_url?: string /* a public preview's screenshot, signed and expiring */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",
            base, head, revision, work_item: string | null, branch: string | null /* git branch it was pushed as */,

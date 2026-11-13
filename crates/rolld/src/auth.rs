@@ -26,6 +26,7 @@ pub const RULES: &[Rule] = &[
     // Version, node and which products are on: the dashboard's sidebar reads it before sign-in.
     // It (and the 404s of products that are off) is merged in front of the gate in main.rs.
     Rule { route: "/v1/info", access: Access::Public("version, node and products on, for the dashboard before sign-in") },
+    Rule { route: "/v1/previews/{id}/screenshot.png", access: Access::Public("a public preview's screenshot behind a signed, expiring link (GitHub fetches the pull request comment's image anonymously)") },
     // roll code has owners and tokens of its own (docs/code/http-api.md "Auth"): public repos and
     // pages read anonymously, git per its own rules, GitHub/Slack/Discord/Linear webhooks verify
     // their signatures, agents' device login and machine links use their own tokens. It takes the
