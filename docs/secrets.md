@@ -551,6 +551,7 @@ roll secrets import  .env [--overwrite]                         # one change (.e
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
 roll secrets health                                            # every finding, every environment, worst first
+roll secrets doctor                                            # this machine's setup, checked
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
 roll secrets scan    [PATH…] | --staged                       # this project's values in files: where, never what
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
@@ -574,6 +575,11 @@ roll run [-p project] [-e production] [--path /] [--allow-unresolved] [--watch] 
   `~/.config/roll/secrets.json` (never the repo), so `roll run -- npm start` needs no flags there
   (`--show`, `--clear`). Then `development` and `/`. A scoped token (`ROLL_TOKEN`) implies its
   project.
+- `roll secrets doctor` checks that setup in one go, each line ok or FAIL: who the token is (and
+  the project it's bound to), the directory's project and environment and how many keys it can
+  read there, the keys a `.env.example` names that it lacks, and whether staged files hold any of
+  the project's values (the scan, names only). It fails when a check does: a first step when
+  `roll run` doesn't see what it should.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
   effective keys, versions, fingerprints and links, and of what their references reach (in this
@@ -1490,8 +1496,6 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
-1. **`roll secrets doctor`**: one command that checks a machine's setup (the token and who it is,
-   the directory's project and environment, the folder's `.env.example`, staged files for values).
 
 Waiting on other pull requests:
 

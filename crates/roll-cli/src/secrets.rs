@@ -190,6 +190,10 @@ pub enum Secrets {
         #[arg(long)]
         code: bool,
     },
+    /// Check this machine's setup: the token and who it is, this directory's project and
+    /// environment, the folder's keys against `.env.example`, staged files for values. Fails if a
+    /// check does.
+    Doctor,
     /// The keys a template (`.env.example`) names that the environment doesn't have, without
     /// reading a value; fails when one is missing (`--strict`: also when it has keys the template
     /// doesn't name).
@@ -746,6 +750,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         return open_share(api, link).await;
     }
     // Health across projects spans them too.
+    if let Secrets::Doctor = &cmd {
+        return doctor(api, &args).await;
+    }
     if let Secrets::Health { all: true, .. } = &cmd {
         let v = api.get("/v1/secrets/findings").await?;
         if json_out {
@@ -1137,7 +1144,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Find { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -1994,6 +2001,69 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
             }
         }
     }
+}
+
+/// `roll secrets doctor`: each check, ok or not, and why.
+async fn doctor(api: &Api, args: &AtArgs) -> anyhow::Result<()> {
+    let mut checks: Vec<(bool, String)> = vec![];
+    // Who this is.
+    let who = match api.get("/v1/secrets/whoami").await {
+        Ok(w) => w,
+        Err(e) => {
+            println!("FAIL roll secrets at {}: {e}", api.base);
+            bail!("can't go on without the API (ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY)");
+        }
+    };
+    checks.push((true, format!("signed in at {} as {}{}", api.base, s(&who["principal"]), who["project"].as_str().map(|p| format!(", limited to {p}")).unwrap_or_default())));
+    // This directory's setup, and what it points at.
+    let here = std::env::current_dir().ok().and_then(|d| setup::nearest(&d));
+    let at = args.resolve();
+    checks.push(match &here {
+        Some(h) => (true, format!("this directory is set up for {} {}:{}", h.name, h.env, h.path)),
+        None if at.project.is_some() => (true, "no setup here; using the flags and environment".into()),
+        None => (false, "no project for this directory: roll secrets setup -p <project> -e <environment>".into()),
+    });
+    let mut keys: Option<std::collections::BTreeSet<String>> = None;
+    match project(api, at.project.as_deref()).await {
+        Err(e) => checks.push((false, format!("the project: {e}"))),
+        Ok(id) => {
+            let env = format!("/v1/secrets/projects/{}/environments/{}", enc(&id), enc(&at.env));
+            match api.get(&format!("{env}/secrets?path={}", enc(&at.path))).await {
+                Err(e) => checks.push((false, format!("{}:{}: {e}", at.env, at.path))),
+                Ok(list) => {
+                    let names: std::collections::BTreeSet<String> = list.as_array().into_iter().flatten().filter_map(|x| x["key"].as_str().map(String::from)).collect();
+                    checks.push((true, format!("{}:{} has {} key(s) you can read", at.env, at.path, names.len())));
+                    keys = Some(names);
+                }
+            }
+            // Staged files hold none of the project's values.
+            if let Some(files) = staged_files().ok().filter(|f| !f.is_empty()) {
+                let mut cands = std::collections::HashSet::new();
+                for (_, text) in &files {
+                    text.lines().for_each(|l| line_candidates(l, &mut cands));
+                }
+                let cands: Vec<String> = cands.into_iter().take(20_000).collect();
+                match api.call(Method::POST, &format!("/v1/secrets/projects/{}/leaks", enc(&id)), Some(json!({ "candidates": cands }))).await {
+                    Ok(v) if v.as_array().is_some_and(|a| a.is_empty()) => checks.push((true, format!("{} staged file(s) hold none of the project's values", files.len()))),
+                    Ok(v) => checks.push((false, format!("staged files hold {} of the project's values: roll secrets scan --staged says where", v.as_array().map_or(0, Vec::len)))),
+                    Err(e) => checks.push((false, format!("scanning the staged files: {e}"))),
+                }
+            }
+        }
+    }
+    // The template the code reads from, if there is one.
+    if let (Some(have), Ok(text)) = (&keys, std::fs::read_to_string(".env.example")) {
+        let missing: Vec<String> = template_keys(&text).into_iter().filter(|k| !have.contains(k)).collect();
+        checks.push(if missing.is_empty() { (true, ".env.example's keys are all set".into()) } else { (false, format!(".env.example names {} that {} doesn't set", missing.join(", "), at.env)) });
+    }
+    for (ok, what) in &checks {
+        println!("{} {what}", if *ok { "ok  " } else { "FAIL" });
+    }
+    let failed = checks.iter().filter(|c| !c.0).count();
+    if failed > 0 {
+        bail!("{failed} check(s) failed");
+    }
+    Ok(())
 }
 
 /// Print findings, and fail when one needs fixing now; `projects`: say which project each is in.

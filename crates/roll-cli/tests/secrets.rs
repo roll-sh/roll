@@ -98,6 +98,8 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", app)], &["secrets", "setup", "-p", "shop", "-e", "production"], None).await;
     let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--", "sh", "-c", "echo $HOST"], None).await;
     assert_eq!(here.trim(), "db.internal");
+    let doctor = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["secrets", "doctor"], None).await;
+    assert!(doctor.contains("ok   this directory is set up for shop production:/") && !doctor.contains("FAIL"), "{doctor}");
 
     // A template's keys checked against the environment, by name only.
     let tpl = dir.path().join(".env.example");
