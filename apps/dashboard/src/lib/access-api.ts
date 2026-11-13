@@ -255,6 +255,8 @@ export const accessApi = {
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
   update: (id: string, patch: Partial<NewGrant>) => call<Grant>("PATCH", token(id), patch),
   revoke: (id: string) => call<Grant>("DELETE", token(id)),
+  /** The networks it's been used from (/24s and /48s), newest first. */
+  networks: (id: string) => call<{ network: string; first_at: number; last_at: number }[]>("GET", `${token(id)}/networks`),
   /** Take back what an approval allowed it for a while (and the approval, if unused). */
   forget: (id: string, approval: string) => call<Grant>("DELETE", `${token(id)}/temporary/${encodeURIComponent(approval)}`),
   /** Its rules narrowed to what its allowed requests used in the last `days` (never wider): a proposal. */

@@ -30,6 +30,7 @@ vi.mock("@/lib/access-api", async (orig) => ({
     token: async () => grant,
     audit: async () => [event],
     approvals: async () => [],
+    networks: async () => [{ network: "203.0.113.0/24", first_at: 0, last_at: Date.now() }],
     revoke: (id: string) => revoke(id),
     tighten: async () => ({ since: 0, days: 30, used: [{ product: "postgres", action: "read", resource: "prj_billing", count: 12, last_at: 0 }], rules: narrowed, from: grant.rules, narrower: true }),
     applyTighten: (id: string, from: unknown) => update(id, from),

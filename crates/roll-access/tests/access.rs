@@ -1078,3 +1078,22 @@ async fn the_audit_log_keeps_its_days() {
     let (_, kept) = d.call(OPERATOR, Method::GET, "/v1/access/audit?limit=1000", None).await;
     assert_eq!(kept.as_array().map(Vec::len), Some(3), "only the last 90 days");
 }
+
+/// A token used from a network it hasn't been before is news (a leaked token is used from
+/// somewhere new): its first network isn't, a known one isn't, and once it roams (five) neither is
+/// the next. Networks are /24s and /48s, so one office or runner pool is one.
+#[tokio::test]
+async fn a_new_network_is_news_until_a_token_roams() {
+    let d = Daemon::new(50);
+    let (_, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let used = |ip: &str| d.access.store.record_use(&id, Some(ip)).map(|n| (n.network, n.networks));
+    assert_eq!(used("203.0.113.5"), None, "where it starts");
+    assert_eq!(used("203.0.113.77"), None, "the same /24");
+    assert_eq!(used("198.51.100.9"), Some(("198.51.100.0/24".to_string(), 2)));
+    assert_eq!(used("2001:db8:1:2::7"), Some(("2001:db8:1::/48".to_string(), 3)));
+    assert_eq!(used("198.51.100.200"), None, "known");
+    assert!(used("192.0.2.1").is_some() && used("100.64.0.1").is_some(), "the fourth and the fifth");
+    assert_eq!(used("10.9.8.7"), None, "roaming now");
+    let (_, list) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}/networks"), None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(6), "{list}");
+}

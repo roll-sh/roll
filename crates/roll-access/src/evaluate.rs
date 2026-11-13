@@ -283,9 +283,14 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     // Used: from an address it may be used from (a refused address neither keeps it from idling
     // nor becomes its last address).
-    if !decided_before && access.store.touch_due(&ctx.grant.id) {
-        let (a, id, ip) = (access.clone(), ctx.grant.id.clone(), ip.map(|i| i.to_string()));
-        tokio::task::spawn_blocking(move || a.store.record_use(&id, ip.as_deref()));
+    if !decided_before && access.store.touch_due(&crate::store::use_key(&ctx.grant.id, ip.map(|i| i.to_string()).as_deref())) {
+        let (a, id, name, ip) = (access.clone(), ctx.grant.id.clone(), ctx.grant.name.clone(), ip.map(|i| i.to_string()));
+        tokio::spawn(async move {
+            let a2 = a.clone();
+            if let Ok(Some(new)) = tokio::task::spawn_blocking(move || a2.store.record_use(&id, ip.as_deref()).map(|n| (id, n))).await {
+                a.network_notice(&name, &new.0, &new.1);
+            }
+        });
     }
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
