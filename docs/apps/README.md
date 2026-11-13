@@ -699,6 +699,13 @@ links = ["db", "cache"]
 [apps.proxy]
 image = "nginx:1.27"
 port = 80                  # and [apps.<name>.variables]: both set when the service is made
+[apps.jobs]
+repo = "acme/shop"         # a roll code repo: deploys on each landing on `branch`
+root = "jobs"              # with repo: the directory in it that builds
+branch = "main"
+type = "worker"            # web, worker or cron (with `schedule`), `start` too
+[apps.jobs.run]
+min_instances = 2          # any run setting, checked as the API checks them
 [databases.db]
 kind = "postgres"
 [databases.cache]
@@ -712,7 +719,8 @@ one's), and a service the file names with another kind of source stops it (renam
 fix, never a quiet conversion). Then it makes the missing databases and places them on the project's canvas, makes the missing services with
 their links so the first deploy has the variables, links what an existing service lacks,
 uploads each `root`, and redeploys an image service whose image changed. Names are matched, so
-running it again only does what changed. Nothing is ever deleted: a service or database removed
+running it again only does what changed, including the run settings an entry names (`~
+settings`, only those that differ; the rest stay as they are). Nothing is ever deleted: a service or database removed
 from the file stays until removed by hand. The file is checked before anything is made: one of
 `root` or `image`, a root inside the directory, links to declared databases, kinds `postgres`
 or `redis`. `roll apps import-compose [file] [--write]` turns a Compose file into these entries
@@ -1111,9 +1119,10 @@ Ranked; the top item not marked *waiting* is what's being worked on. Three revie
 2026-11-13 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **The project file as a Blueprint**: `repo`/`branch`, `type`, `start`, `schedule` and a `run`
-   table in `[apps.<name>]`, checked by `[app.run]`'s checker, applied on each landing on the
-   default branch as Render's Blueprints sync (never deleting).
+1. **The project file applied on each landing**: done: repo, worker and cron entries, and their
+   run settings kept in step by `roll up --all`; next, the owner applying a repo's root
+   `roll.toml` `[apps]` on each landing on the default branch (Render's Blueprint sync), never
+   deleting, its plan in the activity.
 2. **The rollback target on the server, and CLI parity**: "Roll back" without an id picks the
    deployment before the live one on the server (two clicks can't go forward); the CLI gains
    cancel, unlink, registry login, domain redirect and private environments; `roll apps restart`'s
