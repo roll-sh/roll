@@ -23,6 +23,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 const DEFAULT_MASKS: &[&str] = &[
+    // A hit's node id (explain): random on both sides, and not always mixed case.
+    "_node",
     "uuid",
     "index_uuid",
     "cluster_uuid",
