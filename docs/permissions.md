@@ -405,6 +405,9 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 - The operator's policy (`/v1/access/policy`, `roll token policy`) caps every grant's lifetime
   (`max_days`) and can require that every grant expires; a grant made or changed after must fit,
   OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs).
+  `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
+  made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
+  most every 10 seconds, so a change reaches every node within that.
 - The secret is shown once, at creation. The store keeps its SHA-256.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
@@ -488,7 +491,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
 | `POST /v1/access/audit/sinks/{id}/retry` | operator | a failed sink's batch at the next sweep → 204 |
 | `DELETE /v1/access/audit/sinks/{id}` | operator | stop streaming → 204 |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry}`: roll's rules for every grant |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days}`: roll's rules for every grant |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |

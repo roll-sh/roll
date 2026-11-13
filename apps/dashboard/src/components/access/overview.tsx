@@ -369,6 +369,7 @@ function TryIt({ grant }: { grant: string }) {
 function PolicyPanel() {
   const [p, setP] = useState<Policy | null>(null);
   const [days, setDays] = useState("");
+  const [idle, setIdle] = useState("");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     accessApi
@@ -376,6 +377,7 @@ function PolicyPanel() {
       .then((v) => {
         setP(v);
         setDays(v.max_days ? String(v.max_days) : "");
+        setIdle(v.max_idle_days ? String(v.max_idle_days) : "");
       })
       .catch(() => setP(null));
   }, []);
@@ -407,6 +409,19 @@ function PolicyPanel() {
       <label className="flex items-center gap-1.5">
         <input type="checkbox" checked={Boolean(p.require_expiry)} onChange={(e) => void save({ ...p, require_expiry: e.target.checked })} />
         must expire
+      </label>
+      <label className="flex items-center gap-1.5">
+        stops after
+        <input
+          value={idle}
+          onChange={(e) => setIdle(e.target.value.replace(/\D/g, ""))}
+          onBlur={() => void save({ ...p, max_idle_days: idle ? Number(idle) : null })}
+          placeholder="∞"
+          inputMode="numeric"
+          className={`${input} w-16 text-center font-mono text-[12px]`}
+          aria-label="Days unused before a token stops"
+        />
+        days unused
       </label>
       <ErrorNote error={error} />
     </div>

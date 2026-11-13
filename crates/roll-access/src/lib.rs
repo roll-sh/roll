@@ -127,6 +127,36 @@ pub fn find_secrets(text: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod policy_tests {
+    #[test]
+    fn a_grant_unused_too_long_is_idle() {
+        let p = super::Policy { max_idle_days: Some(30), ..Default::default() };
+        let day = 86_400_000;
+        let g = |created: i64, used: Option<i64>| crate::store::Grant {
+            id: "tok_a".into(),
+            name: "a".into(),
+            kind: "token",
+            rules: Default::default(),
+            expires_at: None,
+            ip_allow: vec![],
+            created_by: "operator".into(),
+            created_at: created,
+            last_used_at: used,
+            last_used_ip: None,
+            revoked_at: None,
+            client: None,
+            rate_per_minute: None,
+            revoked_why: None,
+            temporary: vec![],
+        };
+        let now = 100 * day;
+        assert!(p.idle(&g(0, None), now), "made 100 days ago, never used");
+        assert!(!p.idle(&g(0, Some(now - 2 * day)), now), "used two days ago");
+        assert!(!super::Policy::default().idle(&g(0, None), now), "no limit");
+    }
+}
+
+#[cfg(test)]
 mod secret_tests {
     #[test]
     fn secrets_carry_a_checksum_scanners_can_check() {
@@ -273,6 +303,8 @@ pub struct Access {
     pub sinks: std::sync::OnceLock<Arc<dyn sinks::SinkTransport>>,
     /// GitHub's secret scanning keys, cached.
     pub(crate) github_keys: leaks::GithubKeys,
+    /// The token policy as last read (`policy_now`).
+    policy_cache: std::sync::Mutex<Option<(std::time::Instant, Policy)>>,
 }
 
 impl Access {
@@ -281,7 +313,7 @@ impl Access {
             code_sql::Target::Sqlite(path) => code_sql::Db::open_sqlite(path, code_sql::SqliteOptions { readers: 4, cache_kib: 4 << 10 })?,
             code_sql::Target::Postgres { url, schema } => code_sql::Db::connect(url, schema, pg)?,
         };
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -418,11 +450,38 @@ pub struct Policy {
     /// Every grant expires (`expires_at` is required).
     #[serde(default)]
     pub require_expiry: bool,
+    /// A grant not used for this many days stops working (`None`: never), as unused credentials
+    /// are a risk with nothing to show for it.
+    #[serde(default)]
+    pub max_idle_days: Option<u32>,
 }
+
+impl Policy {
+    /// Whether `g` has gone unused too long: since its last use, or since it was made.
+    pub fn idle(&self, g: &store::Grant, now: i64) -> bool {
+        self.max_idle_days.is_some_and(|d| now - g.last_used_at.unwrap_or(g.created_at) > i64::from(d) * 86_400_000)
+    }
+}
+
+/// The policy as read a moment ago: a request reads it without a query (a change reaches every
+/// node within `POLICY_FRESH`).
+const POLICY_FRESH: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Access {
     pub fn policy(&self) -> Policy {
-        self.store.setting("policy").ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+        let p: Policy = self.store.setting("policy").ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        *self.policy_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), p));
+        p
+    }
+
+    /// The policy, read at most every few seconds (for the evaluator, on every request).
+    pub fn policy_now(&self) -> Policy {
+        if let Some((at, p)) = *self.policy_cache.lock().unwrap_or_else(|e| e.into_inner())
+            && at.elapsed() < POLICY_FRESH
+        {
+            return p;
+        }
+        self.policy()
     }
 
     /// Whether a grant expiring at `expires_at` fits the policy.
