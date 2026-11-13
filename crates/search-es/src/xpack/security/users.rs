@@ -89,6 +89,7 @@ fn principal_of(user: &Value, realm_name: &'static str, realm_type: &'static str
         metadata: user.get("metadata").cloned().unwrap_or_else(Value::object),
         realm_name,
         realm_type,
+        authenticating: None,
         kind: super::AuthKind::Realm,
     }
 }

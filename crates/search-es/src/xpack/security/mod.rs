@@ -54,6 +54,10 @@ pub const AUTHENTICATED_HEADER: &str = "x-roll-authenticated-user";
 /// expression). It can only take privileges away, so a client sending it gains nothing.
 pub const INDEX_SCOPE_HEADER: &str = "x-roll-index-scope";
 
+/// Elasticsearch's run-as header: the request runs as this user once the authenticating
+/// user's `run_as` privilege allows it (`xpack.security.authc.run_as.enabled`).
+pub const RUN_AS_HEADER: &str = "es-security-runas-user";
+
 /// How a principal authenticated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AuthKind {
@@ -86,6 +90,10 @@ pub struct Principal {
     pub realm_name: &'static str,
     pub realm_type: &'static str,
     pub kind: AuthKind,
+    /// The user that authenticated, when this principal is the user it runs as
+    /// ([`RUN_AS_HEADER`]): its realm is the `authentication_realm`, this one's the
+    /// `lookup_realm`.
+    pub authenticating: Option<Box<Principal>>,
 }
 
 impl Principal {
@@ -99,6 +107,7 @@ impl Principal {
             metadata: obj! { "_reserved" => true },
             realm_name: "reserved",
             realm_type: "reserved",
+            authenticating: None,
             kind: AuthKind::Realm,
         }
     }
@@ -157,7 +166,8 @@ impl Principal {
             AuthKind::ServiceAccount { .. } => ("_service_account", "_service_account"),
             _ => (self.realm_name, self.realm_type),
         };
-        m.insert("authentication_realm".into(), obj! { "name" => name, "type" => ty });
+        let (auth_name, auth_ty) = self.authenticating.as_ref().map_or((name, ty), |a| (a.realm_name, a.realm_type));
+        m.insert("authentication_realm".into(), obj! { "name" => auth_name, "type" => auth_ty });
         m.insert("lookup_realm".into(), obj! { "name" => name, "type" => ty });
         let auth_type = match &self.kind {
             AuthKind::Realm | AuthKind::OpenSearch(_) => "realm",
@@ -187,7 +197,7 @@ impl Principal {
             "email" => self.email.clone(),
             "metadata" => self.metadata.clone(),
             "enabled" => true,
-            "authentication_realm" => obj! { "name" => self.realm_name, "type" => self.realm_type },
+            "authentication_realm" => self.authenticating.as_ref().map_or_else(|| obj! { "name" => self.realm_name, "type" => self.realm_type }, |a| obj! { "name" => a.realm_name, "type" => a.realm_type }),
             "lookup_realm" => obj! { "name" => self.realm_name, "type" => self.realm_type },
             "authentication_type" => "realm",
         }
@@ -217,16 +227,52 @@ pub fn unauthorized_credentials(detail: impl Into<String>) -> EsError {
 /// Authenticates the request and records its principal.
 pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     let req = ctx.request;
-    if req.header(AUTHENTICATED_HEADER).is_some() {
-        if let Some(scope) = req.header(INDEX_SCOPE_HEADER) {
-            let _ = ctx.principal.set(Principal::owner_scoped(scope));
+    let p = if req.header(AUTHENTICATED_HEADER).is_some() {
+        req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped)
+    } else {
+        match req.header("authorization") {
+            Some(h) => Some(authenticate_header(ctx.cluster, h, &req.uri)?),
+            None => None,
         }
-        return Ok(());
+    };
+    let p = match req.header(RUN_AS_HEADER) {
+        Some(target) if ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch && run_as_enabled(ctx.cluster) => {
+            Some(run_as(ctx, p.unwrap_or_else(Principal::owner), target)?)
+        }
+        _ => p,
+    };
+    if let Some(p) = p {
+        let _ = ctx.principal.set(p);
     }
-    let Some(h) = req.header("authorization") else { return Ok(()) };
-    let p = authenticate_header(ctx.cluster, h, &req.uri)?;
-    let _ = ctx.principal.set(p);
     Ok(())
+}
+
+fn run_as_enabled(cluster: &Cluster) -> bool {
+    cluster.config.node_setting("xpack.security.authc.run_as.enabled").is_none_or(|v| v != "false")
+}
+
+/// The user `authn` runs the request as (`AuthenticatorChain.lookupRunAsUser`, then
+/// `AuthorizationService.authorizeRunAs`): a user the realms know, enabled, that a `run_as`
+/// pattern of `authn`'s roles names. API keys and service accounts can't run as anyone; their
+/// header is ignored, as Elasticsearch does.
+fn run_as(ctx: &Ctx, authn: Principal, target: &str) -> EsResult<Principal> {
+    if !matches!(authn.kind, AuthKind::Realm | AuthKind::Token) {
+        return Ok(authn);
+    }
+    let allowed = || effective(&file_roles(ctx.cluster), &ctx.state(), &authn).allows_run_as(target);
+    match users::lookup_user(ctx.cluster, target).filter(|_| allowed()) {
+        Some(mut user) => {
+            user.kind = authn.kind.clone();
+            user.authenticating = Some(Box::new(authn));
+            Ok(user)
+        }
+        None => Err(run_as_denied(&authn, &privileges::action_of(ctx.api.name()).1, target)),
+    }
+}
+
+/// Elasticsearch's 403 for a user its `run_as` privilege doesn't allow (or that doesn't exist).
+pub(crate) fn run_as_denied(authn: &Principal, action: &str, target: &str) -> EsError {
+    EsError::security(403, format!("action [{action}] is unauthorized for {}, because user [{}] is unauthorized to run as [{target}]", who(authn), authn.username))
 }
 
 /// Authenticates an `Authorization` header value (`uri`: for error messages).
@@ -332,6 +378,11 @@ impl Effective {
     /// authorized one by one.
     pub fn allows_index_action(&self, action: &str) -> bool {
         self.allows(|p| p.indices.iter().any(|g| g.privileges.iter().any(|x| privileges::index_grants(x, action))))
+    }
+
+    /// Whether a `run_as` pattern names `user` (`RunAsPermission`).
+    pub fn allows_run_as(&self, user: &str) -> bool {
+        self.allows(|p| p.run_as.iter().any(|r| privileges::glob(r, user)))
     }
 
     pub fn has_cluster_privilege(&self, privilege: &str) -> bool {
@@ -868,7 +919,8 @@ fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec
 }
 
 /// Wildcards (and no index at all) expand to the matching indices the principal may access;
-/// names given explicitly must be authorized. `-*` (no index) when nothing is left, as
+/// names given explicitly must be authorized, unless `ignore_unavailable` drops the ones that
+/// aren't (`IndexAbstractionResolver`). `-*` (no index) when nothing is left, as
 /// Elasticsearch's resolver does.
 fn narrow(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str) -> EsResult<Option<String>> {
     let defaults = narrow_defaults(ctx.api.name());
@@ -883,7 +935,12 @@ fn narrow_exprs(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, mut exp
         names.sort();
         names.dedup();
         let denied_on: Vec<String> = names.into_iter().filter(|i| !eff.allows_index(action, i)).collect();
-        return if denied_on.is_empty() { Ok(None) } else { Err(denied(p, action, Some(&denied_on))) };
+        if denied_on.is_empty() {
+            return Ok(None);
+        }
+        if !opts.ignore_unavailable {
+            return Err(denied(p, action, Some(&denied_on)));
+        }
     }
     if exprs.is_empty() {
         exprs.push("*".into());
@@ -905,7 +962,7 @@ fn narrow_exprs(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, mut exp
             }
         } else if eff.allows_index(action, e) {
             out.push(e.clone());
-        } else {
+        } else if !opts.ignore_unavailable {
             denied_on.push(e.clone());
         }
     }
@@ -986,7 +1043,9 @@ pub(crate) fn who(p: &Principal) -> String {
         _ => {
             let mut roles = p.roles.clone();
             roles.sort();
-            format!("user [{}] with effective roles [{}]", p.username, roles.join(","))
+            let run_as = p.authenticating.as_ref().map(|_| format!(" run as [{}]", p.username)).unwrap_or_default();
+            let user = p.authenticating.as_ref().map_or(p.username.as_str(), |a| a.username.as_str());
+            format!("user [{user}]{run_as} with effective roles [{}]", roles.join(","))
         }
     }
 }

@@ -163,6 +163,7 @@ fn principal_of(st: &ClusterState, name: &str, user: &Value, owner: bool) -> Pri
         metadata: Value::object(),
         realm_name: "internal",
         realm_type: "internal",
+        authenticating: None,
         kind: AuthKind::OpenSearch(Box::new(Identity {
             backend_roles,
             attributes: user.get("attributes").and_then(Value::as_object).cloned().unwrap_or_default(),

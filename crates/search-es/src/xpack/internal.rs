@@ -60,20 +60,18 @@ pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Princ
 impl Caller {
     /// The client of `ctx`, unless it may read everything anyway.
     pub fn of(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
-        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER};
+        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
         let p = ctx.principal.get()?;
         if p.is_superuser() {
             return None;
         }
-        let mut headers = Vec::new();
-        match ctx.request.header(AUTHENTICATED_HEADER) {
-            // The node authenticated the owner, narrowed to some indices (a per-index route).
-            Some(user) => {
-                headers.push((AUTHENTICATED_HEADER.to_string(), user.to_string()));
-                headers.push((INDEX_SCOPE_HEADER.to_string(), ctx.request.header(INDEX_SCOPE_HEADER)?.to_string()));
-            }
-            None => headers.push(("Authorization".to_string(), ctx.request.header("authorization")?.to_string())),
-        }
+        // The headers that made it this principal: the node's authentication (narrowed to some
+        // indices on a per-index route) or the client's credentials, and its run-as user.
+        let headers = [AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER]
+            .into_iter()
+            .filter(|h| *h != "Authorization" || ctx.request.header(AUTHENTICATED_HEADER).is_none())
+            .filter_map(|h| ctx.request.header(h).map(|v| (h.to_string(), v.to_string())))
+            .collect();
         Some(Caller { headers, security: crate::xpack::security::dls::ReadSecurity::of(ctx) })
     }
 }
@@ -133,6 +131,9 @@ pub fn call_as<'a>(ctx: &crate::rest::Ctx<'_>, cluster: &'a Cluster, method: &st
         && let Some(a) = ctx.request.header("authorization")
     {
         req.headers.push(("Authorization".into(), a.to_string()));
+    }
+    if let Some(user) = ctx.request.header(crate::xpack::security::RUN_AS_HEADER) {
+        req.headers.push((crate::xpack::security::RUN_AS_HEADER.into(), user.to_string()));
     }
     Box::pin(async move {
         let resp = crate::rest::handle(cluster, req).await;

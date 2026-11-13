@@ -77,6 +77,7 @@ fn principal_from_user(u: &Value) -> Principal {
         metadata: u.get("metadata").cloned().unwrap_or_else(Value::object),
         realm_name,
         realm_type,
+        authenticating: None,
         kind: AuthKind::Realm,
     }
 }
@@ -293,6 +294,7 @@ fn authenticate_service_token(cluster: &Cluster, value: &str) -> EsResult<Princi
         metadata: obj! { "_elastic_service_account" => true },
         realm_name: "_service_account",
         realm_type: "_service_account",
+        authenticating: None,
         kind: AuthKind::ServiceAccount { token: name.to_string() },
     })
 }
@@ -587,6 +589,7 @@ pub fn has_privileges_profile(ctx: &Ctx) -> EsResult<Reply> {
             metadata: Value::object(),
             realm_name: "default_native",
             realm_type: "native",
+            authenticating: None,
             kind: AuthKind::Realm,
         };
         let (all, ..) = super::users::check_privileges(&file, &st, &principal, &privs)?;
