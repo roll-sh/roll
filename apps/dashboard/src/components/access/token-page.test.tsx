@@ -9,7 +9,7 @@ const grant: Grant = {
   name: "cursor",
   kind: "token",
   rules: [{ product: "postgres", resources: [{ id: "prj_billing" }], actions: { read: "allow" } }],
-  temporary: [{ rule: { product: "postgres", resources: [{ id: "prj_billing" }], actions: { write: "allow" } }, until: Date.now() + 3600_000 }],
+  temporary: [{ rule: { product: "postgres", resources: [{ id: "prj_billing" }], actions: { write: "allow" } }, until: Date.now() + 3600_000, approval: "apr_9" }],
   expires_at: null,
   ip_allow: [],
   created_by: "operator",
@@ -22,6 +22,7 @@ const event = { id: "ev_1", at: Date.now(), grant_id: "tok_1", decision: "deny",
 const revoke = vi.fn(async (_id: string) => ({ ...grant, revoked_at: Date.now() }));
 const narrowed = [{ product: "postgres", resources: [{ id: "prj_billing" }], actions: { read: "allow" as const } }];
 const update = vi.fn(async (_id: string, _patch: unknown) => grant);
+const forget = vi.fn(async (_id: string, _approval: string) => grant);
 
 vi.mock("@/lib/access-api", async (orig) => ({
   ...(await orig<typeof import("@/lib/access-api")>()),
@@ -32,6 +33,7 @@ vi.mock("@/lib/access-api", async (orig) => ({
     revoke: (id: string) => revoke(id),
     tighten: async () => ({ since: 0, days: 30, used: [{ product: "postgres", action: "read", resource: "prj_billing", count: 12, last_at: 0 }], rules: narrowed, narrower: true }),
     update: (id: string, patch: unknown) => update(id, patch),
+    forget: (id: string, approval: string) => forget(id, approval),
   },
 }));
 vi.mock("@/lib/workspace-resources", () => ({
@@ -42,7 +44,7 @@ vi.mock("@/lib/workspace-store", () => ({ useWorkspace: () => ({ projects: [] })
 vi.mock("../link", () => ({ Link: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a> }));
 vi.mock("./shell", async (orig) => ({ ...(await orig<typeof import("./shell")>()), AccessShell: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 
-/** A token's page: what it may do and for a while by name, what it's asked lately, and revoking it there. */
+/** A token's page: what it may do and for a while by name (taking a while back), what it's asked lately, and revoking it there. */
 describe("the token page", () => {
   it("shows the token's rules and requests, and revokes it", async () => {
     render(<TokenPage id="tok_1" />);
@@ -50,6 +52,8 @@ describe("the token page", () => {
     expect(await screen.findByText(/Postgres · write · billing/)).toBeTruthy();
     expect(await screen.findByText(/DELETE \/v1\/projects\/\{id\} · prj_logs/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "All of its requests" }).getAttribute("href")).toBe("/dashboard/access/audit?grant=tok_1");
+    await userEvent.click(screen.getByRole("button", { name: "Take back" }));
+    await waitFor(() => expect(forget).toHaveBeenCalledWith("tok_1", "apr_9"));
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await userEvent.click(screen.getByRole("button", { name: "Revoke now" }));
     await waitFor(() => expect(revoke).toHaveBeenCalledWith("tok_1"));

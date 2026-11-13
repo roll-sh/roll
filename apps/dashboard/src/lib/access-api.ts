@@ -63,7 +63,7 @@ export interface Grant {
   /** What its rules don't allow asks a person instead of being refused. */
   ask_otherwise?: boolean;
   /** Rules a person allowed for a while when approving its requests, each until a time (Unix ms). */
-  temporary?: { rule: Rule; until: number }[];
+  temporary?: { rule: Rule; until: number; approval?: string }[];
   /** Its requests over the last day (in the list). */
   activity?: { allowed: number; denied: number; asked: number };
 }
@@ -258,6 +258,8 @@ export const accessApi = {
   create: (g: NewGrant) => call<{ grant: Grant; token: string }>("POST", "/v1/access/tokens", g),
   update: (id: string, patch: Partial<NewGrant>) => call<Grant>("PATCH", token(id), patch),
   revoke: (id: string) => call<Grant>("DELETE", token(id)),
+  /** Take back what an approval allowed it for a while (and the approval, if unused). */
+  forget: (id: string, approval: string) => call<Grant>("DELETE", `${token(id)}/temporary/${encodeURIComponent(approval)}`),
   /** Its rules narrowed to what its allowed requests used in the last `days` (never wider): a proposal. */
   tighten: (id: string, days?: number) => call<Tightened>("GET", `${token(id)}/tighten${query({ days })}`),
   /** A new secret, the same rules; the old one stops at once. Shown this once. */

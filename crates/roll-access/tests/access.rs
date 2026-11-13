@@ -911,6 +911,7 @@ async fn approvals_can_be_remembered() {
     assert_eq!(approve(apr.clone(), json!("forever")).await.0, StatusCode::BAD_REQUEST, "nothing is decided");
     assert_eq!(approve(apr.clone(), json!("1h")).await.0, StatusCode::OK);
     assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.0, StatusCode::OK);
+    let hour = apr.clone();
     // For an hour: the same request runs without asking; another project still asks.
     assert_eq!(ask("pa").await.0, StatusCode::OK);
     assert_eq!(ask("pb").await.1["code"], "approval_pending");
@@ -922,7 +923,14 @@ async fn approvals_can_be_remembered() {
     assert_eq!(approve(apr, json!("always")).await.0, StatusCode::OK);
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
     assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
+    assert_eq!(g["temporary"][0]["approval"].as_str(), Some(hour.as_str()), "a while names the approval that allowed it");
     assert_eq!(ask("pc").await.0, StatusCode::OK);
+    // Taken back before the hour is up: asking again.
+    assert_eq!(d.call(&token, Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{hour}"), None).await.0, StatusCode::FORBIDDEN, "only the operator");
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{id}/temporary/{hour}"), None).await.0, StatusCode::OK);
+    // (The approval itself is taken back too: it never ran the request, the rule did.)
+    let again = ask("pa").await;
+    assert_eq!(again.1["code"], "approval_pending", "{again:?}");
 
     // "Ask for anything else": what the rules don't allow asks instead of being refused, and an
     // approval remembered for good grows the token. The operator's routes stay shut.

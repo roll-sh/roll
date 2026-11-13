@@ -387,6 +387,9 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
   operator's token policy applies.
 - A while never becomes for good: a token makes tokens covered by its own rules only, never by
   what it's allowed for now.
+- Each rule for a while names the approval that allowed it. The operator takes it back before it
+  lapses from the token's page (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
+  the approval when its request hasn't used it (the rule may have run that request instead).
 
 ### Approvals in chat
 
@@ -592,6 +595,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | a new secret with the same rules (the old one stops at once) → `{grant, token}`; not for OAuth connections |
 | `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
