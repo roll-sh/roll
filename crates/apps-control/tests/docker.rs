@@ -56,6 +56,10 @@ async fn docker_world() -> Option<World> {
 }
 
 async fn docker_world_netns(netns: Option<bool>) -> Option<World> {
+    docker_world_with(netns, |_| {}).await
+}
+
+async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConfig)) -> Option<World> {
     if std::env::var("ROLL_APPS_DOCKER").ok().as_deref() != Some("1") || !apps_control::runtime::docker::available().await {
         eprintln!("skipped: set ROLL_APPS_DOCKER=1 with Docker running");
         return None;
@@ -72,6 +76,7 @@ async fn docker_world_netns(netns: Option<bool>) -> Option<World> {
     let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     cfg.tcp_ports = Some((free, free));
     cfg.tcp_host = "127.0.0.1".into();
+    setup(&mut cfg);
     let deps = Deps {
         runtime: Arc::new(match netns {
             Some(on) => Docker::new(dir.path().join("scratch")).with_netns(on),
@@ -546,6 +551,38 @@ async fn a_tcp_service_and_a_tunnel_reach_a_sleeping_port() {
     assert_eq!(&got, b"tunnelled\n");
     eprintln!("MEASURED a TCP service from asleep: {} ms to its echo; a tunnel from asleep: {} ms", tcp_cold.as_millis(), began.elapsed().as_millis());
     let _ = ws.close(None).await;
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
+}
+
+/// `run.cpu_target` on real cgroups: an instance kept busy (a loop beside its server) is over
+/// its target, and a second one starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_instance_brings_another_on_its_cpu() {
+    let Some(w) = docker_world_with(None, |c| c.live.cpu_window = Duration::from_secs(3)).await else { return };
+    let run = json!({"port": 8080, "min_instances": 1, "max_instances": 2, "cpu": 0.25, "memory_mb": 256, "cpu_target": 50, "start": "while :; do :; done & mkdir -p /w && echo busy > /w/index.html && httpd -f -p 8080 -h /w"});
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "busy", "source": {"kind": "image", "image": "busybox:1.37"}, "run": run })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let running = || async {
+        let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+        e["instances"].as_array().map_or(0, |a| a.iter().filter(|i| i["state"] == "running").count())
+    };
+    let began = Instant::now();
+    let mut two = false;
+    while began.elapsed() < Duration::from_secs(90) {
+        if running().await >= 2 {
+            two = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let (_, log) = call(&w.api, "GET", &format!("{base}/logs?tail=50"), None, "application/json", None).await;
+    let said = log.as_array().into_iter().flatten().find_map(|l| l["text"].as_str().filter(|t| t.starts_with("scaled out: CPU")).map(str::to_string));
+    assert!(two, "a second instance for its CPU: {log}");
+    eprintln!("MEASURED CPU scaling on cgroups: a second instance {} s after the service was made ({})", began.elapsed().as_secs(), said.unwrap_or_default());
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
