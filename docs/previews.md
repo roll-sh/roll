@@ -585,23 +585,23 @@ Ranked by what a person notices first. Done so far:
   (measured against a live rolld with the operator token on);
 - a project bypass secret for CI (`x-roll-preview-bypass`), so end-to-end tests triggered by the
   GitHub deployment can open private previews.
+- a `release` step at each new head (migrations) and the schema changes it left, on the
+  preview, the pull request comment, the dashboard and the CLI (measured against real Postgres).
 
 1. **The bypass on roll apps' gate**: `pv-…` environments take the secret's SHA-256 next to the
    link token (`access: {token, bypass_sha256}`), once roll apps accepts the field (asked).
-2. **Schema changes in the pull request comment** (Neon does): the Postgres branch's schema
-   against its parent's (`pg_dump --schema-only` of both, as a diff), so a reviewer sees the
-   migration a change ran without opening the preview.
-3. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
-   first service's page, and the comment shows it (Vercel does). Store it in roll storage and
-   drop it with the preview.
-4. **Live logs pushed, not polled**: a streamed `…/logs?follow=1` the dashboard can read with
+2. **Live logs pushed, not polled**: a streamed `…/logs?follow=1` the dashboard can read with
    its token (fetch streaming); `roll preview logs -f` and the dashboard re-read every 2–3 s
    today.
-5. **A cost alert outside the dashboard**: tell the project's owners (webhook, chat) when its
+3. **A cost alert outside the dashboard**: tell the project's owners (repo webhook, chat) when its
    previews pass 80% of `max_usd_month`; the Previews tab shows it today.
-6. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
+4. **A screenshot on the pull request**: once a preview is ready, a headless browser takes its
+   first service's page through the bypass, and the comment shows it (Vercel does). Store it in
+   roll storage and drop it with the preview. Needs a host whose containers reach rolld (not
+   ai-server's firewall) to verify.
+5. **roll apps in `scripts/preview-cost.sh`** once `feature/roll-apps` lands (the scratch-merge
    run is in the measurements).
-7. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+6. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
