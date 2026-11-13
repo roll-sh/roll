@@ -4,7 +4,7 @@ import { useLocation } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { requestSignIn } from "@/lib/code-token";
-import { secretsApi } from "@/lib/secrets-api";
+import { cachedHealth } from "@/lib/secrets-health-cache";
 import { hideAgents } from "@/lib/agents-surface";
 import { monthOf, projectMonth, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace } from "@/lib/workspace-store";
@@ -206,14 +206,12 @@ function Projects({ pathname }: { pathname: string }) {
 }
 
 /** How many of a project's secrets findings need fixing now (expired, missing, exposed), looked at
- *  again as the page changes; nothing while it's none or can't be read. */
+ *  again as the page changes (at most every 30 seconds); nothing while it's none or can't be read. */
 function SecretsToFix({ project, at }: { project: string; at: string }) {
   const [n, setN] = useState(0);
   useEffect(() => {
     let live = true;
-    secretsApi(project)
-      .health()
-      .then(
+    cachedHealth(project).then(
         (found) => live && setN(found.filter((f) => f.issue === "expired" || f.issue === "missing" || f.issue === "exposed").length),
         () => live && setN(0),
       );

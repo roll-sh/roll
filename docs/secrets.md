@@ -1496,6 +1496,10 @@ Reviewed again on 2026-11-13:
 
 Ranked (work that can start now):
 
+1. **The sidebar's health count cached**: one request per project every 30 seconds, not one per
+   navigation (the Health tab still refreshes after every write).
+2. **Health in `roll secrets doctor`**: the directory's environment's serious findings (expired,
+   missing, exposed) as checks of their own.
 
 Waiting on other pull requests:
 
