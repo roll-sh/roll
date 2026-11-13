@@ -93,6 +93,8 @@ export function EnvironmentsView() {
 
       <Backup />
 
+      <CustomerKey onError={setError} />
+
       <DeploymentKey />
 
       <DeleteEnvironment
@@ -394,12 +396,74 @@ function DeploymentKey() {
       <div className={`${card} flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[12.5px]`}>
         <KeyRound className={`size-3.5 ${warn ? "text-danger" : "text-muted"}`} />
         <span className={warn ? "text-danger" : ""}>{KEY_SOURCE[h.key] ?? h.key}</span>
+        {h.customer_managed > 0 && (
+          <span className="text-[11.5px] text-subtle">
+            {h.customer_managed} project{h.customer_managed === 1 ? " brings its" : "s bring their"} own key too
+          </span>
+        )}
         {h.resealed !== null && (
           <span className="ml-auto text-[11.5px] text-subtle">
             {h.resealed === "all" ? "Rotation done: the previous key can be dropped" : `Rotating: ${h.resealed} data key${h.resealed === 1 ? "" : "s"} resealed so far`}
           </span>
         )}
       </div>
+    </Section>
+  );
+}
+
+/**
+ * The project's customer-managed key: a KMS key in the customer's own AWS account that wraps the
+ * data key too, so revoking roll's use of it locks roll out of the project. Admin-only: hidden when
+ * the caller can't see it.
+ */
+function CustomerKey({ onError }: { onError: (e: string) => void }) {
+  const { api } = useSecrets();
+  const current = useLoad(() => api.kms(), [api]);
+  const [arn, setArn] = useState("");
+  const [busy, setBusy] = useState(false);
+  if (current.error || !current.data) return null;
+  const key = current.data.key;
+  const act = async (f: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await f();
+      setArn("");
+      current.reload();
+    } catch (e) {
+      onError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title="Customer-managed key" aside={<span className="text-[11.5px] text-subtle max-sm:hidden">A KMS key in your own AWS account.</span>}>
+      {key ? (
+        <div className={`${card} flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[12.5px]`}>
+          <Lock className="size-3.5 text-accent" />
+          <code className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{key}</code>
+          <button type="button" className={ghost} disabled={busy} onClick={() => act(() => api.removeKms())}>
+            {busy ? "Removing…" : "Remove"}
+          </button>
+        </div>
+      ) : (
+        <form
+          className="flex flex-wrap items-center gap-2 text-[12.5px]"
+          onSubmit={(ev) => {
+            ev.preventDefault();
+            if (arn.trim()) void act(() => api.setKms(arn.trim()));
+          }}
+        >
+          <input value={arn} onChange={(ev) => setArn(ev.target.value)} placeholder="arn:aws:kms:eu-west-1:123456789012:key/…" aria-label="KMS key ARN" className={`${sized} h-7 min-w-0 flex-1 font-mono text-[11.5px]`} />
+          <button type="submit" className={button} disabled={busy || !arn.trim()}>
+            {busy ? "Checking the key…" : "Wrap with this key"}
+          </button>
+        </form>
+      )}
+      <p className="mt-1.5 text-[11.5px] text-muted">
+        {key
+          ? "Opening this project's data key needs roll's deployment key and this key. Revoke roll's use of it (or disable it) and roll can't read the project within a minute; remove it here to go back to roll's key alone."
+          : "Wrap this project's data key with a key only you control: roll checks it can encrypt and decrypt with it first. Its key policy must let roll's role use it with the encryption context roll=secrets."}
+      </p>
     </Section>
   );
 }
