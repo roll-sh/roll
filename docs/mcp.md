@@ -426,12 +426,14 @@ runs, its source, build, start and pre-deploy commands, schedule, kind, port, vo
 leaves out tokens made for a day or less); workload tokens (`Access::mint_workload`: minutes, within
 an identity's scope, owned by its maker, out of the list and caps) for secrets' identity logins; a
 person's own tokens' news is mailed to them (an approval waiting on them, used from a new network,
-revoked as leaked, about to expire; only their own, never a secret); previews-next's routes (#28): a
-preview's env is reveal, accepting a visual change is admin with no tool, screenshots come back as
-MCP image content (`previews_screenshot`), `previews_list_shares`, `previews_env`; the eleventh
-review (MCP's new surface): read-only excludes reveals that make something (a presigned PUT, a share
-link), either switch turns it on and a misspelled key is a 400; completions offer only ids and never
-ask a person; prompts' arguments are quoted ids; template errors say what they were;
+revoked as leaked, about to expire; only their own, never a secret); routes a prefix row decides are
+reviewed (`prefix-reviewed.txt`, 138 looked at; rolld's auth test fails on a new one until it has
+its own row or is listed); previews-next's routes (#28): a preview's env is reveal, accepting a
+visual change is admin with no tool, screenshots come back as MCP image content
+(`previews_screenshot`), `previews_list_shares`, `previews_env`; the eleventh review (MCP's new
+surface): read-only excludes reveals that make something (a presigned PUT, a share link), either
+switch turns it on and a misspelled key is a 400; completions offer only ids and never ask a person;
+prompts' arguments are quoted ids; template errors say what they were;
 `secrets_list_outside_databases` (secrets #39); a project's page as a resource template
 (`roll://projects/{project}`, read through the gate, its id completed); progress while a call waits
 (`notifications/progress` every 10 s for a call with a `progressToken`, checked with the TypeScript

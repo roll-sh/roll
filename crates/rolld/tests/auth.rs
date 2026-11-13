@@ -342,6 +342,22 @@ async fn every_control_plane_route_needs_the_operator_token() {
         .map(|(_, r, _)| r.clone())
         .collect();
     assert!(unscoped.is_empty(), "routes no scoped token can be classified for (add catalogue rows in roll-access): {unscoped:#?}");
+    // A route under a prefix row takes the prefix's action by method, whatever it answers: each was
+    // looked at, and a new one is (a GET that answers values is reveal; the env of a preview was
+    // read until it was).
+    let mut unreviewed: Vec<String> = scoped
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(h, r, _)| h == "api" && roll_access::catalog::by_prefix_only(r) && !roll_access::catalog::prefix_reviewed(r))
+        .map(|(_, r, _)| r.clone())
+        .collect();
+    unreviewed.sort();
+    unreviewed.dedup();
+    assert!(
+        unreviewed.is_empty(),
+        "routes decided only by a prefix row that nobody looked at: give each its own catalogue row (a GET whose answer holds a credential is reveal; changing what production runs is deploy), or add it to crates/roll-access/src/prefix-reviewed.txt: {unreviewed:#?}"
+    );
     // A token with every action on everything works where the operator's does.
     let made: serde_json::Value = http
         .post(format!("{api}/v1/access/tokens"))
