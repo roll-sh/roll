@@ -648,7 +648,7 @@ async fn the_audit_log_streams_to_a_sink() {
     let (headers, body) = fake.sent.lock().unwrap()[0].clone();
     let h = |n: &str| headers.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap();
     assert_eq!(h("x-roll-sink"), id);
-    assert_eq!(h("x-roll-signature"), roll_access::sinks::signature(&secret, h("x-roll-timestamp").parse().unwrap(), &body));
+    assert_eq!(h("x-roll-signature-256"), roll_access::sinks::signature(&secret, h("x-roll-timestamp").parse().unwrap(), &body));
     let sent: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(ids(&sent["events"]), vec!["aud_000", "aud_001", "aud_002"]);
     // Nothing twice; the next rows next time.

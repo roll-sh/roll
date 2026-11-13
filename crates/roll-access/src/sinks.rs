@@ -1,7 +1,8 @@
 //! Audit sinks (docs/permissions.md, "Audit"): the audit log streamed to a SIEM. A sink is a public
-//! HTTPS URL that receives new audit rows in order, in batches of up to 200, signed as roll secrets'
-//! sinks and roll's webhooks are (`X-Roll-Sink`, `X-Roll-Timestamp`, `X-Roll-Signature: sha256=`
-//! hex HMAC of `"{timestamp}.{body}"`), so one receiver takes both. Each sink keeps a cursor (the
+//! HTTPS URL that receives new audit rows in order, in batches of up to 200, signed as every roll
+//! webhook is (roll code's: `X-Roll-Signature-256: sha256=` hex HMAC of `"{timestamp}.{body}"`,
+//! `X-Roll-Timestamp`, `X-Roll-Delivery`, which stays the same when a batch is sent again), plus
+//! `X-Roll-Sink`. Each sink keeps a cursor (the
 //! last row's time and id); the sweeper claims a sink in a write before delivering, so no two nodes
 //! send one batch, and a failed batch is sent again 5 minutes later. Rows hold no secrets (their
 //! arguments are redacted when they're written).
@@ -213,11 +214,14 @@ impl Access {
                 let secret = t.open(&id, &sealed)?;
                 let body = serde_json::to_vec(&json!({ "sink": id, "source": "access", "events": rows })).map_err(|e| e.to_string())?;
                 let ts = now / 1000;
+                // The same batch, sent again, is the same delivery: receivers drop what they have.
+                let delivery = format!("{id}:{end_at}:{end_id}");
                 let headers = vec![
                     ("content-type".to_string(), "application/json".to_string()),
                     ("x-roll-sink".to_string(), id.clone()),
+                    ("x-roll-delivery".to_string(), delivery),
                     ("x-roll-timestamp".to_string(), ts.to_string()),
-                    ("x-roll-signature".to_string(), signature(&secret, ts, &body)),
+                    ("x-roll-signature-256".to_string(), signature(&secret, ts, &body)),
                 ];
                 t.post(url.clone(), headers, body).await
             }
