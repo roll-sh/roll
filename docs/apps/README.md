@@ -1248,6 +1248,8 @@ feature/roll-search 7f92c2f28, the held apps work being wip/roll-apps-next (pair
   - Still open: `put_link` (and create's `links`) checking `Grant::allows(<resource>, reveal)`
     itself (the catalogue's `.lends()` does it at the gate today).
   - `net.rs` and `model::private_ip` move onto mcp's `roll-net`.
+  - `apps_set_environment` (mcp-user-tokens) to take `maintenance`, `allow_ips`, `rate_limit` and
+    `firewall` (told); new run fields pass through `apps_update_service`'s `run`.
   - #24: `apps_deploy` takes `no_traffic`; `apps_set_environment` covers `PUT
     …/environments/{env}` but `access` and `feedback`; `run.scale` needs read on its stream at
     the gate (a row's lends name each resource's own action), and `apps_update_service` says
