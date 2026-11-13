@@ -499,6 +499,38 @@ mod tests {
         assert!(super::super::privileges::index_grants("*:*", "indices:data/read/search"));
     }
 
+    /// A request that names no index is checked on every index it reads, dot-prefixed ones
+    /// too: a user permitted on every other index doesn't read one it isn't permitted on.
+    #[tokio::test]
+    async fn no_index_means_every_index_it_reads() {
+        use base64::Engine;
+        let mut cfg = crate::cluster::ClusterConfig::new("os");
+        cfg.dialect = crate::cluster::Dialect::OpenSearch;
+        let c = Cluster::open(cfg, std::sync::Arc::new(crate::cluster::MemoryStore::new())).await.unwrap();
+        let call = |method: &str, uri: &str, body: &str, auth: Option<&str>| {
+            let mut req = if body.is_empty() { crate::rest::EsRequest::new(method, uri) } else { crate::rest::EsRequest::json(method, uri, body.to_string()) };
+            if let Some(a) = auth {
+                req.headers.push(("Authorization".into(), format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(a))));
+            }
+            crate::rest::handle(&c, req)
+        };
+        for index in ["logs-1", ".reports"] {
+            assert_eq!(call("PUT", &format!("/{index}/_doc/1?refresh=true"), r#"{"f":"x"}"#, None).await.status, 201);
+        }
+        let api = "/_plugins/_security/api";
+        let role = r#"{"index_permissions":[{"index_patterns":["logs-*"],"allowed_actions":["read"]}]}"#;
+        assert_eq!(call("PUT", &format!("{api}/roles/logs_reader"), role, None).await.status, 201);
+        assert_eq!(call("PUT", &format!("{api}/internalusers/reader"), r#"{"password":"correcthorsebattery","opendistro_security_roles":["logs_reader"]}"#, None).await.status, 201);
+        let reader = Some("reader:correcthorsebattery");
+        let r = call("GET", "/logs-1/_search", "", reader).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        for uri in ["/_search", "/*/_search", "/_all/_search"] {
+            let r = call("GET", uri, "", reader).await;
+            let body = String::from_utf8_lossy(&r.body).into_owned();
+            assert!(!body.contains(".reports"), "{uri} read .reports: {} {body}", r.status);
+        }
+    }
+
     #[test]
     fn bcrypt_hashes_verify() {
         let h = bcrypt::hash("s3krit-password", 4).unwrap();
