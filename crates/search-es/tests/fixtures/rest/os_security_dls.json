@@ -1,0 +1,545 @@
+{
+  "dialect": "opensearch",
+  "description": "OpenSearch Security: document and field level security and masked fields (OpenSearch 3.9.0; the salt is the reference's plugins.security.compliance.salt)",
+  "steps": [
+    {
+      "req": "PUT /esm-docs",
+      "body": {
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "secret": {
+              "type": "keyword"
+            },
+            "mask": {
+              "type": "keyword"
+            },
+            "rx": {
+              "type": "keyword"
+            },
+            "n": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-docs"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /esm-docs/_bulk?refresh=true",
+      "raw": "{\"index\":{\"_id\":\"1\"}}\n{\"k\":\"a\",\"secret\":\"s1\",\"mask\":\"m1\",\"rx\":\"a1b2\",\"n\":1}\n{\"index\":{\"_id\":\"2\"}}\n{\"k\":\"b\",\"secret\":\"s2\",\"mask\":\"m2\",\"rx\":\"c3\",\"n\":2}\n",
+      "headers": {
+        "Content-Type": "application/x-ndjson"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 9,
+        "errors": false,
+        "items": [
+          {
+            "index": {
+              "_index": "esm-docs",
+              "_id": "1",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-docs",
+              "_id": "2",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_security/api/internalusers/esm-u1",
+      "body": {
+        "password": "Esm-pass-1234!",
+        "backend_roles": [
+          "b1"
+        ]
+      },
+      "status": 201,
+      "response": {
+        "status": "CREATED",
+        "message": "'esm-u1' created."
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_security/api/roles/esm-r1",
+      "body": {
+        "cluster_permissions": [
+          "cluster_composite_ops_ro"
+        ],
+        "index_permissions": [
+          {
+            "index_patterns": [
+              "esm-*"
+            ],
+            "dls": "{\"term\":{\"k\":\"a\"}}",
+            "fls": [
+              "~secret"
+            ],
+            "masked_fields": [
+              "mask",
+              "rx::/[0-9]/::X"
+            ],
+            "allowed_actions": [
+              "read"
+            ]
+          }
+        ]
+      },
+      "status": 201,
+      "response": {
+        "status": "CREATED",
+        "message": "'esm-r1' created."
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_security/api/rolesmapping/esm-r1",
+      "body": {
+        "users": [
+          "esm-u1"
+        ]
+      },
+      "status": 201,
+      "response": {
+        "status": "CREATED",
+        "message": "'esm-r1' created."
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /esm-docs/_search",
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "mask": [
+        "took",
+        "max_score",
+        "_score"
+      ],
+      "status": 200,
+      "response": {
+        "took": 31,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 2.0,
+          "hits": [
+            {
+              "_index": "esm-docs",
+              "_id": "1",
+              "_score": 2.0,
+              "_source": {
+                "k": "a",
+                "mask": "1268e8efb62fdae641bb1aad660dfe883ebfbc0ca09b803792b0c3006e2e7bf6",
+                "rx": "aXbX",
+                "n": 1
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      },
+      "note": "OpenSearch scores a DLS query as a +1.0 clause; roll applies it as a filter (docs/search/compatibility.md)"
+    },
+    {
+      "req": "GET /esm-docs/_doc/1",
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status": 200,
+      "response": {
+        "_index": "esm-docs",
+        "_id": "1",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "found": true,
+        "_source": {
+          "k": "a",
+          "mask": "1268e8efb62fdae641bb1aad660dfe883ebfbc0ca09b803792b0c3006e2e7bf6",
+          "rx": "aXbX",
+          "n": 1
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /esm-docs/_doc/2",
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status": 404,
+      "response": {
+        "_index": "esm-docs",
+        "_id": "2",
+        "found": false
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /esm-docs/_search",
+      "body": {
+        "query": {
+          "term": {
+            "secret": "s1"
+          }
+        }
+      },
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 3,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /esm-docs/_count",
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status": 200,
+      "response": {
+        "count": 1,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_mget",
+      "body": {
+        "docs": [
+          {
+            "_index": "esm-docs",
+            "_id": "1"
+          },
+          {
+            "_index": "esm-docs",
+            "_id": "2"
+          }
+        ]
+      },
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "status": 200,
+      "response": {
+        "docs": [
+          {
+            "_index": "esm-docs",
+            "_id": "1",
+            "_version": 1,
+            "_seq_no": 0,
+            "_primary_term": 1,
+            "found": true,
+            "_source": {
+              "k": "a",
+              "mask": "1268e8efb62fdae641bb1aad660dfe883ebfbc0ca09b803792b0c3006e2e7bf6",
+              "rx": "aXbX",
+              "n": 1
+            }
+          },
+          {
+            "_index": "esm-docs",
+            "_id": "2",
+            "found": false
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /esm-docs/_search",
+      "body": {
+        "_source": [
+          "k",
+          "mask"
+        ],
+        "query": {
+          "match_all": {}
+        }
+      },
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "mask": [
+        "took",
+        "max_score",
+        "_score"
+      ],
+      "status": 200,
+      "response": {
+        "took": 5,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 2.0,
+          "hits": [
+            {
+              "_index": "esm-docs",
+              "_id": "1",
+              "_score": 2.0,
+              "_source": {
+                "k": "a",
+                "mask": "1268e8efb62fdae641bb1aad660dfe883ebfbc0ca09b803792b0c3006e2e7bf6"
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      },
+      "note": "OpenSearch scores a DLS query as a +1.0 clause; roll applies it as a filter (docs/search/compatibility.md)"
+    },
+    {
+      "req": "PUT /_plugins/_security/api/roles/esm-r2",
+      "body": {
+        "index_permissions": [
+          {
+            "index_patterns": [
+              "esm-docs"
+            ],
+            "dls": "{\"term\":{\"k\":\"b\"}}",
+            "fls": [
+              "k",
+              "n"
+            ],
+            "allowed_actions": [
+              "read"
+            ]
+          }
+        ]
+      },
+      "status": 201,
+      "response": {
+        "status": "CREATED",
+        "message": "'esm-r2' created."
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_security/api/rolesmapping/esm-r2",
+      "body": {
+        "backend_roles": [
+          "b1"
+        ]
+      },
+      "status": 201,
+      "response": {
+        "status": "CREATED",
+        "message": "'esm-r2' created."
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /esm-docs/_search?sort=n",
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 27,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "esm-docs",
+              "_id": "1",
+              "_score": null,
+              "_source": {
+                "k": "a",
+                "mask": "1268e8efb62fdae641bb1aad660dfe883ebfbc0ca09b803792b0c3006e2e7bf6",
+                "rx": "aXbX",
+                "n": 1
+              },
+              "sort": [
+                1
+              ]
+            },
+            {
+              "_index": "esm-docs",
+              "_id": "2",
+              "_score": null,
+              "_source": {
+                "k": "b",
+                "mask": "311badfbbd7fe524ff987852456afa4570b657d88b25912340a99054bea1fb4e",
+                "rx": "cX",
+                "n": 2
+              },
+              "sort": [
+                2
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /esm-docs/_search",
+      "body": {
+        "query": {
+          "term": {
+            "secret": "s2"
+          }
+        }
+      },
+      "headers": {
+        "Authorization": "Basic ZXNtLXUxOkVzbS1wYXNzLTEyMzQh"
+      },
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 6,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": []
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    }
+  ],
+  "node_settings": {
+    "plugins.security.compliance.salt": "1cB0nyGn!rA12KoN"
+  }
+}

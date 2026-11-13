@@ -799,6 +799,12 @@ fn compat_of(neg: Option<&Negotiated>) -> Option<u8> {
 }
 
 fn render_error(e: &EsError, neg: Option<&Negotiated>, pretty: bool, trace: bool, warnings: Vec<(String, String)>, head: bool, dialect: Dialect) -> EsResponse {
+    // An error whose answer is plain text (OpenSearch Security's `Unauthorized`).
+    if let Some(Value::Str(text)) = e.hidden("plain_body") {
+        let mut headers = vec![("content-type".to_string(), "text/plain; charset=UTF-8".to_string())];
+        headers.extend(e.headers().iter().flat_map(|(k, vs)| vs.iter().map(move |v| (k.clone(), v.clone()))));
+        return EsResponse { status: e.status, headers, body: Bytes::from(text.clone()), head };
+    }
     let ty = response_type(None, neg);
     let ty = if ty == XContentType::Smile { XContentType::Json } else { ty };
     let mut v = e.to_body_with(trace, dialect == Dialect::OpenSearch);

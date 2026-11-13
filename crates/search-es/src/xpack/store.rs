@@ -43,6 +43,7 @@ const HOMES: &[Home] = &[
     Home { prefix: "security.token", index: ".security-tokens-7", alias: Some(".security-tokens") },
     Home { prefix: "security.profile", index: ".security-profile-8", alias: Some(".security-profile") },
     Home { prefix: "security.", index: ".security-7", alias: Some(".security") },
+    Home { prefix: "opendistro_security.", index: ".opendistro_security", alias: None },
     Home { prefix: "ml.job", index: ".ml-config", alias: None },
     Home { prefix: "ml.datafeed", index: ".ml-config", alias: None },
     Home { prefix: "ml.dfa", index: ".ml-config", alias: None },

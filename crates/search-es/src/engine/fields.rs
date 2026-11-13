@@ -464,9 +464,10 @@ impl FieldTable {
         }
     }
 
-    /// [`FieldTable::filtered`] by a role's field permissions, which also filter `_source`.
+    /// [`FieldTable::filtered`] by a role's field permissions (masked fields are unmapped too),
+    /// which also filter `_source`.
     pub fn restricted(&self, f: &crate::xpack::security::dls::FieldFilter) -> FieldTable {
-        FieldTable { source_filter: Some(Arc::new(f.clone())), ..self.filtered(|n| f.allows(n)) }
+        FieldTable { source_filter: Some(Arc::new(f.clone())), ..self.filtered(|n| f.searchable(n)) }
     }
 
     /// A document's `_source` as this table's reader may see it.

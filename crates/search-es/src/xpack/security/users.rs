@@ -95,11 +95,16 @@ fn principal_of(user: &Value, realm_name: &'static str, realm_type: &'static str
 
 /// Checks a password against the cache, then the stored hash.
 fn check_password(cluster: &Cluster, user: &str, password: &str, stored: &str) -> bool {
+    check_password_with(cluster, user, password, stored, super::verify_password)
+}
+
+/// [`check_password`] with a verifier of the stored hash's format.
+pub(super) fn check_password_with(cluster: &Cluster, user: &str, password: &str, stored: &str, verify: fn(&str, &str) -> bool) -> bool {
     let key = super::digest(&[user.as_bytes(), password.as_bytes(), stored.as_bytes()]);
     if cluster.xpack.verified.lock().contains(&key) {
         return true;
     }
-    if !super::verify_password(password, stored) {
+    if !verify(password, stored) {
         return false;
     }
     let mut cache = cluster.xpack.verified.lock();

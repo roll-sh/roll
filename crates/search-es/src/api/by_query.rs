@@ -836,6 +836,8 @@ fn run_doc_script(ctx: &Ctx, bound: &crate::scripting::Bound, kind: CtxKind, d: 
 /// `refresh`: the written indices, by uuid.
 fn refresh_touched(ctx: &Ctx<'_>, refresh: bool, touched: &[String]) -> EsResult<()> {
     if refresh {
+        // OpenSearch runs the refresh as the user, once the documents are written.
+        crate::xpack::security::check_refresh(ctx)?;
         for u in touched {
             if let Some(e) = ctx.cluster.engine.loaded(u) {
                 e.refresh_all()?;

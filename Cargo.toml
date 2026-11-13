@@ -40,6 +40,9 @@ futures = "0.3"
 async-trait = "0.1"
 base64 = "0.22"
 bcrypt = "0.19"
+# OpenSearch Security's masked fields (BLAKE2b) and password strength (zxcvbn), in search-es.
+blake2 = "0.10"
+zxcvbn = { version = "3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
 croner = "3"

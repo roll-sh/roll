@@ -1,0 +1,2961 @@
+{
+  "dialect" : "opensearch",
+  "description" : "OpenSearch Security's REST API: internal users, roles, role mappings, action groups, validation, reserved and static entries, PATCH (OpenSearch 3.9.0, security on, plain HTTP)",
+  "steps" : [
+    {
+      "req" : "GET /_plugins/_security/health",
+      "status" : 200,
+      "response" : {
+        "message" : null,
+        "mode" : "strict",
+        "status" : "UP",
+        "settings" : {
+          "plugins.security.cache.ttl_minutes" : 60
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "observability_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/observability/get"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "kibana_user" : {
+          "cluster_permissions" : [
+            "cluster_composite_ops"
+          ],
+          "description" : "Provide the minimum permissions for a kibana user",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "delete",
+                "index",
+                "manage",
+                "read"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                ".kibana",
+                ".kibana-6",
+                ".kibana_*",
+                ".opensearch_dashboards",
+                ".opensearch_dashboards-6",
+                ".opensearch_dashboards_*"
+              ],
+              "masked_fields" : [ ]
+            },
+            {
+              "allowed_actions" : [
+                "indices_all"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                ".tasks",
+                ".management-beats",
+                "*:.tasks",
+                "*:.management-beats"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [ ]
+        },
+        "own_index" : {
+          "cluster_permissions" : [
+            "cluster_composite_ops"
+          ],
+          "description" : "Allow all for indices named like the current user",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices_all"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "${user_name}"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [ ]
+        },
+        "snapshot_management_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/snapshot_management/policy/explain",
+            "cluster:admin/opensearch/snapshot_management/policy/get",
+            "cluster:admin/opensearch/snapshot_management/policy/search",
+            "cluster:admin/repository/get",
+            "cluster:admin/snapshot/get"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "all_access" : {
+          "cluster_permissions" : [
+            "*"
+          ],
+          "description" : "Allow full access to all indices and all cluster APIs",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "*"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [
+            {
+              "allowed_actions" : [
+                "kibana_all_write"
+              ],
+              "tenant_patterns" : [
+                "*"
+              ]
+            }
+          ]
+        },
+        "logstash" : {
+          "cluster_permissions" : [
+            "cluster:admin/ingest/pipeline/get",
+            "cluster:admin/ingest/pipeline/put",
+            "cluster_composite_ops",
+            "cluster_monitor",
+            "indices:admin/template/get",
+            "indices:admin/template/put"
+          ],
+          "description" : "Provide the minimum permissions for logstash and beats",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "create_index",
+                "crud"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "logstash-*",
+                "ecs-logstash-*"
+              ],
+              "masked_fields" : [ ]
+            },
+            {
+              "allowed_actions" : [
+                "crud",
+                "create_index"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*beat*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [ ]
+        },
+        "observability_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/observability/create",
+            "cluster:admin/opensearch/observability/delete",
+            "cluster:admin/opensearch/observability/get",
+            "cluster:admin/opensearch/observability/update"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "point_in_time_full_access" : {
+          "cluster_permissions" : [ ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "manage_point_in_time"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "flow_framework_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/flow_framework/*",
+            "cluster_monitor"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/aliases/get",
+                "indices:admin/mappings/get",
+                "indices_monitor"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "cross_cluster_replication_leader_full_access" : {
+          "cluster_permissions" : [ ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/plugins/replication/index/setup/validate",
+                "indices:data/read/plugins/replication/changes",
+                "indices:data/read/plugins/replication/file_chunk"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "ppl_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/ppl"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/mappings/get",
+                "indices:admin/resolve/index",
+                "indices:data/read/field_caps*",
+                "indices:data/read/point_in_time/create",
+                "indices:data/read/point_in_time/delete",
+                "indices:data/read/search*",
+                "indices:monitor/settings/get"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "security_analytics_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/securityanalytics/alerts/get",
+            "cluster:admin/opensearch/securityanalytics/correlationAlerts/get",
+            "cluster:admin/opensearch/securityanalytics/correlations/findings",
+            "cluster:admin/opensearch/securityanalytics/correlations/list",
+            "cluster:admin/opensearch/securityanalytics/detector/get",
+            "cluster:admin/opensearch/securityanalytics/detector/search",
+            "cluster:admin/opensearch/securityanalytics/findings/get",
+            "cluster:admin/opensearch/securityanalytics/logtype/search",
+            "cluster:admin/opensearch/securityanalytics/mapping/get",
+            "cluster:admin/opensearch/securityanalytics/mapping/view/get",
+            "cluster:admin/opensearch/securityanalytics/rule/get",
+            "cluster:admin/opensearch/securityanalytics/rule/search",
+            "cluster:admin/opensearch/securityanalytics/threatintel/alerts/get",
+            "cluster:admin/opensearch/securityanalytics/threatintel/iocs/findings/get",
+            "cluster:admin/opensearch/securityanalytics/threatintel/iocs/list",
+            "cluster:admin/opensearch/securityanalytics/threatintel/monitors/search",
+            "cluster:admin/opensearch/securityanalytics/threatintel/sources/get",
+            "cluster:admin/opensearch/securityanalytics/threatintel/sources/search"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "security_analytics_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/securityanalytics/alerts/*",
+            "cluster:admin/opensearch/securityanalytics/connections/*",
+            "cluster:admin/opensearch/securityanalytics/correlationAlerts/*",
+            "cluster:admin/opensearch/securityanalytics/correlations/*",
+            "cluster:admin/opensearch/securityanalytics/detector/*",
+            "cluster:admin/opensearch/securityanalytics/findings/*",
+            "cluster:admin/opensearch/securityanalytics/logtype/*",
+            "cluster:admin/opensearch/securityanalytics/mapping/*",
+            "cluster:admin/opensearch/securityanalytics/rule/*",
+            "cluster:admin/opensearch/securityanalytics/threatintel/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/mapping/put",
+                "indices:admin/mappings/get"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "knn_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/knn_delete_model_action",
+            "cluster:admin/knn_get_model_action",
+            "cluster:admin/knn_remove_model_from_cache_action",
+            "cluster:admin/knn_search_model_action",
+            "cluster:admin/knn_stats_action",
+            "cluster:admin/knn_training_job_route_decision_info_action",
+            "cluster:admin/knn_training_job_router_action",
+            "cluster:admin/knn_training_model_action",
+            "cluster:admin/knn_update_model_graveyard_action",
+            "cluster:admin/knn_warmup_action"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "readall_and_monitor" : {
+          "cluster_permissions" : [
+            "cluster_composite_ops_ro",
+            "cluster_monitor"
+          ],
+          "description" : "Provide the minimum permissions for to readall indices and monitor the cluster",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "read"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [ ]
+        },
+        "flow_framework_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/flow_framework/workflow/get",
+            "cluster:admin/opensearch/flow_framework/workflow/search",
+            "cluster:admin/opensearch/flow_framework/workflow_state/get",
+            "cluster:admin/opensearch/flow_framework/workflow_state/search",
+            "cluster:admin/opensearch/flow_framework/workflow_step/get"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "security_rest_api_full_access" : {
+          "cluster_permissions" : [
+            "restapi:admin/actiongroups",
+            "restapi:admin/allowlist",
+            "restapi:admin/config/update",
+            "restapi:admin/internalusers",
+            "restapi:admin/nodesdn",
+            "restapi:admin/resource_sharing/migrate",
+            "restapi:admin/roles",
+            "restapi:admin/rolesmapping",
+            "restapi:admin/ssl/certs/info",
+            "restapi:admin/ssl/certs/reload",
+            "restapi:admin/tenants"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "forecast_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/plugin/forecast/*",
+            "cluster:admin/settings/update",
+            "cluster_monitor"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/aliases/get",
+                "indices:admin/mapping/get",
+                "indices:admin/mapping/put",
+                "indices:admin/mappings/fields/get*",
+                "indices:admin/mappings/get",
+                "indices:admin/resolve/index",
+                "indices:data/read*",
+                "indices:data/read/field_caps*",
+                "indices:data/read/search",
+                "indices:data/write*",
+                "indices_monitor"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "kibana_read_only" : {
+          "cluster_permissions" : [ ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "cross_cluster_search_remote_full_access" : {
+          "cluster_permissions" : [ ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/shards/search_shards",
+                "indices:data/read/search"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "anomaly_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/ad/detector/info",
+            "cluster:admin/opendistro/ad/detector/search",
+            "cluster:admin/opendistro/ad/detector/suggest",
+            "cluster:admin/opendistro/ad/detector/validate",
+            "cluster:admin/opendistro/ad/detectors/get",
+            "cluster:admin/opendistro/ad/result/search",
+            "cluster:admin/opendistro/ad/result/topAnomalies",
+            "cluster:admin/opendistro/ad/tasks/search"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "reports_instances_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/reports/instance/get",
+            "cluster:admin/opendistro/reports/instance/list",
+            "cluster:admin/opendistro/reports/menu/download"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "snapshot_management_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/notifications/feature/publish",
+            "cluster:admin/opensearch/snapshot_management/*",
+            "cluster:admin/repository/*",
+            "cluster:admin/snapshot/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "readall" : {
+          "cluster_permissions" : [
+            "cluster_composite_ops_ro"
+          ],
+          "description" : "Provide the minimum permissions for to readall indices",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "read"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [ ]
+        },
+        "asynchronous_search_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/asynchronous_search/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:data/read/search*"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "search_relevance_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/search_relevance/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/mappings/get",
+                "indices:data/read/*"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "ml_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/ml/*",
+            "cluster_monitor"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices_monitor"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "reports_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/reports/definition/create",
+            "cluster:admin/opendistro/reports/definition/delete",
+            "cluster:admin/opendistro/reports/definition/get",
+            "cluster:admin/opendistro/reports/definition/list",
+            "cluster:admin/opendistro/reports/definition/on_demand",
+            "cluster:admin/opendistro/reports/definition/update",
+            "cluster:admin/opendistro/reports/instance/get",
+            "cluster:admin/opendistro/reports/instance/list",
+            "cluster:admin/opendistro/reports/menu/download"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "ip2geo_datasource_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/geospatial/datasource/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "notebooks_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/notebooks/get",
+            "cluster:admin/opendistro/notebooks/list"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "security_analytics_ack_alerts" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/securityanalytics/alerts/*",
+            "cluster:admin/opensearch/securityanalytics/correlationAlerts/*",
+            "cluster:admin/opensearch/securityanalytics/threatintel/alerts/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "ltr_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/ltr/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "alerting_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/alerting/*",
+            "cluster:admin/opensearch/alerting/*",
+            "cluster:admin/opensearch/notifications/feature/publish",
+            "cluster_monitor"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/aliases/get",
+                "indices:admin/mappings/get",
+                "indices_monitor"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "alerting_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/alerting/alerts/get",
+            "cluster:admin/opendistro/alerting/destination/get",
+            "cluster:admin/opendistro/alerting/monitor/get",
+            "cluster:admin/opendistro/alerting/monitor/search",
+            "cluster:admin/opensearch/alerting/comments/search",
+            "cluster:admin/opensearch/alerting/findings/get",
+            "cluster:admin/opensearch/alerting/remote/indexes/get",
+            "cluster:admin/opensearch/alerting/v2/alerts/get",
+            "cluster:admin/opensearch/alerting/v2/monitor/get",
+            "cluster:admin/opensearch/alerting/v2/monitor/search",
+            "cluster:admin/opensearch/alerting/workflow/get",
+            "cluster:admin/opensearch/alerting/workflow_alerts/get"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "cross_cluster_replication_follower_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/plugins/replication/autofollow/update"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/plugins/replication/index/pause",
+                "indices:admin/plugins/replication/index/resume",
+                "indices:admin/plugins/replication/index/setup/validate",
+                "indices:admin/plugins/replication/index/start",
+                "indices:admin/plugins/replication/index/status_check",
+                "indices:admin/plugins/replication/index/stop",
+                "indices:admin/plugins/replication/index/update",
+                "indices:data/write/plugins/replication/changes"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "manage_snapshots" : {
+          "cluster_permissions" : [
+            "manage_snapshots"
+          ],
+          "description" : "Provide the minimum permissions for managing snapshots",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/create",
+                "indices:data/write/index"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [ ]
+        },
+        "notifications_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/notifications/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "query_assistant_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/ml/config/get",
+            "cluster:admin/opensearch/ml/execute",
+            "cluster:admin/opensearch/ml/predict",
+            "cluster:admin/opensearch/ppl"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "notifications_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/notifications/channels/get",
+            "cluster:admin/opensearch/notifications/configs/get",
+            "cluster:admin/opensearch/notifications/features"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "knn_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/knn_get_model_action",
+            "cluster:admin/knn_search_model_action",
+            "cluster:admin/knn_stats_action"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "asynchronous_search_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/asynchronous_search/get"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "index_management_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/ism/*",
+            "cluster:admin/opendistro/rollup/*",
+            "cluster:admin/opendistro/transform/*",
+            "cluster:admin/opensearch/controlcenter/lron/*",
+            "cluster:admin/opensearch/notifications/channels/get",
+            "cluster:admin/opensearch/notifications/feature/publish"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/opensearch/ism/*",
+                "indices:internal/plugins/replication/index/stop"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "ml_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/ml/config/get",
+            "cluster:admin/opensearch/ml/connectors/get",
+            "cluster:admin/opensearch/ml/connectors/search",
+            "cluster:admin/opensearch/ml/controllers/get",
+            "cluster:admin/opensearch/ml/memory/conversation/get",
+            "cluster:admin/opensearch/ml/memory/conversation/interaction/search",
+            "cluster:admin/opensearch/ml/memory/conversation/list",
+            "cluster:admin/opensearch/ml/memory/conversation/search",
+            "cluster:admin/opensearch/ml/memory/interaction/get",
+            "cluster:admin/opensearch/ml/memory/interaction/list",
+            "cluster:admin/opensearch/ml/memory/trace/get",
+            "cluster:admin/opensearch/ml/model_groups/get",
+            "cluster:admin/opensearch/ml/model_groups/search",
+            "cluster:admin/opensearch/ml/models/get",
+            "cluster:admin/opensearch/ml/models/search",
+            "cluster:admin/opensearch/ml/profile/nodes",
+            "cluster:admin/opensearch/ml/stats/nodes",
+            "cluster:admin/opensearch/ml/tasks/get",
+            "cluster:admin/opensearch/ml/tasks/search",
+            "cluster:admin/opensearch/ml/tools/get",
+            "cluster:admin/opensearch/ml/tools/list"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "reports_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/reports/definition/get",
+            "cluster:admin/opendistro/reports/definition/list",
+            "cluster:admin/opendistro/reports/instance/get",
+            "cluster:admin/opendistro/reports/instance/list",
+            "cluster:admin/opendistro/reports/menu/download"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "anomaly_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/ingest/pipeline/delete",
+            "cluster:admin/ingest/pipeline/put",
+            "cluster:admin/opendistro/ad/*",
+            "cluster_monitor"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/aliases/get",
+                "indices:admin/mappings/fields/get",
+                "indices:admin/mappings/fields/get*",
+                "indices:admin/mappings/get",
+                "indices:admin/resolve/index",
+                "indices:admin/setting/put",
+                "indices:data/read/field_caps*",
+                "indices:data/read/search",
+                "indices_monitor"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "forecast_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/plugin/forecast/forecaster/info",
+            "cluster:admin/plugin/forecast/forecaster/stats",
+            "cluster:admin/plugin/forecast/forecaster/suggest",
+            "cluster:admin/plugin/forecast/forecaster/validate",
+            "cluster:admin/plugin/forecast/forecasters/get",
+            "cluster:admin/plugin/forecast/forecasters/info",
+            "cluster:admin/plugin/forecast/forecasters/search",
+            "cluster:admin/plugin/forecast/result/topForecasts",
+            "cluster:admin/plugin/forecast/tasks/search"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/mappings/fields/get*",
+                "indices:admin/resolve/index",
+                "indices:data/read*"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "opensearch-forecast-result*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "security_rest_api_access" : {
+          "cluster_permissions" : [ ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "ip2geo_datasource_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/geospatial/datasource/get"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "ltr_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/ltr/caches/stats",
+            "cluster:admin/ltr/featurestore/list",
+            "cluster:admin/ltr/stats"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "alerting_ack_alerts" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/alerting/alerts/*",
+            "cluster:admin/opendistro/alerting/chained_alerts/*",
+            "cluster:admin/opendistro/alerting/workflow_alerts/*",
+            "cluster:admin/opensearch/alerting/comments/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "search_relevance_read_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/search_relevance/experiment/get",
+            "cluster:admin/opensearch/search_relevance/judgment/get",
+            "cluster:admin/opensearch/search_relevance/queryset/get",
+            "cluster:admin/opensearch/search_relevance/search_configuration/get"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices:admin/mappings/get",
+                "indices:data/read/*"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "search-relevance-*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "kibana_server" : {
+          "cluster_permissions" : [
+            "cluster_composite_ops",
+            "cluster_monitor",
+            "indices:admin/index_template*",
+            "indices:admin/template*",
+            "indices:data/read/scroll*",
+            "manage_point_in_time"
+          ],
+          "description" : "Provide the minimum permissions for the Kibana server",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices_all"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                ".kibana",
+                ".opensearch_dashboards"
+              ],
+              "masked_fields" : [ ]
+            },
+            {
+              "allowed_actions" : [
+                "indices_all"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                ".kibana-6",
+                ".opensearch_dashboards-6"
+              ],
+              "masked_fields" : [ ]
+            },
+            {
+              "allowed_actions" : [
+                "indices_all"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                ".kibana_*",
+                ".opensearch_dashboards_*"
+              ],
+              "masked_fields" : [ ]
+            },
+            {
+              "allowed_actions" : [
+                "indices_all"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                ".tasks"
+              ],
+              "masked_fields" : [ ]
+            },
+            {
+              "allowed_actions" : [
+                "indices_all"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                ".management-beats*"
+              ],
+              "masked_fields" : [ ]
+            },
+            {
+              "allowed_actions" : [
+                "indices:admin/aliases*"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [ ]
+        },
+        "notebooks_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opendistro/notebooks/create",
+            "cluster:admin/opendistro/notebooks/delete",
+            "cluster:admin/opendistro/notebooks/get",
+            "cluster:admin/opendistro/notebooks/list",
+            "cluster:admin/opendistro/notebooks/update"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        },
+        "query_insights_full_access" : {
+          "cluster_permissions" : [
+            "cluster:admin/opensearch/insights/*"
+          ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "indices_all"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "top_queries-*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/actiongroups",
+      "unordered" : true,
+      "status" : 200,
+      "response" : {
+        "data_access" : {
+          "allowed_actions" : [
+            "indices:data/*",
+            "crud"
+          ],
+          "description" : "Allow all read/write operations on data",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "delete" : {
+          "allowed_actions" : [
+            "indices:data/write/delete*"
+          ],
+          "description" : "Allow deleting documents",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "cluster_manage_pipelines" : {
+          "allowed_actions" : [
+            "cluster:admin/ingest/pipeline/*"
+          ],
+          "description" : "Manage pipelines",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "cluster"
+        },
+        "manage_aliases" : {
+          "allowed_actions" : [
+            "indices:admin/aliases*"
+          ],
+          "description" : "Allow managing index aliases",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "crud" : {
+          "allowed_actions" : [
+            "read",
+            "write"
+          ],
+          "description" : "Allow all read/write operations on data",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "manage_snapshots" : {
+          "allowed_actions" : [
+            "cluster:admin/snapshot/*",
+            "cluster:admin/repository/*"
+          ],
+          "description" : "Allow snapshots",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "cluster"
+        },
+        "kibana_all_read" : {
+          "allowed_actions" : [
+            "kibana:saved_objects/*/read"
+          ],
+          "description" : "Allow reading in all OpenSearch Dashboards apps",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "kibana"
+        },
+        "search" : {
+          "allowed_actions" : [
+            "indices:data/read/search*",
+            "indices:data/read/msearch*",
+            "indices:admin/resolve/index",
+            "suggest"
+          ],
+          "description" : "Allow searching",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "get" : {
+          "allowed_actions" : [
+            "indices:data/read/get*",
+            "indices:data/read/mget*"
+          ],
+          "description" : "Allow get",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "manage_data_streams" : {
+          "allowed_actions" : [
+            "indices:admin/data_stream/*",
+            "indices:monitor/data_stream/stats"
+          ],
+          "description" : "Manage data streams",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "write" : {
+          "allowed_actions" : [
+            "indices:data/write*",
+            "indices:admin/mapping/put"
+          ],
+          "description" : "Allow writing data",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "cluster_manage_index_templates" : {
+          "allowed_actions" : [
+            "indices:admin/template/*",
+            "indices:admin/index_template/*",
+            "cluster:admin/component_template/*"
+          ],
+          "description" : "Manage index templates",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "cluster"
+        },
+        "indices_all" : {
+          "allowed_actions" : [
+            "indices:*"
+          ],
+          "description" : "Allow readonly everything with indices and data",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "read" : {
+          "allowed_actions" : [
+            "indices:data/read*",
+            "indices:admin/mappings/fields/get*",
+            "indices:admin/resolve/index"
+          ],
+          "description" : "Allow all read operations",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "cluster_all" : {
+          "allowed_actions" : [
+            "cluster:*"
+          ],
+          "description" : "Allow everything on cluster level",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "cluster"
+        },
+        "unlimited" : {
+          "allowed_actions" : [
+            "*"
+          ],
+          "description" : "Allow all",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "all"
+        },
+        "create_index" : {
+          "allowed_actions" : [
+            "indices:admin/create",
+            "indices:admin/mapping/put"
+          ],
+          "description" : "Allow creating new indices",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "index" : {
+          "allowed_actions" : [
+            "indices:data/write/index*",
+            "indices:data/write/update*",
+            "indices:admin/mapping/put",
+            "indices:data/write/bulk*"
+          ],
+          "description" : "Allow indexing",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "cluster_composite_ops_ro" : {
+          "allowed_actions" : [
+            "indices:data/read/mget",
+            "indices:data/read/msearch",
+            "indices:data/read/mtv",
+            "indices:admin/aliases/exists*",
+            "indices:admin/aliases/get*",
+            "indices:data/read/scroll",
+            "indices:admin/resolve/index"
+          ],
+          "description" : "Allow readonly bulk and m* operations",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "cluster"
+        },
+        "suggest" : {
+          "allowed_actions" : [
+            "indices:data/read/suggest*"
+          ],
+          "description" : "Allow suggestions",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "manage" : {
+          "allowed_actions" : [
+            "indices:monitor/*",
+            "indices:admin/*"
+          ],
+          "description" : "Allow indices management",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "manage_point_in_time" : {
+          "allowed_actions" : [
+            "indices:data/read/point_in_time/create",
+            "indices:data/read/point_in_time/delete",
+            "indices:data/read/point_in_time/readall",
+            "indices:data/read/search",
+            "indices:monitor/point_in_time/segments"
+          ],
+          "description" : "Manage point in time actions",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "cluster_composite_ops" : {
+          "allowed_actions" : [
+            "indices:data/write/bulk",
+            "indices:admin/aliases*",
+            "indices:data/write/reindex",
+            "cluster_composite_ops_ro"
+          ],
+          "description" : "Allow read/write bulk and m* operations",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "cluster"
+        },
+        "cluster_monitor" : {
+          "allowed_actions" : [
+            "cluster:monitor/*"
+          ],
+          "description" : "Allow monitoring the cluster",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "cluster"
+        },
+        "indices_monitor" : {
+          "allowed_actions" : [
+            "indices:monitor/*"
+          ],
+          "description" : "Allow monitoring indices",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        },
+        "kibana_all_write" : {
+          "allowed_actions" : [
+            "kibana:saved_objects/*/write"
+          ],
+          "description" : "Allow writing in all OpenSearch Dashboards apps",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "kibana"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles/all_access",
+      "status" : 200,
+      "response" : {
+        "all_access" : {
+          "cluster_permissions" : [
+            "*"
+          ],
+          "description" : "Allow full access to all indices and all cluster APIs",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "*"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [
+                "*"
+              ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : true,
+          "static" : true,
+          "tenant_permissions" : [
+            {
+              "allowed_actions" : [
+                "kibana_all_write"
+              ],
+              "tenant_patterns" : [
+                "*"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/rolesmapping/all_access",
+      "status" : 200,
+      "response" : {
+        "all_access" : {
+          "and_backend_roles" : [ ],
+          "backend_roles" : [
+            "admin"
+          ],
+          "description" : "Maps admin to all_access",
+          "hidden" : false,
+          "hosts" : [ ],
+          "reserved" : false,
+          "users" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/actiongroups/crud",
+      "status" : 200,
+      "response" : {
+        "crud" : {
+          "allowed_actions" : [
+            "read",
+            "write"
+          ],
+          "description" : "Allow all read/write operations on data",
+          "hidden" : false,
+          "reserved" : true,
+          "static" : true,
+          "type" : "index"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers/esm-nope",
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "user 'esm-nope' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles/esm-nope",
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "role 'esm-nope' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/rolesmapping/esm-nope",
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "rolesmapping 'esm-nope' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/actiongroups/esm-nope",
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "actiongroup 'esm-nope' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u1",
+      "body" : {
+        "password" : "Esm-pass-1234!",
+        "backend_roles" : [
+          "b1"
+        ],
+        "attributes" : {
+          "team" : "t1"
+        },
+        "description" : "d"
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-u1' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers/esm-u1",
+      "status" : 200,
+      "response" : {
+        "esm-u1" : {
+          "attributes" : {
+            "team" : "t1"
+          },
+          "backend_roles" : [
+            "b1"
+          ],
+          "description" : "d",
+          "hash" : "",
+          "hidden" : false,
+          "opendistro_security_roles" : [ ],
+          "reserved" : false,
+          "static" : false
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u1",
+      "body" : {
+        "backend_roles" : [
+          "b2"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-u1' updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers/esm-u1",
+      "status" : 200,
+      "response" : {
+        "esm-u1" : {
+          "attributes" : { },
+          "backend_roles" : [
+            "b2"
+          ],
+          "hash" : "",
+          "hidden" : false,
+          "opendistro_security_roles" : [ ],
+          "reserved" : false,
+          "static" : false
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "password" : "abc"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Weak password"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "password" : ""
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Password is too short"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "password" : "esm-u2-Strong-99!"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Password is similar to user name"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "backend_roles" : [
+          "x"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "Please specify either 'hash' or 'password' when creating a new internal user."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "password" : "Esm-pass-1234!",
+        "bogus" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Invalid configuration",
+        "invalid_keys" : {
+          "keys" : "bogus"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "password" : "Esm-pass-1234!",
+        "hidden" : true
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Invalid configuration",
+        "invalid_keys" : {
+          "keys" : "hidden"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "password" : "Esm-pass-1234!",
+        "backend_roles" : "x",
+        "attributes" : [ ]
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Wrong datatype",
+        "backend_roles" : "Array expected",
+        "attributes" : "Object expected"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "password" : null
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Wrong datatype",
+        "password" : "String expected"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : {
+        "password" : "Esm-pass-1234!",
+        "opendistro_security_roles" : [
+          "esm-nope"
+        ]
+      },
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "role 'esm-nope' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "raw" : "notjson",
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Could not parse content of request."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Request body required for this action."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u2",
+      "body" : [ ],
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Request body required for this action."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm:u",
+      "body" : {
+        "password" : "Esm-pass-1234!"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "A restricted character(s) was detected in the account name. Please remove: ':'"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u3",
+      "body" : {
+        "hash" : ""
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-u3' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/esm-u3",
+      "body" : {
+        "backend_roles" : [
+          "x"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "Existing user esm-u3 has no password, and no new password or hash was specified."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/internalusers/admin",
+      "body" : {
+        "password" : "Esm-pass-1234!"
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'admin' is reserved."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/internalusers/admin",
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'admin' is reserved."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/internalusers/admin",
+      "body" : [
+        {
+          "op" : "add",
+          "path" : "/backend_roles",
+          "value" : [
+            "p1"
+          ]
+        }
+      ],
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'admin' is reserved."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/internalusers/esm-nope",
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "user 'esm-nope' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/internalusers/esm-u1",
+      "body" : [
+        {
+          "op" : "add",
+          "path" : "/backend_roles/-",
+          "value" : "p1"
+        }
+      ],
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-u1' updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers/esm-u1",
+      "status" : 200,
+      "response" : {
+        "esm-u1" : {
+          "attributes" : { },
+          "backend_roles" : [
+            "b2",
+            "p1"
+          ],
+          "hash" : "",
+          "hidden" : false,
+          "opendistro_security_roles" : [ ],
+          "reserved" : false,
+          "static" : false
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/internalusers/esm-u1",
+      "body" : [
+        {
+          "op" : "replace",
+          "path" : "/bogus",
+          "value" : 1
+        }
+      ],
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "Missing field \"bogus\""
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/internalusers/esm-u1",
+      "body" : {
+        "op" : "add"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "Wrong request body"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/internalusers/esm-u1",
+      "body" : [
+        {
+          "op" : "add",
+          "path" : "/password",
+          "value" : "abc"
+        }
+      ],
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Weak password"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/internalusers/esm-nope",
+      "body" : [
+        {
+          "op" : "add",
+          "path" : "/backend_roles",
+          "value" : [
+            "p1"
+          ]
+        }
+      ],
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "user 'esm-nope' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/internalusers",
+      "body" : [
+        {
+          "op" : "add",
+          "path" : "/esm-u4",
+          "value" : {
+            "password" : "Esm-pass-1234!",
+            "backend_roles" : [
+              "z"
+            ]
+          }
+        },
+        {
+          "op" : "remove",
+          "path" : "/esm-u3"
+        }
+      ],
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "Resource updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers/esm-u4",
+      "status" : 200,
+      "response" : {
+        "esm-u4" : {
+          "attributes" : { },
+          "backend_roles" : [
+            "z"
+          ],
+          "hash" : "",
+          "hidden" : false,
+          "opendistro_security_roles" : [ ],
+          "reserved" : false,
+          "static" : false
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/internalusers/esm-u3",
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "user 'esm-u3' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/internalusers",
+      "body" : [
+        {
+          "op" : "remove",
+          "path" : "/esm-nope"
+        }
+      ],
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "No updates required"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/internalusers/esm-u4",
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-u4' deleted."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r1",
+      "body" : {
+        "cluster_permissions" : [
+          "cluster_composite_ops",
+          "cluster:monitor/health"
+        ],
+        "index_permissions" : [
+          {
+            "index_patterns" : [
+              "esm-*"
+            ],
+            "dls" : "{\"term\":{\"k\":\"a\"}}",
+            "fls" : [
+              "~secret"
+            ],
+            "masked_fields" : [
+              "mask"
+            ],
+            "allowed_actions" : [
+              "read"
+            ]
+          }
+        ],
+        "tenant_permissions" : [
+          {
+            "tenant_patterns" : [
+              "t1"
+            ],
+            "allowed_actions" : [
+              "kibana_all_read"
+            ]
+          }
+        ],
+        "description" : "r"
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-r1' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles/esm-r1",
+      "status" : 200,
+      "response" : {
+        "esm-r1" : {
+          "cluster_permissions" : [
+            "cluster_composite_ops",
+            "cluster:monitor/health"
+          ],
+          "description" : "r",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "read"
+              ],
+              "dls" : "{\"term\":{\"k\":\"a\"}}",
+              "fls" : [
+                "~secret"
+              ],
+              "index_patterns" : [
+                "esm-*"
+              ],
+              "masked_fields" : [
+                "mask"
+              ]
+            }
+          ],
+          "reserved" : false,
+          "static" : false,
+          "tenant_permissions" : [
+            {
+              "allowed_actions" : [
+                "kibana_all_read"
+              ],
+              "tenant_patterns" : [
+                "t1"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r1",
+      "body" : {
+        "cluster_permissions" : [
+          "bogus_group"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-r1' updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles/esm-r1",
+      "status" : 200,
+      "response" : {
+        "esm-r1" : {
+          "cluster_permissions" : [
+            "bogus_group"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : false,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r2",
+      "body" : {
+        "index_permissions" : [
+          {
+            "allowed_actions" : [
+              "read"
+            ]
+          }
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-r2' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles/esm-r2",
+      "status" : 200,
+      "response" : {
+        "esm-r2" : {
+          "cluster_permissions" : [ ],
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "read"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [ ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : false,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r2",
+      "body" : {
+        "cluster_permissions" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Wrong datatype",
+        "cluster_permissions" : "Array expected"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r2",
+      "body" : {
+        "foo" : 1
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Invalid configuration",
+        "invalid_keys" : {
+          "keys" : "foo"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r2",
+      "body" : {
+        "index_permissions" : [
+          {
+            "index_patterns" : [
+              "x"
+            ],
+            "bogus" : 1
+          }
+        ]
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "i_o_exception",
+              "reason" : "tools.jackson.databind.exc.UnrecognizedPropertyException: Unrecognized property \"bogus\" (class org.opensearch.security.securityconf.impl.v7.RoleV7$Index), not marked as ignorable (5 known properties: \"allowed_actions\", \"dls\", \"fls\", \"index_patterns\", \"masked_fields\")\n at [No location information] (through reference chain: org.opensearch.security.securityconf.impl.v7.RoleV7[\"index_permissions\"]->java.util.ArrayList[0]->org.opensearch.security.securityconf.impl.v7.RoleV7$Index[\"bogus\"])"
+            }
+          ],
+          "type" : "i_o_exception",
+          "reason" : "tools.jackson.databind.exc.UnrecognizedPropertyException: Unrecognized property \"bogus\" (class org.opensearch.security.securityconf.impl.v7.RoleV7$Index), not marked as ignorable (5 known properties: \"allowed_actions\", \"dls\", \"fls\", \"index_patterns\", \"masked_fields\")\n at [No location information] (through reference chain: org.opensearch.security.securityconf.impl.v7.RoleV7[\"index_permissions\"]->java.util.ArrayList[0]->org.opensearch.security.securityconf.impl.v7.RoleV7$Index[\"bogus\"])",
+          "caused_by" : {
+            "type" : "unrecognized_property_exception",
+            "reason" : "Unrecognized property \"bogus\" (class org.opensearch.security.securityconf.impl.v7.RoleV7$Index), not marked as ignorable (5 known properties: \"allowed_actions\", \"dls\", \"fls\", \"index_patterns\", \"masked_fields\")\n at [No location information] (through reference chain: org.opensearch.security.securityconf.impl.v7.RoleV7[\"index_permissions\"]->java.util.ArrayList[0]->org.opensearch.security.securityconf.impl.v7.RoleV7$Index[\"bogus\"])"
+          }
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r2",
+      "body" : {
+        "tenant_permissions" : [
+          {
+            "tenant_patterns" : [
+              "x"
+            ],
+            "bogus" : 1
+          }
+        ]
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "i_o_exception",
+              "reason" : "tools.jackson.databind.exc.UnrecognizedPropertyException: Unrecognized property \"bogus\" (class org.opensearch.security.securityconf.impl.v7.RoleV7$Tenant), not marked as ignorable (2 known properties: \"allowed_actions\", \"tenant_patterns\")\n at [No location information] (through reference chain: org.opensearch.security.securityconf.impl.v7.RoleV7[\"tenant_permissions\"]->java.util.ArrayList[0]->org.opensearch.security.securityconf.impl.v7.RoleV7$Tenant[\"bogus\"])"
+            }
+          ],
+          "type" : "i_o_exception",
+          "reason" : "tools.jackson.databind.exc.UnrecognizedPropertyException: Unrecognized property \"bogus\" (class org.opensearch.security.securityconf.impl.v7.RoleV7$Tenant), not marked as ignorable (2 known properties: \"allowed_actions\", \"tenant_patterns\")\n at [No location information] (through reference chain: org.opensearch.security.securityconf.impl.v7.RoleV7[\"tenant_permissions\"]->java.util.ArrayList[0]->org.opensearch.security.securityconf.impl.v7.RoleV7$Tenant[\"bogus\"])",
+          "caused_by" : {
+            "type" : "unrecognized_property_exception",
+            "reason" : "Unrecognized property \"bogus\" (class org.opensearch.security.securityconf.impl.v7.RoleV7$Tenant), not marked as ignorable (2 known properties: \"allowed_actions\", \"tenant_patterns\")\n at [No location information] (through reference chain: org.opensearch.security.securityconf.impl.v7.RoleV7[\"tenant_permissions\"]->java.util.ArrayList[0]->org.opensearch.security.securityconf.impl.v7.RoleV7$Tenant[\"bogus\"])"
+          }
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/esm-r2",
+      "body" : {
+        "index_permissions" : [
+          "x"
+        ]
+      },
+      "status" : 500,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "json_node_exception",
+              "reason" : "`JsonNode` not of type `ObjectNode` (but `tools.jackson.databind.node.StringNode)`, cannot call `withArray()` on it"
+            }
+          ],
+          "type" : "json_node_exception",
+          "reason" : "`JsonNode` not of type `ObjectNode` (but `tools.jackson.databind.node.StringNode)`, cannot call `withArray()` on it"
+        },
+        "status" : 500
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/all_access",
+      "body" : {
+        "cluster_permissions" : [
+          "*"
+        ]
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'all_access' is static."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/roles/all_access",
+      "body" : { },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Request body required for this action."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/roles/all_access",
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'all_access' is static."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/roles/security_rest_api_access",
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'security_rest_api_access' is reserved."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/roles/esm-r2",
+      "body" : [
+        {
+          "op" : "replace",
+          "path" : "/description",
+          "value" : "x"
+        }
+      ],
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "Missing field \"description\""
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/roles/esm-r2",
+      "body" : [
+        {
+          "op" : "add",
+          "path" : "/description",
+          "value" : "x"
+        }
+      ],
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-r2' updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/roles/esm-r2",
+      "status" : 200,
+      "response" : {
+        "esm-r2" : {
+          "cluster_permissions" : [ ],
+          "description" : "x",
+          "hidden" : false,
+          "index_permissions" : [
+            {
+              "allowed_actions" : [
+                "read"
+              ],
+              "fls" : [ ],
+              "index_patterns" : [ ],
+              "masked_fields" : [ ]
+            }
+          ],
+          "reserved" : false,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/roles/esm-r2",
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-r2' deleted."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/roles/esm-r2",
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "role 'esm-r2' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/esm-r1",
+      "body" : {
+        "users" : [
+          "esm-u1"
+        ],
+        "backend_roles" : [
+          "b2"
+        ],
+        "and_backend_roles" : [
+          "x",
+          "y"
+        ],
+        "hosts" : [
+          "h"
+        ],
+        "description" : "m"
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-r1' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/rolesmapping/esm-r1",
+      "status" : 200,
+      "response" : {
+        "esm-r1" : {
+          "and_backend_roles" : [
+            "x",
+            "y"
+          ],
+          "backend_roles" : [
+            "b2"
+          ],
+          "description" : "m",
+          "hidden" : false,
+          "hosts" : [
+            "h"
+          ],
+          "reserved" : false,
+          "users" : [
+            "esm-u1"
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/esm-r1",
+      "body" : {
+        "users" : [
+          "esm-u1"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-r1' updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/esm-nope",
+      "body" : {
+        "users" : [
+          "a"
+        ]
+      },
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "role 'esm-nope' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/esm-r1",
+      "body" : {
+        "users" : "a"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Wrong datatype",
+        "users" : "Array expected"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/esm-r1",
+      "body" : {
+        "bogus" : [
+          "a"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Invalid configuration",
+        "invalid_keys" : {
+          "keys" : "bogus"
+        },
+        "specify_one_of" : {
+          "keys" : "backend_roles,hosts,and_backend_roles,users"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/esm-r1",
+      "body" : {
+        "description" : "only"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Invalid configuration",
+        "specify_one_of" : {
+          "keys" : "backend_roles,hosts,and_backend_roles,users"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/rolesmapping/security_rest_api_access",
+      "body" : {
+        "users" : [
+          "esm-u9"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'security_rest_api_access' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/rolesmapping/security_rest_api_access",
+      "status" : 200,
+      "response" : {
+        "security_rest_api_access" : {
+          "and_backend_roles" : [ ],
+          "backend_roles" : [ ],
+          "hidden" : false,
+          "hosts" : [ ],
+          "reserved" : false,
+          "users" : [
+            "esm-u9"
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/rolesmapping/security_rest_api_access",
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'security_rest_api_access' deleted."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/rolesmapping/security_rest_api_access",
+      "status" : 404,
+      "response" : {
+        "status" : "NOT_FOUND",
+        "message" : "rolesmapping 'security_rest_api_access' not found."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PATCH /_plugins/_security/api/rolesmapping",
+      "body" : [
+        {
+          "op" : "add",
+          "path" : "/esm-r1/users/-",
+          "value" : "esm-u9"
+        }
+      ],
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "Resource updated."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/rolesmapping/esm-r1",
+      "status" : 200,
+      "response" : {
+        "esm-r1" : {
+          "and_backend_roles" : [ ],
+          "backend_roles" : [ ],
+          "hidden" : false,
+          "hosts" : [ ],
+          "reserved" : false,
+          "users" : [
+            "esm-u1",
+            "esm-u9"
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/actiongroups/esm-ag",
+      "body" : {
+        "allowed_actions" : [
+          "read",
+          "indices:data/write/index"
+        ],
+        "type" : "index",
+        "description" : "x"
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-ag' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_plugins/_security/api/actiongroups/esm-ag",
+      "status" : 200,
+      "response" : {
+        "esm-ag" : {
+          "allowed_actions" : [
+            "read",
+            "indices:data/write/index"
+          ],
+          "description" : "x",
+          "hidden" : false,
+          "reserved" : false,
+          "static" : false,
+          "type" : "index"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/actiongroups/esm-ag2",
+      "body" : {
+        "type" : "index"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "error",
+        "reason" : "Invalid configuration",
+        "missing_mandatory_keys" : {
+          "keys" : "allowed_actions"
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/actiongroups/esm-ag2",
+      "body" : {
+        "allowed_actions" : [
+          "esm-ag2"
+        ]
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "esm-ag2 cannot be an allowed_action of itself"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/actiongroups/esm-ag2",
+      "body" : {
+        "allowed_actions" : [
+          "x"
+        ],
+        "type" : "bogus"
+      },
+      "status" : 400,
+      "response" : {
+        "status" : "BAD_REQUEST",
+        "message" : "Invalid action group type: bogus. Supported types are: cluster, index."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_plugins/_security/api/actiongroups/read",
+      "body" : {
+        "allowed_actions" : [
+          "x"
+        ]
+      },
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'read' is static."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/actiongroups/read",
+      "status" : 403,
+      "response" : {
+        "status" : "FORBIDDEN",
+        "message" : "Resource 'read' is static."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "DELETE /_plugins/_security/api/actiongroups/esm-ag",
+      "status" : 200,
+      "response" : {
+        "status" : "OK",
+        "message" : "'esm-ag' deleted."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /_opendistro/_security/api/roles/esm-r3",
+      "body" : {
+        "cluster_permissions" : [
+          "cluster_monitor"
+        ]
+      },
+      "status" : 201,
+      "response" : {
+        "status" : "CREATED",
+        "message" : "'esm-r3' created."
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /_opendistro/_security/api/roles/esm-r3",
+      "status" : 200,
+      "response" : {
+        "esm-r3" : {
+          "cluster_permissions" : [
+            "cluster_monitor"
+          ],
+          "hidden" : false,
+          "index_permissions" : [ ],
+          "reserved" : false,
+          "static" : false,
+          "tenant_permissions" : [ ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

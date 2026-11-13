@@ -28,6 +28,7 @@
 pub mod actions;
 pub mod api_keys;
 pub mod dls;
+pub mod opensearch;
 pub mod privileges;
 pub mod query;
 pub mod tokens;
@@ -60,6 +61,8 @@ pub enum AuthKind {
     ApiKey(Box<ApiKeyAuth>),
     Token,
     ServiceAccount { token: String },
+    /// An OpenSearch Security user (the opensearch dialect): its backend roles and attributes.
+    OpenSearch(Box<opensearch::Identity>),
 }
 
 /// What an API key authentication carries.
@@ -117,12 +120,21 @@ impl Principal {
         }
     }
 
+    /// The OpenSearch Security user this principal is (the opensearch dialect).
+    pub fn os(&self) -> Option<&opensearch::Identity> {
+        match &self.kind {
+            AuthKind::OpenSearch(id) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Whether the principal holds every privilege (superuser role, not narrowed by an API key).
     pub fn is_superuser(&self) -> bool {
         match &self.kind {
             AuthKind::ApiKey(a) => {
                 a.role_descriptors.as_object().is_none_or(|m| m.is_empty()) && self.roles.iter().any(|r| r == "superuser")
             }
+            AuthKind::OpenSearch(id) => id.owner,
             _ => self.roles.iter().any(|r| r == "superuser"),
         }
     }
@@ -148,7 +160,7 @@ impl Principal {
         m.insert("authentication_realm".into(), obj! { "name" => name, "type" => ty });
         m.insert("lookup_realm".into(), obj! { "name" => name, "type" => ty });
         let auth_type = match &self.kind {
-            AuthKind::Realm => "realm",
+            AuthKind::Realm | AuthKind::OpenSearch(_) => "realm",
             AuthKind::ApiKey(_) => "api_key",
             AuthKind::Token => "token",
             AuthKind::ServiceAccount { .. } => "token",
@@ -227,12 +239,18 @@ pub fn authenticate_header(cluster: &Cluster, header: &str, uri: &str) -> EsResu
     }
     if scheme.eq_ignore_ascii_case("basic") {
         let decoded = b64_decode(value).map_err(|e| {
+            if cluster.dialect == crate::cluster::Dialect::OpenSearch {
+                return opensearch::unauthorized();
+            }
             unauthorized("invalid basic authentication header encoding").caused_by(EsError::illegal_argument(e))
         })?;
         let text = String::from_utf8_lossy(&decoded).into_owned();
         let Some((user, password)) = text.split_once(':') else {
             return Err(unauthorized("invalid basic authentication header value"));
         };
+        if cluster.dialect == crate::cluster::Dialect::OpenSearch {
+            return opensearch::authenticate_password(cluster, user, password, false).ok_or_else(opensearch::unauthorized);
+        }
         return users::authenticate_password(cluster, user, password).ok_or_else(|| unauthorized(format!("unable to authenticate user [{user}] for REST request [{uri}]")));
     }
     if scheme.eq_ignore_ascii_case("apikey") {
@@ -262,6 +280,9 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
         let decoded = b64_decode(value).ok()?;
         let text = String::from_utf8(decoded).ok()?;
         let (user, password) = text.split_once(':')?;
+        if cluster.dialect == crate::cluster::Dialect::OpenSearch {
+            return opensearch::authenticate_password(cluster, user, password, true);
+        }
         if users::is_reserved(user) && !users::has_own_password(cluster, user) {
             return None;
         }
@@ -416,6 +437,7 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             let d = tokens::service_account_descriptor(&p.username).unwrap_or(Value::Null);
             (vec![Permission::of_descriptor(&d)], None)
         }
+        AuthKind::OpenSearch(id) => (opensearch::permissions(st, p, id), None),
         _ => (permissions_of_roles(file, st, &p.roles), None),
     };
     let parents = st.metadata.data_streams.values().flat_map(|d| d.indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
@@ -516,6 +538,35 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
         }
         return Err(denied(p, CHANGE, None));
     }
+    if p.os().is_some() {
+        // The plugin checks composite requests, scrolls and reindex as cluster actions (their
+        // items are then checked on their indices), and expands no wildcards to the permitted
+        // indices.
+        if opensearch::is_cluster_action(&action) && !ctx.api.name().starts_with("plugins_security.") {
+            if !eff.allows_cluster(&action) {
+                return Err(denied(p, &action, None));
+            }
+            if scope != Scope::Cluster {
+                return Ok(None);
+            }
+        }
+        // A single document write: its action on its index, and `indices:admin/create` when
+        // it creates the index.
+        if matches!(ctx.api.name(), "index" | "create" | "delete" | "update") {
+            let name = crate::meta::resolve::resolve_date_math(ctx.path_param("index").unwrap_or_default(), ctx.now_ms)?;
+            let creates = ctx.api.name() != "delete" && crate::write::resolve_existing(&st, &name).is_none() && matches!(crate::write::write_index_name(&st, &name), Ok(None));
+            if creates && !eff.allows_index("indices:admin/create", &name) {
+                return Err(denied(p, "indices:admin/create", None));
+            }
+            let action = if ctx.api.name() == "create" { "indices:data/write/index" } else { action.as_str() };
+            return if eff.allows_index(action, &name) { Ok(None) } else { Err(denied(p, action, None)) };
+        }
+        if scope == Scope::Index && NARROWED.contains(&ctx.api.name()) {
+            let defaults = narrow_defaults(ctx.api.name());
+            let opts = ctx.indices_options(defaults).unwrap_or(defaults);
+            return check_all(ctx, p, &eff, &action, crate::api::index_expressions(ctx), &opts).map(|_| None);
+        }
+    }
     match scope {
         Scope::Any => Ok(None),
         Scope::Cluster => {
@@ -579,6 +630,15 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
     }
 }
 
+/// The `indices:admin/refresh` an OpenSearch user's `refresh=true` by-query request runs as the
+/// user once its documents are written (the plugin denies it then, after the writes).
+pub fn check_refresh(ctx: &Ctx) -> EsResult<()> {
+    const REFRESH: &str = "indices:admin/refresh";
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser() && p.os().is_some()) else { return Ok(()) };
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    if request_indices(ctx).iter().all(|i| eff.allows_index(REFRESH, i)) { Ok(()) } else { Err(denied(p, REFRESH, None)) }
+}
+
 /// APIs Elasticsearch authorizes by action name only (`RBACEngine.shouldAuthorizeIndexActionNameOnly`):
 /// the request when any role grants its action on some index, its items one by one.
 const COMPOSITE: &[&str] = &["bulk", "mget", "msearch", "msearch_template"];
@@ -598,6 +658,15 @@ impl WriteOp {
         match self {
             WriteOp::Index => "indices:data/write/index:op_type/index",
             WriteOp::Create => "indices:data/write/index:op_type/create",
+            WriteOp::Update => "indices:data/write/update",
+            WriteOp::Delete => "indices:data/write/delete",
+        }
+    }
+
+    /// The item's action without Elasticsearch's `:op_type/…` suffix (OpenSearch's name).
+    fn base_action(self) -> &'static str {
+        match self {
+            WriteOp::Index | WriteOp::Create => "indices:data/write/index",
             WriteOp::Update => "indices:data/write/update",
             WriteOp::Delete => "indices:data/write/delete",
         }
@@ -638,7 +707,8 @@ pub fn check_mapping_update(ctx: &Ctx, idx: &crate::meta::IndexMeta) -> EsResult
             (!restricted || g.allow_restricted) && g.names.iter().any(|n| privileges::index_pattern_matches(n, index)) && g.privileges.iter().any(|x| BWC.contains(&x.as_str()))
         })
     }
-    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    // OpenSearch updates mappings for a write as the node, without checking the user.
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser() && p.os().is_none()) else { return Ok(()) };
     let st = ctx.state();
     let eff = effective(&file_roles(ctx.cluster), &st, p);
     let in_data_stream = st.metadata.data_stream_of(&idx.name).is_some();
@@ -693,6 +763,20 @@ pub fn authorize_writes(ctx: &Ctx, items: &[WriteItem]) -> Vec<Option<EsError>> 
 fn check_writes(p: &Principal, eff: &Effective, items: &[WriteItem]) -> Vec<Option<EsError>> {
     const AUTO_CREATE: &str = "indices:admin/auto_create";
     const SHARD: &str = "indices:data/write/bulk[s]";
+    // OpenSearch: an index a write creates needs `indices:admin/create`; then the shard action
+    // and the item's own action, both named in one 403.
+    if let Some(id) = p.os() {
+        return items
+            .iter()
+            .map(|it| {
+                if it.creates && !eff.allows_index("indices:admin/create", &it.name) {
+                    return Some(opensearch::denied(p, id, "indices:admin/create"));
+                }
+                let missing: Vec<&str> = [SHARD, it.op.base_action()].into_iter().filter(|a| !eff.allows_index(a, &it.name)).collect();
+                (!missing.is_empty()).then(|| opensearch::denied(p, id, &missing.join(", ")))
+            })
+            .collect();
+    }
     let mut out: Vec<Option<EsError>> = items
         .iter()
         .map(|it| (it.creates && !eff.allows_index(AUTO_CREATE, &it.name)).then(|| denied(p, AUTO_CREATE, Some(std::slice::from_ref(&it.name)))))
@@ -756,7 +840,31 @@ pub fn authorize_search(ctx: &Ctx, exprs: &[String], opts: &crate::meta::resolve
     const SEARCH: &str = "indices:data/read/search";
     let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(None) };
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    if p.os().is_some() {
+        return check_all(ctx, p, &eff, SEARCH, exprs.to_vec(), opts).map(|_| None);
+    }
     narrow_exprs(ctx, p, &eff, SEARCH, exprs.to_vec(), opts)
+}
+
+/// OpenSearch's check of an index request (`do_not_fail_on_forbidden` off): every index its
+/// expressions resolve to (or every index when it names none) must be permitted; nothing is
+/// narrowed to the permitted ones.
+fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec<String>, opts: &crate::meta::resolve::IndicesOptions) -> EsResult<()> {
+    let st = ctx.state();
+    let mut names: Vec<String> = Vec::new();
+    if exprs.iter().all(|e| e.starts_with('-')) {
+        names.extend(st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned());
+    }
+    for e in exprs.iter().filter(|e| !e.starts_with('-')) {
+        if e.contains('*') || e == "_all" {
+            let mut list = vec![e.clone()];
+            list.extend(exprs.iter().filter(|x| x.starts_with('-')).cloned());
+            names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms).unwrap_or_default());
+        } else {
+            names.push(e.clone());
+        }
+    }
+    if names.iter().all(|n| eff.allows_index(action, n)) { Ok(()) } else { Err(denied(p, action, None)) }
 }
 
 /// Wildcards (and no index at all) expand to the matching indices the principal may access;
@@ -858,7 +966,7 @@ pub fn ingest_user(cluster: &Cluster, p: &Principal, properties: &[String]) -> c
                 None => obj! { "name" => p.realm_name, "type" => p.realm_type },
             }),
             "authentication_type" => Some(Value::from(match p.kind {
-                AuthKind::Realm => "REALM",
+                AuthKind::Realm | AuthKind::OpenSearch(_) => "REALM",
                 AuthKind::ApiKey(_) => "API_KEY",
                 AuthKind::Token | AuthKind::ServiceAccount { .. } => "TOKEN",
             })),
@@ -885,6 +993,9 @@ pub(crate) fn who(p: &Principal) -> String {
 
 /// Elasticsearch's 403 for an action the principal's roles don't grant.
 fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
+    if let Some(id) = p.os() {
+        return opensearch::denied(p, id, action);
+    }
     let who = who(p);
     let on = indices.map(|i| format!(" on indices [{}]", i.join(","))).unwrap_or_default();
     let by = privileges::granted_by(action, indices.is_none());
