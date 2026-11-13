@@ -264,7 +264,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // but not the MCP envelope around it (a batch of calls is each call); a hop counts where it was
     // decided. Over it, nothing is written: a flood stays cheap.
     let mut limit = None;
-    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && route != "/v1/mcp") {
+    if let Some(rate) = grant.rate_per_minute.filter(|_| !decided_before && route != "/v1/mcp").map(|r| access.rate_share(r)) {
         match access.limiter.check(&grant.id, rate, Instant::now()) {
             crate::rate::Verdict::Over { retry_after } => return rate_limited(rate, retry_after),
             crate::rate::Verdict::Allowed { remaining, reset } => limit = Some((rate, remaining, reset)),

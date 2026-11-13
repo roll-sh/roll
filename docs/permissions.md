@@ -85,7 +85,7 @@ type Grant = {
   last_used_ip: string | null;
   revoked_at: number | null;
   client?: { id: string; name: string; uri?: string }; // OAuth only
-  rate_per_minute?: number; // 1–100,000 requests a minute, per node; absent: no limit
+  rate_per_minute?: number; // 1–100,000 requests a minute across the fleet (each node a share); absent: no limit
 };
 
 type Rule = {
@@ -623,8 +623,10 @@ the consent screen), like Stripe's and GitHub's per-key limits. It protects roll
 agent loop; it isn't billing.
 
 - A GCRA per grant (`roll-access/src/rate.rs`): a full minute's worth may come at once, then one
-  request every `60 s / rate`. Counted in memory on each node, so a fleet of N nodes allows up to
-  N times the rate.
+  request every `60 s / rate`. Counted in memory on each node, with no shared write per request:
+  each of N serving nodes enforces its share, the rate over N rounded up (`Access::rate_share`, N
+  from the cluster's live nodes), so the fleet allows about the rate. A client whose requests all
+  reach one node gets that node's share. The `RateLimit-*` headers give the share this node enforces.
 - Every MCP tool call counts, as the route it calls; the `/v1/mcp` envelope doesn't, so a batch of
   calls (at most 100 messages) counts each call. A hop to an owner counts where it was decided.
 - Allowed answers carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds).

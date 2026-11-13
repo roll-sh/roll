@@ -463,6 +463,9 @@ async fn run() -> anyhow::Result<()> {
         workspace,
     )?;
     router = router.merge(roll_access::api::router(access.clone()));
+    // A grant's rate is shared among the nodes serving requests (each enforces its share).
+    let nodes = cluster.clone();
+    let _ = access.nodes.set(Box::new(move || nodes.nodes().len()));
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);
     // Approvals can be posted to a Slack channel through roll code's chat ops.

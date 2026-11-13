@@ -244,6 +244,14 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(get().await, (StatusCode::OK, Some("1".into()), None));
     assert_eq!(get().await, (StatusCode::OK, Some("0".into()), None));
     assert_eq!(get().await, (StatusCode::TOO_MANY_REQUESTS, Some("0".into()), Some("30".into())));
+    // On three nodes each enforces a third of the rate, so the fleet allows about the rate.
+    let _ = d.access.nodes.set(Box::new(|| 3));
+    let (six, _) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "rate_per_minute": 6 })).await;
+    let mut codes = Vec::new();
+    for _ in 0..3 {
+        codes.push(d.call(&six, Method::GET, "/v1/projects", None).await.0);
+    }
+    assert_eq!(codes, [StatusCode::OK, StatusCode::OK, StatusCode::TOO_MANY_REQUESTS], "two here: this node's share of six");
 
     // Secrets are per project and environment: a rule for the project's development environment
     // reaches those and only those, names but not values.

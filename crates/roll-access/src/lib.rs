@@ -369,6 +369,9 @@ pub struct Access {
     pub resolvers: Resolvers,
     /// Approvals in chat, when rolld wires them.
     pub chat: std::sync::OnceLock<Arc<dyn ApprovalChat>>,
+    /// How many nodes serve requests now (rolld's cluster): a grant's rate is shared among them
+    /// ([`Access::rate_share`]). Unset: one.
+    pub nodes: std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>,
     /// How other products revoke their own leaked secrets, by prefix ([`Access::on_leaked`]).
     revokers: std::sync::RwLock<Vec<(&'static str, Revoker)>>,
     /// Grants' request limits on this node.
@@ -392,7 +395,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), github_keys: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -418,6 +421,15 @@ impl Access {
     /// Secrets found where they shouldn't be (a pushed file, a public repo, a report from GitHub's
     /// secret scanning): each live grant they open is revoked at once, with why, and logged.
     /// Returns the grants revoked.
+    /// This node's share of a grant's `rate_per_minute`: the rate over the nodes serving requests,
+    /// rounded up (at least one a minute). Counted in memory on each node, so the fleet as a whole
+    /// allows about the rate, with no shared write per request; a client whose requests all reach
+    /// one node gets that node's share.
+    pub fn rate_share(&self, rate: u32) -> u32 {
+        let nodes = self.nodes.get().map_or(1, |n| n()).max(1) as u32;
+        rate.div_ceil(nodes).max(1)
+    }
+
     /// A product's own leaked secrets (apps' deploy hooks, `rlk_`): found wherever roll's are
     /// (roll code's landings, GitHub's secret scanning), revoked by `revoke`, which says what it
     /// revoked (`None`: nothing live).
