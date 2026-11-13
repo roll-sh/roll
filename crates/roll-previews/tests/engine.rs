@@ -168,10 +168,12 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     e.engine.store.update(&base.id, |r| r.last_active_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.engine.store.row(&base.id).unwrap().desired, Desired::Active);
-    // A repo taken off the project's canvas takes its baseline with it.
+    // A repo taken off the project's canvas takes its previews with it, the baseline too.
     e.ws.remove(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Repo, "acme/web").unwrap();
     e.engine.pass().await.unwrap();
-    assert!(e.engine.store.row(&base.id).map_or(true, |r| r.desired == Desired::Deleted), "no baseline of a repo the project left");
+    for id in [&base.id, &chg.id] {
+        assert!(e.engine.store.row(id).map_or(true, |r| r.desired == Desired::Deleted), "no preview of a repo the project left");
+    }
     e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Repo, "acme/web", 0.0, 0.0).unwrap();
     e.engine.pass().await.unwrap();
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.is_baseline() && r.desired == Desired::Active).expect("back with the repo");
@@ -184,7 +186,7 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     e.engine.store.put_settings(&e.project, &s).unwrap();
     e.engine.pass().await.unwrap();
     assert!(e.engine.store.rows(Some(&e.project)).unwrap().iter().all(|r| !r.is_baseline() || r.desired == Desired::Deleted), "and with the rule off");
-    assert_eq!(e.engine.store.row(&chg.id).unwrap().desired, Desired::Active);
+    assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
 #[tokio::test]

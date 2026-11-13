@@ -777,7 +777,8 @@ type Settings = {
     while the rule is on; turning the rule off deletes it. A project whose services run on roll
     apps gets none (roll can't screenshot those pages yet, so it would cost and never compare),
     and a baseline goes with its repo when the project no longer stands for it (taken off the
-    canvas, or not trusted): it would otherwise keep running with the project's secrets. A change is compared at its screenshot;
+    canvas, or not trusted), as every preview of that repo does: it would otherwise keep running
+    with the project's secrets and data. A change is compared at its screenshot;
     one taken before the baseline had any is compared once the baseline's first one comes in, and
     its comment updated. The baseline keeps its screenshots of its last 10 heads, and a change is
     compared with the one where it left the branch (its merge base, as Chromatic compares with an
