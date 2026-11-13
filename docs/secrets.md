@@ -433,6 +433,7 @@ roll secrets rm      KEY…
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
+roll secrets render  config.tpl [--out config.yml]              # ${KEY} filled in; a missing key fails
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | rm NAME | order A B C
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
@@ -602,6 +603,16 @@ opened archive; admin, audited `project.restore`), on this server or another. Va
 before any environment is protected, so a restore isn't a change request; what can't be restored
 (a link to a resource that project doesn't have, an import of another project's folder) comes back
 as a warning, by name. Disaster recovery, and moving a project between roll servers.
+
+### Templates
+
+For a tool that reads a config file rather than its environment, `roll secrets render
+config.tpl --out config.yml` fills each `${KEY}` from the environment (resolved, so references,
+imports and links count) and writes the file 0600; without `--out` it prints it. A key with no
+value fails the whole render, naming every such key, so a half-filled file is never written.
+`\${KEY}` stays a literal `${KEY}`, and anything else (`$KEY`, `${KEY:-default}`) is left as
+written, so shell snippets in the file survive. The values are read through the same audited
+`values` route `roll run` uses; nothing new runs on the server.
 
 ### Finding a key
 
@@ -1206,7 +1217,7 @@ Done and in PR #20:
 - finding a key across every project the caller may read (`roll secrets find`, the dashboard's
   "Find a key"), for rotating an organisation-wide key;
 - exports as a Docker `--env-file` and a Kubernetes Secret manifest, next to dotenv, shell, JSON and
-  YAML;
+  YAML; `roll secrets render` fills `${KEY}` in a config file;
 - the fixes from three security reviews and a phone-width pass;
 - every route checked to be in the HTTP table (`every_route_is_in_the_http_contract`), which
   roll-access's catalogue is checked against.
@@ -1227,11 +1238,14 @@ Ranked:
    Then `rlst_` tokens, and the tokens identities mint, become roll-access's. roll apps'
    `SecretSource` is wired to `Secrets::values` as `app:<svc>`, whichever of #20 and #21 merges
    second.
-2. **Templates** (Doppler's `secrets substitute`, Infisical's `export --template`): `roll secrets
-   render FILE` fills `${KEY}` in a config file from an environment, failing on a key that isn't
-   set, for tools that read a file rather than the environment.
-3. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
+2. **Expiry dates for values that expire outside roll** (a vendor's API key, a TLS certificate;
+   1Password's item expiry, Infisical's reminders): a secret's optional `expires_at`, shown in the
+   grid and insights as expiring or expired, announced to the environment's notify URL ahead of time
+   (names only), and listed by `roll secrets insights`.
+3. **`roll secrets render --watch`** (the Infisical agent, consul-template): render again when the
+   environment's digest changes, and run `--exec` (a reload) after each new file.
+4. **Search links live** once roll search (#22) lands `Kind::Search`: try the provider against a
    real cluster.
-4. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
+5. *Waiting on #19.* **Access requests through roll-access's "ask"**: a person asks for time-boxed
    `reveal` on a protected environment, and an approver grants it for minutes.
-5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).
+6. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here).

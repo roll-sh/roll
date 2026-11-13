@@ -99,6 +99,13 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let here = ok(&api, &[("XDG_CONFIG_HOME", cfg), ("ROLL_TEST_CWD", web)], &["run", "--", "sh", "-c", "echo $HOST"], None).await;
     assert_eq!(here.trim(), "db.internal");
 
+    // A config file filled from the environment: `\${…}` and shell syntax stay as written.
+    let tpl = "url: http://${HOST}:${PORT}\nliteral: \\${HOST} ${HOME:-x} $PORT\n";
+    let filled = ok(&api, &[], &[&at[..], &["render", "-"]].concat(), Some(tpl)).await;
+    assert_eq!(filled, "url: http://db.internal:5432\nliteral: ${HOST} ${HOME:-x} $PORT\n");
+    let unset = roll(&api, &[], &[&at[..], &["render", "-"]].concat(), Some("${HOST} ${MISSING}")).await;
+    assert!(unset.code != Some(0) && unset.stderr.contains("MISSING isn't set") && !unset.stdout.contains("db.internal"), "{}", unset.stderr);
+
     ok(&api, &[], &[&at[..], &["set", "BROKEN=${NOPE}"]].concat(), None).await;
     let refused = roll(&api, &[], &["run", "-p", "shop", "-e", "production", "--", "true"], None).await;
     assert_ne!(refused.code, Some(0));

@@ -150,6 +150,13 @@ pub enum Secrets {
         #[arg(long)]
         request: bool,
     },
+    /// Fill `${KEY}` in a config file (`-`: stdin) from the environment; a key that isn't set fails.
+    /// `\${KEY}` stays as written. Prints it, or writes `--out` (0600).
+    Render {
+        file: String,
+        #[arg(long)]
+        out: Option<String>,
+    },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
@@ -794,6 +801,32 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             if let Some(sk) = v["skipped"].as_array().filter(|a| !a.is_empty()) {
                 println!("Skipped {} existing (use --overwrite): {}", sk.len(), sk.iter().map(s).collect::<Vec<_>>().join(", "));
+            }
+        }
+        Secrets::Render { file, out } => {
+            let tpl = if file == "-" {
+                let mut t = String::new();
+                std::io::stdin().read_to_string(&mut t)?;
+                t
+            } else {
+                std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
+            };
+            let v = c.call(Method::GET, &format!("{env}/values?{}", c.q()), None).await?;
+            let unresolved: std::collections::BTreeMap<String, String> = v["problems"].as_array().into_iter().flatten().map(|p| (s(&p["key"]), s(&p["problem"]))).collect();
+            let text = render(&tpl, |k| v["values"][k].as_str().map(String::from)).map_err(|missing| {
+                let why: Vec<String> = missing.iter().map(|k| unresolved.get(k).map_or_else(|| format!("{k} isn't set in {}:{}", c.at.env, c.at.path), |p| format!("{k}: {p}"))).collect();
+                anyhow::anyhow!("{file} names keys that have no value:\n  {}", why.join("\n  "))
+            })?;
+            match out {
+                Some(path) => {
+                    use std::io::Write;
+                    let mut o = std::fs::OpenOptions::new();
+                    o.write(true).create(true).truncate(true);
+                    #[cfg(unix)]
+                    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+                    o.open(&path).with_context(|| format!("writing {path}"))?.write_all(text.as_bytes())?;
+                }
+                None => print!("{text}"),
             }
         }
         Secrets::Export { format, name, namespace } => {
@@ -1675,6 +1708,43 @@ async fn setup_dir(api: &Api, args: &AtArgs, show: bool, clear: bool) -> anyhow:
     let file = setup::save(&all)?;
     println!("{key} → {display}, {env}{}  (kept in {})", if path == "/" { String::new() } else { format!(" {path}") }, file.display());
     Ok(())
+}
+
+/// `${KEY}` → its value; `\${` is a literal `${`. Anything else (`$KEY`, `${a:-b}`) stays as
+/// written, so shell snippets in the file survive. Fails with every key that has no value.
+fn render(tpl: &str, get: impl Fn(&str) -> Option<String>) -> Result<String, Vec<String>> {
+    let (mut out, mut missing, mut rest) = (String::with_capacity(tpl.len()), Vec::new(), tpl);
+    while let Some(i) = rest.find("${") {
+        if rest[..i].ends_with('\\') {
+            out.push_str(&rest[..i - 1]);
+            out.push_str("${");
+            rest = &rest[i + 2..];
+            continue;
+        }
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let end = after.find('}').filter(|&e| {
+            let k = &after[..e];
+            k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        match end {
+            Some(e) => {
+                let k = &after[..e];
+                match get(k) {
+                    Some(v) => out.push_str(&v),
+                    None if !missing.iter().any(|m| m == k) => missing.push(k.to_string()),
+                    None => {}
+                }
+                rest = &after[e + 1..];
+            }
+            None => {
+                out.push_str("${");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    if missing.is_empty() { Ok(out) } else { Err(missing) }
 }
 
 /// The variables `roll run` adds: the environment's resolved values, minus the ones the shell
