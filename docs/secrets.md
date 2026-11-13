@@ -1615,18 +1615,21 @@ no Terraform provider.
 
 Ranked (work that can start now):
 
-1. **A GitHub Action** (`sdk/github-action`), as Doppler's and Infisical's: a workflow step logs in
-   with the job's own OIDC token through a workload identity (no stored token), masks every value
-   (`::add-mask::`) and exports the environment to the job, multi-line values safely. No
-   dependencies to bundle: Node's own `fetch`.
-2. **Terraform: identities and syncs as resources** (`roll_secrets_identity`, `roll_secrets_sync`),
-   so CI's OIDC login and a platform sync are code too; `roll_secrets_token` once #30 lands.
-3. **Products say who owns a resource**, so a person's project can link their own databases,
+1. **Leak scanning in the GitHub Action** (`scan: true`): a pull request's added lines checked
+   against the project's stored values through `POST …/leaks` (fingerprints, never values; only
+   what the token may reveal), failing the check and naming key, environment, file and line, as
+   roll code's blocker does for repos it hosts. Repos on GitHub get the same guard.
+2. **Customer-managed keys per project** (BYOK): a project's data key sealed by a KMS key in the
+   customer's own AWS account (cross-account, grants they can revoke), as Infisical's external KMS;
+   revoking it makes the project's values unreadable to roll at once.
+3. **A Helm chart for the operator** (#36), the way most clusters install one.
+4. **Screenshots for the PR**: the Access tab's tokens (roll-access's, on #30), a person's project,
+   and the deploy notice when apps reads secrets (#31), refreshed once those land.
+5. **Products say who owns a resource**, so a person's project can link their own databases,
    buckets and streams: an `Owners` answer from each product's records (`Workspace::trusts`).
    Waits on products serving signed-in people (today they're the operator's).
-4. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
-   a project has members besides its owner. Tokens already ask through roll-access (`ask` rules,
-   approvals for a while); a project's one owner reaches all of it.
+6. **Access requests** (time-boxed `reveal` on a protected environment, approved for minutes): once
+   a project has members besides its owner.
 
 Open pull requests after this one:
 
@@ -1637,7 +1640,12 @@ Open pull requests after this one:
   #30 and #31 both change `caller()`: whichever lands second keeps #30's (no `rlst_`) with
   #31's `caller_of` split.
 - **#32, Go and Python clients** (after #20): `sdk/go/secrets`, `sdk/python/roll_secrets`.
-- **#33, a Terraform provider** (after #20): environments, keys (a value or a link) and values.
+- **#33, a Terraform provider** (after #20): environments, keys (a value or a link), identities,
+  syncs, tokens and values.
+- **#34, a GitHub Action** (after #20): a job's environment through its own OIDC token, masked.
+- **#35, `roll run --fallback`** (after #20): an encrypted copy of the last values, used through an
+  outage.
+- **#36, a Kubernetes operator** (after #32): RollSecrets pulled with the cluster's own identity.
 
 Done since the last review: roll search's merge (#22: its links checked live, the conflicts additive); signed-in people manage the secrets of their own projects (People,
 under Access), with the canvas guards. main (roll MCP #19 and accounts #18) merged in. roll secrets asks the
