@@ -781,9 +781,10 @@ reads the group's lag (its committed offset on each partition against the partit
 watermark, as the broker's `GET …/groups/{g}` adds it up), only for a stream placed on the
 service's own project, so no tenant reads another's; the reaper starts instances at once and
 stops one (the newest, given the drain to finish its work) only after fewer were wanted for
-`scale_down_after`. The lag is read from the broker in-process, which is the stream's owner on a
-single node; on the fleet it should go through the stream's owner (in `## Next`). Queues follow
-once a queue is a workspace resource (its project is what keeps it a tenant's).
+`scale_down_after`. rolld reads the lag from its own API (`GET /v1/streams/{s}/groups/{g}`, the
+operator's token), which on a fleet forwards to the stream's owner, the only node whose numbers
+are right (checked against a live rolld: 30 records, a group committed at 5, lag 25). Queues
+follow once a queue is a workspace resource (its project is what keeps it a tenant's).
 
 ## HTTP/2 and gRPC
 
@@ -1068,9 +1069,9 @@ integration review on 2026-11-13 (after the product review against Railway, Rend
 Vercel, Cloud Run and Heroku) set this order; their findings are fixed or in "With the other
 platform branches".
 
-1. **Workers that follow their work, on the fleet and on queues**: done: a stream group's lag
-   on one node; next, reading it through the stream's owner on the fleet, and queues' depth once
-   a queue is a workspace resource.
+1. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+   follow a stream group's lag now (a queue's project is what keeps another tenant's depth
+   unread).
 2. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
