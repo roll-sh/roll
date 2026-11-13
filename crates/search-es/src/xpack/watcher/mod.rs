@@ -749,7 +749,38 @@ fn due_at(w: &Value) -> Option<i64> {
     if w.pointer(&["status", "state", "active"]) == Some(&Value::Bool(false)) {
         return None;
     }
-    w.pointer(&["_roll", "next_run"]).and_then(Value::as_i64)
+    match w.pointer(&["_roll", "next_run"]).and_then(Value::as_i64) {
+        Some(t) => Some(t),
+        // Stored before watches were scheduled: due at once, to be given its first time.
+        None if unscheduled(w) => Some(0),
+        None => None,
+    }
+}
+
+/// An active watch stored before watches were scheduled (no activation time kept).
+fn unscheduled(w: &Value) -> bool {
+    w.pointer(&["_roll", "activated"]).is_none()
+}
+
+/// Gives an [`unscheduled`] watch its activation (now) and first fire time, as Elasticsearch
+/// schedules the watches it finds when it starts: missed runs aren't caught up.
+async fn schedule(cluster: &Cluster, id: &str, now: i64) {
+    let id = id.to_string();
+    let _ = cluster
+        .update(move |st| {
+            let Some(Value::Obj(mut w)) = st.metadata.xpack.get(WATCHES, &id).cloned() else { return Ok(()) };
+            if !unscheduled(&Value::Obj(w.clone())) {
+                return Ok(());
+            }
+            let mut roll = w.get("_roll").and_then(Value::as_object).cloned().unwrap_or_default();
+            roll.insert("activated".into(), now.into());
+            if let Some(n) = w.get("watch").and_then(|watch| next_run(watch, now, now)) {
+                roll.insert("next_run".into(), n.into());
+            }
+            w.insert("_roll".into(), Value::Obj(roll));
+            store::put(st, WATCHES, &id, Value::Obj(w), now).map(|_| ())
+        })
+        .await;
 }
 
 /// When the next active watch fires (none while watcher is stopped): the cluster's job
@@ -767,8 +798,19 @@ pub async fn run_due(cluster: &Cluster, now: i64) -> usize {
     if state(&st).get("stopped").and_then(Value::as_bool) == Some(true) {
         return 0;
     }
-    let due: Vec<(String, i64)> = st.metadata.xpack.iter(WATCHES).filter_map(|(id, w)| due_at(w).filter(|t| *t <= now).map(|t| (id.clone(), t))).collect();
+    let mut due: Vec<(String, i64)> = Vec::new();
+    let mut new: Vec<String> = Vec::new();
+    for (id, w) in st.metadata.xpack.iter(WATCHES) {
+        match due_at(w) {
+            Some(_) if unscheduled(w) => new.push(id.clone()),
+            Some(t) if t <= now => due.push((id.clone(), t)),
+            _ => {}
+        }
+    }
     drop(st);
+    for id in &new {
+        schedule(cluster, id, now).await;
+    }
     for (id, scheduled) in &due {
         trigger(cluster, id, *scheduled).await;
     }
@@ -819,6 +861,26 @@ async fn trigger(cluster: &Cluster, id: &str, scheduled_ms: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A watch stored before watches were scheduled is given its first fire time from now by
+    /// the scheduler's next pass, without running.
+    #[tokio::test]
+    async fn watches_stored_before_scheduling_get_a_fire_time() {
+        let c = Cluster::in_memory("w").await;
+        let doc = obj! {
+            "watch" => obj! { "trigger" => obj! { "schedule" => obj! { "interval" => "1h" } }, "input" => obj! { "simple" => Map::new() }, "actions" => Map::new() },
+            "status" => obj! { "state" => obj! { "active" => true } },
+            "_version" => 1,
+        };
+        c.update(move |st| store::put(st, WATCHES, "old", doc, 0).map(|_| ())).await.unwrap();
+        assert_eq!(next_due(&c.state()), Some(0));
+        let now = crate::time::now_millis();
+        assert_eq!(run_due(&c, now).await, 0, "scheduled, not run");
+        let w = c.state().metadata.xpack.get(WATCHES, "old").cloned().unwrap();
+        assert_eq!(w.pointer(&["_roll", "next_run"]).and_then(Value::as_i64), Some(now + 3_600_000));
+        assert_eq!(next_due(&c.state()), Some(now + 3_600_000));
+        assert_eq!(w.get("_version").and_then(Value::as_i64), Some(1));
+    }
 
     #[test]
     fn cron_shapes() {

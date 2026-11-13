@@ -226,17 +226,13 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    and #26 reaches main second. Secrets' link provider (#20) asks for `access: "data"` keys;
    OpenSearch-flavor clusters have no API keys (a 400), so secrets' search link there wants a
    link user like apps'. The fleet test with every product on.
-2. **Older watches** stored before the watcher engine have no next fire time until re-stored or
-   re-activated: give them one on load. (Stored secrets are sealed now: watch passwords and
-   `Authorization` headers, connector and Fleet secrets, under `ROLL_SECRET_KEY`;
-   docs/search/architecture.md, "Multi-tenancy and authentication".)
-3. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
+2. **Benchmarks on a quiet host** (docs/benchmarks/search.md, round 7 summary: roll ahead of
    both engines on every measure but `autohisto_agg` and `terms_enum`, where OpenSearch is;
    `auto_date_histogram` is now counted from the points tree too, 27.8 → 3.0 ms in an A/B): a full
    rerun of every Rally track with variance for all three targets; one allocator policy (rolld's
    against search-dev's purge governor, by a matched benchmark); `terms_enum`'s per-request
    overhead.
-4. **Compatibility gaps** from the extended suites (4,832 of the 5,541 Elasticsearch passes),
+3. **Compatibility gaps** from the extended suites (4,832 of the 5,541 Elasticsearch passes),
    largest first: platinum's machine learning (278, a product decision: anomaly detection and
    trained models), rollup (52), security's last 13, `watcher-security`'s run-as (4), ES|QL's last 5
    (TOP_SNIPPETS, CATEGORIZE, approximation, `unsigned_long` past `i64::MAX`). `logsdb`'s last 9 are
@@ -245,16 +241,16 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    fields); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
-5. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
+4. **Dashboard polish**: the index browser and console on the per-index routes, signed-in users
    (#18) seeing only the clusters and indices their access allows; checked against Elastic
    Cloud's and OpenSearch Dashboards' consoles.
-6. **Metering on the fleet**: a cluster that moves mid-interval is metered once; job wakes billed
+5. **Metering on the fleet**: a cluster that moves mid-interval is metered once; job wakes billed
    as loaded time are visible in usage.
-7. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+6. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-8. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+7. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
