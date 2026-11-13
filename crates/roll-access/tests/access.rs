@@ -773,4 +773,15 @@ async fn approvals_can_be_remembered() {
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
     assert_eq!((g["temporary"].as_array().map(Vec::len), g["rules"].as_array().map(Vec::len)), (Some(1), Some(3)), "{g}");
     assert_eq!(ask("pc").await.0, StatusCode::OK);
+
+    // Remembered where it was asked: development's values, never production's.
+    let (secrets, _) = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "reveal": "ask" } }]), json!({})).await;
+    let values = |env: &'static str| {
+        let (d, t) = (&d, secrets.clone());
+        async move { d.call(&t, Method::GET, &format!("/v1/secrets/projects/prj_s/environments/{env}/values"), None).await }
+    };
+    let apr = values("development").await.1["approval"].as_str().unwrap().to_string();
+    assert_eq!(approve(apr, json!("1h")).await.0, StatusCode::OK);
+    assert_eq!(values("development").await.0, StatusCode::OK);
+    assert_eq!(values("production").await.1["code"], "approval_pending");
 }

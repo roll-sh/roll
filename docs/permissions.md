@@ -425,15 +425,17 @@ it's found, as GitHub does for its own tokens:
 
 - **In roll code.** Everything that lands, in any repository, is read after it lands. The scanner
   reads the store's durable land log, never inside the lander, with a cursor of its own and one
-  node at a time (`code-control/src/leaks.rs`). It reads every changeset a landing added, and the
-  changed files up to 1 MiB each. A file that mentions a token prefix goes to roll-access, which
-  matches checksums and revokes each live token.
+  node at a time (`code-control/src/leaks.rs`). It reads every changeset a landing added (up to
+  50), and the changed files up to 1 MiB each, at most 500 files and 64 MiB a landing; a file it
+  can't read is skipped, never retried forever. A file that mentions a token prefix goes to
+  roll-access, which matches checksums and revokes each live token. A token found in a private
+  repository says only that and the repository's id (whoever owns the token may not read it).
 - **From GitHub.** `POST /v1/access/leaks/github` takes reports from GitHub's secret scanning
   partner program: tokens found in public repositories, gists and issues. Each report is signed
   with one of GitHub's ECDSA P-256 keys (`Github-Public-Key-Identifier` and
   `Github-Public-Key-Signature`, checked against
-  `api.github.com/meta/public_keys/secret_scanning`, cached for an hour and refetched for an
-  unknown key at most once a minute). roll revokes the live tokens and answers each with its
+  `api.github.com/meta/public_keys/secret_scanning`: cached for an hour, fetched again at most once
+  a minute and one fetch at a time, and a failed fetch leaves the keys there were). roll revokes the live tokens and answers each with its
   `token_hash` and `true_positive` or `false_positive`. An unsigned or wrongly signed report
   changes nothing.
 - A revoked token answers 401 on its next request. The grant keeps `revoked_why` ("found in
@@ -449,8 +451,8 @@ agent loop; it isn't billing.
 - A GCRA per grant (`roll-access/src/rate.rs`): a full minute's worth may come at once, then one
   request every `60 s / rate`. Counted in memory on each node, so a fleet of N nodes allows up to
   N times the rate.
-- An MCP message counts once, not again for the route its tool calls; a hop to an owner counts
-  where it was decided.
+- Every MCP tool call counts, as the route it calls; the `/v1/mcp` envelope doesn't, so a batch of
+  calls (at most 100 messages) counts each call. A hop to an owner counts where it was decided.
 - Allowed answers carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds).
   Over the limit the answer is `429` `{code: "rate_limited", retry_after, limit}` with
   `Retry-After`, before anything is looked up or written: no audit row, no `last_used_at`, so a

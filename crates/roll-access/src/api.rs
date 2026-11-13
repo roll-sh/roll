@@ -389,8 +389,9 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     let rule = roll_auth::scope::Rule {
         product: found.product.clone(),
         resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: resource }]),
-        environments: None,
-        paths: None,
+        // Only where the request was: an approval in development never reaches production.
+        environments: found.environment.clone().map(|e| vec![e]),
+        paths: found.scope_path.clone().map(|p| vec![p]),
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     };
     // For good is a change to the token: it meets the policy as it is now.

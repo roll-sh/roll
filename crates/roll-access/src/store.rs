@@ -235,6 +235,9 @@ pub struct Approval {
     pub expires_at: i64,
     #[serde(skip)]
     pub request_hash: String,
+    /// The environment and path the request was about (a remembered approval keeps to them).
+    pub environment: Option<String>,
+    pub scope_path: Option<String>,
 }
 
 /// A new approval, before it's stored.
@@ -250,6 +253,8 @@ pub struct Ask<'a> {
     pub args: Value,
     pub tool: Option<&'a str>,
     pub request_hash: String,
+    pub environment: Option<&'a str>,
+    pub scope_path: Option<&'a str>,
 }
 
 /// An approval stays pending this long.
@@ -357,7 +362,8 @@ pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
     })
 }
 
-const APPROVAL_COLUMNS: &str = "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash";
+const APPROVAL_COLUMNS: &str =
+    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
     let args: Option<String> = r.get(10)?;
@@ -381,6 +387,8 @@ fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
         decided_by: r.get(16)?,
         expires_at: r.get(17)?,
         request_hash: r.get(18)?,
+        environment: r.get(19)?,
+        scope_path: r.get(20)?,
     })
 }
 
@@ -425,6 +433,12 @@ impl Store {
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
+        }
+        // What environment and path a request was about (a remembered approval keeps to them).
+        for col in ["environment", "scope_path"] {
+            if !db.has_column("approvals", col)? {
+                db.add_column("approvals", col, "TEXT")?;
+            }
         }
         if !db.has_column("grants", "rate_per_minute")? {
             db.add_column("grants", "rate_per_minute", "INTEGER")?;
@@ -501,7 +515,8 @@ impl Store {
         let ip = serde_json::to_string(&new.ip_allow).map_err(|e| Error::Internal(e.to_string()))?;
         let kind_s = if kind == GrantKind::Oauth { "oauth" } else { "token" };
         self.db.write(|c| {
-            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants", (), |r| r.get(0))?;
+            // Live ones: a revoked token doesn't keep a place.
+            let count: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE revoked_at IS NULL", (), |r| r.get(0))?;
             if count as usize >= MAX_GRANTS {
                 return Err(Error::Conflict(format!("at most {MAX_GRANTS} tokens: revoke some first")));
             }
@@ -696,7 +711,7 @@ impl Store {
                 return Err(Error::TooMany("this token has 50 approvals waiting: decide some first".into()));
             }
             c.execute(
-                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?)"),
+                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?)"),
                 params![
                     id,
                     a.grant.id,
@@ -712,7 +727,9 @@ impl Store {
                     a.tool,
                     now,
                     now + APPROVAL_TTL_MS,
-                    a.request_hash
+                    a.request_hash,
+                    a.environment,
+                    a.scope_path
                 ],
             )?;
             Ok(())
