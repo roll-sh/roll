@@ -183,7 +183,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
 | OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
 | OpenSearch SQL plugin's PPL suite | **204 of 204** |
-| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,363 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 21 suites at 100% (KQL 34 of 34), runtime fields 243 of 248; round 6 passed 3,463. Largest gaps: x-pack `platinum` (829 of 1,412), `logsdb` (136 of 234), `otel-data` (6 of 68), transforms (55 of 108), ES\|QL (498 of 549), watcher (43 of 89), downsampling (17 of 59) |
+| extended suites (66 module, plugin and x-pack suites, each on its test cluster's settings) | **4,457 of the 5,541 tests that pass on Elasticsearch** (6,044 in all); 21 suites at 100% (KQL 34 of 34), runtime fields 243 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (829 of 1,412), `otel-data` (6 of 68), transforms (55 of 108), ES\|QL (498 of 549), watcher (43 of 89), downsampling (17 of 59) |
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
@@ -215,8 +215,12 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    written, acknowledged and verified across a SIGKILL, a rolling restart and a scale-out (4 ×
    502, 3 × 503, the longest stall 11.1 s at the SIGKILL). Next there: shorten that stall (the
    lease takeover after a SIGKILL).
-3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`, `logsdb`,
-   `otel-data`, transforms, ES|QL, watcher, downsampling. Runtime fields' last 5:
+3. **Compatibility gaps** from the extended suites, largest first: x-pack `platinum`,
+   `otel-data`, transforms, ES|QL, watcher, downsampling. `logsdb`'s last 9 are decisions:
+   `_ignored_source` returned as Elasticsearch's binary entries (7 tests; it needs a stored field
+   per document on the synthetic-source indexing path, so measure it first), `@timestamp`
+   indexed with a doc-values skipper instead of points (changes range queries: needs a
+   benchmark plan), and one columnar template Elasticsearch rejects for a reason not yet found. Runtime fields' last 5:
    `geo_bounds` on a geo_point runtime field (a hook in `search-aggs`' parser), ip terms tie
    order (runtime ip values reach aggregations as strings), highlighting a runtime-field query
    (`search-index`'s highlighter). KQL is done (34 of 34); check its parse-error wording against the
