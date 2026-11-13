@@ -606,7 +606,8 @@ async fn clients_connect_by_their_metadata_document() {
 /// refreshing rotates the refresh token, and revoking the connection ends it.
 #[tokio::test]
 async fn oauth_connects_an_mcp_client() {
-    let d = Daemon::new(50);
+    // No grace for a spent refresh token here: presented again, it's a stolen copy.
+    let d = Daemon::with(50, |c| c.refresh_grace = std::time::Duration::ZERO);
     let (s, meta) = d.call("", Method::GET, "/.well-known/oauth-authorization-server", None).await;
     assert_eq!((s, meta["code_challenge_methods_supported"][0].as_str()), (StatusCode::OK, Some("S256")));
     let (s, pr) = d.call("", Method::GET, "/.well-known/oauth-protected-resource/v1/mcp", None).await;
@@ -650,13 +651,16 @@ async fn oauth_connects_an_mcp_client() {
     assert_eq!(d.call(refresh, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "a refresh token opens nothing");
     let (s, next) = d.form("/v1/access/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client_id)]).await;
     assert_eq!(s, StatusCode::OK, "{next}");
+    assert_eq!(d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+    // A spent refresh token used again: someone else has a copy (OAuth 2.1), so the whole
+    // connection is revoked, the fresh tokens with it, and it says why.
     let reuse = d.form("/v1/access/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client_id)]).await;
     assert_eq!(reuse.1["error"], "invalid_grant", "refresh tokens rotate");
-
-    let grant = next["grant_id"].as_str().unwrap();
-    d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{grant}"), None).await;
     let (s, _) = d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let grant = next["grant_id"].as_str().unwrap();
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{grant}"), None).await;
+    assert!(g["revoked_why"].as_str().is_some_and(|w| w.contains("used again")), "{g}");
 }
 
 /// A delivery: its headers and body.

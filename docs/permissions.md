@@ -41,7 +41,7 @@ approves it, the request then running as sent) and one evaluator shared by the A
 | operator token | (any) | `ROLL_ADMIN_TOKEN`: everything. The person who runs roll. |
 | scoped token | `rlt_` | created by the operator (or a token allowed to manage access) with the builder |
 | OAuth access token | `rlo_` | issued to an MCP client after the consent screen; one hour |
-| OAuth refresh token | `rlf_` | rotates on every use; 30 days since its last use |
+| OAuth refresh token | `rlf_` | rotates on every use; 30 days since its last use; a spent one used again revokes the connection |
 | product credentials | `rlc_`, `rla_`, keys… | roll code owner tokens, storage IAM, stream and tasks keys: unchanged, checked by their product |
 
 Each grant secret is its prefix, 34 random characters of lowercase base32 and a 6-character
@@ -52,7 +52,11 @@ aren't recognised by scanners.
 
 A scoped token and an OAuth connection are both a **grant**: one row with the rules, expiry, IP
 allowlist, name and who made it. An OAuth connection is a grant whose secrets are the rotating
-access and refresh tokens. Revoking the grant revokes them all at once.
+access and refresh tokens. Revoking the grant revokes them all at once. A refresh token, once
+used, is kept as spent until it would have expired: presented again later than 30 seconds after
+its use, someone else has a copy (OAuth 2.1, section 4.3.1), so the connection is revoked, with why,
+and the audit log has it. Within those 30 seconds it's only refused (a client retrying after a lost
+answer keeps its connection).
 
 Grants are made by the operator: the operator's token, or a signed-in admin (docs/accounts.md:
 an admin's session acts as the operator). The grant records who made it (`created_by`: the admin's
@@ -276,7 +280,8 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
   the bodies of reindex, ES|QL, SQL and the other query-bearing APIs) and a body's `_index` values
   stay within `{index}` (search's `control.rs`, `per_index_routes`; feature/roll-search 5db7c2602
   and fae055c31), and a document an ingest pipeline moves (`_index`, `reroute`) is checked again
-  as a write at the index it lands in (ea6be2f0f).
+  as a write at the index it lands in (ea6be2f0f). ES|QL and SQL read as the caller too (0158b6d9c):
+  `FROM`, wildcards, `LOOKUP JOIN` and SQL reach only the indices it may read.
 - An approval about some indices names them (`cl_1/logs-a`), and remembering it allows those
   indices only.
 
