@@ -1372,6 +1372,11 @@ impl DocCounter {
         DocCounter { dv: None, multi: None }
     }
 
+    /// Every doc counts one (no `_doc_count` values on the segment).
+    pub fn is_none(&self) -> bool {
+        self.dv.is_none() && self.multi.is_none()
+    }
+
     pub fn open(seg: &SegmentContext, field: Option<u32>) -> DocCounter {
         let Some(f) = field else { return DocCounter::none() };
         match seg.reader.doc_values(f) {

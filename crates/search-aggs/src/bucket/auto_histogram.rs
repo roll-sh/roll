@@ -572,6 +572,30 @@ impl Aggregator for AutoAgg {
                 let mut batch = std::mem::take(&mut self.batch);
                 dv.load_batch(b.docs, &mut batch);
                 let res = (|| {
+                    // One owning bucket, nothing recorded for sub-aggregations, every doc
+                    // counting one, one value each: a value in a bucket already seen costs a
+                    // range check (the previous value's bucket first) and an increment.
+                    if !self.many && !self.record && self.doc_counter.is_none() && batch.all_single() {
+                        let mut at = 0usize;
+                        for (k, &p) in batch.pos.iter().enumerate() {
+                            let v = decode.to_i64(batch.vals[k]);
+                            if let Some((idx, Some(pr))) = &self.prep
+                                && *idx == self.single.idx
+                            {
+                                if !pr.holds(at.min(pr.len() - 1), v) {
+                                    at = pr.index(v).unwrap_or(usize::MAX);
+                                }
+                                if let Some(&o) = self.slot_ords.get(at)
+                                    && o != u32::MAX
+                                {
+                                    self.counts[o as usize] += 1;
+                                    continue;
+                                }
+                            }
+                            self.collect_values(&b, p as usize, &[v])?;
+                        }
+                        return Ok(());
+                    }
                     for (i, raw) in batch.docs() {
                         vals.clear();
                         vals.extend(raw.iter().map(|&v| decode.to_i64(v)));

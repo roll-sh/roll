@@ -277,6 +277,12 @@ impl PreparedRounding {
         Some(lo)
     }
 
+    /// Whether `v` is in bucket `i`.
+    #[inline]
+    pub fn holds(&self, i: usize, v: i64) -> bool {
+        v >= self.points[i] && self.points.get(i + 1).map_or(v <= self.max, |&next| v < next)
+    }
+
     /// The rounding point (bucket key) of bucket `i`.
     #[inline]
     pub fn point(&self, i: usize) -> i64 {
