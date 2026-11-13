@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, primary } from "../ui";
+import { ActivityPanel } from "./activity";
 import { DrainsPanel } from "./drains";
 import { EnvironmentPanel } from "./environment";
 import { NotificationsPanel } from "./notifications";
@@ -359,6 +360,8 @@ export function SettingsTab({
       <DrainsPanel project={service.project} projectName={projectName} runner={runner} />
 
       <SpendPanel project={service.project} projectName={projectName} runner={runner} />
+
+      <ActivityPanel service={service.id} />
 
       <Panel title="Danger zone">
         <div className="p-5">

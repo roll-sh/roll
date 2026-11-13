@@ -615,6 +615,15 @@ newer push takes its place, as it would supersede the deploy; `Environment.waiti
 it), is settled by the landing follower every couple of seconds, and is dropped after an hour. A
 failed one isn't deployed, which the environment's log says.
 
+## Audit trail
+
+Every change someone makes to a service is an event in the event log, `audit.<what>` with the
+actor (as `Deployment.actor`: what rolld's gate saw): settings (the keys a PATCH set), variables
+(the names set and removed), a reveal of the values, an environment's settings or deletion,
+domains (added, removed, redirected), links and the registry login. Never a value: variables by
+name, an access token as "access changed". `GET /v1/apps/services/{id}/activity` and the Activity
+panel in Settings read it, newest first; audit events are kept 90 days (the rest of the log 7).
+
 ## Incidents
 
 A crash loop's banner on the service page has the logs a click away and **Roll back** to the
@@ -797,8 +806,7 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on 
 2. **Volume backups**: scheduled snapshots and restore for Docker volumes (EFS waits on AWS).
 3. **Gradual rollout**: a new deployment takes a share of requests, gated on its 5xx rate
     (Vercel's rolling releases, Cloud Run's traffic splits).
-4. Then: an audit trail from the event log (variables, settings, domains, reveals),
-    per-environment run settings in the dashboard, `roll apps metrics
+4. Then: per-environment run settings in the dashboard, `roll apps metrics
     --range`, CLI commands for drains and notifications.
 5. **Dashboard costs**: polling already waits while the tab is hidden (`usePageVisible`); next,
    the service page from the event log (SSE after a cursor) instead of three requests every

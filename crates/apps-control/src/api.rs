@@ -57,6 +57,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
     let service_routes = Router::new()
         .route("/v1/apps/services/{id}", get(get_service).patch(patch_service).delete(delete_service))
         .route("/v1/apps/services/{id}/links", get(links))
+        .route("/v1/apps/services/{id}/activity", get(activity))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
         .route("/v1/apps/events", get(events))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
@@ -222,8 +223,22 @@ async fn get_service(State(apps): S, Path(id): Path<String>) -> R {
     ok(apps.service(&id).await?)
 }
 
-async fn patch_service(State(apps): S, Path(id): Path<String>, b: Bytes) -> R {
-    ok(apps.patch_service(&id, body(&b)?).await?)
+/// The keys a JSON patch sets (`run.min_instances`, `name`), for the audit trail.
+fn changed(v: &Value) -> Vec<String> {
+    match v.as_object() {
+        Some(o) => o.iter().flat_map(|(k, v)| match v.as_object() {
+            Some(inner) if !inner.is_empty() => inner.keys().map(|i| format!("{k}.{i}")).collect::<Vec<_>>(),
+            _ => vec![k.clone()],
+        }).collect(),
+        None => Vec::new(),
+    }
+}
+
+async fn patch_service(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
+    let patch = body(&b)?;
+    let s = apps.patch_service(&id, patch.clone()).await?;
+    apps.audit("settings", &id, "", actor(&ext), json!({ "changed": changed(&patch) })).await;
+    ok(s)
 }
 
 async fn delete_service(State(apps): S, Path(id): Path<String>) -> R {
@@ -235,12 +250,19 @@ async fn links(State(apps): S, Path(id): Path<String>) -> R {
     ok(apps.links(&id).await?)
 }
 
-async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, b: Bytes) -> R {
-    ok(apps.put_link(&id, &kind, &r, body(&b)?).await?)
+async fn activity(State(apps): S, Path(id): Path<String>) -> R {
+    ok(apps.activity(&id).await?)
 }
 
-async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>) -> R {
+async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let l = apps.put_link(&id, &kind, &r, body(&b)?).await?;
+    apps.audit("link.added", &id, "", actor(&ext), json!({ "kind": kind, "ref": r })).await;
+    ok(l)
+}
+
+async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions) -> R {
     apps.delete_link(&id, &kind, &r).await?;
+    apps.audit("link.removed", &id, "", actor(&ext), json!({ "kind": kind, "ref": r })).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -303,12 +325,16 @@ async fn events(State(apps): S, Query(q): Query<EventsQuery>) -> R {
     ok(json!({ "events": events, "next": next }))
 }
 
-async fn put_registry(State(apps): S, Path(id): Path<String>, b: Bytes) -> R {
-    ok(apps.put_registry(&id, body(&b)?).await?)
+async fn put_registry(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
+    let s = apps.put_registry(&id, body(&b)?).await?;
+    apps.audit("registry.set", &id, "", actor(&ext), json!({ "server": s.registry.as_ref().map(|r| r.server.clone()) })).await;
+    ok(s)
 }
 
-async fn delete_registry(State(apps): S, Path(id): Path<String>) -> R {
-    ok(apps.delete_registry(&id).await?)
+async fn delete_registry(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.delete_registry(&id).await?;
+    apps.audit("registry.removed", &id, "", actor(&ext), json!({})).await;
+    ok(s)
 }
 
 async fn environments(State(apps): S, Path(id): Path<String>) -> R {
@@ -319,12 +345,17 @@ async fn get_env(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     ok(apps.environment(&id, &env).await?)
 }
 
-async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
-    ok(apps.put_environment(&id, &env, body(&b)?).await?)
+async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let put = body(&b)?;
+    let e = apps.put_environment(&id, &env, put.clone()).await?;
+    // The access token is a secret: the trail says it changed, never what it is.
+    apps.audit("environment", &id, &env, actor(&ext), json!({ "changed": put.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() })).await;
+    ok(e)
 }
 
-async fn delete_env(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+async fn delete_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
     apps.delete_environment(&id, &env).await?;
+    apps.audit("environment.removed", &id, &env, actor(&ext), json!({})).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -576,12 +607,19 @@ async fn variables(State(apps): S, Path((id, env)): Path<(String, String)>) -> R
     ok(apps.variables(&id, &env, false).await?)
 }
 
-async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
-    ok(apps.variables(&id, &env, true).await?)
+async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions) -> R {
+    let v = apps.variables(&id, &env, true).await?;
+    apps.audit("variables.revealed", &id, &env, actor(&ext), json!({})).await;
+    ok(v)
 }
 
-async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
-    ok(apps.change_variables(&id, &env, body(&b)?).await?)
+async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let change = body(&b)?;
+    let v = apps.change_variables(&id, &env, change.clone()).await?;
+    // Names only: a value never reaches the trail.
+    let set: Vec<String> = change["set"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    apps.audit("variables", &id, &env, actor(&ext), json!({ "set": set, "unset": change["unset"] })).await;
+    ok(v)
 }
 
 #[derive(Deserialize)]
@@ -737,8 +775,9 @@ async fn domains(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
     ok(apps.domains(&id, &env).await?)
 }
 
-async fn add_domain(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+async fn add_domain(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let d = apps.add_domain(&id, &env, body(&b)?).await?;
+    apps.audit("domain.added", &id, &env, actor(&ext), json!({ "hostname": d.hostname })).await;
     Ok((StatusCode::CREATED, Json(d)).into_response())
 }
 
@@ -746,11 +785,14 @@ async fn verify_domain(State(apps): S, Path((id, env, host)): Path<(String, Stri
     ok(apps.verify_domain(&id, &env, &host).await?)
 }
 
-async fn patch_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>, b: Bytes) -> R {
-    ok(apps.set_domain_redirect(&id, &env, &host, body(&b)?).await?)
+async fn patch_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let d = apps.set_domain_redirect(&id, &env, &host, body(&b)?).await?;
+    apps.audit("domain.redirect", &id, &env, actor(&ext), json!({ "hostname": d.hostname, "redirect_to": d.redirect_to })).await;
+    ok(d)
 }
 
-async fn delete_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>) -> R {
+async fn delete_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>, ext: Extensions) -> R {
     apps.delete_domain(&id, &env, &host).await?;
+    apps.audit("domain.removed", &id, &env, actor(&ext), json!({ "hostname": host })).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

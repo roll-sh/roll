@@ -362,7 +362,13 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     // settling).
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let (_, log) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
-    let mine: Vec<(&str, &str)> = log["events"].as_array().unwrap().iter().filter(|e| e["service"] == id).map(|e| (e["kind"].as_str().unwrap(), e["deployment"].as_str().unwrap_or(""))).collect();
+    let mine: Vec<(&str, &str)> = log["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["service"] == id && !e["kind"].as_str().unwrap_or("").starts_with("audit."))
+        .map(|e| (e["kind"].as_str().unwrap(), e["deployment"].as_str().unwrap_or("")))
+        .collect();
     assert_eq!(mine, [("deploy.active", d1["id"].as_str().unwrap()), ("deploy.failed", d2["id"].as_str().unwrap())], "{log}");
     assert!(log["events"].as_array().unwrap().iter().any(|e| e["kind"] == "deploy.failed" && e["data"]["error"].as_str().unwrap_or("").contains("health check")));
     let next = log["next"].as_i64().unwrap();
@@ -665,6 +671,25 @@ async fn deploys_report_on_their_commit_and_can_wait_for_ci() {
     let (_, log) = (0, get_until(&w.api, &format!("{base}/logs"), |l| l.to_string().contains("its check ci/test failed")).await);
     assert!(log.to_string().contains("d2d2d2d2d2d2"));
     assert_eq!(call(&w.api, "GET", &base, None).await.1["active"]["revision"], "c1c1c1c1c1c1");
+}
+
+/// Changes people make are an audit trail: what changed and who, never a value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changes_are_an_audit_trail_without_values() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"API_KEY": "sk-s3cr3t"}}))).await;
+    call(&w.api, "GET", &format!("{base}/variables/values"), None).await;
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"min_instances": 1}}))).await;
+    let (st, trail) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert_eq!(st, StatusCode::OK, "{trail}");
+    let kinds: Vec<&str> = trail.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["audit.settings", "audit.variables.revealed", "audit.variables"], "newest first");
+    assert_eq!(trail[2]["data"]["set"], json!(["API_KEY"]));
+    assert_eq!(trail[0]["data"]["changed"], json!(["run.min_instances"]));
+    assert!(!trail.to_string().contains("sk-s3cr3t"), "a value never reaches the trail");
 }
 
 /// A project past its alert gets `spend.alert` once; past its hard limit it's capped: its

@@ -850,6 +850,18 @@ impl Store {
         Ok(self.db.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", (), |r| r.get(0))?)
     }
 
+    /// A service's audit trail (`audit.*` events), newest first.
+    pub fn activity(&self, service: &str, limit: usize) -> Result<Vec<Event>> {
+        Ok(self.db.query(
+            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ? AND kind LIKE 'audit.%' ORDER BY seq DESC LIMIT ?",
+            params![service, limit.clamp(1, 500) as i64],
+            |r| {
+                let data: String = r.get(6)?;
+                Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })
+            },
+        )?)
+    }
+
     /// An event no state change carries (a crash loop the reaper noticed).
     pub fn add_event(&self, kind: &str, service: &str, env: &str, deployment: Option<&str>, data: &serde_json::Value) -> Result<()> {
         let now = self.now()?;
@@ -869,8 +881,10 @@ impl Store {
         )?)
     }
 
+    /// Events older than `before_ms`, but the audit trail's (`audit.*`) only after 90 days.
     pub fn prune_events(&self, before_ms: i64) -> Result<()> {
-        self.db.execute("DELETE FROM events WHERE at < ?", [before_ms])?;
+        self.db.execute("DELETE FROM events WHERE at < ? AND kind NOT LIKE 'audit.%'", [before_ms])?;
+        self.db.execute("DELETE FROM events WHERE at < ? AND kind LIKE 'audit.%'", [code_sql::now_ms() - 90 * 86_400_000])?;
         self.db.execute("DELETE FROM notify_deliveries WHERE at < ? AND status <> 'pending'", [before_ms])?;
         Ok(())
     }

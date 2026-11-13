@@ -1186,6 +1186,26 @@ impl Apps {
         self.db(move |s| s.domain_owner(&host)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active).and_then(|(_, _, d)| d.redirect_to)
     }
 
+    /// Write the audit trail's entry for a change someone made (`audit.<what>`): who, and what
+    /// changed, never a value. Best effort: the change already happened.
+    pub async fn audit(self: &Arc<Self>, what: &str, service: &str, env: &str, actor: Option<String>, mut data: Value) {
+        data["actor"] = json!(actor);
+        let (kind, sid, e) = (format!("audit.{what}"), service.to_string(), env.to_string());
+        if let Err(err) = self.db(move |s| s.add_event(&kind, &sid, &e, None, &data)).await {
+            tracing::warn!(service, error = %err, "apps: an audit entry wasn't written");
+        }
+    }
+
+    /// `GET /v1/apps/services/{id}/activity`: its audit trail, newest first.
+    pub async fn activity(self: &Arc<Self>, service: &str) -> Result<Vec<Event>> {
+        let sid = service.to_string();
+        self.db(move |s| {
+            s.service(&sid)?;
+            s.activity(&sid, 200)
+        })
+        .await
+    }
+
     /// The environment a request's `Host` names: a generated hostname, or an active custom domain.
     pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<(String, String)> {
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);

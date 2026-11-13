@@ -309,6 +309,17 @@ export interface NotifyTarget {
 
 export type NotifyEvent = "deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "cron.failed" | "job.failed";
 
+/** An entry of the event log (`GET /v1/apps/events`, a service's `…/activity`). */
+export interface AppEvent {
+  seq: number;
+  at: number;
+  kind: string;
+  service: string;
+  environment: string;
+  deployment: string | null;
+  data: Record<string, unknown>;
+}
+
 /** A project's log drain: where its services' runtime output is POSTed (NDJSON). */
 export interface LogDrain {
   id: string;
@@ -393,6 +404,7 @@ export const appsApi = {
   remove: (id: string) => call<null>("DELETE", svc(id)),
 
   links: (id: string) => call<Link[]>("GET", `${svc(id)}/links`),
+  activity: (id: string) => call<AppEvent[]>("GET", `${svc(id)}/activity`),
   link: (id: string, kind: LinkKind, ref: string, prefix?: string) =>
     call<Link>("PUT", `${svc(id)}/links/${kind}/${enc(ref)}`, prefix ? { prefix } : {}),
   unlink: (id: string, kind: LinkKind, ref: string) => call<null>("DELETE", `${svc(id)}/links/${kind}/${enc(ref)}`),
