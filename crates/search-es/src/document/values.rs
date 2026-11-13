@@ -742,7 +742,7 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             }
             let v = w.p.take_value();
             let mut out = Vec::new();
-            flatten(&v, "", &mut out);
+            flatten(&v, "", f.raw("null_value").and_then(Value::as_str), &mut out);
             vec![FieldValue::Flattened(out)]
         }
         "flat_object" => {
@@ -1109,20 +1109,26 @@ fn check_feature(v: f32, feature: &str, field: &str) -> Result<(), EsError> {
     Ok(())
 }
 
-pub(crate) fn flatten(v: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
+/// The `(key, text)` leaves of a `flattened` value (`FlattenedFieldParser`): a `null` leaf
+/// takes the field's `null_value`, if it has one.
+pub(crate) fn flatten(v: &Value, prefix: &str, null_value: Option<&str>, out: &mut Vec<(String, String)>) {
     match v {
         Value::Obj(m) => {
             for (k, x) in m {
                 let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-                crate::stack::maybe_grow(|| flatten(x, &key, out));
+                crate::stack::maybe_grow(|| flatten(x, &key, null_value, out));
             }
         }
         Value::Arr(a) => {
             for x in a {
-                crate::stack::maybe_grow(|| flatten(x, prefix, out));
+                crate::stack::maybe_grow(|| flatten(x, prefix, null_value, out));
             }
         }
-        Value::Null => {}
+        Value::Null => {
+            if let Some(n) = null_value {
+                out.push((prefix.to_string(), n.to_string()));
+            }
+        }
         other => out.push((prefix.to_string(), other.to_es_string())),
     }
 }

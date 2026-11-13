@@ -32,6 +32,9 @@ pub struct CreateRequest {
     pub settings: Settings,
     pub mappings: Option<Map>,
     pub aliases: Vec<(String, AliasMeta)>,
+    /// Settings the system provides (`settingsSystemProvided`: the downsample target's):
+    /// private ones allowed, applied over the request's.
+    pub system: Settings,
 }
 
 pub fn parse_create_body(body: Option<Map>) -> EsResult<CreateRequest> {
@@ -370,6 +373,7 @@ fn create_index_unhooked(st: &mut ClusterState, provided_name: &str, name: &str,
     let mut settings = composed.settings.clone();
     // Explicit `null`s in the request stay in the index's settings (Elasticsearch prints them).
     settings.overlay_keeping_nulls(&req.settings);
+    settings.merge(&req.system);
     if !settings.contains("index.number_of_shards") {
         settings.set("index.number_of_shards", "1");
     }

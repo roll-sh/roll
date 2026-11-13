@@ -855,7 +855,7 @@ impl<'m, 'p> Walker<'m, 'p> {
             return Ok(());
         }
         let mut pairs = Vec::new();
-        values::flatten(&v, key, &mut pairs);
+        values::flatten(&v, key, f.raw("null_value").and_then(Value::as_str), &mut pairs);
         if !f.props.is_empty() {
             self.flattened_props(f, full, &mut pairs)?;
         }

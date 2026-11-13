@@ -26,8 +26,8 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (66 suites, 6,044
-  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 3,534,
-  3,495 of the 5,541 that pass on Elasticsearch 9.5.5 run like each suite's own test cluster.
+  tests; [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 3,561,
+  3,522 of the 5,541 that pass on Elasticsearch 9.5.5 run like each suite's own test cluster.
   Gaps found by the module suites besides those in the table: `geo_bounds` of `geo_point`
   runtime fields, highlighting runtime fields, the tie order of `ip` runtime field terms, nested runtime field errors as cause chains, the `registered_domain`,
   `user_agent` and `attachment` processors, ingest node statistics and verbose simulate
@@ -206,8 +206,8 @@ the discovery/store plugins.
 | `ccr` | `x-pack/plugin/ccr` | security | 10 | 10 | 0 | 0 | 10 |
 | `core` | `x-pack/plugin/core` | security | 1 | 0 | 0 | 0 | 0 |
 | `diskbbq` | `x-pack/plugin/diskbbq` | plain | 8 | 7 | 5 | 5 | 2 |
-| `downsample` | `x-pack/plugin/downsample/qa/rest:downsample` | plain | 68 | 59 | 17 | 17 | 42 |
-| `downsample-with-security` | `x-pack/plugin/downsample/qa/rest:downsample-with-security` | security | 1 | 1 | 0 | 0 | 1 |
+| `downsample` | `x-pack/plugin/downsample/qa/rest:downsample` | plain | 68 | 59 | 43 | 43 | 16 |
+| `downsample-with-security` | `x-pack/plugin/downsample/qa/rest:downsample-with-security` | security | 1 | 1 | 1 | 1 | 0 |
 | `ent-search` | `x-pack/plugin/ent-search` | security | 371 | 371 | 6 | 6 | 365 |
 | `eql` | `x-pack/plugin/eql/qa/rest` | basic | 39 | 39 | 27 | 27 | 12 |
 | `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 3 | 3 | 18 |
@@ -242,7 +242,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | 6044 | 5541 | 3918 | 3918 | 1623 |
+| **total** | | | 6044 | 5541 | 3945 | 3945 | 1596 |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -263,7 +263,8 @@ the discovery/store plugins.
 <!-- test-search: apm-data >= 1 -->
 <!-- test-search: async-search >= 1 -->
 <!-- test-search: diskbbq >= 5 -->
-<!-- test-search: downsample >= 17 -->
+<!-- test-search: downsample >= 43 -->
+<!-- test-search: downsample-with-security >= 1 -->
 <!-- test-search: ent-search >= 366 -->
 <!-- test-search: eql >= 27 -->
 <!-- test-search: fleet >= 21 -->
