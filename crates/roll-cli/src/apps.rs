@@ -36,6 +36,10 @@ pub struct Up {
     /// What the deployment is (shown in the dashboard).
     #[arg(long, short = 'm')]
     pub message: Option<String>,
+    /// Build from scratch: no cached layer, base images pulled again, and the service's
+    /// dependency caches empty from here on.
+    #[arg(long)]
+    pub no_cache: bool,
     /// Every service and database the directory's roll.toml declares (`[apps.<name>]`,
     /// `[databases.<name>]`): made where missing, linked, and deployed. The plan is printed
     /// first.
@@ -60,6 +64,10 @@ pub struct Deploy {
     /// (`<id>--<host>`), and `roll apps rollback <id>` puts it live.
     #[arg(long)]
     pub no_traffic: bool,
+    /// Build from scratch: no cached layer, base images pulled again, and the service's
+    /// dependency caches empty from here on (for a build a stale cache keeps breaking).
+    #[arg(long)]
+    pub no_cache: bool,
     #[arg(long, short = 'd')]
     pub detach: bool,
 }
@@ -1074,6 +1082,9 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     if let Some(k) = &api.key {
         req = req.bearer_auth(k);
     }
+    if u.no_cache {
+        req = req.header("x-roll-no-cache", "1");
+    }
     // The message: the one given, else the checkout's last commit (said to have local changes
     // when the tree isn't clean), percent-encoded since a subject needn't be ASCII.
     let message = u.message.clone().or_else(|| git.as_ref().map(|(_, subject, dirty)| if *dirty { format!("{subject} (with local changes)") } else { subject.clone() }));
@@ -1501,6 +1512,9 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 if let Some(k) = &api.key {
                     req = req.bearer_auth(k);
                 }
+                if u.no_cache {
+                    req = req.header("x-roll-no-cache", "1");
+                }
                 if let Some(m) = &u.message {
                     req = req.header("x-roll-message", urlencoding::encode(m).into_owned());
                 }
@@ -1533,7 +1547,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
 
 pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> {
     let svc = service(api, &d.target).await?;
-    let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true) });
+    let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
     let dep = api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?;
     if json_out || d.detach {
         println!("{}", serde_json::to_string_pretty(&dep)?);

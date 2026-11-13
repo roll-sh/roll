@@ -1235,6 +1235,21 @@ row is `roll up` of a two-file Node app against a real rolld, timed with curl ov
   `/opt/venv`; PHP serves `php -S` with `PHP_CLI_SERVER_WORKERS=4`.
 - Every generated start command takes `$PORT` (default 8080); only a tree's own Dockerfile sets
   another port, through its last `EXPOSE`.
+- BuildKit's cache mounts (`RUN --mount=type=cache`: npm's, pip's, Go's and Cargo's caches,
+  `.next/cache`) belong to the node's builder and are keyed by their id, the target path by
+  default, so on one Docker node every service's `/root/.npm` used to be one directory, and one
+  service's build could leave files another's read. Every cache mount, in the generated
+  Dockerfile and the tree's own, now has `id=<namespace>-<its id or target>`
+  (`apps_build::isolate_caches`), the namespace a secret per service made at its first build and
+  never logged (the build log shows the Dockerfile as generated). A Dockerfile can still name a
+  bare id, but only another bare id's owner shares it, never a service's own. CodeBuild builds
+  each run in a fresh VM and share nothing but the service's registry cache.
+- **Deploy without the cache** (Render's "Clear build cache & deploy"): `POST …/deploys
+  {no_cache: true}`, `roll apps deploy --no-cache`, `roll up --no-cache` (`X-Roll-No-Cache: 1`),
+  or Settings → Build. The build runs with `--no-cache --pull` (CodeBuild: without
+  `--cache-from`, and writes the registry cache afresh) and the service gets a new cache-mount
+  namespace, so the dependency caches start empty for it and every build after it. A deploy of an
+  image has no build: 400.
 
 ## Not done yet
 
@@ -1384,41 +1399,38 @@ Ranked; the top item not marked *waiting* is what's being worked on. Reviews on
 2026-11-13 and 2026-11-14 (bugs and security in the newest work, the product against Railway, Render, Fly,
 Vercel, Cloud Run and Heroku, and integration with the other branches' heads) set this order.
 
-1. **Deploy without the build cache** (Render's "Clear build cache & deploy"): `POST …/deploys`
-   with `no_cache`, `roll apps deploy --no-cache` and a button in the deploy menu, for a build
-   that a stale cached layer keeps breaking.
-2. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+1. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-3. **Region**: the region shown on the overview and each environment, defaulting to the project's
+2. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-4. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+3. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-5. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+4. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-6. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
+5. *Waiting on #20.* **roll secrets as the env store**, as in "Secrets and environments", plus
    service variables at `/services/<name>`, values resolved only when a container is made,
    `dynamic` links refused, and links as per-environment secrets links.
-7. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+6. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-8. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
-9. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+7. *Waiting on #20.* Links for buckets, streams, queues and NoSQL as roll secrets links.
+8. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-10. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+9. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-11. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+10. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-12. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+11. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-13. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+12. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

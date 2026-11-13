@@ -227,6 +227,8 @@ pub struct BuildJob {
     pub env_hash: String,
     /// The tree's own Dockerfile (it reads variables with `ARG`), not a generated one.
     pub own_dockerfile: bool,
+    /// Use no cached layer and pull base images again (`--no-cache --pull`).
+    pub no_cache: bool,
 }
 
 impl std::fmt::Debug for BuildJob {
@@ -316,6 +318,7 @@ mod tests {
             env: vars,
             env_hash: String::new(),
             own_dockerfile: true,
+            no_cache: false,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
         job.own_dockerfile = false;

@@ -342,6 +342,18 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(steps, ["build", "rollout", "live"], "{d1}");
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{first}/logs"), None).await;
     assert!(log.as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("generated Dockerfile")), "the build log shows the Dockerfile");
+    // Its cache mounts are its own (another service's build can't name them, and the log
+    // doesn't), until a deploy without the cache starts them afresh.
+    let ns = |df: &str| df.split("--mount=id=").nth(1).and_then(|r| r.split('-').next()).map(str::to_string);
+    let (no_cache, df) = w.fake.built.lock().last().cloned().unwrap();
+    let first_ns = ns(&df).unwrap_or_else(|| panic!("{df}"));
+    assert!(!no_cache && !log.to_string().contains(&first_ns), "{df}");
+    let base = format!("/v1/apps/services/{id}/environments/production/deploys");
+    let (_, d) = call(&w.api, "POST", &base, Some(json!({"no_cache": true}))).await;
+    settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let (no_cache, df) = w.fake.built.lock().last().cloned().unwrap();
+    assert!(no_cache && ns(&df).is_some_and(|n| n != first_ns), "{df}");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"no_cache": true, "image": "nginx:1.27"}))).await.0, StatusCode::BAD_REQUEST, "an image has no build");
     // A root reached through a symlink in the pushed tree would build from the host: refused.
     let host = tempfile::tempdir().unwrap();
     std::fs::create_dir(host.path().join("app")).unwrap();

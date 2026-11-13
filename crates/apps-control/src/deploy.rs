@@ -53,7 +53,7 @@ impl Apps {
         self.refuse_capped(service)?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["revision", "image", "message", "no_traffic"].contains(&k.as_str()) {
+            if !["revision", "image", "message", "no_traffic", "no_cache"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -71,6 +71,12 @@ impl Apps {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(Error::BadRequest("no_traffic is a boolean".into())),
+        };
+        // Render's "Clear build cache & deploy": for a build a stale cached layer keeps breaking.
+        let no_cache = match o.get("no_cache") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(Error::BadRequest("no_cache is a boolean".into())),
         };
         if let Some(k) = key {
             if k.is_empty() || k.len() > 200 || !k.bytes().all(|b| b.is_ascii_graphic()) {
@@ -146,7 +152,10 @@ impl Apps {
                 }
             }
         }
-        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.for_env(&row)?.run, upload: upload_key, status: DeployStatus::Queued, actor: by.actor, no_traffic };
+        let d = NewDeployment { trigger, revision, message, image, plan: None, rollback_of: None, run: svc.for_env(&row)?.run, upload: upload_key, status: DeployStatus::Queued, actor: by.actor, no_traffic, no_cache };
+        if no_cache && d.image.is_some() {
+            return Err(Error::BadRequest("no_cache is for a deploy that builds; an image is pulled as it is".into()));
+        }
         let (sid, e, k) = (service.to_string(), env.to_string(), key.map(str::to_string));
         let ours = d.upload.clone().filter(|_| key.is_some());
         if no_traffic && (svc.run.kind != RunType::Web || svc.run.volume.is_some()) {
@@ -203,6 +212,7 @@ impl Apps {
             status: DeployStatus::Queued,
             actor,
             no_traffic: false,
+            no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -246,6 +256,7 @@ impl Apps {
             status: DeployStatus::Queued,
             actor,
             no_traffic: false,
+            no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -289,6 +300,7 @@ impl Apps {
             status: DeployStatus::Queued,
             actor,
             no_traffic: false,
+            no_cache: false,
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
@@ -850,14 +862,32 @@ impl Apps {
         for n in &plan.notes {
             log.line(format!("plan: {n}"));
         }
+        // The service's own cache mounts (`isolate_caches`); a deploy without the cache starts
+        // them empty, and every build after it uses the new ones.
+        let (sid, did) = (svc.id.clone(), d.id.clone());
+        let (no_cache, cache_ns) = self.db(move |s| {
+            let fresh = s.no_cache(&did)?;
+            Ok((fresh, s.build_cache(&sid, fresh)?))
+        })
+        .await?;
+        if no_cache {
+            log.line("building without the cache: no cached layers, base images pulled again, the cache mounts empty");
+        }
         let dockerfile = if plan.provider == apps_build::Provider::Dockerfile {
             let df = build_cfg.dockerfile.clone().unwrap_or_else(|| "Dockerfile".into());
-            crate::model::in_tree(&context, "the Dockerfile", &df, false)?;
+            let at = crate::model::in_tree(&context, "the Dockerfile", &df, false)?;
+            let text = tokio::fs::read_to_string(&at).await.map_err(|e| anyhow::anyhow!("reading {df}: {e}"))?;
+            let isolated = apps_build::isolate_caches(&text, &cache_ns);
+            if isolated != text {
+                tokio::fs::remove_file(&at).await?;
+                tokio::fs::write(&at, isolated).await?;
+            }
             df
         } else {
             let name = "Dockerfile.roll";
             anyhow::ensure!(std::fs::symlink_metadata(context.join(name)).is_err(), "the tree already has a {name}");
-            tokio::fs::write(context.join(name), &plan.dockerfile).await?;
+            // The log shows it as generated; the namespace is the service's secret.
+            tokio::fs::write(context.join(name), apps_build::isolate_caches(&plan.dockerfile, &cache_ns)).await?;
             if std::fs::symlink_metadata(context.join(".dockerignore")).is_err() {
                 tokio::fs::write(context.join(".dockerignore"), apps_build::DOCKERIGNORE).await?;
             }
@@ -883,6 +913,7 @@ impl Apps {
             own_dockerfile: plan.provider == apps_build::Provider::Dockerfile,
             env: build_env,
             env_hash,
+            no_cache,
         };
         log.line(format!("building with {}", self.deps.builder.name()));
         let image = self.deps.builder.build(&job, log, cancel).await?;

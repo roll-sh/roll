@@ -959,6 +959,9 @@ impl Builder for DockerBuilder {
         if !job.env.is_empty() && !job.own_dockerfile {
             cmd.arg("--build-arg").arg(format!("ROLL_BUILD_ENV={}", job.env_hash));
         }
+        if job.no_cache {
+            cmd.args(["--no-cache", "--pull"]);
+        }
         let mut child = cmd
             .arg(&job.context)
             .stdin(Stdio::null())

@@ -56,6 +56,8 @@ pub struct Fake {
     pub counts: Counts,
     /// Who the last pull logged in as (a private registry).
     pub pulled_as: Mutex<Option<String>>,
+    /// Each build's `no_cache` and its Dockerfile, in order.
+    pub built: Mutex<Vec<(bool, String)>>,
     /// Instances that answer 500 from now on (a running app that broke: [`Fake::sicken`]).
     sick: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Instances the kernel killed for their memory ([`Fake::oom`]).
@@ -475,7 +477,8 @@ impl Builder for Fake {
             log.line("#2 ERROR: the build failed on purpose");
             anyhow::bail!("the build failed");
         }
-        anyhow::ensure!(job.context.join(&job.dockerfile).exists(), "no Dockerfile in the context");
+        let dockerfile = std::fs::read_to_string(job.context.join(&job.dockerfile)).map_err(|_| anyhow::anyhow!("no Dockerfile in the context"))?;
+        self.built.lock().push((job.no_cache, dockerfile));
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }

@@ -6,6 +6,7 @@
 //! a slim runtime image with BuildKit. It only reads files: no network, no processes. The design
 //! is "Builds" in docs/apps/README.md.
 
+mod caches;
 mod cargo;
 mod df;
 mod docker;
@@ -24,6 +25,7 @@ mod version;
 
 use serde::{Deserialize, Serialize};
 
+pub use caches::isolate_caches;
 pub use tree::{DirTree, MapTree, Tree};
 pub use node::{WorkspaceApp, workspace_app};
 pub use uses::{Datastore, uses};

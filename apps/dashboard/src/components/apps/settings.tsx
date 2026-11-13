@@ -306,6 +306,14 @@ export function SettingsTab({
               </Field>
             )}
           </Grid>
+          {service.source.kind === "repo" && env && (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
+              <p className="text-[13px] text-muted">For a build a stale cached layer keeps breaking: no cached layers, base images pulled again, the dependency caches empty.</p>
+              <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("deploy", () => appsApi.deploy(service.id, env.name, { no_cache: true }))}>
+                Deploy without the cache
+              </button>
+            </div>
+          )}
         </Panel>
       )}
 

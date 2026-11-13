@@ -155,6 +155,9 @@ CREATE TABLE IF NOT EXISTS apps_sites (
 CREATE TABLE IF NOT EXISTS deploy_no_traffic (
     deployment TEXT PRIMARY KEY
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS deploy_no_cache (
+    deployment TEXT PRIMARY KEY
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS deploy_steps (
     deployment TEXT NOT NULL,
     step TEXT NOT NULL,
@@ -379,6 +382,9 @@ pub struct NewDeployment {
     /// Stops when it's healthy, never switched to: neither supersedes a queued deploy nor is
     /// superseded by one.
     pub no_traffic: bool,
+    /// Builds from scratch: no cached layer, base images pulled again, a new namespace for the
+    /// service's cache mounts ([`Store::build_cache`]).
+    pub no_cache: bool,
 }
 
 /// One minute of one environment's metrics.
@@ -565,6 +571,7 @@ impl Store {
         db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "tag_seen", "TEXT")?;
         db.add_column("variables", "write_only", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("services", "build_cache", "TEXT")?;
         db.add_column("environments", "feedback", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("links", "minted", "TEXT")?;
         db.add_column("environments", "maintenance", "TEXT")?;
@@ -1053,6 +1060,9 @@ impl Store {
             if d.no_traffic {
                 c.execute("INSERT INTO deploy_no_traffic (deployment) VALUES (?)", [&id])?;
             }
+            if d.no_cache {
+                c.execute("INSERT INTO deploy_no_cache (deployment) VALUES (?)", [&id])?;
+            }
             Ok(c.query_row(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE id = ?"), [&id], deploy_row)?)
         })
     }
@@ -1132,6 +1142,22 @@ impl Store {
 
     pub fn site(&self, key: &str) -> Result<Option<u64>> {
         Ok(self.db.query_row("SELECT size FROM apps_sites WHERE key = ?", [key], |r| r.get::<_, i64>(0)).optional()?.map(|n| n as u64))
+    }
+
+    pub fn no_cache(&self, id: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM deploy_no_cache WHERE deployment = ?", [id], |_| Ok(())).optional()?.is_some())
+    }
+
+    /// The namespace of the service's BuildKit cache mounts (`apps_build::isolate_caches`): a
+    /// secret, made on its first build; `fresh` makes a new one (an empty cache from then on).
+    pub fn build_cache(&self, service: &str, fresh: bool) -> Result<String> {
+        let new = crate::model::random(16);
+        self.db.write(|c| {
+            let sql = if fresh { "UPDATE services SET build_cache = ? WHERE id = ?" } else { "UPDATE services SET build_cache = ? WHERE id = ? AND build_cache IS NULL" };
+            c.execute(sql, [&new, service])?;
+            c.query_row("SELECT build_cache FROM services WHERE id = ?", [service], |r| r.get::<_, Option<String>>(0))
+        })?
+        .ok_or_else(|| Error::NotFound(format!("no service {service}")))
     }
 
     pub fn no_traffic(&self, id: &str) -> Result<bool> {

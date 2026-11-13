@@ -333,7 +333,7 @@ type DeployStatus = "queued" | "building" | "deploying" | "active" | "inactive" 
  *  `<id without dep_>--<environment's host>` (`abc123def456--web-prod.up.roll.site`), behind the
  *  environment's access token when it's private; one instance at most, gone a minute after its
  *  last request, metered with the environment. */
-type NewDeploy = { revision?: string; image?: string; message?: string; no_traffic?: boolean };
+type NewDeploy = { revision?: string; image?: string; message?: string; no_traffic?: boolean; no_cache?: boolean /* build from scratch (400 with an image): no cached layer, base images pulled again, the service's cache mounts empty from then on; an upload says it with `X-Roll-No-Cache: 1` */ };
 
 type Deployment = {
   id: string;

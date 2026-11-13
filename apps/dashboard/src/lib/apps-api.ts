@@ -343,6 +343,8 @@ export interface NewDeploy {
   revision?: string;
   image?: string;
   message?: string;
+  /** Build from scratch: no cached layer, base images pulled again, the cache mounts empty from then on. */
+  no_cache?: boolean;
 }
 
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
