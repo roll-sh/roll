@@ -656,7 +656,7 @@ and admins see every project.
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
-| `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image |
+| `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours}` (1–720) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
@@ -812,7 +812,10 @@ type Settings = {
     what differs, the area only one of them has included; the sheet's Diff shows it against main
     (else the push before), so whoever accepts a visual change sees what they accept. Diffs are
     made on request one at a time, up to 2048 × 8192, so asking for many can't add up to
-    gigabytes of decoded screenshots. `roll preview screenshot <id> -o shot.png` saves any of them
+    gigabytes of decoded screenshots. A public preview's comment shows the diff against main inside
+    its folded checks through a signed link of its own (`screenshot.png?diff=base&exp=…&sig=…`, the
+    variant in what's signed, so a screenshot's link can't be turned into it or back).
+    `roll preview screenshot <id> -o shot.png` saves any of them
     (`--page`, `--phone`, `--base`, `--previous`, `--diff base|previous`), for scripts and for the
     agents that drive the CLI; MCP's `previews_screenshot` returns them as images.
     With `visual_review` (`off` by default, `check` or `required`) a change's pages are reviewed as
@@ -964,6 +967,7 @@ Ranked by what a person notices first. Done so far:
 - `roll preview screenshot` (any screenshot or diff to a file);
 - the settings' screenshot rules in a section of their own ("Screenshots and checks");
 - a second service in the live check (`wiki:/` taken in its own run and compared);
+- the diff against main in a public preview's comment (a signed link of its own);
 - visual reviews in automations (the `preview` trigger's field, a built-in template);
 - an acceptance carried over a push that changes nothing visible;
 - speed against main ("300 ms slower than main") accessibility problems and errors new against it;

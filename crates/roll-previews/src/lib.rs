@@ -233,6 +233,9 @@ pub struct Preview {
     /// API answers.
     #[serde(skip)]
     pub screenshot_link: Option<(i64, String)>,
+    /// The same for where it differs from the baseline's, when it does (`?diff=base`).
+    #[serde(skip)]
+    pub diff_link: Option<(i64, String)>,
     pub last_reset_at: Option<i64>,
     pub last_active_at: i64,
     pub expires_at: Option<i64>,

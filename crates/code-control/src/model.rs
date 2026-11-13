@@ -317,6 +317,9 @@ pub struct PreviewEnvironment {
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
+    /// A public preview's picture of where that is, signed and expiring (as `screenshot_url`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_url: Option<String>,
     /// The project's other pages (`github.pages`): errors, change since the push before, and
     /// against the default branch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

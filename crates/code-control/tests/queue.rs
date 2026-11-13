@@ -540,6 +540,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
             page_health: None,
             page_a11y: None,
             base_change: None,
+            diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
             visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true }),

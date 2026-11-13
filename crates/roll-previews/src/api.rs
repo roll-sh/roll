@@ -345,9 +345,25 @@ async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<
     let (Some(exp), Some(sig)) = (q.get("exp").and_then(|x| x.parse::<i64>().ok()), q.get("sig").cloned()) else {
         return Ok((StatusCode::FORBIDDEN, "a signed link only").into_response());
     };
-    let shot = blocking(e, move |e| if e.store.screenshot_link_ok(&id, exp, &sig)? { e.store.screenshot(&id) } else { Ok(None) }).await?;
-    match shot.filter(|(_, png)| !png.is_empty()) {
-        Some((_, png)) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400, immutable")], png).into_response()),
+    // `diff=base`: where it differs from the baseline's, under its own signature.
+    let variant = match q.get("diff").map(String::as_str) {
+        None => None,
+        Some("base") => Some("diff=base"),
+        Some(_) => return Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
+    };
+    let shot = blocking(e, move |e| {
+        if !e.store.screenshot_link_ok(&id, exp, &sig, variant)? {
+            return Ok(None);
+        }
+        if variant.is_none() {
+            return Ok(e.store.screenshot(&id)?.map(|(_, png)| png));
+        }
+        let (Some(before), Some((_, after))) = (e.store.base_screenshot(&id, false, None)?, e.store.screenshot(&id)?) else { return Ok(None) };
+        Ok(crate::visual::diff(&before, &after))
+    })
+    .await?;
+    match shot.filter(|png| !png.is_empty()) {
+        Some(png) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400, immutable")], png).into_response()),
         None => Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
     }
 }

@@ -1380,19 +1380,29 @@ impl Store {
     /// A link to the preview's screenshot anyone can open until it expires (30 days after it was
     /// taken): `(expiry in ms, signature)`. `None` when there's no screenshot.
     pub fn screenshot_link(&self, id: &str) -> Result<Option<(i64, String)>> {
+        self.link(id, None)
+    }
+
+    /// The same for where its page differs from the baseline's (`diff=base`): its own signature,
+    /// so a screenshot's link can't be turned into the diff's or back.
+    pub fn diff_link(&self, id: &str) -> Result<Option<(i64, String)>> {
+        self.link(id, Some("diff=base"))
+    }
+
+    fn link(&self, id: &str, variant: Option<&str>) -> Result<Option<(i64, String)>> {
         use hmac::Mac;
         let Some(at) = self.screenshot_at(id)? else { return Ok(None) };
         let exp = at + SCREENSHOT_LINK_MS;
-        Ok(Some((exp, hex::encode(self.link_mac(id, exp)?.finalize().into_bytes()))))
+        Ok(Some((exp, hex::encode(self.link_mac(id, exp, variant)?.finalize().into_bytes()))))
     }
 
     /// Whether `sig` is the screenshot link's signature for `exp`, it hasn't expired, it's for the
     /// screenshot there is now (a link names one screenshot: `exp` is 30 days after it was taken),
     /// and the preview is still public and live.
-    pub fn screenshot_link_ok(&self, id: &str, exp: i64, sig: &str) -> Result<bool> {
+    pub fn screenshot_link_ok(&self, id: &str, exp: i64, sig: &str, variant: Option<&str>) -> Result<bool> {
         use hmac::Mac;
         let Ok(sig) = hex::decode(sig) else { return Ok(false) };
-        if exp <= self.now_ms()? || self.link_mac(id, exp)?.verify_slice(&sig).is_err() {
+        if exp <= self.now_ms()? || self.link_mac(id, exp, variant)?.verify_slice(&sig).is_err() {
             return Ok(false);
         }
         if self.screenshot_at(id)? != Some(exp - SCREENSHOT_LINK_MS) {
@@ -1402,10 +1412,14 @@ impl Store {
         Ok(row.desired == Desired::Active && self.settings(&row.project_id)?.access == crate::settings::Access::Public)
     }
 
-    fn link_mac(&self, id: &str, exp: i64) -> Result<hmac::Hmac<sha2::Sha256>> {
+    fn link_mac(&self, id: &str, exp: i64, variant: Option<&str>) -> Result<hmac::Hmac<sha2::Sha256>> {
         use hmac::Mac;
         let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
-        m.update(format!("screenshot\n{id}\n{exp}").as_bytes());
+        // A plain screenshot's message is what it always was, so links already posted still work.
+        match variant {
+            None => m.update(format!("screenshot\n{id}\n{exp}").as_bytes()),
+            Some(v) => m.update(format!("screenshot\n{id}\n{exp}\n{v}").as_bytes()),
+        }
         Ok(m)
     }
 
@@ -1643,6 +1657,7 @@ impl Store {
         let page_health = self.page_health(&r.id)?;
         let page_a11y = self.page_a11y(&r.id)?;
         let screenshot_link = self.screenshot_link(&r.id)?;
+        let diff_link = if self.base_change(&r.id)?.is_some_and(|b| b.change_bp > 0) { self.diff_link(&r.id)? } else { None };
         let earlier = self.pinned(&r.id)?.into_iter().map(|mut p| {
             p.share_url = Some(share(&p.url));
             p
@@ -1692,6 +1707,7 @@ impl Store {
             page_health,
             page_a11y,
             screenshot_link,
+            diff_link,
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,
@@ -1844,21 +1860,25 @@ mod tests {
         assert_eq!(store.screenshot_link(id).unwrap(), None, "no screenshot, no link");
         store.set_screenshot(id, "cs_1", b"\x89PNG...", None, None).unwrap();
         let (exp, sig) = store.screenshot_link(id).unwrap().unwrap();
-        assert!(store.screenshot_link_ok(id, exp, &sig).unwrap());
-        assert!(!store.screenshot_link_ok("pv_other", exp, &sig).unwrap(), "another preview");
-        assert!(!store.screenshot_link_ok(id, exp + 1, &sig).unwrap(), "a moved expiry");
-        assert!(!store.screenshot_link_ok(id, exp, &"0".repeat(64)).unwrap(), "a guess");
+        assert!(store.screenshot_link_ok(id, exp, &sig, None).unwrap());
+        assert!(!store.screenshot_link_ok("pv_other", exp, &sig, None).unwrap(), "another preview");
+        assert!(!store.screenshot_link_ok(id, exp + 1, &sig, None).unwrap(), "a moved expiry");
+        assert!(!store.screenshot_link_ok(id, exp, &"0".repeat(64), None).unwrap(), "a guess");
+        // The diff's link is its own: neither opens the other.
+        let (_, diff) = store.diff_link(id).unwrap().unwrap();
+        assert!(store.screenshot_link_ok(id, exp, &diff, Some("diff=base")).unwrap());
+        assert!(!store.screenshot_link_ok(id, exp, &diff, None).unwrap() && !store.screenshot_link_ok(id, exp, &sig, Some("diff=base")).unwrap());
         let past = store.now_ms().unwrap() - 1;
         let stale = hex::encode({
             use hmac::Mac;
-            store.link_mac(id, past).unwrap().finalize().into_bytes()
+            store.link_mac(id, past, None).unwrap().finalize().into_bytes()
         });
-        assert!(!store.screenshot_link_ok(id, past, &stale).unwrap(), "expired");
+        assert!(!store.screenshot_link_ok(id, past, &stale, None).unwrap(), "expired");
         // A failed try keeps the screenshot (and its link); a private preview's link is dead.
         store.set_screenshot_tried(id, "cs_2").unwrap();
-        assert!(store.screenshot_link_ok(id, exp, &sig).unwrap(), "a failed try keeps the last one");
+        assert!(store.screenshot_link_ok(id, exp, &sig, None).unwrap(), "a failed try keeps the last one");
         store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Link, ..Default::default() }).unwrap();
-        assert!(!store.screenshot_link_ok(id, exp, &sig).unwrap(), "gone private");
+        assert!(!store.screenshot_link_ok(id, exp, &sig, None).unwrap(), "gone private");
     }
 
     use super::*;

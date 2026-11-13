@@ -155,6 +155,10 @@ impl CodeSource {
                     .then(|| p.screenshot_link.clone())
                     .flatten()
                     .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id)),
+                diff_url: (s.access == crate::settings::Access::Public)
+                    .then(|| p.diff_link.clone())
+                    .flatten()
+                    .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?diff=base&exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id)),
             }),
         }
     }

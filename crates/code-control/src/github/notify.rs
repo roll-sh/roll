@@ -452,6 +452,10 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         let branch = branch_name(&b.branch);
         summary.push(if b.percent <= 0.0 { format!("the same as {branch}") } else { format!("differs from {branch} by {}", pct(b.percent)) });
         details.push_str(&base_line(b));
+        // roll's own signed link (a public preview's); nothing in it can end the image's markdown.
+        if let Some(url) = e.diff_url.as_ref().filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])) {
+            details.push_str(&format!("![Where it differs from {}]({url})\n\n", branch_name(&b.branch)));
+        }
     }
     if let Some(v) = &e.visual_change {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
@@ -673,6 +677,7 @@ mod preview_tests {
             page_health: None,
             page_a11y: None,
             base_change: None,
+            diff_url: None,
             pages: Vec::new(),
             speed_budget: None,
             visual_review: None,
@@ -734,6 +739,12 @@ mod preview_tests {
         timed.speed_budget = None;
         timed.base_change = Some(crate::model::PreviewBaseChange { branch: "main".into(), percent: 0.0, phone_percent: None, load_ms: Some(900), a11y_added: None, errors_added: None });
         assert!(page_checks(&timed).unwrap().contains("loads in 1.2 s, 300 ms slower than main</summary>"));
+        // A public preview's diff against main goes inside, as an image; anything else, not.
+        timed.diff_url = Some("https://api.roll.sh/v1/previews/pv_1/screenshot.png?diff=base&exp=1&sig=ab".into());
+        assert!(page_checks(&timed).unwrap().contains("![Where it differs from main](https://api.roll.sh/v1/previews/pv_1/screenshot.png?diff=base&exp=1&sig=ab)"));
+        timed.diff_url = Some("javascript:alert(1)".into());
+        assert!(!page_checks(&timed).unwrap().contains("Where it differs"));
+        timed.diff_url = None;
         // Accessibility against main: what the change added.
         timed.page_a11y = Some(crate::model::PreviewPageA11y { issues: vec![issue("images", 3, "<img>")], lang: true, title: true });
         timed.base_change.as_mut().unwrap().a11y_added = Some(1);

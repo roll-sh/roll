@@ -409,6 +409,21 @@ curl -sS -o "$HOME_DIR/diff.png" "http://$API/v1/previews/$PV/screenshot?diff=ba
 DIFF=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print('PNG' if b[:4]==b'\x89PNG' else 'not a PNG: ' + b[:200].decode('utf-8','replace'))" "$HOME_DIR/diff.png")
 [ "$DIFF" = PNG ] || { echo "the diff against main should be a PNG: $DIFF"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API/v1/previews/$PV/screenshot?diff=previous")" = image/png ] || { echo "the diff against the push before should be a PNG"; exit 1; }
+# A public preview's pull request comment shows where it differs from main through a signed
+# link of its own, which opens without credentials; the screenshot's signature doesn't open it.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
+DIFF_URL=""
+for _ in $(seq 1 60); do
+  DIFF_URL=$(api GET "/v1/code/changes/$CHG" | jq_ "((d.get('preview') or {}).get('environment') or {}).get('diff_url') or ''")
+  [ -n "$DIFF_URL" ] && break
+  sleep 0.5
+done
+DIFF_PATH="/${DIFF_URL#*://*/}"
+[ "$(curl -s -o /dev/null -w '%{content_type}' "http://$API$DIFF_PATH")" = image/png ] || { echo "the signed diff link should open the diff: $DIFF_URL"; exit 1; }
+SHOT_NOW=$(api GET "/v1/code/changes/$CHG" | jq_ "d['preview']['environment']['screenshot_url']")
+SWAPPED="/${SHOT_NOW#*://*/}"; SWAPPED="${SWAPPED/screenshot.png?/screenshot.png?diff=base&}"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API$SWAPPED")" = 403 ] || { echo "the screenshot's signature shouldn't open the diff"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 # Main's load where it was compared comes along (to say "300 ms slower than main").
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
