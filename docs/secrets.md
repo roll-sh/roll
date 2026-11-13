@@ -258,7 +258,8 @@ shared with the others, with both sides' consent:
 2. That project's admin **imports** it like any folder, naming the project:
    `{"project": "<id>", "environment": "production", "path": "/shared"}` (admin on the importing
    folder, since every reader of it will read the shared values; refused with 403 unless the folder
-   is shared with this project). `roll secrets imports add production:/shared --from-project <id>`.
+   is shared with this project). `GET …/shared` lists what other projects share with this one,
+   ready to import. `roll secrets imports add production:/shared --from-project <id>`.
 
 Readers of the importing folder then see the shared values as part of their project, a token
 scoped to it too: the export stands in for access to the other project, the one exception to
@@ -851,6 +852,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
+| `GET /shared` | | `Import[]`: the folders other projects share with this one |
 | `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
 | `GET /environments/{env}/secrets/{key}?path=&type=` | | `Secret` |
@@ -1052,7 +1054,7 @@ dynamic links for services and uses the digest for `needs_deploy`). Ranked:
 3. *Waiting on #19 (people as principals).* **Access requests**: a person asks for time-boxed `reveal` on a protected environment, an
    approver grants it for minutes (Infisical's access requests), audited; built on the change
    request approvals.
-4. **Shares offered, not typed**: the imports panel lists the folders other projects share with
-   this one (`GET …/shared-with-me`) instead of asking for an environment and folder by name.
+4. **A second look at the whole surface**: another security review of identities, sharing,
+   typed keys and scans, then a pass over every screen at phone width.
 5. **Keep `wip/secrets-on-mcp` current** with this branch (merge it again after each round here),
    so the roll-access swap is ready the day #19 lands.

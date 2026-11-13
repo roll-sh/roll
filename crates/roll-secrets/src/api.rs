@@ -39,6 +39,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{E}/folders"), get(folders).post(create_folder).delete(delete_folder))
         .route(&format!("{E}/imports"), get(imports).put(set_imports))
         .route(&format!("{E}/exports"), get(exports).put(set_exports))
+        .route(&format!("{P}/shared"), get(shared_with))
         .route(&format!("{E}/secrets"), get(secrets))
         .route(K, get(secret).put(set_secret).delete(delete_secret))
         .route(&format!("{K}/value"), get(reveal))
@@ -299,6 +300,10 @@ async fn imports(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
 async fn set_imports(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
     let list: Vec<Import> = body(&b)?;
     Ok(ok(blocking(s, move |s| s.set_imports(&project, &env, &path_of(&q), list, &c)).await?))
+}
+
+async fn shared_with(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.shared_with(&project, &c)).await?))
 }
 
 async fn exports(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {

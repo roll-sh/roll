@@ -110,6 +110,7 @@ export function secretsApi(project: string) {
     deleteFolder: (env: string, path: string) => req<{ change: Change | null }>("DELETE", `${E(env)}/folders${qs({ path })}`),
     imports: (env: string, path = "/") => req<Import[]>("GET", `${E(env)}/imports${qs({ path })}`),
     setImports: (env: string, path: string, imports: Import[]) => req<Import[]>("PUT", `${E(env)}/imports${qs({ path })}`, imports),
+    shared: () => req<Import[]>("GET", `${P}/shared`),
     exports: (env: string, path = "/") => req<Export[]>("GET", `${E(env)}/exports${qs({ path })}`),
     setExports: (env: string, path: string, projects: string[]) => req<Export[]>("PUT", `${E(env)}/exports${qs({ path })}`, projects.map((project) => ({ project }))),
 

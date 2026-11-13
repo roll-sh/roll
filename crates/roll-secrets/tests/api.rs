@@ -795,6 +795,7 @@ async fn a_folder_shared_by_another_project_reads_as_its_own_until_the_share_end
     let (s, _) = api.call(Method::PUT, "/environments/staging/imports?path=/", Some(import.clone())).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     api.ok(Method::PUT, &theirs("/environments/production/exports?path=/shared"), Some(json!([{ "project": api.project }]))).await;
+    assert_eq!(api.ok(Method::GET, "/shared", None).await, import, "offered here, ready to import");
     api.ok(Method::PUT, "/environments/staging/imports?path=/", Some(import)).await;
     // Its stored values, opened with its own key; a reference would resolve against the wrong
     // project, so it doesn't cross.

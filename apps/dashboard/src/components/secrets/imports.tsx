@@ -23,6 +23,8 @@ export function ImportsPanel({ env, path, saved, highlight, onSaved, onClose }: 
   const ws = useWorkspace();
   const others = ws.projects.filter((p) => p.id !== here.id);
   const projectName = (id: string) => ws.projects.find((p) => p.id === id)?.name ?? id;
+  const offered = useLoad(() => api.shared(), [api]);
+  const [picking, setPicking] = useState(false);
   const ids = useRef(0);
   const rows = (list: Import[]): Row[] => list.map((i) => ({ ...i, id: ids.current++ }));
   const [draft, setDraft] = useState<Row[]>(() => rows(saved));
@@ -140,12 +142,7 @@ export function ImportsPanel({ env, path, saved, highlight, onSaved, onClose }: 
           <Plus className="size-3.5" /> Add an import
         </button>
         {others.length > 0 && (
-          <button
-            className={ghost}
-            disabled={draft.length >= MAX}
-            onClick={() => setDraft((d) => [...d, { project: others[0].id, environment: "production", path: "/", id: ids.current++ }])}
-            title="A folder another project shares with this one (its admin shares it first)"
-          >
+          <button className={ghost} disabled={draft.length >= MAX} onClick={() => setPicking((p) => !p)} aria-expanded={picking} title="A folder another project shares with this one">
             <Plus className="size-3.5" /> From another project
           </button>
         )}
@@ -159,6 +156,35 @@ export function ImportsPanel({ env, path, saved, highlight, onSaved, onClose }: 
           {busy ? "Saving…" : "Save imports"}
         </button>
       </div>
+      {picking && (
+        <div className="rise mt-2 rounded-lg border border-line-2 p-2">
+          {(offered.data ?? []).length === 0 ? (
+            <p className="text-[11.5px] text-subtle">Nothing is shared with this project yet. A folder&apos;s admin in another project shares it here first (its imports panel, &quot;Shared with other projects&quot;).</p>
+          ) : (
+            <ul className="flex flex-wrap gap-1.5">
+              {(offered.data ?? []).map((o) => {
+                const taken = draft.some((d) => same(d, o));
+                return (
+                  <li key={`${o.project}:${o.environment}:${o.path}`}>
+                    <button
+                      className={`${ghost} font-mono text-[12px]`}
+                      disabled={taken || draft.length >= MAX}
+                      onClick={() => {
+                        setDraft((d) => [...d, { ...o, id: ids.current++ }]);
+                        setPicking(false);
+                      }}
+                    >
+                      {projectName(o.project ?? "")} · {o.environment}
+                      {o.path === "/" ? "" : o.path}
+                      {taken ? " (imported)" : ""}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
       {others.length > 0 && <SharedWith env={env} path={path} others={others} />}
     </section>
   );

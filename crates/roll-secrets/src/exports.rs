@@ -45,6 +45,19 @@ pub(crate) fn exported(c: &Conn<'_>, from_env_id: &str, path: &str, to_project: 
 }
 
 impl Secrets {
+    /// The folders other projects share with `project`, ready to import (`Import`s).
+    pub fn shared_with(&self, project: &str, caller: &Caller) -> Result<Vec<crate::Import>> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        self.db.read(|c| {
+            Ok(c.query(
+                "SELECT e.project_id, e.slug, x.path FROM exports x JOIN environments e ON e.id = x.env_id WHERE x.to_project = ? ORDER BY e.project_id, e.slug, x.path",
+                [project],
+                |r| Ok(crate::Import { project: Some(r.get(0)?), environment: r.get(1)?, path: r.get(2)? }),
+            )?)
+        })
+    }
+
     /// The projects `slug`'s `path` is shared with.
     pub fn exports(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<Vec<Export>> {
         let path = names::path(path)?;
