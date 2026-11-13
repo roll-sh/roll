@@ -945,7 +945,8 @@ instance and holds it (a lease, as a request does, so it doesn't sleep while con
 spliced to the app's port, half-closes included. A deploy's health check is the port accepting;
 its HTTP names are 404s. One node for now: on a fleet the edge doesn't carry TCP (`## Next`). Checked live
 against rolld on Docker: a busybox echo server, asleep, echoed the first connection in 170 ms
-(the wake) and the next in 5 ms.
+(the wake) and the next in 5 ms; `a_tcp_service_and_a_tunnel_reach_a_sleeping_port` (`pnpm
+test:apps --docker`) keeps it measured: 156 ms over its port from asleep, 168 ms over a tunnel.
 
 ## Reaching a service from your machine
 

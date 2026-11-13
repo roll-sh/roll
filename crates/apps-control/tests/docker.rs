@@ -68,6 +68,10 @@ async fn docker_world_netns(netns: Option<bool>) -> Option<World> {
     let cluster = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), roll_cluster::ClusterConfig::new("n1", "http://127.0.0.1:1", b"0123456789abcdef".to_vec())).unwrap();
     let mut cfg = AppsConfig::new(dir.path().to_path_buf());
     cfg.live.probe_every = Duration::from_millis(5);
+    // A TCP service's port: one free here.
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    cfg.tcp_ports = Some((free, free));
+    cfg.tcp_host = "127.0.0.1".into();
     let deps = Deps {
         runtime: Arc::new(match netns {
             Some(on) => Docker::new(dir.path().join("scratch")).with_netns(on),
@@ -480,3 +484,70 @@ async fn a_private_caller_wakes_a_sleeping_service() {
     assert!(left.is_empty(), "the instance, its sandbox and its waker are gone: {left}");
     w.apps.shutdown().await;
 }
+
+/// A TCP service and a tunnel on real Docker: a busybox echo server, asleep each time, answers
+/// a raw connection to its own port and a tunnel's bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tcp_service_and_a_tunnel_reach_a_sleeping_port() {
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let Some(w) = docker_world().await else { return };
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "echo", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 9000, "tcp": true, "start": "nc -lk -p 9000 -e cat", "memory_mb": 256, "cpu": 0.25} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    // The loop gives its environment a port and listens there.
+    tokio::spawn(w.apps.clone().serve_tcp_ports("127.0.0.1".parse().unwrap()));
+    for _ in 0..1200 {
+        let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+        if e["active"].is_object() && e["tcp"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+    let addr = e["tcp"].as_str().unwrap_or_else(|| panic!("{e}")).to_string();
+    let live = w.apps.live(&id, "production");
+    // Its own port, from asleep.
+    live.sleep().await;
+    let mut conn = None;
+    for _ in 0..100 {
+        if let Ok(c) = tokio::net::TcpStream::connect(addr.as_str()).await {
+            conn = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let mut conn = conn.expect("its port listens");
+    let began = Instant::now();
+    conn.write_all(b"over tcp\n").await.unwrap();
+    let mut buf = [0u8; 9];
+    tokio::time::timeout(Duration::from_secs(30), conn.read_exact(&mut buf)).await.expect("an echo").unwrap();
+    assert_eq!(&buf, b"over tcp\n");
+    let tcp_cold = began.elapsed();
+    drop(conn);
+    // A tunnel, from asleep.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    live.sleep().await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(axum::serve(l, w.api.clone()).into_future());
+    let began = Instant::now();
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}{base}/tunnel")).await.unwrap();
+    ws.send(Message::Binary(b"tunnelled\n".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while got.len() < 10 {
+        match tokio::time::timeout(Duration::from_secs(30), ws.next()).await.expect("an echo") {
+            Some(Ok(Message::Binary(b))) => got.extend_from_slice(&b),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(&got, b"tunnelled\n");
+    eprintln!("MEASURED a TCP service from asleep: {} ms to its echo; a tunnel from asleep: {} ms", tcp_cold.as_millis(), began.elapsed().as_millis());
+    let _ = ws.close(None).await;
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
+    w.apps.shutdown().await;
+}
+
