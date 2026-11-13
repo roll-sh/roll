@@ -523,7 +523,6 @@ impl Database {
             vxid: procs::Vxid::default(),
             backend_proc: None,
             wrote: false,
-            started: Instant::now(),
             seq_last: HashMap::new(),
             deferred: Vec::new(),
             deferred_triggers: Vec::new(),
@@ -1042,7 +1041,6 @@ pub struct Txn {
     pub vxid: procs::Vxid,
     pub backend_proc: Option<Arc<procs::Proc>>,
     wrote: bool,
-    pub started: Instant,
     /// currval() per sequence within this session's transaction.
     pub seq_last: HashMap<u32, i64>,
     /// Pending deferred constraint checks.
